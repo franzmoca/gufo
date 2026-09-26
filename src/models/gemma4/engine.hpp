@@ -5,11 +5,13 @@
 #include <cstdint>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <span>
 #include <string>
 #include <string_view>
 #include <vector>
 
+#include "src/core/sampling.hpp"
 #include "src/models/gemma4/config.hpp"
 #include "src/models/gemma4/tokenizer.hpp"
 
@@ -20,6 +22,7 @@ class GgufReader;
 namespace gufo::models::gemma4 {
 
 struct ModelWeights;
+struct DraftWeights;
 namespace rocm {
 class DeviceModel;
 class Executor;
@@ -34,6 +37,10 @@ struct ModelOptions {
   /// Rows of one forward that may request logits (qualification only needs
   /// more than one).
   std::uint32_t max_logit_rows = 64;
+  /// Optional `gemma4-assistant` MTP drafter; empty leaves speculation off.
+  std::string mtp_model_path;
+  /// Draft tokens per cycle (at most rocm::kMaxDraftTokens).
+  std::uint32_t draft_tokens = 4;
 };
 
 class Session;
@@ -74,6 +81,12 @@ public:
   [[nodiscard]] std::size_t ResidentBytes() const noexcept;
   [[nodiscard]] std::size_t SessionBytes(std::uint32_t context) const noexcept;
   [[nodiscard]] std::string ModelName() const;
+  [[nodiscard]] bool HasMtp() const noexcept {
+    return draft_weights_ != nullptr;
+  }
+  [[nodiscard]] std::uint32_t DraftTokens() const noexcept {
+    return options_.draft_tokens;
+  }
 
 private:
   Model();
@@ -81,6 +94,8 @@ private:
   ModelOptions options_;
   std::shared_ptr<core::GgufReader> reader_;
   std::unique_ptr<ModelWeights> weights_;
+  std::shared_ptr<core::GgufReader> draft_reader_;
+  std::unique_ptr<DraftWeights> draft_weights_;
   std::unique_ptr<Tokenizer> tokenizer_;
   std::unique_ptr<rocm::DeviceModel> device_;
   std::unique_ptr<rocm::Executor> executor_;
@@ -107,6 +122,30 @@ public:
                                  std::vector<float>* logits,
                                  std::string* error_msg = nullptr);
 
+  struct DecodeResult {
+    std::vector<TokenId> tokens;
+    bool stop{false};
+  };
+  /// Emits the next tokens. With the MTP drafter one call drafts, verifies
+  /// and emits the accepted prefix plus the target's own next sample, all
+  /// drawn with `sampler`, so greedy decoding reproduces autoregressive
+  /// output exactly and sampled decoding keeps the target distribution.
+  /// Without it (or with a one-token budget) one token is emitted. The last
+  /// emitted token stays pending until the next call or a Sync.
+  [[nodiscard]] bool DecodeStep(std::size_t max_tokens,
+                                sampling::SamplerState& sampler,
+                                DecodeResult* result,
+                                std::string* error_msg = nullptr,
+                                bool stop_at_eos = true);
+  struct SpeculativeStats {
+    std::uint64_t cycles{0};
+    std::uint64_t drafted{0};
+    std::uint64_t accepted{0};
+  };
+  [[nodiscard]] const SpeculativeStats& Statistics() const noexcept {
+    return stats_;
+  }
+
   [[nodiscard]] std::span<const float> Logits() const noexcept {
     return valid_ ? std::span<const float>(logits_) : std::span<const float>{};
   }
@@ -132,6 +171,10 @@ private:
   std::vector<TokenId> tokens_;
   std::vector<float> logits_;
   bool valid_{false};
+  /// Emitted but not yet evaluated; its predecessor's hidden state is the
+  /// cache's frontier hidden.
+  std::optional<TokenId> pending_;
+  SpeculativeStats stats_;
 
   friend class Model;
 };

@@ -9,16 +9,11 @@ namespace gufo::models::gemma4::rocm {
 
 enum class GemvFormat : std::uint8_t { kQ4_K, kQ5_K, kQ6_K };
 
-/// Activation rows one launch may carry; decode is one row, verification
-/// up to the draft width plus one.
-inline constexpr std::uint32_t kMaxGemvRows = 8;
-
-/// y[rows][m] = x[rows][k] * W^T for K-quant W ([m][k] in GGUF blocks) and
-/// FP32 activations. Each row's result is bitwise independent of `rows`.
-/// Returns false without launching when the shape is unsupported.
+/// y[m] = W x for K-quant W ([m][k] in GGUF blocks) and an FP32 activation
+/// row: the autoregressive decode projection. Returns false without
+/// launching when the shape is unsupported.
 [[nodiscard]] bool LaunchKQuantGemv(GemvFormat format, const void* w,
-                                    const float* x, float* y,
-                                    std::uint32_t rows, std::uint32_t m,
+                                    const float* x, float* y, std::uint32_t m,
                                     std::uint32_t k, hipStream_t stream);
 
 }  // namespace gufo::models::gemma4::rocm

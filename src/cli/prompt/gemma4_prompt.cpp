@@ -29,13 +29,22 @@ std::shared_ptr<g4::Model> LoadModel(
     std::cerr << "Gemma 4 runs text-only; image input is not supported\n";
     return nullptr;
   }
-  if (!opt.speculative_backend.empty()) {
-    std::cerr << "Gemma 4 --speculative is not available yet\n";
+  const bool mtp = opt.speculative_backend == "mtp";
+  if (!opt.speculative_backend.empty() && !mtp) {
+    std::cerr << "Gemma 4 supports only --speculative mtp\n";
+    return nullptr;
+  }
+  if (mtp && opt.mtp_model_path.empty()) {
+    std::cerr << "--speculative mtp requires --mtp-model\n";
     return nullptr;
   }
   std::string error;
   auto model = g4::Model::Load(
-      opt.model_path, g4::ModelOptions{.max_context = kDefaultContext}, &error);
+      opt.model_path,
+      g4::ModelOptions{.max_context = kDefaultContext,
+                       .mtp_model_path = mtp ? opt.mtp_model_path : "",
+                       .draft_tokens = opt.draft_tokens},
+      &error);
   if (model == nullptr) {
     std::cerr << "Error loading Gemma 4 model: " << error << '\n';
     std::cerr << "[Model Load]: " << SecondsSince(start) << " s (failed)\n";
@@ -84,23 +93,27 @@ int Generate(const PromptOptions& opt, g4::Model& model, g4::Session& session,
   sampling::SamplerState sampler(opt.sampling, history);
   const auto decode_start = std::chrono::steady_clock::now();
   std::size_t generated = 0;
-  for (; generated < opt.max_tokens; ++generated) {
-    const auto token =
-        static_cast<g4::TokenId>(sampler.Sample(session.Logits()));
-    if (model.IsStopToken(token)) {
-      break;
-    }
-    sampler.Accept(static_cast<sampling::TokenId>(token));
-    const std::string piece = model.TokenText(token);
-    if (reply != nullptr) {
-      reply->append(piece);
-    }
-    std::cout << piece << std::flush;
-    if ((reply != nullptr || generated + 1 < opt.max_tokens) &&
-        !session.Evaluate(token, &error)) {
+  bool stop = false;
+  while (generated < opt.max_tokens && !stop) {
+    g4::Session::DecodeResult step;
+    if (!session.DecodeStep(opt.max_tokens - generated, sampler, &step,
+                            &error)) {
       std::cerr << "\nGemma 4 decode failed: " << error << '\n';
       return 1;
     }
+    for (const g4::TokenId token : step.tokens) {
+      if (model.IsStopToken(token)) {
+        stop = true;
+        break;
+      }
+      const std::string piece = model.TokenText(token);
+      if (reply != nullptr) {
+        reply->append(piece);
+      }
+      std::cout << piece << std::flush;
+      ++generated;
+    }
+    stop = stop || step.stop || step.tokens.empty();
   }
   std::cout << '\n';
   if (opt.verbose && generated > 0) {
@@ -110,6 +123,16 @@ int Generate(const PromptOptions& opt, g4::Model& model, g4::Session& session,
               << " tok/s)\nGenerated " << generated << " tokens in " << seconds
               << " s (" << static_cast<double>(generated) / seconds
               << " tok/s)\n";
+    if (model.HasMtp()) {
+      const auto& stats = session.Statistics();
+      std::cout << "[Speculative]: cycles=" << stats.cycles
+                << " drafted=" << stats.drafted
+                << " accepted=" << stats.accepted << " acceptance="
+                << (stats.drafted != 0 ? static_cast<double>(stats.accepted) /
+                                             static_cast<double>(stats.drafted)
+                                       : 0.0)
+                << '\n';
+    }
   }
   return 0;
 }

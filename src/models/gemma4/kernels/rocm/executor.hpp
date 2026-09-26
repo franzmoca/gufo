@@ -26,6 +26,8 @@ struct KvCache {
   std::uint32_t ring{0};
   std::vector<std::uint16_t*> k;  ///< Per layer, binary16.
   std::vector<std::uint16_t*> v;  ///< Per layer, binary16.
+  /// Target post-norm hidden state of the frontier token (MTP draft input).
+  float* hidden{nullptr};
 };
 
 /// Runs the Gemma 4 graph on device-resident weights. Scratch is shared by
@@ -40,12 +42,10 @@ public:
   Executor(const Executor&) = delete;
   Executor& operator=(const Executor&) = delete;
 
-  [[nodiscard]] static std::size_t ScratchBytes(const Config& config,
-                                                std::uint32_t vocab,
-                                                std::size_t max_cols,
-                                                std::uint32_t max_rows,
-                                                std::uint32_t max_logit_rows,
-                                                std::uint32_t max_context);
+  [[nodiscard]] static std::size_t ScratchBytes(
+      const Config& config, const Config* draft, std::uint32_t vocab,
+      std::size_t max_cols, std::uint32_t max_rows,
+      std::uint32_t max_logit_rows, std::uint32_t max_context);
   [[nodiscard]] static std::size_t CacheBytes(const Config& config,
                                               std::uint32_t max_context,
                                               std::uint32_t ring);
@@ -60,6 +60,17 @@ public:
   void Forward(KvCache& cache, std::span<const std::int32_t> tokens,
                std::uint32_t first_position,
                std::span<const std::uint32_t> logit_rows);
+
+  /// Keeps hidden row `row` of the last Forward as the cache's frontier
+  /// state for drafting.
+  void CommitHidden(KvCache& cache, std::uint32_t row);
+
+  /// Drafts `steps` greedy tokens with the MTP drafter after `token` at
+  /// position `position` (the committed frontier), reading the target's KV
+  /// strictly before it and the cache's frontier hidden state. Every step
+  /// runs on the device; `drafts` receives the tokens with one host sync.
+  void DraftChain(KvCache& cache, std::int32_t token, std::uint32_t position,
+                  std::uint32_t steps, std::vector<std::int32_t>* drafts);
 
   /// Copies the logits of the last Forward to the host, [rows][vocab].
   void CopyLogits(std::size_t rows, std::vector<float>* out) const;
@@ -99,7 +110,23 @@ private:
   float* logits_{nullptr};
   float* partials_{nullptr};
   void* q8_{nullptr};
+  // Drafter scratch (present with an MTP drafter).
+  std::uint32_t* draft_tokens_{nullptr};
+  float* draft_concat_{nullptr};
+  float* draft_x_{nullptr};
+  float* draft_h_{nullptr};
+  float* draft_q_{nullptr};
+  float* draft_attn_{nullptr};
+  float* draft_o_{nullptr};
+  float* draft_gate_{nullptr};
+  float* draft_up_{nullptr};
+  float* draft_logits_{nullptr};
+  float* draft_next_{nullptr};
 };
+
+/// Longest draft chain one cycle may request; verification then carries
+/// kMaxDraftTokens + 1 rows, within the batch-invariant projection width.
+inline constexpr std::uint32_t kMaxDraftTokens = 7;
 
 /// Ring slots for sliding layers given the largest forward.
 [[nodiscard]] std::uint32_t RingSlots(const Config& config,

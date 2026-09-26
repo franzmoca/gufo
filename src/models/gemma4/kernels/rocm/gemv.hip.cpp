@@ -1,14 +1,12 @@
-// Decode and verification projections for Gemma 4's K-quant weights.
+// Autoregressive decode projections for Gemma 4's K-quant weights.
 //
-// Y[b][m] = sum_k X[b][k] * W[m][k] for up to kMaxGemvRows activation rows
-// sharing every weight load. The weights stay in their GGUF blocks; the
+// y[m] = sum_k x[k] * W[m][k]; the weights stay in their GGUF blocks and the
 // activations stay FP32. A lane's unit of work is one 16-byte vector of
-// quantized values -- 32 values of a Q4_K/Q5_K super-block (with their
-// Q5_K high bits) or 64 values of a Q6_K super-block -- so each lane issues
-// wide loads and unpacks nibbles with word operations. Per row, tasks are
-// strided over the 32 lanes of one wave in a fixed order and reduced with a
-// fixed xor tree, so every activation row's result is independent of how
-// many rows share the launch: verification reproduces decode bit for bit.
+// quantized values -- 32 values of a Q4_K/Q5_K super-block (with their Q5_K
+// high bits) or 64 values of a Q6_K super-block -- dequantized once and
+// contracted in a fixed FMA order. Lanes holding the same task of different
+// rows read the same activations, which the hardware broadcasts; each row
+// reduces over its task lanes with a fixed xor tree.
 #include "src/models/gemma4/kernels/rocm/gemv.hpp"
 
 #include <hip/hip_fp16.h>
@@ -45,91 +43,51 @@ __device__ __forceinline__ void ScaleMin(const std::uint8_t* s, int j,
   }
 }
 
-/// Dot of 16 unsigned 4/5/6-bit values packed per byte with 16 activations,
-/// and the activations' sum (for the block minimum).
-struct Partial {
-  float dot;
-  float sum;
-};
-
-__device__ __forceinline__ Partial Dot16(const std::uint8_t* q, const float* x,
-                                         int shift, int mask,
-                                         const std::uint8_t* high, int hshift,
-                                         int hmask, int hleft) {
-  // 16 activations are 64-byte aligned: four vector loads.
-  float xv[16];
-#pragma unroll
-  for (int i = 0; i < 16; i += 4) {
-    const float4 f = *reinterpret_cast<const float4*>(x + i);
-    xv[i] = f.x;
-    xv[i + 1] = f.y;
-    xv[i + 2] = f.z;
-    xv[i + 3] = f.w;
-  }
-  float dot = 0.0F;
-  float sum = 0.0F;
-#pragma unroll
-  for (int i = 0; i < 16; ++i) {
-    int v = (q[i] >> shift) & mask;
-    if (high != nullptr) {
-      v |= ((high[i] >> hshift) & hmask) << hleft;
-    }
-    dot = __builtin_fmaf(static_cast<float>(v), xv[i], dot);
-    sum = __builtin_fmaf(1.0F, xv[i], sum);
-  }
-  return {dot, sum};
-}
-
-/// acc + s0 * lo.dot - m0 * lo.sum + s1 * hi.dot - m1 * hi.sum as an explicit
-/// FMA chain, so every width rounds identically.
-__device__ __forceinline__ float Combine(float acc, float s0, Partial lo,
-                                         float m0, float s1, Partial hi,
-                                         float m1) {
-  acc = __builtin_fmaf(s0, lo.dot, acc);
-  acc = __builtin_fmaf(-m0, lo.sum, acc);
-  acc = __builtin_fmaf(s1, hi.dot, acc);
-  return __builtin_fmaf(-m1, hi.sum, acc);
-}
-
 template<int B>
 struct Accumulators {
   float v[B];
 };
 
-// Q4_K: 8 tasks per 256-value super-block. Task t covers qs bytes
-// [32 p + 16 h, +16) with p = t / 2, h = t % 2: low nibbles are values
-// 64 p + 16 h + i of sub-block 2 p, high nibbles 64 p + 32 + 16 h + i of
-// sub-block 2 p + 1.
-template<int B>
-__device__ __forceinline__ void TaskQ4K(const std::uint8_t* block, int t,
-                                        const float* const* x, std::size_t k0,
-                                        Accumulators<B>& acc) {
-  const int p = t >> 1;
-  const int h = t & 1;
-  const float d = Half(block);
-  const float dmin = Half(block + 2);
-  float sc0, m0, sc1, m1;
-  ScaleMin(block + 4, 2 * p, &sc0, &m0);
-  ScaleMin(block + 4, 2 * p + 1, &sc1, &m1);
-  const uint4 raw =
-      *reinterpret_cast<const uint4*>(block + 16 + 32 * p + 16 * h);
-  const auto* q = reinterpret_cast<const std::uint8_t*>(&raw);
-  const std::size_t v0 = k0 + 64 * p + 16 * h;
+/// Dequantizes 16 values packed per byte (optional high bits) as
+/// scale * v + offset, once per task however many activation rows follow.
+__device__ __forceinline__ void Dequant16(const std::uint8_t* q, int shift,
+                                          const std::uint8_t* high, int hshift,
+                                          int hmask, float scale, float offset,
+                                          float* out) {
 #pragma unroll
-  for (int b = 0; b < B; ++b) {
-    const Partial lo = Dot16(q, x[b] + v0, 0, 0xF, nullptr, 0, 0, 0);
-    const Partial hi = Dot16(q, x[b] + v0 + 32, 4, 0xF, nullptr, 0, 0, 0);
-    acc.v[b] =
-        Combine(acc.v[b], d * sc0, lo, dmin * m0, d * sc1, hi, dmin * m1);
+  for (int i = 0; i < 16; ++i) {
+    int v = (q[i] >> shift) & 0xF;
+    if (high != nullptr) {
+      v |= ((high[i] >> hshift) & hmask) << 4;
+    }
+    out[i] = __builtin_fmaf(scale, static_cast<float>(v), offset);
   }
 }
 
-// Q5_K: as Q4_K with the fifth bit of value 16 h + i of pair p in bit 2 p
-// (low nibble) or 2 p + 1 (high nibble) of qh[16 h + i].
-template<int B>
-__device__ __forceinline__ void TaskQ5K(const std::uint8_t* block, int t,
-                                        const float* const* x, std::size_t k0,
-                                        Accumulators<B>& acc) {
+/// acc += sum_i w[i] * x[i] as one FMA chain over n 64-byte-aligned values.
+template<int N>
+__device__ __forceinline__ float Accumulate(float acc, const float* w,
+                                            const float* x) {
+#pragma unroll
+  for (int i = 0; i < N; i += 4) {
+    const float4 f = *reinterpret_cast<const float4*>(x + i);
+    acc = __builtin_fmaf(w[i], f.x, acc);
+    acc = __builtin_fmaf(w[i + 1], f.y, acc);
+    acc = __builtin_fmaf(w[i + 2], f.z, acc);
+    acc = __builtin_fmaf(w[i + 3], f.w, acc);
+  }
+  return acc;
+}
+
+// Q4_K: 8 tasks per 256-value super-block. Task t covers qs bytes
+// [32 p + 16 h, +16) with p = t / 2, h = t % 2: low nibbles are values
+// 64 p + 16 h + i of sub-block 2 p, high nibbles 64 p + 32 + 16 h + i of
+// sub-block 2 p + 1. Q5_K adds the fifth bit of value 16 h + i of pair p
+// from bit 2 p (low) or 2 p + 1 (high) of qh[16 h + i].
+template<int B, bool kFiveBit>
+__device__ __forceinline__ void TaskQ45K(const std::uint8_t* block, int t,
+                                         const float* const* x, std::size_t k0,
+                                         Accumulators<B>& acc) {
   const int p = t >> 1;
   const int h = t & 1;
   const float d = Half(block);
@@ -137,18 +95,24 @@ __device__ __forceinline__ void TaskQ5K(const std::uint8_t* block, int t,
   float sc0, m0, sc1, m1;
   ScaleMin(block + 4, 2 * p, &sc0, &m0);
   ScaleMin(block + 4, 2 * p + 1, &sc1, &m1);
+  const int qs = kFiveBit ? 48 : 16;
   const uint4 raw_q =
-      *reinterpret_cast<const uint4*>(block + 48 + 32 * p + 16 * h);
-  const uint4 raw_h = *reinterpret_cast<const uint4*>(block + 16 + 16 * h);
+      *reinterpret_cast<const uint4*>(block + qs + 32 * p + 16 * h);
   const auto* q = reinterpret_cast<const std::uint8_t*>(&raw_q);
-  const auto* qh = reinterpret_cast<const std::uint8_t*>(&raw_h);
+  uint4 raw_h{};
+  const std::uint8_t* qh = nullptr;
+  if constexpr (kFiveBit) {
+    raw_h = *reinterpret_cast<const uint4*>(block + 16 + 16 * h);
+    qh = reinterpret_cast<const std::uint8_t*>(&raw_h);
+  }
+  float w[32];
+  Dequant16(q, 0, qh, 2 * p, 1, d * sc0, -(dmin * m0), w);
+  Dequant16(q, 4, qh, 2 * p + 1, 1, d * sc1, -(dmin * m1), w + 16);
   const std::size_t v0 = k0 + 64 * p + 16 * h;
 #pragma unroll
   for (int b = 0; b < B; ++b) {
-    const Partial lo = Dot16(q, x[b] + v0, 0, 0xF, qh, 2 * p, 1, 4);
-    const Partial hi = Dot16(q, x[b] + v0 + 32, 4, 0xF, qh, 2 * p + 1, 1, 4);
-    acc.v[b] =
-        Combine(acc.v[b], d * sc0, lo, dmin * m0, d * sc1, hi, dmin * m1);
+    float a = Accumulate<16>(acc.v[b], w, x[b] + v0);
+    acc.v[b] = Accumulate<16>(a, w + 16, x[b] + v0 + 32);
   }
 }
 
@@ -173,25 +137,24 @@ __device__ __forceinline__ void TaskQ6K(const std::uint8_t* block, int t,
   const auto* ql_a = reinterpret_cast<const std::uint8_t*>(&raw_a);
   const auto* ql_b = reinterpret_cast<const std::uint8_t*>(&raw_b);
   const auto* qh = reinterpret_cast<const std::uint8_t*>(&raw_h);
-  const std::size_t v0 = k0 + 128 * n + 16 * h;
+  float w[64];
   const float s0 = d * static_cast<float>(sc[0]);
   const float s1 = d * static_cast<float>(sc[2]);
   const float s2 = d * static_cast<float>(sc[4]);
   const float s3 = d * static_cast<float>(sc[6]);
+  // (q - 32) * s = s * q - 32 s.
+  Dequant16(ql_a, 0, qh, 0, 3, s0, -32.0F * s0, w);
+  Dequant16(ql_b, 0, qh, 2, 3, s1, -32.0F * s1, w + 16);
+  Dequant16(ql_a, 4, qh, 4, 3, s2, -32.0F * s2, w + 32);
+  Dequant16(ql_b, 4, qh, 6, 3, s3, -32.0F * s3, w + 48);
+  const std::size_t v0 = k0 + 128 * n + 16 * h;
 #pragma unroll
   for (int b = 0; b < B; ++b) {
     const float* xb = x[b] + v0;
-    const Partial p0 = Dot16(ql_a, xb, 0, 0xF, qh, 0, 3, 4);
-    const Partial p1 = Dot16(ql_b, xb + 32, 0, 0xF, qh, 2, 3, 4);
-    const Partial p2 = Dot16(ql_a, xb + 64, 4, 0xF, qh, 4, 3, 4);
-    const Partial p3 = Dot16(ql_b, xb + 96, 4, 0xF, qh, 6, 3, 4);
-    // q - 32 folds the offset into the activation sum.
-    float a = acc.v[b];
-    a = __builtin_fmaf(s0, __builtin_fmaf(-32.0F, p0.sum, p0.dot), a);
-    a = __builtin_fmaf(s1, __builtin_fmaf(-32.0F, p1.sum, p1.dot), a);
-    a = __builtin_fmaf(s2, __builtin_fmaf(-32.0F, p2.sum, p2.dot), a);
-    a = __builtin_fmaf(s3, __builtin_fmaf(-32.0F, p3.sum, p3.dot), a);
-    acc.v[b] = a;
+    float a = Accumulate<16>(acc.v[b], w, xb);
+    a = Accumulate<16>(a, w + 16, xb + 32);
+    a = Accumulate<16>(a, w + 32, xb + 64);
+    acc.v[b] = Accumulate<16>(a, w + 48, xb + 96);
   }
 }
 
@@ -248,9 +211,9 @@ __global__ void __launch_bounds__(kWave* kWavesPerBlock)
       const std::uint8_t* block = base + blk * T::kBlockBytes;
       const std::size_t k0 = static_cast<std::size_t>(blk) * 256;
       if constexpr (F == GemvFormat::kQ4_K) {
-        TaskQ4K<B>(block, t, xs, k0, acc);
+        TaskQ45K<B, false>(block, t, xs, k0, acc);
       } else if constexpr (F == GemvFormat::kQ5_K) {
-        TaskQ5K<B>(block, t, xs, k0, acc);
+        TaskQ45K<B, true>(block, t, xs, k0, acc);
       } else {
         TaskQ6K<B>(block, t, xs, k0, acc);
       }
@@ -279,54 +242,23 @@ void Launch(const void* w, const float* x, float* y, std::uint32_t m,
       static_cast<const std::uint8_t*>(w), x, y, m, k);
 }
 
-template<GemvFormat F>
-void LaunchRows(const void* w, const float* x, float* y, std::uint32_t rows,
-                std::uint32_t m, std::uint32_t k, hipStream_t stream) {
-  switch (rows) {
-    case 1:
-      Launch<F, 1>(w, x, y, m, k, stream);
-      return;
-    case 2:
-      Launch<F, 2>(w, x, y, m, k, stream);
-      return;
-    case 3:
-      Launch<F, 3>(w, x, y, m, k, stream);
-      return;
-    case 4:
-      Launch<F, 4>(w, x, y, m, k, stream);
-      return;
-    case 5:
-      Launch<F, 5>(w, x, y, m, k, stream);
-      return;
-    case 6:
-      Launch<F, 6>(w, x, y, m, k, stream);
-      return;
-    case 7:
-      Launch<F, 7>(w, x, y, m, k, stream);
-      return;
-    default:
-      Launch<F, 8>(w, x, y, m, k, stream);
-      return;
-  }
-}
-
 }  // namespace
 
 bool LaunchKQuantGemv(GemvFormat format, const void* w, const float* x,
-                      float* y, std::uint32_t rows, std::uint32_t m,
-                      std::uint32_t k, hipStream_t stream) {
-  if (rows == 0 || rows > kMaxGemvRows || k % 256 != 0) {
+                      float* y, std::uint32_t m, std::uint32_t k,
+                      hipStream_t stream) {
+  if (k % 256 != 0) {
     return false;
   }
   switch (format) {
     case GemvFormat::kQ4_K:
-      LaunchRows<GemvFormat::kQ4_K>(w, x, y, rows, m, k, stream);
+      Launch<GemvFormat::kQ4_K, 1>(w, x, y, m, k, stream);
       return true;
     case GemvFormat::kQ5_K:
-      LaunchRows<GemvFormat::kQ5_K>(w, x, y, rows, m, k, stream);
+      Launch<GemvFormat::kQ5_K, 1>(w, x, y, m, k, stream);
       return true;
     case GemvFormat::kQ6_K:
-      LaunchRows<GemvFormat::kQ6_K>(w, x, y, rows, m, k, stream);
+      Launch<GemvFormat::kQ6_K, 1>(w, x, y, m, k, stream);
       return true;
   }
   return false;

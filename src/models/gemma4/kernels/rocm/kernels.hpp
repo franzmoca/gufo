@@ -105,6 +105,10 @@ void PostFeedForwardNorm(const float* f, const float* post_norm, float scale,
 void GeGlu(const float* gate, const float* up, float* out, std::size_t count,
            hipStream_t stream);
 
+/// y = x * scale, elementwise (y may alias x).
+void Scale(const float* x, float scale, float* y, std::size_t count,
+           hipStream_t stream);
+
 /// logits = cap * tanh(logits / cap), elementwise.
 void Softcap(float* logits, std::size_t count, float cap, hipStream_t stream);
 

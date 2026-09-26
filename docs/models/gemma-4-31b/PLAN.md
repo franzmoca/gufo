@@ -286,3 +286,15 @@ Each milestone is a testable state with Conventional Commits on `feat/gemma`. M4
   system libm through `-L/usr/lib64`; dev builds here are configured with
   `-DCMAKE_EXE_LINKER_FLAGS=-L<nix glibc>/lib` (production `nix build` is
   sandboxed and unaffected).
+
+**2026-09-26 — M3 (first pass) and M5 MTP.**
+- WMMA prefill attention (binary16 operands, FP32 accumulation): pp2048
+  247 → 414 tok/s; prefill KL vs the oracle 0.0084 → 0.0039.
+- Gemma decode GEMV (lane groups share activations): AR tg128 9.57 → 10.47
+  tok/s. Measured DRAM read ceiling here: 239 GB/s (AR ceiling ~12.7 tok/s).
+- MTP with the Unsloth drafter (on-device draft chain, verification rows
+  through the batch-invariant small-batch projections): greedy MTP equals AR
+  on every tested prompt. Greedy prose, 126 tokens: n=2 20.6, n=3 21.6,
+  **n=4 22.3 tok/s** (acceptance 36.8%), n=5 21.4 — vs the llama.cpp fork's
+  20.2 tok/s at n=4. With a drafter loaded, single-token projections use the
+  shared kernels' bit-identical one-row paths so verification equals decode.

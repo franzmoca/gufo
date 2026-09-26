@@ -497,6 +497,15 @@ __global__ void GeGluKernel(const float* gate, const float* up, float* out,
   }
 }
 
+__global__ void ScaleKernel(const float* x, float scale, float* y,
+                            std::size_t count) {
+  const std::size_t i =
+      static_cast<std::size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+  if (i < count) {
+    y[i] = x[i] * scale;
+  }
+}
+
 __global__ void SoftcapKernel(float* logits, std::size_t count, float cap) {
   const std::size_t i =
       static_cast<std::size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
@@ -591,6 +600,11 @@ void PostFeedForwardNorm(const float* f, const float* post_norm, float scale,
 void GeGlu(const float* gate, const float* up, float* out, std::size_t count,
            hipStream_t stream) {
   GeGluKernel<<<Blocks(count), kThreads, 0, stream>>>(gate, up, out, count);
+}
+
+void Scale(const float* x, float scale, float* y, std::size_t count,
+           hipStream_t stream) {
+  ScaleKernel<<<Blocks(count), kThreads, 0, stream>>>(x, scale, y, count);
 }
 
 void Softcap(float* logits, std::size_t count, float cap, hipStream_t stream) {

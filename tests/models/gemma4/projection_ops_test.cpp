@@ -127,32 +127,18 @@ void CheckShape(const Format& f, std::size_t m, std::size_t k,
   }
   Require(worst < 2e-6, name + ": decode error " + std::to_string(worst));
 
-  // The Gemma decode/verification GEMV: every width reproduces its own
-  // single-row result bit for bit and matches the FP64 dot.
+  // The Gemma autoregressive GEMV matches the FP64 dot.
   if (f.gemv) {
     namespace g4k = gufo::models::gemma4::rocm;
-    std::vector<float> one(g4k::kMaxGemvRows * m);
-    for (std::size_t r = 0; r < g4k::kMaxGemvRows; ++r) {
-      Require(g4k::LaunchKQuantGemv(*f.gemv, dw, dx + r * k, dy + r * m, 1,
+    std::vector<float> one(2 * m);
+    for (std::size_t r = 0; r < 2; ++r) {
+      Require(g4k::LaunchKQuantGemv(*f.gemv, dw, dx + r * k, dy + r * m,
                                     static_cast<std::uint32_t>(m),
                                     static_cast<std::uint32_t>(k), nullptr),
               name + ": Gemma GEMV rejected the shape");
     }
     HIP_CHECK(hipDeviceSynchronize());
     HIP_CHECK(hipMemcpy(one.data(), dy, one.size() * 4, hipMemcpyDeviceToHost));
-    for (std::uint32_t width = 2; width <= g4k::kMaxGemvRows; ++width) {
-      HIP_CHECK(hipMemset(dy, 0xFF, width * m * sizeof(float)));
-      Require(g4k::LaunchKQuantGemv(*f.gemv, dw, dx, dy, width,
-                                    static_cast<std::uint32_t>(m),
-                                    static_cast<std::uint32_t>(k), nullptr),
-              name + ": Gemma GEMV rejected the width");
-      HIP_CHECK(hipDeviceSynchronize());
-      HIP_CHECK(
-          hipMemcpy(batch.data(), dy, width * m * 4, hipMemcpyDeviceToHost));
-      Require(std::memcmp(batch.data(), one.data(), width * m * 4) == 0,
-              name + ": Gemma GEMV width " + std::to_string(width) +
-                  " differs from one row");
-    }
     double gworst = 0.0;
     for (std::size_t o = 0; o < m; o += std::max<std::size_t>(1, m / 97)) {
       gufo::quant::Dequantize(f.type, w.data() + o * encoded_row, row.data(),
@@ -192,15 +178,25 @@ void CheckShape(const Format& f, std::size_t m, std::size_t k,
              iters;
     };
     const double gemma = time([&](std::uint8_t* wp) {
-      (void)g4k::LaunchKQuantGemv(*f.gemv, wp, dx, dy, 1,
+      (void)g4k::LaunchKQuantGemv(*f.gemv, wp, dx, dy,
                                   static_cast<std::uint32_t>(m),
                                   static_cast<std::uint32_t>(k), nullptr);
     });
     const double qwen = time([&](std::uint8_t* wp) {
       gufo::hip::LaunchGEMV(wp, f.type, dx, dy, m, k, nullptr);
     });
-    std::cout << name << ": Gemma GEMV " << bytes / gemma / 1e9
-              << " GB/s, shared GEMV " << bytes / qwen / 1e9 << " GB/s\n";
+    const double qwen1 = time([&](std::uint8_t* wp) {
+      gufo::hip::LaunchBatchedQuantGEMMFp32(f.type, wp, dx, dy, 1, m, k,
+                                            nullptr);
+    });
+    const double qwen5 = time([&](std::uint8_t* wp) {
+      gufo::hip::LaunchBatchedQuantGEMMFp32(f.type, wp, dx, dy, 5, m, k,
+                                            nullptr);
+    });
+    std::cout << name << ": one row: Gemma GEMV " << gemma * 1e6
+              << " us, shared GEMV " << qwen * 1e6 << " us, shared small-batch "
+              << qwen1 * 1e6 << " us; five rows: shared small-batch "
+              << qwen5 * 1e6 << " us (" << bytes / 1e6 << " MB)\n";
     for (auto* ptr : rot)
       HIP_CHECK(hipFree(ptr));
   }

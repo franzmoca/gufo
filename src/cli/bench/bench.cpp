@@ -1237,8 +1237,13 @@ int RunGemma4Benchmark(const BenchOptions& options,
                        const std::shared_ptr<const core::GgufReader>& reader,
                        std::chrono::steady_clock::time_point model_load_start) {
   namespace g4 = models::gemma4;
-  if (!options.speculative_backend.empty()) {
-    std::cerr << "Error: Gemma 4 --speculative is not available yet\n";
+  const bool mtp = options.speculative_backend == "mtp";
+  if (!options.speculative_backend.empty() && !mtp) {
+    std::cerr << "Error: Gemma 4 supports only --speculative mtp or off\n";
+    return 1;
+  }
+  if (mtp && options.mtp_model_path.empty()) {
+    std::cerr << "Error: --speculative mtp requires --mtp-model\n";
     return 1;
   }
   if (options.concurrency != std::vector<std::size_t>{1}) {
@@ -1261,8 +1266,10 @@ int RunGemma4Benchmark(const BenchOptions& options,
   std::string error;
   auto model = g4::Model::Load(
       options.model_path,
-      g4::ModelOptions{.max_context =
-                           static_cast<std::uint32_t>(required_context)},
+      g4::ModelOptions{
+          .max_context = static_cast<std::uint32_t>(required_context),
+          .mtp_model_path = mtp ? options.mtp_model_path : "",
+          .draft_tokens = options.draft_tokens},
       &error);
   if (model == nullptr) {
     std::cerr << "Error creating Gemma 4 model: " << error << '\n';
@@ -1356,22 +1363,26 @@ int RunGemma4Benchmark(const BenchOptions& options,
         std::vector<g4::TokenId> generated;
         const auto start = std::chrono::steady_clock::now();
         while (generated.size() < generation_length) {
-          const auto token =
-              static_cast<g4::TokenId>(sampler.Sample(session->Logits()));
-          sampler.Accept(static_cast<sampling::TokenId>(token));
-          generated.push_back(token);
-          if (generated.size() < generation_length &&
-              !session->Evaluate(token, &error)) {
+          g4::Session::DecodeResult step;
+          if (!session->DecodeStep(generation_length - generated.size(),
+                                   sampler, &step, &error, false) ||
+              step.tokens.empty()) {
             std::cerr << "Error running Gemma 4 decode: " << error << '\n';
             return 1;
           }
+          generated.insert(generated.end(), step.tokens.begin(),
+                           step.tokens.end());
         }
         const double seconds = std::chrono::duration<double>(
                                    std::chrono::steady_clock::now() - start)
                                    .count();
         runs.push_back(static_cast<double>(generation_length) / seconds);
         if (options.verbose) {
-          std::cerr << "Gemma 4 tg depth=" << depth << " text="
+          const auto& stats = session->Statistics();
+          std::cerr << "Gemma 4 tg depth=" << depth
+                    << " cycles=" << stats.cycles
+                    << " drafted=" << stats.drafted
+                    << " accepted=" << stats.accepted << " text="
                     << model->Decode(std::span(generated).first(
                            std::min<std::size_t>(generated.size(), 48)))
                     << '\n';
