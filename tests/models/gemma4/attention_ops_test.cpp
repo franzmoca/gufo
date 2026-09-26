@@ -44,6 +44,7 @@ struct Case {
   bool shared_position;
   std::uint32_t key_limit;
   const char* name;
+  bool timed = false;  ///< also report the launch time (deep decode shapes)
 };
 
 template<class T>
@@ -58,7 +59,7 @@ T* Device(const std::vector<T>& host) {
 std::vector<float> RunKernel(const Case& c, const std::vector<float>& q,
                              const std::vector<std::uint16_t>& kc,
                              const std::vector<std::uint16_t>& vc,
-                             std::uint32_t max_keys) {
+                             std::uint32_t max_keys, bool timed = false) {
   float* dq = Device(q);
   auto* dk = Device(kc);
   auto* dv = Device(vc);
@@ -84,6 +85,27 @@ std::vector<float> RunKernel(const Case& c, const std::vector<float>& q,
   a.ring = c.ring;
   k::Attention(a, nullptr);
   HIP_CHECK(hipDeviceSynchronize());
+  if (timed) {
+    hipEvent_t start, stop;
+    HIP_CHECK(hipEventCreate(&start));
+    HIP_CHECK(hipEventCreate(&stop));
+    constexpr int kIters = 20;
+    HIP_CHECK(hipEventRecord(start, nullptr));
+    for (int i = 0; i < kIters; ++i) {
+      k::Attention(a, nullptr);
+    }
+    HIP_CHECK(hipEventRecord(stop, nullptr));
+    HIP_CHECK(hipEventSynchronize(stop));
+    float ms = 0.0F;
+    HIP_CHECK(hipEventElapsedTime(&ms, start, stop));
+    const double keys = c.window != 0 ? std::min(max_keys, c.window) : max_keys;
+    const double bytes = 4.0 * keys * c.kv_heads * c.head_dim;
+    const double us = 1e3 * ms / kIters;
+    std::cout << c.name << ": " << us << " us (" << bytes / us / 1e3
+              << " GB/s of K/V)\n";
+    HIP_CHECK(hipEventDestroy(start));
+    HIP_CHECK(hipEventDestroy(stop));
+  }
   HIP_CHECK(hipMemcpy(out.data(), dout, out.size() * 4, hipMemcpyDeviceToHost));
   for (void* p :
        {static_cast<void*>(dq), static_cast<void*>(dk), static_cast<void*>(dv),
@@ -110,7 +132,7 @@ void Check(const Case& c, std::mt19937& rng) {
   for (auto& v : vc)
     v = ToHalf(normal(rng));
 
-  const auto out = RunKernel(c, q, kc, vc, max_keys);
+  const auto out = RunKernel(c, q, kc, vc, max_keys, c.timed);
   double worst = 0.0;
   for (std::uint32_t r = 0; r < c.rows; ++r) {
     const std::uint32_t pos =
@@ -212,6 +234,12 @@ int main() {
         {512, 32, 4, 47, 0, 0, 0, false, kNoLimit, "global prefill from zero"},
         {512, 8, 1, 3, 1500, 0, 0, true, 1500, "draft global frontier"},
         {256, 8, 4, 3, 2000, 1024, 3072, true, 2000, "draft sliding frontier"},
+        {512, 32, 4, 1, 32767, 0, 0, false, kNoLimit, "global decode 32K",
+         true},
+        {512, 32, 4, 5, 32763, 0, 0, false, kNoLimit, "global verify 32K",
+         true},
+        {256, 32, 16, 1, 32767, 1024, 3072, false, kNoLimit,
+         "sliding decode 32K", true},
     };
     for (const Case& c : cases) {
       Check(c, rng);

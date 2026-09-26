@@ -410,21 +410,17 @@ __device__ inline void MergeWaves(const WaveState<D>& st, float* dst,
   }
 }
 
+/// Single-pass attention, one block per (head, row): the fallback when the
+/// WMMA prefill kernel does not take a shape.
 template<int D>
-__global__ void __launch_bounds__(kThreads)
-    AttentionKernel(AttentionArgs a, std::uint32_t chunk, bool split) {
+__global__ void __launch_bounds__(kThreads) AttentionKernel(AttentionArgs a) {
   constexpr int P = D / kWave;
-  const std::uint32_t split_index = blockIdx.x;
   const std::uint32_t head = blockIdx.y;
   const std::uint32_t row = blockIdx.z;
   const std::uint32_t kvh = head / (a.heads / a.kv_heads);
   const KeyRange keys = RowKeys(a, row);
-  std::uint32_t begin = keys.lo;
-  std::uint32_t end = keys.hi;
-  if (split) {
-    begin = max(begin, split_index * chunk);
-    end = min(end, (split_index + 1) * chunk);
-  }
+  const std::uint32_t begin = keys.lo;
+  const std::uint32_t end = keys.hi;
   const int lane = threadIdx.x % kWave;
   const float* qh =
       a.q + (static_cast<std::size_t>(row) * a.heads + head) * D + lane * P;
@@ -443,16 +439,216 @@ __global__ void __launch_bounds__(kThreads)
   if (begin < end) {
     AttendKeys<D>(a, q_lane, kvh, begin, end, st);
   }
-  if (split) {
-    const std::size_t splits = gridDim.x;
-    float* dst = a.partials +
-                 ((static_cast<std::size_t>(row) * a.heads + head) * splits +
-                  split_index) *
-                     (D + 2);
-    MergeWaves<D>(st, dst, false);
-  } else {
-    float* dst = a.out + (static_cast<std::size_t>(row) * a.heads + head) * D;
-    MergeWaves<D>(st, dst, true);
+  float* dst = a.out + (static_cast<std::size_t>(row) * a.heads + head) * D;
+  MergeWaves<D>(st, dst, true);
+}
+
+/// Split-K decode/verification attention geometry for head size D and G
+/// query heads per KV head. The score pass gives each wave kHeadsPerWave
+/// heads and kKeysPerStep keys per step, so a step's 32 partial dot
+/// products reduce-scatter to one score per lane.
+template<int D, int G>
+struct SplitGeometry {
+  static constexpr int kChunk = static_cast<int>(SplitChunk(D));
+  static constexpr int kHeadsPerWave = G < 4 ? G : 4;
+  static constexpr int kWaveGroups = G / kHeadsPerWave;
+  static constexpr int kWavesPerGroup = kWaves / kWaveGroups;
+  static constexpr int kKeysPerStep = kWave / kHeadsPerWave;
+  static constexpr int kDimsPerLane = D / kWave;
+  static constexpr int kDimsPerThread = D / kThreads;
+  static_assert(G % kHeadsPerWave == 0 && kWaves % kWaveGroups == 0);
+  static_assert(kHeadsPerWave * kKeysPerStep == kWave);
+  static_assert(kChunk % kKeysPerStep == 0 && G <= kWaves);
+  static_assert(kDimsPerLane % 8 == 0 && kDimsPerThread >= 1);
+};
+
+/// Leaves in lane L the wave-wide sum of v[L] (fixed butterfly order).
+__device__ __forceinline__ float ReduceScatter(float (&v)[kWave]) {
+  const int lane = threadIdx.x % kWave;
+#pragma unroll
+  for (int step = kWave / 2; step >= 1; step >>= 1) {
+    const bool upper = (lane & step) != 0;
+#pragma unroll
+    for (int i = 0; i < step; ++i) {
+      const float send = upper ? v[i] : v[i + step];
+      const float keep = upper ? v[i + step] : v[i];
+      v[i] = keep + __shfl_xor(send, step, kWave);
+    }
+  }
+  return v[0];
+}
+
+/// One absolute-position chunk of keys for one row and one KV head, all G
+/// query heads: scores into shared memory, the chunk-local softmax, then
+/// one pass over the values. Writes (m, l, unnormalized acc) per head; the
+/// computation of a row never depends on the other rows of the batch.
+template<int D, int G>
+__global__ void __launch_bounds__(kThreads)
+    SplitAttentionKernel(AttentionArgs a, std::uint32_t first_split) {
+  using S = SplitGeometry<D, G>;
+  constexpr int C = S::kChunk;
+  constexpr int HW = S::kHeadsPerWave;
+  constexpr int KS = S::kKeysPerStep;
+  constexpr int P = S::kDimsPerLane;
+  constexpr int DT = S::kDimsPerThread;
+  __shared__ float scores[G][C];
+  __shared__ float stats[G][2];
+  const std::uint32_t row = blockIdx.x;
+  const std::uint32_t kvh = blockIdx.y;
+  const std::uint32_t split = first_split + blockIdx.z;
+  const std::uint32_t base = split * C;
+  const KeyRange keys = RowKeys(a, row);
+  const std::uint32_t begin = max(keys.lo, base);
+  const std::uint32_t end = min(keys.hi, base + C);
+  const int lane = threadIdx.x % kWave;
+  const int wave = threadIdx.x / kWave;
+  const std::size_t stride = static_cast<std::size_t>(a.kv_heads) * D;
+  const auto* k_cache = reinterpret_cast<const __half*>(a.k_cache) + kvh * D;
+  const auto* v_cache = reinterpret_cast<const __half*>(a.v_cache) + kvh * D;
+
+  // Scores.
+  {
+    const int h0 = (wave / S::kWavesPerGroup) * HW;
+    float q[HW][P];
+#pragma unroll
+    for (int h = 0; h < HW; ++h) {
+      const float* qh =
+          a.q +
+          (static_cast<std::size_t>(row) * a.heads + kvh * G + h0 + h) * D +
+          lane * P;
+#pragma unroll
+      for (int i = 0; i < P; ++i) {
+        q[h][i] = qh[i];
+      }
+    }
+    for (int step = wave % S::kWavesPerGroup; step < C / KS;
+         step += S::kWavesPerGroup) {
+      const std::uint32_t key0 = base + step * KS;
+      if (key0 + KS <= begin || key0 >= end) {
+        continue;
+      }
+      // Keys stay packed binary16 until their products (half the
+      // registers of converted values).
+      uint4 kraw[KS][P / 8];
+#pragma unroll
+      for (int kk = 0; kk < KS; ++kk) {
+        const std::uint32_t key = key0 + kk;
+        if (key >= begin && key < end) {
+          const std::uint32_t slot = a.ring != 0 ? key % a.ring : key;
+          const auto* kp = reinterpret_cast<const uint4*>(
+              k_cache + slot * stride + lane * P);
+#pragma unroll
+          for (int i = 0; i < P / 8; ++i) {
+            kraw[kk][i] = kp[i];
+          }
+        } else {
+#pragma unroll
+          for (int i = 0; i < P / 8; ++i) {
+            kraw[kk][i] = uint4{0, 0, 0, 0};
+          }
+        }
+      }
+      float part[kWave];
+#pragma unroll
+      for (int kk = 0; kk < KS; ++kk) {
+#pragma unroll
+        for (int h = 0; h < HW; ++h) {
+          float dot = 0.0F;
+#pragma unroll
+          for (int i = 0; i < P / 8; ++i) {
+            const auto* k2 = reinterpret_cast<const __half2*>(&kraw[kk][i]);
+#pragma unroll
+            for (int j = 0; j < 4; ++j) {
+              const float2 f = __half22float2(k2[j]);
+              dot = __builtin_fmaf(q[h][8 * i + 2 * j], f.x, dot);
+              dot = __builtin_fmaf(q[h][8 * i + 2 * j + 1], f.y, dot);
+            }
+          }
+          part[h * KS + kk] = dot;
+        }
+      }
+      const float score = ReduceScatter(part);
+      const std::uint32_t key = key0 + lane % KS;
+      scores[h0 + lane / KS][step * KS + lane % KS] =
+          key >= begin && key < end ? score : -INFINITY;
+    }
+  }
+  __syncthreads();
+
+  // Chunk-local softmax, one wave per head.
+  if (wave < G) {
+    float m = -INFINITY;
+    for (std::uint32_t key = begin + lane; key < end; key += kWave) {
+      m = fmaxf(m, scores[wave][key - base]);
+    }
+#pragma unroll
+    for (int offset = kWave / 2; offset > 0; offset >>= 1) {
+      m = fmaxf(m, __shfl_xor(m, offset, kWave));
+    }
+    float l = 0.0F;
+    for (std::uint32_t key = begin + lane; key < end; key += kWave) {
+      const float p = expf(scores[wave][key - base] - m);
+      scores[wave][key - base] = p;
+      l += p;
+    }
+    l = WaveSum(l);
+    if (lane == 0) {
+      stats[wave][0] = m;
+      stats[wave][1] = l;
+    }
+  }
+  __syncthreads();
+
+  // Values: thread t owns dims [t DT, t DT + DT) of every head.
+  float acc[G][DT];
+#pragma unroll
+  for (int g = 0; g < G; ++g) {
+#pragma unroll
+    for (int j = 0; j < DT; ++j) {
+      acc[g][j] = 0.0F;
+    }
+  }
+  const int d0 = static_cast<int>(threadIdx.x) * DT;
+#pragma unroll 4
+  for (std::uint32_t key = begin; key < end; ++key) {
+    const std::uint32_t slot = a.ring != 0 ? key % a.ring : key;
+    const __half* vp = v_cache + slot * stride + d0;
+    float v[DT];
+    if constexpr (DT == 2) {
+      const float2 f = __half22float2(*reinterpret_cast<const __half2*>(vp));
+      v[0] = f.x;
+      v[1] = f.y;
+    } else {
+#pragma unroll
+      for (int j = 0; j < DT; ++j) {
+        v[j] = __half2float(vp[j]);
+      }
+    }
+#pragma unroll
+    for (int g = 0; g < G; ++g) {
+      const float p = scores[g][key - base];
+#pragma unroll
+      for (int j = 0; j < DT; ++j) {
+        acc[g][j] = __builtin_fmaf(p, v[j], acc[g][j]);
+      }
+    }
+  }
+  const std::size_t splits = gridDim.z;
+#pragma unroll
+  for (int g = 0; g < G; ++g) {
+    float* dst =
+        a.partials +
+        ((static_cast<std::size_t>(row) * a.heads + kvh * G + g) * splits +
+         blockIdx.z) *
+            (D + 2);
+    if (threadIdx.x == 0) {
+      dst[0] = begin < end ? stats[g][0] : -INFINITY;
+      dst[1] = begin < end ? stats[g][1] : 0.0F;
+    }
+#pragma unroll
+    for (int j = 0; j < DT; ++j) {
+      dst[2 + d0 + j] = acc[g][j];
+    }
   }
 }
 
@@ -489,27 +685,47 @@ __global__ void __launch_bounds__(kThreads)
   }
 }
 
-template<int D>
-void LaunchAttention(const AttentionArgs& a, hipStream_t stream) {
-  const bool split = a.rows <= kSplitRows;
-  if (!split) {
-    if (!LaunchWmmaPrefillAttention(a, stream)) {
-      AttentionKernel<D>
-          <<<dim3(1, a.heads, a.rows), kThreads, 0, stream>>>(a, 0, false);
-    }
-    return;
-  }
-  // Splits cover [0, max key) of the batch in absolute-position chunks.
+template<int D, int G>
+void LaunchSplitAttention(const AttentionArgs& a, hipStream_t stream) {
+  // Splits cover the batch's keys [lowest window start, highest key) in
+  // absolute-position chunks; rows are adjacent in the grid so the blocks
+  // reading one chunk run together.
   const std::uint32_t chunk = SplitChunk(D);
   const std::uint32_t last_position =
       a.shared_position ? a.first_position : a.first_position + a.rows - 1;
   const std::uint32_t max_hi = std::min(last_position + 1, a.key_limit);
+  const std::uint32_t min_lo = a.window != 0 && a.first_position + 1 > a.window
+                                   ? a.first_position + 1 - a.window
+                                   : 0;
+  const std::uint32_t first_split = std::min(min_lo, max_hi) / chunk;
   const std::uint32_t splits =
-      std::max<std::uint32_t>(1, (max_hi + chunk - 1) / chunk);
-  AttentionKernel<D>
-      <<<dim3(splits, a.heads, a.rows), kThreads, 0, stream>>>(a, chunk, true);
+      std::max<std::uint32_t>(1, (max_hi + chunk - 1) / chunk - first_split);
+  SplitAttentionKernel<D, G>
+      <<<dim3(a.rows, a.kv_heads, splits), kThreads, 0, stream>>>(a,
+                                                                  first_split);
   AttentionMergeKernel<D><<<dim3(a.heads, a.rows), kThreads, 0, stream>>>(
       a.partials, a.out, a.heads, splits);
+}
+
+template<int D>
+void LaunchAttention(const AttentionArgs& a, hipStream_t stream) {
+  if (a.rows > kSplitRows) {
+    if (!LaunchWmmaPrefillAttention(a, stream)) {
+      AttentionKernel<D><<<dim3(1, a.heads, a.rows), kThreads, 0, stream>>>(a);
+    }
+    return;
+  }
+  switch (a.heads / a.kv_heads) {
+    case 2:
+      LaunchSplitAttention<D, 2>(a, stream);
+      return;
+    case 8:
+      LaunchSplitAttention<D, 8>(a, stream);
+      return;
+    default:
+      throw std::invalid_argument(
+          "split attention supports 2 or 8 query heads per KV head");
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -610,8 +826,9 @@ std::size_t AttentionPartialFloats(std::uint32_t rows, std::uint32_t heads,
                                    std::uint32_t max_keys) {
   const std::uint32_t split_rows = std::min(rows, kSplitRows);
   const std::uint32_t chunk = SplitChunk(head_dim);
-  const std::size_t splits =
-      std::max<std::uint32_t>(1, (max_keys + chunk - 1) / chunk);
+  // One more split than the keys need: a window's first chunk may start
+  // before it.
+  const std::size_t splits = (max_keys + chunk - 1) / chunk + 1;
   return static_cast<std::size_t>(split_rows) * heads * splits * (head_dim + 2);
 }
 
