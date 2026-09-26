@@ -65,11 +65,16 @@ __device__ inline Bounds KeyBounds(const AttentionArgs& a,
 }
 
 template<std::uint32_t D, std::uint32_t kHeads, std::uint32_t kQueryBlocks>
-__global__ void __launch_bounds__(256)
+constexpr std::uint32_t kPrefillThreads =
+    32 * kHeads * kQueryBlocks * D / kSlice;
+
+template<std::uint32_t D, std::uint32_t kHeads, std::uint32_t kQueryBlocks>
+__global__ void __launch_bounds__((kPrefillThreads<D, kHeads, kQueryBlocks>))
     WmmaPrefillAttentionKernel(AttentionArgs a) {
   constexpr std::uint32_t kWavesPerRow = D / kSlice;
   constexpr std::uint32_t kRowBlocks = kHeads * kQueryBlocks;
-  static_assert(kRowBlocks * kWavesPerRow == 8, "eight waves per block");
+  constexpr std::uint32_t kThreads = kPrefillThreads<D, kHeads, kQueryBlocks>;
+  static_assert(kThreads <= 1024, "at most 32 waves per block");
   constexpr std::uint32_t kKStride = D + 8;       // K rows, halves
   constexpr std::uint32_t kVtStride = kKeys + 8;  // V^T rows, halves
   constexpr std::uint32_t kQueries = kQueryBlocks * 16;
@@ -129,12 +134,16 @@ __global__ void __launch_bounds__(256)
   }
   v8f o_acc[kSliceSteps] = {};
 
-  // Online softmax state, owned by lane pairs of the part-0 wave: lane l
-  // covers row l / 2 and keys [8 (l % 2), 8 (l % 2) + 8) of each tile.
+  // Online softmax state, spread over the row block's waves: wave `part`
+  // owns rows [part R, part R + R) with R = 16 / kWavesPerRow, and each row's
+  // kSegLanes lanes cover kSegKeys keys of every tile.
+  constexpr std::uint32_t kRowsPerPart = 16 / kWavesPerRow;
+  constexpr std::uint32_t kSegLanes = 32 / kRowsPerPart;
+  constexpr std::uint32_t kSegKeys = kKeys / kSegLanes;
   float running_max = -INFINITY;
   float running_sum = 0.0F;
-  const std::uint32_t sm_row = lane >> 1U;
-  const std::uint32_t sm_seg = lane & 1U;
+  const std::uint32_t sm_row = part * kRowsPerPart + lane / kSegLanes;
+  const std::uint32_t sm_seg = lane % kSegLanes;
   const std::uint32_t sm_query = row0 + sm_row;
   const Bounds sm_keys = KeyBounds(a, position_of(min(sm_query, a.rows - 1)));
 
@@ -145,29 +154,52 @@ __global__ void __launch_bounds__(256)
     return a.ring != 0 ? key % a.ring : key;
   };
 
-  for (std::uint32_t key0 = block_lo; key0 < block_hi; key0 += kKeys) {
-    __syncthreads();
-    // Stage K row-major and V transposed; lane-major keys keep the V^T
-    // writes on distinct banks.
-    for (std::uint32_t idx = tid; idx < kKeys * (D / 8); idx += 256) {
-      const std::uint32_t key = idx % kKeys;
+  // Each thread stages kStage 8-half chunks of K and V per tile; the next
+  // tile's chunks are loaded into registers while the current one computes.
+  constexpr std::uint32_t kChunks = kKeys * (D / 8);
+  static_assert(kChunks % kThreads == 0, "whole chunks per thread");
+  constexpr std::uint32_t kStage = kChunks / kThreads;
+  uint4 k_next[kStage];
+  uint4 v_next[kStage];
+  const auto fetch = [&](std::uint32_t key0) {
+#pragma unroll
+    for (std::uint32_t j = 0; j < kStage; ++j) {
+      const std::uint32_t idx = tid + j * kThreads;
+      const std::uint32_t position = key0 + idx % kKeys;
       const std::uint32_t d8 = (idx / kKeys) * 8;
-      const std::uint32_t position = key0 + key;
-      uint4 kv = make_uint4(0U, 0U, 0U, 0U);
-      uint4 vv = make_uint4(0U, 0U, 0U, 0U);
+      k_next[j] = make_uint4(0U, 0U, 0U, 0U);
+      v_next[j] = make_uint4(0U, 0U, 0U, 0U);
       if (position < block_hi) {
         const std::size_t at =
             static_cast<std::size_t>(slot_of(position)) * kv_stride +
             static_cast<std::size_t>(kv_head) * D + d8;
-        kv = *reinterpret_cast<const uint4*>(k_cache + at);
-        vv = *reinterpret_cast<const uint4*>(v_cache + at);
+        k_next[j] = *reinterpret_cast<const uint4*>(k_cache + at);
+        v_next[j] = *reinterpret_cast<const uint4*>(v_cache + at);
       }
-      *reinterpret_cast<uint4*>(&k_lds[key * kKStride + d8]) = kv;
-      const auto* vh = reinterpret_cast<const __half*>(&vv);
+    }
+  };
+  if (block_lo < block_hi) {
+    fetch(block_lo);
+  }
+
+  for (std::uint32_t key0 = block_lo; key0 < block_hi; key0 += kKeys) {
+    __syncthreads();
+    // Stage K row-major and V transposed; lane-major keys keep the V^T
+    // writes on distinct banks.
+#pragma unroll
+    for (std::uint32_t j = 0; j < kStage; ++j) {
+      const std::uint32_t idx = tid + j * kThreads;
+      const std::uint32_t key = idx % kKeys;
+      const std::uint32_t d8 = (idx / kKeys) * 8;
+      *reinterpret_cast<uint4*>(&k_lds[key * kKStride + d8]) = k_next[j];
+      const auto* vh = reinterpret_cast<const __half*>(&v_next[j]);
 #pragma unroll
       for (std::uint32_t i = 0; i < 8; ++i) {
         vt_lds[(d8 + i) * kVtStride + key] = vh[i];
       }
+    }
+    if (key0 + kKeys < block_hi) {
+      fetch(key0 + kKeys);
     }
     __syncthreads();
 
@@ -186,13 +218,13 @@ __global__ void __launch_bounds__(256)
     }
     __syncthreads();
 
-    if (part == 0) {
+    {
       const std::uint32_t position_row = sm_query;
-      float vals[8];
+      float vals[kSegKeys];
       float tile_max = -INFINITY;
 #pragma unroll
-      for (std::uint32_t m = 0; m < 8; ++m) {
-        const std::uint32_t col = sm_seg * 8 + m;
+      for (std::uint32_t m = 0; m < kSegKeys; ++m) {
+        const std::uint32_t col = sm_seg * kSegKeys + m;
         const std::uint32_t key = key0 + col;
         float s = 0.0F;
 #pragma unroll
@@ -204,18 +236,24 @@ __global__ void __launch_bounds__(256)
         vals[m] = valid ? s : -INFINITY;
         tile_max = fmaxf(tile_max, vals[m]);
       }
-      tile_max = fmaxf(tile_max, __shfl_xor(tile_max, 1, 32));
+#pragma unroll
+      for (std::uint32_t offset = 1; offset < kSegLanes; offset <<= 1) {
+        tile_max = fmaxf(tile_max, __shfl_xor(tile_max, offset, 32));
+      }
       const float next_max = fmaxf(running_max, tile_max);
       const float scale =
           next_max == -INFINITY ? 1.0F : expf(running_max - next_max);
       float tile_sum = 0.0F;
 #pragma unroll
-      for (std::uint32_t m = 0; m < 8; ++m) {
+      for (std::uint32_t m = 0; m < kSegKeys; ++m) {
         const float w = vals[m] == -INFINITY ? 0.0F : expf(vals[m] - next_max);
         tile_sum += w;
-        p_lds[rb][sm_row][sm_seg * 8 + m] = __float2half(w);
+        p_lds[rb][sm_row][sm_seg * kSegKeys + m] = __float2half(w);
       }
-      tile_sum += __shfl_xor(tile_sum, 1, 32);
+#pragma unroll
+      for (std::uint32_t offset = 1; offset < kSegLanes; offset <<= 1) {
+        tile_sum += __shfl_xor(tile_sum, offset, 32);
+      }
       running_max = next_max;
       running_sum = running_sum * scale + tile_sum;
       if (sm_seg == 0) {
@@ -241,7 +279,7 @@ __global__ void __launch_bounds__(256)
     }
   }
 
-  if (part == 0 && sm_seg == 0) {
+  if (sm_seg == 0) {
     row_sum[rb][sm_row] = running_sum;
   }
   __syncthreads();
@@ -263,24 +301,31 @@ __global__ void __launch_bounds__(256)
   }
 }
 
+template<std::uint32_t D, std::uint32_t kHeads, std::uint32_t kQueryBlocks>
+bool Launch(const AttentionArgs& a, hipStream_t stream) {
+  if ((a.heads / a.kv_heads) % kHeads != 0) {
+    return false;
+  }
+  constexpr std::uint32_t kQueries = 16 * kQueryBlocks;
+  const dim3 grid((a.rows + kQueries - 1) / kQueries, a.heads / kHeads);
+  WmmaPrefillAttentionKernel<D, kHeads, kQueryBlocks>
+      <<<grid, kPrefillThreads<D, kHeads, kQueryBlocks>, 0, stream>>>(a);
+  return true;
+}
+
 }  // namespace
 
 bool LaunchWmmaPrefillAttention(const AttentionArgs& a, hipStream_t stream) {
-  const std::uint32_t gqa = a.heads / a.kv_heads;
-  if (gqa % 2 != 0 || a.heads % 2 != 0) {
+  if (a.kv_heads == 0 || a.heads % a.kv_heads != 0) {
     return false;
   }
   if (a.head_dim == 256) {
     // Two heads x two 16-query blocks, two waves per row block.
-    const dim3 grid((a.rows + 31) / 32, a.heads / 2);
-    WmmaPrefillAttentionKernel<256, 2, 2><<<grid, 256, 0, stream>>>(a);
-    return true;
+    return Launch<256, 2, 2>(a, stream);
   }
   if (a.head_dim == 512) {
-    // Two heads x one 16-query block, four waves per row block.
-    const dim3 grid((a.rows + 15) / 16, a.heads / 2);
-    WmmaPrefillAttentionKernel<512, 2, 1><<<grid, 256, 0, stream>>>(a);
-    return true;
+    // Four heads x one 16-query block, four waves per row block.
+    return Launch<512, 4, 1>(a, stream);
   }
   return false;
 }

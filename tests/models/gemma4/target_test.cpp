@@ -28,6 +28,9 @@ namespace {
 /// never loosened. Observed: decode mean KL 2.4e-7, prefill mean KL 0.0084.
 constexpr double kDecodeMeanKl = 1e-5;
 constexpr double kPrefillMeanKl = 0.015;
+/// Bulk prefill vs exact rows over the 1353-token snapshot prompt;
+/// observed 1.39 (2026-09-26).
+constexpr double kLongPrefillMeanKl = 1.6;
 
 struct Stats {
   double mean_kl{0.0};
@@ -257,6 +260,21 @@ int main() {
     original.reset();
     typed.reset();
     serialized.reset();
+
+    // Bulk prefill over many attention tiles and a wrapped ring stays close
+    // to the exact small-batch rows. The repeated text makes this prompt very
+    // sensitive to prefill's binary16/Q8_1 rounding: llama.cpp's teacher-forced
+    // logits sit at mean KL 2.93 from the same exact rows.
+    {
+      const auto exact = GpuLogits(*model, long_prompt, 8);
+      const auto bulk = GpuLogits(*model, long_prompt, long_prompt.size());
+      const Stats lp = Compare(exact, bulk, vocab);
+      std::cout << "long prefill vs exact rows (" << lp.rows
+                << " tokens): mean KL " << lp.mean_kl << ", max " << lp.max_kl
+                << ", top-1 " << lp.top1 << "/" << lp.rows << '\n';
+      Require(lp.mean_kl < kLongPrefillMeanKl,
+              "long prefill exceeds its KL envelope");
+    }
 
     if (draft == nullptr || *draft == '\0') {
       std::cout

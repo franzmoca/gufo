@@ -44,7 +44,8 @@ struct Case {
   bool shared_position;
   std::uint32_t key_limit;
   const char* name;
-  bool timed = false;  ///< also report the launch time (deep decode shapes)
+  bool timed = false;            ///< also report the launch time (deep shapes)
+  std::uint32_t row_stride = 1;  ///< rows checked against FP64
 };
 
 template<class T>
@@ -101,8 +102,9 @@ std::vector<float> RunKernel(const Case& c, const std::vector<float>& q,
     const double keys = c.window != 0 ? std::min(max_keys, c.window) : max_keys;
     const double bytes = 4.0 * keys * c.kv_heads * c.head_dim;
     const double us = 1e3 * ms / kIters;
+    const double flops = 4.0 * c.rows * keys * c.heads * c.head_dim;
     std::cout << c.name << ": " << us << " us (" << bytes / us / 1e3
-              << " GB/s of K/V)\n";
+              << " GB/s of K/V, " << flops / us / 1e6 << " TFLOP/s)\n";
     HIP_CHECK(hipEventDestroy(start));
     HIP_CHECK(hipEventDestroy(stop));
   }
@@ -133,8 +135,11 @@ void Check(const Case& c, std::mt19937& rng) {
     v = ToHalf(normal(rng));
 
   const auto out = RunKernel(c, q, kc, vc, max_keys, c.timed);
+  // Repeated launches produce the same bits.
+  Require(RunKernel(c, q, kc, vc, max_keys) == out,
+          std::string(c.name) + ": output differs between launches");
   double worst = 0.0;
-  for (std::uint32_t r = 0; r < c.rows; ++r) {
+  for (std::uint32_t r = 0; r < c.rows; r += c.row_stride) {
     const std::uint32_t pos =
         c.shared_position ? c.first_position : c.first_position + r;
     const std::uint32_t hi = std::min(pos + 1, c.key_limit);
@@ -240,6 +245,12 @@ int main() {
          true},
         {256, 32, 16, 1, 32767, 1024, 3072, false, kNoLimit,
          "sliding decode 32K", true},
+        {512, 32, 4, 512, 32768, 0, 0, false, kNoLimit, "global prefill 32K",
+         true, 97},
+        {512, 32, 4, 2048, 32768, 0, 0, false, kNoLimit,
+         "global prefill 2048 rows at 32K", true, 389},
+        {256, 32, 16, 512, 32768, 1024, 1536, false, kNoLimit,
+         "sliding prefill 32K", true, 97},
     };
     for (const Case& c : cases) {
       Check(c, rng);
