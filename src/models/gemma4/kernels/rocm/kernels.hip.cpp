@@ -92,26 +92,45 @@ __global__ void __launch_bounds__(kThreads)
   }
 }
 
+/// Elements of a row each thread keeps in registers across the passes of the
+/// fused residual norms: element i of thread t is t + i * kThreads, the order
+/// of every strided loop here.
+constexpr std::uint32_t kRowRegisters = 24;
+
 __global__ void __launch_bounds__(kThreads)
     PostAttentionNormKernel(const float* o, const float* post_norm, float* x,
                             const float* next_norm, float* h, std::uint32_t dim,
                             float eps) {
   __shared__ float scratch[kWaves];
   const std::size_t base = static_cast<std::size_t>(blockIdx.x) * dim;
+  float ov[kRowRegisters];
+  float xv[kRowRegisters];
   float ss = 0.0F;
-  for (std::uint32_t i = threadIdx.x; i < dim; i += kThreads) {
-    ss += o[base + i] * o[base + i];
+#pragma unroll
+  for (std::uint32_t j = 0; j < kRowRegisters; ++j) {
+    const std::uint32_t i = threadIdx.x + j * kThreads;
+    ov[j] = i < dim ? o[base + i] : 0.0F;
+    xv[j] = i < dim ? x[base + i] : 0.0F;
+    ss += ov[j] * ov[j];
   }
   const float r = RmsScale(BlockSum(ss, scratch), dim, eps);
   float ss2 = 0.0F;
-  for (std::uint32_t i = threadIdx.x; i < dim; i += kThreads) {
-    const float v = x[base + i] + o[base + i] * r * post_norm[i];
-    x[base + i] = v;
-    ss2 += v * v;
+#pragma unroll
+  for (std::uint32_t j = 0; j < kRowRegisters; ++j) {
+    const std::uint32_t i = threadIdx.x + j * kThreads;
+    if (i < dim) {
+      xv[j] = xv[j] + ov[j] * r * post_norm[i];
+      x[base + i] = xv[j];
+      ss2 += xv[j] * xv[j];
+    }
   }
   const float r2 = RmsScale(BlockSum(ss2, scratch), dim, eps);
-  for (std::uint32_t i = threadIdx.x; i < dim; i += kThreads) {
-    h[base + i] = x[base + i] * r2 * next_norm[i];
+#pragma unroll
+  for (std::uint32_t j = 0; j < kRowRegisters; ++j) {
+    const std::uint32_t i = threadIdx.x + j * kThreads;
+    if (i < dim) {
+      h[base + i] = xv[j] * r2 * next_norm[i];
+    }
   }
 }
 
@@ -121,23 +140,37 @@ __global__ void __launch_bounds__(kThreads)
                               float* h, std::uint32_t dim, float eps) {
   __shared__ float scratch[kWaves];
   const std::size_t base = static_cast<std::size_t>(blockIdx.x) * dim;
+  float fv[kRowRegisters];
+  float xv[kRowRegisters];
   float ss = 0.0F;
-  for (std::uint32_t i = threadIdx.x; i < dim; i += kThreads) {
-    ss += f[base + i] * f[base + i];
+#pragma unroll
+  for (std::uint32_t j = 0; j < kRowRegisters; ++j) {
+    const std::uint32_t i = threadIdx.x + j * kThreads;
+    fv[j] = i < dim ? f[base + i] : 0.0F;
+    xv[j] = i < dim ? x[base + i] : 0.0F;
+    ss += fv[j] * fv[j];
   }
   const float r = RmsScale(BlockSum(ss, scratch), dim, eps);
   float ss2 = 0.0F;
-  for (std::uint32_t i = threadIdx.x; i < dim; i += kThreads) {
-    const float v = (x[base + i] + f[base + i] * r * post_norm[i]) * scale;
-    x[base + i] = v;
-    ss2 += v * v;
+#pragma unroll
+  for (std::uint32_t j = 0; j < kRowRegisters; ++j) {
+    const std::uint32_t i = threadIdx.x + j * kThreads;
+    if (i < dim) {
+      xv[j] = (xv[j] + fv[j] * r * post_norm[i]) * scale;
+      x[base + i] = xv[j];
+      ss2 += xv[j] * xv[j];
+    }
   }
   if (next_norm == nullptr) {
     return;
   }
   const float r2 = RmsScale(BlockSum(ss2, scratch), dim, eps);
-  for (std::uint32_t i = threadIdx.x; i < dim; i += kThreads) {
-    h[base + i] = x[base + i] * r2 * next_norm[i];
+#pragma unroll
+  for (std::uint32_t j = 0; j < kRowRegisters; ++j) {
+    const std::uint32_t i = threadIdx.x + j * kThreads;
+    if (i < dim) {
+      h[base + i] = xv[j] * r2 * next_norm[i];
+    }
   }
 }
 
@@ -585,6 +618,9 @@ std::size_t AttentionPartialFloats(std::uint32_t rows, std::uint32_t heads,
 void PostAttentionNorm(const float* o, const float* post_norm, float* x,
                        const float* next_norm, float* h, std::uint32_t rows,
                        std::uint32_t dim, float eps, hipStream_t stream) {
+  if (dim > kRowRegisters * kThreads) {
+    throw std::invalid_argument("PostAttentionNorm row is too wide");
+  }
   PostAttentionNormKernel<<<rows, kThreads, 0, stream>>>(
       o, post_norm, x, next_norm, h, dim, eps);
 }
@@ -593,6 +629,9 @@ void PostFeedForwardNorm(const float* f, const float* post_norm, float scale,
                          float* x, const float* next_norm, float* h,
                          std::uint32_t rows, std::uint32_t dim, float eps,
                          hipStream_t stream) {
+  if (dim > kRowRegisters * kThreads) {
+    throw std::invalid_argument("PostFeedForwardNorm row is too wide");
+  }
   PostFeedForwardNormKernel<<<rows, kThreads, 0, stream>>>(
       f, post_norm, scale, x, next_norm, h, dim, eps);
 }
