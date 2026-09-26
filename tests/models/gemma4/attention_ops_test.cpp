@@ -1,0 +1,210 @@
+// Gemma 4 attention kernels against an FP64 formula over the same binary16
+// caches: window and ring addressing, the draft key limit, split-K and
+// single-pass modes, and batch invariance of the split mode.
+#include <hip/hip_runtime.h>
+
+#include <cmath>
+#include <cstdint>
+#include <cstring>
+#include <limits>
+#include <random>
+#include <string>
+#include <vector>
+
+#include "src/core/hip/hip_utils.hpp"
+#include "src/models/gemma4/kernels/rocm/kernels.hpp"
+#include "tests/models/gemma4/check.hpp"
+
+namespace k = gufo::models::gemma4::rocm;
+using gemma4_test::Require;
+
+namespace {
+
+std::uint16_t ToHalf(float x) {
+  const _Float16 h = static_cast<_Float16>(x);
+  std::uint16_t bits;
+  std::memcpy(&bits, &h, 2);
+  return bits;
+}
+
+float FromHalf(std::uint16_t bits) {
+  _Float16 h;
+  std::memcpy(&h, &bits, 2);
+  return static_cast<float>(h);
+}
+
+struct Case {
+  std::uint32_t head_dim;
+  std::uint32_t heads;
+  std::uint32_t kv_heads;
+  std::uint32_t rows;
+  std::uint32_t first_position;
+  std::uint32_t window;
+  std::uint32_t ring;
+  bool shared_position;
+  std::uint32_t key_limit;
+  const char* name;
+};
+
+template<class T>
+T* Device(const std::vector<T>& host) {
+  T* ptr = nullptr;
+  HIP_CHECK(hipMalloc(&ptr, host.size() * sizeof(T) + 16));
+  HIP_CHECK(hipMemcpy(ptr, host.data(), host.size() * sizeof(T),
+                      hipMemcpyHostToDevice));
+  return ptr;
+}
+
+std::vector<float> RunKernel(const Case& c, const std::vector<float>& q,
+                             const std::vector<std::uint16_t>& kc,
+                             const std::vector<std::uint16_t>& vc,
+                             std::uint32_t max_keys) {
+  float* dq = Device(q);
+  auto* dk = Device(kc);
+  auto* dv = Device(vc);
+  std::vector<float> out(std::size_t{c.rows} * c.heads * c.head_dim, NAN);
+  float* dout = Device(out);
+  std::vector<float> partials(
+      k::AttentionPartialFloats(c.rows, c.heads, c.head_dim, max_keys));
+  float* dpart = Device(partials);
+  k::AttentionArgs a{};
+  a.q = dq;
+  a.k_cache = dk;
+  a.v_cache = dv;
+  a.out = dout;
+  a.partials = dpart;
+  a.rows = c.rows;
+  a.heads = c.heads;
+  a.kv_heads = c.kv_heads;
+  a.head_dim = c.head_dim;
+  a.first_position = c.first_position;
+  a.shared_position = c.shared_position;
+  a.key_limit = c.key_limit;
+  a.window = c.window;
+  a.ring = c.ring;
+  k::Attention(a, nullptr);
+  HIP_CHECK(hipDeviceSynchronize());
+  HIP_CHECK(hipMemcpy(out.data(), dout, out.size() * 4, hipMemcpyDeviceToHost));
+  for (void* p :
+       {static_cast<void*>(dq), static_cast<void*>(dk), static_cast<void*>(dv),
+        static_cast<void*>(dout), static_cast<void*>(dpart)}) {
+    HIP_CHECK(hipFree(p));
+  }
+  return out;
+}
+
+void Check(const Case& c, std::mt19937& rng) {
+  const std::uint32_t D = c.head_dim;
+  const std::uint32_t last =
+      c.shared_position ? c.first_position : c.first_position + c.rows - 1;
+  const std::uint32_t max_keys = std::min(last + 1, c.key_limit);
+  const std::uint32_t slots = c.ring != 0 ? c.ring : max_keys;
+  std::normal_distribution<float> normal(0.0F, 1.0F);
+  std::vector<float> q(std::size_t{c.rows} * c.heads * D);
+  for (float& v : q)
+    v = normal(rng) * 0.35F;
+  std::vector<std::uint16_t> kc(std::size_t{slots} * c.kv_heads * D);
+  std::vector<std::uint16_t> vc(kc.size());
+  for (auto& v : kc)
+    v = ToHalf(normal(rng));
+  for (auto& v : vc)
+    v = ToHalf(normal(rng));
+
+  const auto out = RunKernel(c, q, kc, vc, max_keys);
+  double worst = 0.0;
+  for (std::uint32_t r = 0; r < c.rows; ++r) {
+    const std::uint32_t pos =
+        c.shared_position ? c.first_position : c.first_position + r;
+    const std::uint32_t hi = std::min(pos + 1, c.key_limit);
+    const std::uint32_t lo =
+        c.window != 0 && pos + 1 > c.window ? pos + 1 - c.window : 0;
+    for (std::uint32_t h = 0; h < c.heads; ++h) {
+      const std::uint32_t kvh = h / (c.heads / c.kv_heads);
+      const float* qh = &q[(std::size_t{r} * c.heads + h) * D];
+      std::vector<double> scores;
+      double m = -INFINITY;
+      for (std::uint32_t key = lo; key < hi; ++key) {
+        const std::uint32_t slot = c.ring != 0 ? key % c.ring : key;
+        double s = 0.0;
+        for (std::uint32_t d = 0; d < D; ++d) {
+          s += qh[d] *
+               FromHalf(kc[(std::size_t{slot} * c.kv_heads + kvh) * D + d]);
+        }
+        scores.push_back(s);
+        m = std::max(m, s);
+      }
+      double total = 0.0;
+      for (double& s : scores) {
+        s = std::exp(s - m);
+        total += s;
+      }
+      for (std::uint32_t d = 0; d < D; ++d) {
+        double acc = 0.0;
+        for (std::uint32_t key = lo; key < hi; ++key) {
+          const std::uint32_t slot = c.ring != 0 ? key % c.ring : key;
+          acc += scores[key - lo] *
+                 FromHalf(vc[(std::size_t{slot} * c.kv_heads + kvh) * D + d]);
+        }
+        const double want = acc / total;
+        const double got = out[(std::size_t{r} * c.heads + h) * D + d];
+        Require(std::isfinite(got),
+                std::string(c.name) + ": non-finite output");
+        worst = std::max(worst, std::fabs(got - want));
+      }
+    }
+  }
+  Require(worst < 2e-5,
+          std::string(c.name) + ": max error " + std::to_string(worst));
+
+  // Split mode: every row equals its single-row evaluation bit for bit.
+  if (c.rows > 1 && c.rows <= k::kSplitRows && !c.shared_position) {
+    for (std::uint32_t r = 0; r < c.rows; ++r) {
+      Case single = c;
+      single.rows = 1;
+      single.first_position = c.first_position + r;
+      std::vector<float> q1(q.begin() + std::size_t{r} * c.heads * D,
+                            q.begin() + std::size_t{r + 1} * c.heads * D);
+      const auto one = RunKernel(single, q1, kc, vc, max_keys);
+      Require(std::memcmp(one.data(), &out[std::size_t{r} * c.heads * D],
+                          one.size() * 4) == 0,
+              std::string(c.name) + ": row " + std::to_string(r) +
+                  " depends on its batch");
+    }
+  }
+}
+
+}  // namespace
+
+int main() {
+  int devices = 0;
+  if (hipGetDeviceCount(&devices) != hipSuccess || devices == 0) {
+    std::cout << "SKIP: no HIP device\n";
+    return 77;
+  }
+  return gemma4_test::Run([] {
+    std::mt19937 rng(20260926);
+    constexpr std::uint32_t kNoLimit =
+        std::numeric_limits<std::uint32_t>::max();
+    const Case cases[] = {
+        {256, 32, 16, 1, 0, 1024, 3072, false, kNoLimit, "sliding first token"},
+        {256, 32, 16, 1, 1023, 1024, 3072, false, kNoLimit,
+         "sliding full window"},
+        {256, 32, 16, 1, 5000, 1024, 3072, false, kNoLimit,
+         "sliding ring wrap"},
+        {256, 8, 4, 5, 1020, 1024, 1280, false, kNoLimit,
+         "sliding verify window edge"},
+        {256, 8, 4, 8, 3070, 1024, 1280, false, kNoLimit,
+         "sliding verify wrap"},
+        {256, 8, 4, 40, 1000, 1024, 1280, false, kNoLimit, "sliding prefill"},
+        {512, 32, 4, 1, 0, 0, 0, false, kNoLimit, "global first token"},
+        {512, 32, 4, 1, 2999, 0, 0, false, kNoLimit, "global multi-split"},
+        {512, 8, 1, 7, 1500, 0, 0, false, kNoLimit, "global verify"},
+        {512, 8, 1, 33, 600, 0, 0, false, kNoLimit, "global prefill"},
+        {512, 8, 1, 3, 1500, 0, 0, true, 1500, "draft global frontier"},
+        {256, 8, 4, 3, 2000, 1024, 3072, true, 2000, "draft sliding frontier"},
+    };
+    for (const Case& c : cases) {
+      Check(c, rng);
+    }
+  });
+}

@@ -1,5 +1,9 @@
 #include "src/cli/prompt/prompt.hpp"
 
+#if defined(ENGINE_ENABLE_HIP)
+#include "src/cli/prompt/gemma4_prompt.hpp"
+#endif
+
 #include <charconv>
 #include <chrono>
 #include <cmath>
@@ -271,25 +275,6 @@ std::optional<ReasoningEffort> ParseReasoningEffort(std::string_view value) {
     return ReasoningEffort::kMax;
   }
   return std::nullopt;
-}
-
-ReasoningOptions PromptReasoningOptions(const PromptOptions& options) {
-  ReasoningOptions reasoning;
-  if (options.reasoning_mode == "on") {
-    reasoning.enabled = true;
-  } else if (options.reasoning_mode == "off") {
-    reasoning.enabled = false;
-  }
-  if (options.reasoning_effort != "auto") {
-    reasoning.effort = ParseReasoningEffort(options.reasoning_effort);
-    reasoning.enabled = true;
-  }
-  if (options.preserve_thinking == "on") {
-    reasoning.preserve_thinking = true;
-  } else if (options.preserve_thinking == "off") {
-    reasoning.preserve_thinking = false;
-  }
-  return reasoning;
 }
 
 #if defined(ENGINE_ENABLE_HIP)
@@ -822,6 +807,25 @@ void GenerateQwenGpuResponse(
 
 }  // namespace
 
+ReasoningOptions PromptReasoningOptions(const PromptOptions& options) {
+  ReasoningOptions reasoning;
+  if (options.reasoning_mode == "on") {
+    reasoning.enabled = true;
+  } else if (options.reasoning_mode == "off") {
+    reasoning.enabled = false;
+  }
+  if (options.reasoning_effort != "auto") {
+    reasoning.effort = ParseReasoningEffort(options.reasoning_effort);
+    reasoning.enabled = true;
+  }
+  if (options.preserve_thinking == "on") {
+    reasoning.preserve_thinking = true;
+  } else if (options.preserve_thinking == "off") {
+    reasoning.preserve_thinking = false;
+  }
+  return reasoning;
+}
+
 static std::optional<PromptOptions> ParseTextOptions(
     std::span<const char* const> args, std::string* error_msg,
     std::string_view command) {
@@ -987,6 +991,9 @@ int RunPrompt(std::span<const char* const> args) {
       std::move(reader_owner));
 
 #if defined(ENGINE_ENABLE_HIP)
+  if (IsGemma4(*reader)) {
+    return RunGemma4Prompt(opt, model_load_start);
+  }
   if (IsDeepSeekV4Flash(*reader)) {
     if (!opt.image_paths.empty() || !opt.vision_model_path.empty()) {
       std::cerr << "DeepSeek does not support image input\n";
@@ -1201,6 +1208,9 @@ int RunChat(std::span<const char* const> args) {
       std::move(reader_owner));
 
 #if defined(ENGINE_ENABLE_HIP)
+  if (IsGemma4(*reader)) {
+    return RunGemma4Chat(opt, model_load_start);
+  }
   if (IsDeepSeekV4Flash(*reader)) {
     if (!opt.image_paths.empty() || !opt.vision_model_path.empty()) {
       std::cerr << "DeepSeek does not support image input\n";

@@ -9,6 +9,7 @@
 #include <string_view>
 #include <vector>
 
+#include "src/core/reasoning.hpp"
 #include "src/core/sampling.hpp"
 
 namespace gufo::cli {
@@ -41,6 +42,11 @@ struct PromptOptions {
   std::uint32_t draft_tokens = 7;
   std::uint32_t min_draft_tokens = 1;
 };
+
+/// Provider-neutral reasoning controls from --think/--reasoning-effort/
+/// --preserve-thinking; each model maps them onto its own template.
+[[nodiscard]] ReasoningOptions PromptReasoningOptions(
+    const PromptOptions& options);
 
 /// Prints help for `gufo prompt`.
 void PrintPromptHelp(std::string_view program_name);
