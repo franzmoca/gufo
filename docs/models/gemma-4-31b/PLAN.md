@@ -298,3 +298,15 @@ Each milestone is a testable state with Conventional Commits on `feat/gemma`. M4
   **n=4 22.3 tok/s** (acceptance 36.8%), n=5 21.4 — vs the llama.cpp fork's
   20.2 tok/s at n=4. With a drafter loaded, single-token projections use the
   shared kernels' bit-identical one-row paths so verification equals decode.
+
+**2026-09-26 — M4 HTTP serving.**
+- `gufo serve llm` loads Gemma 4 (with or without `--speculative mtp`): plain
+  and streamed chat, the thinking channel as `reasoning_content`, Gemma tool
+  calls as OpenAI `tool_calls` (ids `call_…`) and tool-result continuation.
+- The output markup (reasoning markers, tool syntax) is per runner; Qwen and
+  DeepSeek parsing is unchanged (93 CPU/server tests pass).
+- Session snapshots (global rows, the live sliding rows in logical order,
+  frontier hidden, logits) back the RAM and disk prompt caches. Multi-turn
+  replay: 502 then 597 of 604/701 prompt tokens reused; after a restart the
+  disk cache restored 502 tokens in 441 ms. `gemma4.target` checks that a
+  snapshot taken after the ring wraps restores bitwise.

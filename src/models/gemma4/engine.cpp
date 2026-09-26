@@ -1,6 +1,10 @@
 #include "src/models/gemma4/engine.hpp"
 
+#include <hip/hip_runtime.h>
+
 #include <algorithm>
+#include <array>
+#include <cstring>
 #include <exception>
 #include <utility>
 
@@ -12,6 +16,29 @@
 
 namespace gufo::models::gemma4 {
 namespace {
+
+constexpr std::array<char, 8> kSnapshotMagic = {'G', '4', 'S', 'N',
+                                                'A', 'P', '0', '1'};
+
+struct SnapshotHeader {
+  std::array<char, 8> magic;
+  std::uint32_t version;
+  std::uint32_t position;
+  std::uint32_t hidden;
+  std::uint32_t vocab;
+  std::uint32_t layers;
+  std::uint32_t window;
+};
+static_assert(sizeof(SnapshotHeader) == 32);
+
+/// First position whose KV a later token may attend in `layer`.
+std::uint32_t FirstLiveRow(const Config& c, std::uint32_t layer,
+                           std::uint32_t position) {
+  if (!c.IsSliding(layer) || position < c.sliding_window) {
+    return 0;
+  }
+  return position - (c.sliding_window - 1);
+}
 
 bool Fail(std::string* error_msg, std::string message) {
   if (error_msg != nullptr) {
@@ -149,6 +176,10 @@ std::size_t Model::ResidentBytes() const noexcept {
 
 std::size_t Model::SessionBytes(std::uint32_t context) const noexcept {
   return rocm::Executor::CacheBytes(config(), context, executor_->ring());
+}
+
+std::size_t Model::SessionRingSlots() const noexcept {
+  return executor_->ring();
 }
 
 std::string Model::ModelName() const {
@@ -362,6 +393,147 @@ bool Session::DecodeStep(std::size_t max_tokens,
   stats_.cycles += 1;
   stats_.drafted += steps;
   stats_.accepted += accepted;
+  return true;
+}
+
+bool SessionSnapshot::CopyTo(std::span<std::uint8_t> destination) const {
+  if (destination.size() != data_.size()) {
+    return false;
+  }
+  std::memcpy(destination.data(), data_.data(), data_.size());
+  return true;
+}
+
+std::uint64_t Session::SnapshotBytes() const {
+  const Config& c = model_->config();
+  const auto n = static_cast<std::uint32_t>(tokens_.size());
+  std::uint64_t bytes = sizeof(SnapshotHeader) + std::uint64_t{n} * 4;
+  for (std::uint32_t l = 0; l < c.num_layers; ++l) {
+    bytes += 2ULL * (n - FirstLiveRow(c, l, n)) * c.KvDim(l) * 2;
+  }
+  return bytes + std::uint64_t{c.hidden_size} * 4 +
+         std::uint64_t{model_->VocabSize()} * 4;
+}
+
+std::unique_ptr<SessionSnapshot> Session::SaveSnapshot(
+    std::string* error_msg) const {
+  if (!valid_ || tokens_.empty()) {
+    Fail(error_msg, "only an evaluated session can be saved");
+    return nullptr;
+  }
+  const Config& c = model_->config();
+  const auto n = static_cast<std::uint32_t>(tokens_.size());
+  auto snapshot = std::unique_ptr<SessionSnapshot>(new SessionSnapshot());
+  auto& data = snapshot->data_;
+  data.resize(SnapshotBytes());
+  const SnapshotHeader header{
+      kSnapshotMagic,  kSnapshotPayloadVersion, n,
+      c.hidden_size,   model_->VocabSize(),     c.num_layers,
+      c.sliding_window};
+  std::uint8_t* at = data.data();
+  std::memcpy(at, &header, sizeof(header));
+  at += sizeof(header);
+  std::memcpy(at, tokens_.data(), tokens_.size() * 4);
+  at += tokens_.size() * 4;
+  const hipStream_t stream = model_->executor_->stream();
+  std::lock_guard lock(model_->mutex_);
+  const auto copy_rows = [&](const std::uint16_t* cache, std::uint32_t layer,
+                             std::uint32_t first) {
+    const std::size_t row = std::size_t{c.KvDim(layer)} * 2;
+    const bool ring = c.IsSliding(layer);
+    for (std::uint32_t p = first; p < n;) {
+      const std::uint32_t slot = ring ? p % cache_->ring : p;
+      const std::uint32_t run =
+          ring ? std::min(n - p, cache_->ring - slot) : n - p;
+      (void)hipMemcpyAsync(at,
+                           reinterpret_cast<const std::uint8_t*>(cache) +
+                               std::size_t{slot} * row,
+                           std::size_t{run} * row, hipMemcpyDeviceToHost,
+                           stream);
+      at += std::size_t{run} * row;
+      p += run;
+    }
+  };
+  for (std::uint32_t l = 0; l < c.num_layers; ++l) {
+    const std::uint32_t first = FirstLiveRow(c, l, n);
+    copy_rows(cache_->k[l], l, first);
+    copy_rows(cache_->v[l], l, first);
+  }
+  (void)hipMemcpyAsync(at, cache_->hidden, std::size_t{c.hidden_size} * 4,
+                       hipMemcpyDeviceToHost, stream);
+  at += std::size_t{c.hidden_size} * 4;
+  if (hipStreamSynchronize(stream) != hipSuccess) {
+    Fail(error_msg, "snapshot copy failed");
+    return nullptr;
+  }
+  std::memcpy(at, logits_.data(), logits_.size() * 4);
+  return snapshot;
+}
+
+bool Session::RestoreSnapshot(const SessionSnapshot& snapshot,
+                              std::string* error_msg) {
+  return RestoreSnapshot(snapshot.bytes(), error_msg);
+}
+
+bool Session::RestoreSnapshot(std::span<const std::uint8_t> payload,
+                              std::string* error_msg) {
+  Reset();
+  const Config& c = model_->config();
+  SnapshotHeader header{};
+  if (payload.size() < sizeof(header)) {
+    return Fail(error_msg, "snapshot is truncated");
+  }
+  std::memcpy(&header, payload.data(), sizeof(header));
+  if (header.magic != kSnapshotMagic ||
+      header.version != kSnapshotPayloadVersion ||
+      header.hidden != c.hidden_size || header.vocab != model_->VocabSize() ||
+      header.layers != c.num_layers || header.window != c.sliding_window) {
+    return Fail(error_msg, "snapshot belongs to another model or version");
+  }
+  const std::uint32_t n = header.position;
+  if (n == 0 || n > cache_->max_context) {
+    return Fail(error_msg, "snapshot position exceeds the session context");
+  }
+  tokens_.resize(n);
+  if (payload.size() != SnapshotBytes()) {
+    tokens_.clear();
+    return Fail(error_msg, "snapshot size does not match its header");
+  }
+  const std::uint8_t* at = payload.data() + sizeof(header);
+  std::memcpy(tokens_.data(), at, std::size_t{n} * 4);
+  at += std::size_t{n} * 4;
+  const hipStream_t stream = model_->executor_->stream();
+  std::lock_guard lock(model_->mutex_);
+  const auto copy_rows = [&](std::uint16_t* cache, std::uint32_t layer,
+                             std::uint32_t first) {
+    const std::size_t row = std::size_t{c.KvDim(layer)} * 2;
+    const bool ring = c.IsSliding(layer);
+    for (std::uint32_t p = first; p < n;) {
+      const std::uint32_t slot = ring ? p % cache_->ring : p;
+      const std::uint32_t run =
+          ring ? std::min(n - p, cache_->ring - slot) : n - p;
+      (void)hipMemcpyAsync(
+          reinterpret_cast<std::uint8_t*>(cache) + std::size_t{slot} * row, at,
+          std::size_t{run} * row, hipMemcpyHostToDevice, stream);
+      at += std::size_t{run} * row;
+      p += run;
+    }
+  };
+  for (std::uint32_t l = 0; l < c.num_layers; ++l) {
+    const std::uint32_t first = FirstLiveRow(c, l, n);
+    copy_rows(cache_->k[l], l, first);
+    copy_rows(cache_->v[l], l, first);
+  }
+  (void)hipMemcpyAsync(cache_->hidden, at, std::size_t{c.hidden_size} * 4,
+                       hipMemcpyHostToDevice, stream);
+  at += std::size_t{c.hidden_size} * 4;
+  if (hipStreamSynchronize(stream) != hipSuccess) {
+    Reset();
+    return Fail(error_msg, "snapshot restore failed");
+  }
+  logits_.resize(model_->VocabSize());
+  std::memcpy(logits_.data(), at, logits_.size() * 4);
+  valid_ = true;
   return true;
 }
 

@@ -45,6 +45,24 @@ struct ModelOptions {
 
 class Session;
 
+/// Host copy of one session's context: tokens, the KV rows later tokens can
+/// still attend (every global row, the last window-1 sliding rows in logical
+/// order), the frontier hidden state and the last logits.
+class SessionSnapshot final {
+public:
+  [[nodiscard]] std::uint64_t SizeBytes() const noexcept {
+    return data_.size();
+  }
+  [[nodiscard]] std::span<const std::uint8_t> bytes() const noexcept {
+    return data_;
+  }
+  [[nodiscard]] bool CopyTo(std::span<std::uint8_t> destination) const;
+
+private:
+  std::vector<std::uint8_t> data_;
+  friend class Session;
+};
+
 /// Gufo-owned API over the Gemma 4 ROCm runtime: one resident model and any
 /// number of sessions with independent context state. Forwards of different
 /// sessions are serialized on the model's executor.
@@ -80,6 +98,8 @@ public:
   }
   [[nodiscard]] std::size_t ResidentBytes() const noexcept;
   [[nodiscard]] std::size_t SessionBytes(std::uint32_t context) const noexcept;
+  /// Sliding-window ring slots per session (window + prefill chunk).
+  [[nodiscard]] std::size_t SessionRingSlots() const noexcept;
   [[nodiscard]] std::string ModelName() const;
   [[nodiscard]] bool HasMtp() const noexcept {
     return draft_weights_ != nullptr;
@@ -159,6 +179,16 @@ public:
   [[nodiscard]] bool IsValid() const noexcept { return valid_; }
   [[nodiscard]] std::size_t AllocatedBytes() const noexcept;
   void Reset();
+
+  /// Compatibility version; bump on payload or inference arithmetic changes.
+  static constexpr std::uint32_t kSnapshotPayloadVersion = 1;
+  [[nodiscard]] std::uint64_t SnapshotBytes() const;
+  [[nodiscard]] std::unique_ptr<SessionSnapshot> SaveSnapshot(
+      std::string* error_msg = nullptr) const;
+  [[nodiscard]] bool RestoreSnapshot(const SessionSnapshot& snapshot,
+                                     std::string* error_msg = nullptr);
+  [[nodiscard]] bool RestoreSnapshot(std::span<const std::uint8_t> payload,
+                                     std::string* error_msg = nullptr);
 
 private:
   Session(std::shared_ptr<Model> model, std::unique_ptr<rocm::KvCache> cache);

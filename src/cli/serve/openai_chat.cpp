@@ -26,6 +26,7 @@
 #include "src/core/image.hpp"
 #include "src/core/json.hpp"
 #include "src/core/utf8.hpp"
+#include "src/models/gemma4/tool_syntax.hpp"
 
 namespace gufo::server {
 namespace {
@@ -52,11 +53,21 @@ struct ParsedGeneration {
   bool hide_tool_markup{false};
 };
 
+using OutputMarkup = TextGenerationBackend::OutputMarkup;
+
 constexpr std::array<std::string_view, 7> kToolMarkers{
     "<tool_call>",          "<｜DSML｜tool_calls｜>", "<｜DSML｜tool_calls>",
     "<DSML｜tool_calls｜>", "<DSML｜tool_calls>",     "<tool_calls｜>",
     "<tool_calls>",
 };
+constexpr std::array<std::string_view, 1> kGemma4ToolMarkers{"<|tool_call>"};
+
+std::span<const std::string_view> ToolMarkers(const OutputMarkup& markup) {
+  if (markup.tool_syntax == OutputMarkup::ToolSyntax::kGemma4) {
+    return kGemma4ToolMarkers;
+  }
+  return kToolMarkers;
+}
 
 long long Now() {
   return static_cast<long long>(std::time(nullptr));
@@ -723,10 +734,10 @@ std::optional<json::Value> TryParseJson(std::string_view value) noexcept {
   }
 }
 
-std::size_t EarliestMarker(std::string_view text,
+std::size_t EarliestMarker(std::string_view text, const OutputMarkup& markup,
                            std::string_view* marker = nullptr) {
   std::size_t earliest = std::string_view::npos;
-  for (const auto candidate : kToolMarkers) {
+  for (const auto candidate : ToolMarkers(markup)) {
     const std::size_t position = text.find(candidate);
     if (position < earliest) {
       earliest = position;
@@ -738,16 +749,18 @@ std::size_t EarliestMarker(std::string_view text,
   return earliest;
 }
 
-std::size_t HeldMarkerPrefix(std::string_view text) {
+std::size_t HeldMarkerPrefix(std::string_view text,
+                             const OutputMarkup& markup) {
+  const auto markers = ToolMarkers(markup);
   std::size_t maximum_marker = 0;
-  for (const auto marker : kToolMarkers) {
+  for (const auto marker : markers) {
     maximum_marker = std::max(maximum_marker, marker.size());
   }
   const std::size_t maximum =
       std::min(text.size(), maximum_marker > 0 ? maximum_marker - 1 : 0);
   for (std::size_t length = maximum; length > 0; --length) {
     const std::string_view suffix = text.substr(text.size() - length);
-    if (std::ranges::any_of(kToolMarkers, [&](std::string_view marker) {
+    if (std::ranges::any_of(markers, [&](std::string_view marker) {
           return marker.starts_with(suffix);
         })) {
       return length;
@@ -1017,26 +1030,60 @@ void ParseDsmlCalls(std::string_view text, std::vector<ParsedToolCall>* calls) {
   }
 }
 
+/// Gemma 4 calls: `<|tool_call>call:NAME{...}<tool_call|>` blocks.
+void ParseGemmaCalls(std::string_view text,
+                     std::vector<ParsedToolCall>* calls) {
+  constexpr std::string_view kStart = "<|tool_call>";
+  constexpr std::string_view kEnd = "<tool_call|>";
+  std::size_t cursor = 0;
+  while (true) {
+    const std::size_t start = text.find(kStart, cursor);
+    if (start == std::string_view::npos) {
+      return;
+    }
+    const std::size_t body = start + kStart.size();
+    const std::size_t end = text.find(kEnd, body);
+    if (end == std::string_view::npos) {
+      return;  // an interrupted call is never reported
+    }
+    if (auto call =
+            models::gemma4::ParseToolCall(text.substr(body, end - body))) {
+      ParsedToolCall parsed;
+      parsed.id = RandomId("call_");
+      parsed.name = std::move(call->name);
+      for (const auto& [key, value] : call->arguments.members()) {
+        parsed.arguments.push_back({
+            .name = key,
+            .value = value.is_string() ? value.get_str() : value.dump(),
+            .is_string = value.is_string(),
+        });
+      }
+      calls->push_back(std::move(parsed));
+    }
+    cursor = end + kEnd.size();
+  }
+}
+
 ParsedGeneration ParseGeneration(
     std::string_view raw,
     TextGenerationBackend::InitialOutputState initial_output_state,
-    std::span<const tokenization::ChatTool> tools,
+    const OutputMarkup& markup, std::span<const tokenization::ChatTool> tools,
     ChatRequest::ToolChoice choice, bool enforce_required) {
   ParsedGeneration parsed;
   std::string_view content = raw;
 
-  constexpr std::string_view kThinkStart = "<think>";
-  constexpr std::string_view kThinkEnd = "</think>";
+  const std::string_view kThinkStart = markup.reasoning_start;
+  const std::string_view kThinkEnd = markup.reasoning_end;
   if (initial_output_state ==
       TextGenerationBackend::InitialOutputState::kReasoning) {
     if (content.starts_with(kThinkStart)) {
       content.remove_prefix(kThinkStart.size());
     }
     std::size_t think_end = content.find(kThinkEnd);
-    if (EarliestMarker(content) < think_end)
+    if (EarliestMarker(content, markup) < think_end)
       think_end = std::string_view::npos;
     if (think_end == std::string_view::npos) {
-      const auto marker = EarliestMarker(content);
+      const auto marker = EarliestMarker(content, markup);
       parsed.reasoning_content = std::string(Trim(content.substr(0, marker)));
       if (marker == std::string_view::npos) {
         if (enforce_required && choice == ChatRequest::ToolChoice::kRequired)
@@ -1061,7 +1108,8 @@ ParsedGeneration ParseGeneration(
     if (think_start != std::string_view::npos) {
       const std::size_t think_content_start = think_start + kThinkStart.size();
       std::size_t think_end = content.find(kThinkEnd, think_content_start);
-      const auto marker = EarliestMarker(content.substr(think_content_start));
+      const auto marker =
+          EarliestMarker(content.substr(think_content_start), markup);
       if (marker != std::string_view::npos &&
           think_content_start + marker < think_end)
         think_end = std::string_view::npos;
@@ -1081,7 +1129,7 @@ ParsedGeneration ParseGeneration(
         }
       } else {
         const auto remaining = content.substr(think_content_start);
-        const auto marker = EarliestMarker(remaining);
+        const auto marker = EarliestMarker(remaining, markup);
         parsed.reasoning_content =
             std::string(Trim(remaining.substr(0, marker)));
         parsed.text = std::string(content.substr(0, think_start));
@@ -1093,13 +1141,17 @@ ParsedGeneration ParseGeneration(
     }
   }
 
-  const std::size_t marker = EarliestMarker(parsed.text);
+  const std::size_t marker = EarliestMarker(parsed.text, markup);
   if (choice != ChatRequest::ToolChoice::kNone && !tools.empty() &&
       marker != std::string_view::npos) {
     const std::string text_before_tools = parsed.text.substr(0, marker);
     const std::string text_from_tools = parsed.text.substr(marker);
-    ParseQwenCalls(text_from_tools, tools, &parsed.tool_calls);
-    ParseDsmlCalls(text_from_tools, &parsed.tool_calls);
+    if (markup.tool_syntax == OutputMarkup::ToolSyntax::kGemma4) {
+      ParseGemmaCalls(text_from_tools, &parsed.tool_calls);
+    } else {
+      ParseQwenCalls(text_from_tools, tools, &parsed.tool_calls);
+      ParseDsmlCalls(text_from_tools, &parsed.tool_calls);
+    }
     std::erase_if(parsed.tool_calls, [&](const auto& call) {
       return std::ranges::none_of(
           tools, [&](const auto& tool) { return tool.name == call.name; });
@@ -1249,8 +1301,8 @@ public:
 
   StreamingTextFilter(
       TextGenerationBackend::InitialOutputState initial_output_state,
-      EmitCallback emit_piece)
-      : emit_piece_(std::move(emit_piece)) {
+      const OutputMarkup& markup, EmitCallback emit_piece)
+      : markup_(markup), emit_piece_(std::move(emit_piece)) {
     if (initial_output_state ==
         TextGenerationBackend::InitialOutputState::kReasoning) {
       state_ = State::kThinking;
@@ -1270,7 +1322,7 @@ public:
     pending_.append(piece);
 
     if (state_ == State::kInitial) {
-      constexpr std::string_view kThinkStart = "<think>";
+      const std::string_view kThinkStart = markup_.reasoning_start;
       std::string_view view = pending_;
       while (!view.empty() &&
              std::isspace(static_cast<unsigned char>(view.front())) != 0) {
@@ -1290,9 +1342,9 @@ public:
     }
 
     if (state_ == State::kThinking) {
-      constexpr std::string_view kThinkEnd = "</think>";
+      const std::string_view kThinkEnd = markup_.reasoning_end;
       const std::size_t end_pos = pending_.find(kThinkEnd);
-      const auto marker = EarliestMarker(pending_);
+      const auto marker = EarliestMarker(pending_, markup_);
       if (marker < end_pos) {
         if (marker > 0 && !emit_piece_(pending_.substr(0, marker), true))
           return false;
@@ -1311,7 +1363,7 @@ public:
         state_ = State::kContent;
         trim_reasoning_separator_ = true;
       } else {
-        std::size_t held = HeldMarkerPrefix(pending_);
+        std::size_t held = HeldMarkerPrefix(pending_, markup_);
         for (std::size_t len = std::min(pending_.size(), kThinkEnd.size() - 1);
              len > 0; --len) {
           if (kThinkEnd.starts_with(pending_.substr(pending_.size() - len))) {
@@ -1338,7 +1390,7 @@ public:
         pending_.erase(0, first);
         trim_reasoning_separator_ = false;
       }
-      const std::size_t marker = EarliestMarker(pending_);
+      const std::size_t marker = EarliestMarker(pending_, markup_);
       if (marker != std::string::npos) {
         if (marker > 0 && !emit_piece_(pending_.substr(0, marker), false)) {
           return false;
@@ -1349,7 +1401,7 @@ public:
         return true;
       }
 
-      const std::size_t held = HeldMarkerPrefix(pending_);
+      const std::size_t held = HeldMarkerPrefix(pending_, markup_);
       const std::size_t ready = pending_.size() - held;
       if (ready > 0 && !emit_piece_(pending_.substr(0, ready), false)) {
         return false;
@@ -1386,6 +1438,7 @@ private:
     kContent,
   };
 
+  OutputMarkup markup_;
   EmitCallback emit_piece_;
   core::Utf8Decoder decoder_;
   std::string raw_;
@@ -1574,11 +1627,12 @@ HttpResponse NonStreamingResponse(
     const ParsedChatRequest& request, TextGenerationBackend& backend,
     const std::shared_ptr<TextGenerationBackend::GenerationRequest>& generation,
     TextGenerationBackend::InitialOutputState initial_output_state) {
+  const OutputMarkup markup = backend.output_markup();
   const auto result = generation->Wait();
   core::Utf8Decoder decoder;
   const ParsedGeneration generated =
       ParseGeneration(decoder.Push(result.text, true), initial_output_state,
-                      request.chat.tools, request.chat.tool_choice,
+                      markup, request.chat.tools, request.chat.tool_choice,
                       result.finish_reason !=
                           TextGenerationBackend::FinishReason::kStopSequence);
 
@@ -1633,6 +1687,7 @@ HttpResponse StreamingResponse(
   const std::string id = RandomId("chatcmpl-");
   const long long created = Now();
   const std::string model = backend.model_id();
+  const OutputMarkup markup = backend.output_markup();
   auto stream_log = std::make_shared<HttpResponse::StreamLog>();
   return {
       .status = 200,
@@ -1646,7 +1701,7 @@ HttpResponse StreamingResponse(
           },
       .streaming_body =
           [request, generation = std::move(generation), id, created, model,
-           initial_output_state,
+           initial_output_state, markup,
            stream_log](const HttpResponse::BodyWriter& writer) {
             json::Value role_delta = json::Value::object();
             role_delta["role"] = "assistant";
@@ -1658,7 +1713,7 @@ HttpResponse StreamingResponse(
 
             bool connected = true;
             StreamingTextFilter filter(
-                initial_output_state,
+                initial_output_state, markup,
                 [&](std::string_view text, bool is_reasoning) {
                   if (text.empty()) {
                     return true;
@@ -1687,8 +1742,8 @@ HttpResponse StreamingResponse(
                 return;
 
               const ParsedGeneration generated = ParseGeneration(
-                  filter.raw(), initial_output_state, request.chat.tools,
-                  request.chat.tool_choice,
+                  filter.raw(), initial_output_state, markup,
+                  request.chat.tools, request.chat.tool_choice,
                   result.finish_reason !=
                       TextGenerationBackend::FinishReason::kStopSequence);
               if (!filter.Finish(generated.hide_tool_markup)) {
@@ -1771,18 +1826,20 @@ HttpResponse CreateOpenAiResponse(const HttpRequest& request,
                                   const sampling::SamplingConfig& sampling,
                                   bool stream) {
   const auto initial = backend.initial_output_state(chat);
+  const OutputMarkup markup = backend.output_markup();
   auto generation = backend.start_chat(chat, max_tokens, sampling,
                                        request.is_cancelled, stream);
   auto stream_log = std::make_shared<HttpResponse::StreamLog>();
   auto timing = std::make_shared<std::string>();
-  const auto run = [generation, initial, model = backend.model_id(), stream_log,
+  const auto run = [generation, initial, markup, model = backend.model_id(),
+                    stream_log,
                     timing](const HttpResponse::BodyWriter& writer) {
     ResponsesOutput output(model, writer);
     if (!output.Begin()) {
       generation->Cancel();
       return json::Value();
     }
-    StreamingTextFilter filter(initial,
+    StreamingTextFilter filter(initial, markup,
                                [&](std::string_view piece, bool reasoning) {
                                  if (output.Append(piece, reasoning))
                                    return true;

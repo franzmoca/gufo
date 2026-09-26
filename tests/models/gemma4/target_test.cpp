@@ -1,9 +1,12 @@
 // Model-backed GPU qualification of the Gemma 4 target against the scalar
 // reference on the same GGUF: decode arithmetic (FP32 activations) must be
 // essentially exact, prefill (Q8_1 activations) must stay inside the
-// envelope measured at introduction, and session prefix extension must be
-// bitwise stable. Requires GUFO_GEMMA4_MODEL; exits 77 without it.
+// envelope measured at introduction, and session prefix extension and
+// snapshot restore past a sliding-ring wrap must be bitwise stable.
+// Requires GUFO_GEMMA4_MODEL; exits 77 without it.
+#include <algorithm>
 #include <cmath>
+#include <cstdint>
 #include <cstdlib>
 #include <iostream>
 #include <string>
@@ -146,7 +149,10 @@ int main() {
   return gemma4_test::Run([&] {
     std::string error;
     g4::ModelOptions options;
-    options.max_context = 1024;
+    // A small prefill chunk keeps the sliding ring short (window + 256), so
+    // the snapshot check below wraps it inside this context.
+    options.max_context = 2048;
+    options.prefill_chunk = 256;
     auto model = g4::Model::Load(path, options, &error);
     Require(model != nullptr, error);
     const std::size_t vocab = model->VocabSize();
@@ -205,6 +211,52 @@ int main() {
         Compare(as_vector(fresh->Logits()), as_vector(b->Logits()), vocab);
     Require(rw.top1 == 1 && rw.mean_kl < kPrefillMeanKl,
             "rewound session diverges from a fresh one");
+
+    // A snapshot taken after the ring wrapped restores into a fresh session
+    // (typed and serialized) and continues bitwise like the original.
+    std::string text;
+    for (int i = 0; i < 90; ++i) {
+      text += "Ship " + std::to_string(i) +
+              " left Genoa at dawn carrying salt, wine and letters. ";
+    }
+    const auto long_prompt = PromptTokens(*model, text);
+    Require(long_prompt.size() > model->SessionRingSlots() + 64 &&
+                long_prompt.size() + 16 < options.max_context,
+            "snapshot prompt does not wrap the sliding ring");
+    auto original = model->CreateSession(0, &error);
+    Require(original && original->Sync(long_prompt, &error), error);
+    const auto snapshot = original->SaveSnapshot(&error);
+    Require(snapshot != nullptr &&
+                snapshot->SizeBytes() == original->SnapshotBytes(),
+            error);
+    const std::vector<std::uint8_t> bytes(snapshot->bytes().begin(),
+                                          snapshot->bytes().end());
+    auto typed = model->CreateSession(0, &error);
+    auto serialized = model->CreateSession(0, &error);
+    Require(typed && typed->RestoreSnapshot(*snapshot, &error), error);
+    Require(serialized && serialized->RestoreSnapshot(bytes, &error), error);
+    for (int step = 0; step <= 8; ++step) {
+      const auto logits = as_vector(original->Logits());
+      Require(as_vector(typed->Logits()) == logits &&
+                  as_vector(serialized->Logits()) == logits,
+              "restored session diverges at step " + std::to_string(step));
+      if (step == 8) {
+        break;
+      }
+      const auto next = static_cast<g4::TokenId>(
+          std::max_element(logits.begin(), logits.end()) - logits.begin());
+      Require(original->Evaluate(next, &error) &&
+                  typed->Evaluate(next, &error) &&
+                  serialized->Evaluate(next, &error),
+              error);
+    }
+    std::vector<std::uint8_t> corrupt = bytes;
+    corrupt.pop_back();
+    Require(!serialized->RestoreSnapshot(corrupt, &error),
+            "truncated snapshot was accepted");
+    original.reset();
+    typed.reset();
+    serialized.reset();
 
     if (draft == nullptr || *draft == '\0') {
       std::cout

@@ -22,6 +22,10 @@ namespace gufo::models::deepseek_v4_flash {
 class Model;
 }
 
+namespace gufo::models::gemma4 {
+class Model;
+}  // namespace gufo::models::gemma4
+
 namespace gufo::models::qwen38_flash_next {
 class Model;
 }
@@ -110,6 +114,15 @@ public:
             TextSchedulerPolicy scheduler_policy = {},
             TextSpeculativeConfig speculative_config = {},
             TextDiskCacheConfig disk_cache_config = {});
+
+  /// Installs a previously loaded Gemma 4 model with request-owned sessions
+  /// and host/disk continuation snapshots.
+  bool load(std::shared_ptr<models::gemma4::Model> model, std::string* error,
+            std::uint32_t max_context = 0, std::size_t session_count = 1,
+            TextPrefillPolicy prefill_policy = {},
+            TextSchedulerPolicy scheduler_policy = {},
+            TextSpeculativeConfig speculative_config = {},
+            TextDiskCacheConfig disk_cache_config = {});
 #endif
 
   /// Stable model identifier used in API responses.
@@ -120,6 +133,7 @@ public:
   [[nodiscard]] ReasoningOptions reasoning_defaults() const override;
   [[nodiscard]] InitialOutputState initial_output_state(
       const ChatRequest& request) const override;
+  [[nodiscard]] OutputMarkup output_markup() const override;
   void set_model_id(const std::string& model_id);
   void set_sampling_defaults(std::size_t max_tokens,
                              const sampling::SamplingConfig& sampling);
