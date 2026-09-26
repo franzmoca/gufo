@@ -7,6 +7,8 @@
 #include <cmath>
 #include <stdexcept>
 
+#include "src/models/gemma4/kernels/rocm/attention_wmma.hpp"
+
 namespace gufo::models::gemma4::rocm {
 namespace {
 
@@ -173,10 +175,11 @@ __device__ void NormRopeHead(float* buf, const float* weight, std::uint32_t dim,
     if (freq_factors != nullptr) {
       theta /= freq_factors[i];
     }
-    // Fast-math sinf/cosf lose accuracy for large angles (positions reach
-    // 262144 rad); double evaluation of the float angle rounds correctly.
-    const float c = static_cast<float>(cos(static_cast<double>(theta)));
-    const float s = static_cast<float>(sin(static_cast<double>(theta)));
+    // Fast-math sinf/cosf become native approximations that lose accuracy
+    // for large angles (positions reach 262144 rad); the OCML routine keeps
+    // full float accuracy, as ggml's sinf/cosf do.
+    const float c = __ocml_cos_f32(theta);
+    const float s = __ocml_sin_f32(theta);
     const float a = buf[i];
     const float b = buf[i + half];
     lo = a * c - b * s;
@@ -457,8 +460,10 @@ template<int D>
 void LaunchAttention(const AttentionArgs& a, hipStream_t stream) {
   const bool split = a.rows <= kSplitRows;
   if (!split) {
-    AttentionKernel<D>
-        <<<dim3(1, a.heads, a.rows), kThreads, 0, stream>>>(a, 0, false);
+    if (!LaunchWmmaPrefillAttention(a, stream)) {
+      AttentionKernel<D>
+          <<<dim3(1, a.heads, a.rows), kThreads, 0, stream>>>(a, 0, false);
+    }
     return;
   }
   // Splits cover [0, max key) of the batch in absolute-position chunks.

@@ -153,7 +153,12 @@ void Check(const Case& c, std::mt19937& rng) {
       }
     }
   }
-  Require(worst < 2e-5,
+  // Split mode accumulates in FP32; prefill runs binary16 WMMA operands
+  // (queries and probabilities rounded to binary16).
+  // With O(1) values, binary16 Q and P give ~1e-3 relative error per term.
+  const double limit = c.rows <= k::kSplitRows ? 2e-5 : 1e-2;
+  std::cout << c.name << ": max error " << worst << '\n';
+  Require(worst < limit,
           std::string(c.name) + ": max error " + std::to_string(worst));
 
   // Split mode: every row equals its single-row evaluation bit for bit.
@@ -196,10 +201,15 @@ int main() {
         {256, 8, 4, 8, 3070, 1024, 1280, false, kNoLimit,
          "sliding verify wrap"},
         {256, 8, 4, 40, 1000, 1024, 1280, false, kNoLimit, "sliding prefill"},
+        {256, 8, 4, 70, 3000, 1024, 1280, false, kNoLimit,
+         "sliding prefill ring wrap"},
+        {256, 32, 16, 37, 2, 1024, 3072, false, kNoLimit,
+         "sliding prefill start"},
         {512, 32, 4, 1, 0, 0, 0, false, kNoLimit, "global first token"},
         {512, 32, 4, 1, 2999, 0, 0, false, kNoLimit, "global multi-split"},
         {512, 8, 1, 7, 1500, 0, 0, false, kNoLimit, "global verify"},
         {512, 8, 1, 33, 600, 0, 0, false, kNoLimit, "global prefill"},
+        {512, 32, 4, 47, 0, 0, 0, false, kNoLimit, "global prefill from zero"},
         {512, 8, 1, 3, 1500, 0, 0, true, 1500, "draft global frontier"},
         {256, 8, 4, 3, 2000, 1024, 3072, true, 2000, "draft sliding frontier"},
     };

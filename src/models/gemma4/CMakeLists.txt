@@ -14,11 +14,12 @@ if (ENGINE_ENABLE_HIP)
   set(GEMMA4_ROCM_DIR "${CMAKE_CURRENT_SOURCE_DIR}/kernels/rocm")
   target_sources(gufo_gemma4 PRIVATE
     ${GEMMA4_ROCM_DIR}/kernels.hip.cpp
+    ${GEMMA4_ROCM_DIR}/attention_wmma.hip.cpp
     ${GEMMA4_ROCM_DIR}/device_model.cpp
     ${GEMMA4_ROCM_DIR}/executor.cpp
     engine.cpp)
   set_source_files_properties(${GEMMA4_ROCM_DIR}/kernels.hip.cpp
-    PROPERTIES LANGUAGE HIP)
+    ${GEMMA4_ROCM_DIR}/attention_wmma.hip.cpp PROPERTIES LANGUAGE HIP)
   target_compile_options(gufo_gemma4 PRIVATE
     $<$<COMPILE_LANGUAGE:HIP>:-O3;-ffast-math;-fno-finite-math-only;-Wno-unused-command-line-argument>)
   target_link_libraries(gufo_gemma4 PUBLIC hip::host roc::hipblas)
