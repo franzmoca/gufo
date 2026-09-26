@@ -1,0 +1,93 @@
+#include <cstdint>
+#include <iostream>
+#include <span>
+#include <string>
+
+#include "src/core/crypto/sha256.hpp"
+#include "src/models/gemma4/chat_template.hpp"
+#include "tests/models/gemma4/check.hpp"
+#include "tests/models/gemma4/template_cases.hpp"
+
+namespace g4 = gufo::models::gemma4;
+using gemma4_test::Require;
+
+namespace {
+
+std::string Sha256(const std::string& text) {
+  return gufo::crypto::Sha256Hex(std::span<const std::uint8_t>(
+      reinterpret_cast<const std::uint8_t*>(text.data()), text.size()));
+}
+
+/// Every case must render byte-identically to the Jinja source.
+void CheckGoldens() {
+  const auto goldens = gemma4_test::ReadJson(GUFO_CHAT_TEMPLATE_HF_GOLDENS);
+  const auto* gemma = goldens.find("gemma4");
+  Require(gemma != nullptr, "goldens lack a gemma4 section");
+  Require(gemma->member_str("template_sha256") ==
+              g4::ChatTemplate::UnslothTemplateSha256(),
+          "goldens were rendered from another template");
+  const auto* expected = gemma->find("cases");
+  const auto cases = gemma4_test::LoadTemplateCases(
+      std::string(GUFO_GEMMA4_FIXTURES) + "/template_cases.json");
+  Require(cases.size() == expected->size(), "case/golden count mismatch");
+  for (const auto& c : cases) {
+    std::string error;
+    const auto rendered =
+        g4::ChatTemplate::Render(c.messages, c.tools, c.options, &error);
+    Require(rendered.has_value(), c.name + ": " + error);
+    const auto* golden = expected->find(c.name);
+    Require(golden != nullptr, c.name + ": no golden");
+    if (Sha256(rendered->text) != golden->member_str("rendered_sha256")) {
+      std::cerr << "---- " << c.name << " rendered ----\n"
+                << rendered->text << "\n----\n";
+      throw std::runtime_error(c.name + ": rendering differs from Jinja");
+    }
+
+    // The generation prompt is a pure suffix of the stable conversation.
+    auto without = c.options;
+    without.add_generation_prompt = false;
+    const auto prefix = g4::ChatTemplate::Render(c.messages, c.tools, without);
+    Require(
+        prefix && prefix->text == rendered->text.substr(
+                                      0, rendered->generation_prompt_offset),
+        c.name + ": generation prompt is not a suffix");
+  }
+}
+
+void CheckOptions() {
+  gufo::ReasoningOptions reasoning;
+  Require(!g4::ResolveChatOptions(reasoning).enable_thinking,
+          "thinking is off by default");
+  reasoning.effort = gufo::ReasoningEffort::kHigh;
+  Require(g4::ResolveChatOptions(reasoning).enable_thinking,
+          "an effort level enables thinking");
+  reasoning.effort = gufo::ReasoningEffort::kMinimal;
+  Require(!g4::ResolveChatOptions(reasoning).enable_thinking,
+          "minimal effort keeps thinking off");
+  reasoning.enabled = true;
+  Require(g4::ResolveChatOptions(reasoning).enable_thinking,
+          "explicit enable wins");
+}
+
+void CheckRejections() {
+  gufo::tokenization::ChatMessage image;
+  image.images.push_back({});
+  std::string error;
+  Require(!g4::ChatTemplate::Render(std::span(&image, 1), {}, {}, &error) &&
+              !error.empty(),
+          "image input accepted by the text-only renderer");
+  gufo::tokenization::ChatTool bad;
+  bad.definition_json = "[1]";
+  Require(!g4::ChatTemplate::Render({}, std::span(&bad, 1), {}, &error),
+          "non-object tool accepted");
+}
+
+}  // namespace
+
+int main() {
+  return gemma4_test::Run([] {
+    CheckGoldens();
+    CheckOptions();
+    CheckRejections();
+  });
+}
