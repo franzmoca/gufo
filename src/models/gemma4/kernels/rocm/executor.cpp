@@ -270,13 +270,9 @@ void Executor::Project(const DeviceTensor& w, const float* x, const void* xq,
     }
     return;
   }
-  // Autoregressive decode: the Gemma GEMV wins on wide outputs and long
-  // reductions; the shared GEMV keeps narrow K/V projections and the
-  // vocabulary head.
-  const bool gemma_shape =
-      (w.rows >= 8192 && w.rows <= 21504) || w.cols >= 8192;
+  // Autoregressive decode: the Gemma GEMV serves every K-quant projection.
   if (const auto format = GemvFormatOf(w.type);
-      gemma_shape && format &&
+      format &&
       LaunchKQuantGemv(*format, w.data, x, y, w.rows, w.cols, stream_)) {
     return;
   }
