@@ -2,6 +2,7 @@
 // for comparison with tools/gemma4/llama_logits and the CPU reference:
 //   gemma4_gpu_probe --model GGUF --tokens T.i32 --logits-out L.g4lg
 //       [--chunk N]   (tokens per EvaluateAll call; default: all at once)
+//       [--first N --stride N]  (keep only these rows in the output)
 #include <chrono>
 #include <fstream>
 #include <iostream>
@@ -17,6 +18,8 @@ using gemma4_test::Require;
 int main(int argc, char** argv) {
   std::string model, tokens_path, logits_out;
   std::size_t chunk = 0;
+  std::size_t first = 0;
+  std::size_t stride = 1;
   for (int i = 1; i < argc; ++i) {
     const std::string arg = argv[i];
     const auto value = [&]() -> std::string {
@@ -32,6 +35,10 @@ int main(int argc, char** argv) {
       logits_out = value();
     else if (arg == "--chunk")
       chunk = std::stoul(value());
+    else if (arg == "--first")
+      first = std::stoul(value());
+    else if (arg == "--stride")
+      stride = std::stoul(value());
     else {
       std::cerr << "unknown argument " << arg << '\n';
       return 2;
@@ -64,10 +71,14 @@ int main(int argc, char** argv) {
       Require(session->EvaluateAll(std::span(tokens).subspan(begin, count),
                                    &logits, &error),
               error);
-      file.logits.insert(file.logits.end(), logits.begin(), logits.end());
-    }
-    for (std::size_t p = 0; p < tokens.size(); ++p) {
-      file.positions.push_back(static_cast<std::uint32_t>(p));
+      for (std::size_t r = 0; r < count; ++r) {
+        const std::size_t p = begin + r;
+        if (p >= first && (p - first) % stride == 0) {
+          file.positions.push_back(static_cast<std::uint32_t>(p));
+          file.logits.insert(file.logits.end(), logits.begin() + r * file.vocab,
+                             logits.begin() + (r + 1) * file.vocab);
+        }
+      }
     }
     const auto done = std::chrono::steady_clock::now();
     gemma4_test::WriteLogits(logits_out, file);

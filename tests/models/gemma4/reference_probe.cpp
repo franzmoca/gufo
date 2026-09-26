@@ -18,7 +18,7 @@ namespace g4 = gufo::models::gemma4;
 using gemma4_test::Require;
 
 int main(int argc, char** argv) {
-  std::string model, text, chat, tokens_out, logits_out, trace_out;
+  std::string model, text, chat, tokens_in, tokens_out, logits_out, trace_out;
   bool half_kv = false;
   bool q8 = false;
   std::size_t chunk = 0;
@@ -35,6 +35,8 @@ int main(int argc, char** argv) {
       text = value();
     else if (arg == "--chat")
       chat = value();
+    else if (arg == "--tokens-in")
+      tokens_in = value();
     else if (arg == "--tokens-out")
       tokens_out = value();
     else if (arg == "--logits-out")
@@ -54,8 +56,9 @@ int main(int argc, char** argv) {
   }
   return gemma4_test::Run([&] {
     Require(!model.empty() && !tokens_out.empty() && !logits_out.empty() &&
-                (text.empty() != chat.empty()),
-            "usage: --model GGUF (--text T | --chat M) --tokens-out F "
+                (!text.empty()) + (!chat.empty()) + (!tokens_in.empty()) == 1,
+            "usage: --model GGUF (--text T | --chat M | --tokens-in F) "
+            "--tokens-out F "
             "--logits-out F [--half-kv] [--chunk N]");
     std::string error;
     const auto reader = gufo::core::GgufReader::OpenFile(model, &error);
@@ -66,7 +69,12 @@ int main(int argc, char** argv) {
     Require(tokenizer != nullptr, error);
 
     std::vector<g4::TokenId> tokens;
-    if (!chat.empty()) {
+    if (!tokens_in.empty()) {
+      std::ifstream in(tokens_in, std::ios::binary);
+      for (std::int32_t t; in.read(reinterpret_cast<char*>(&t), 4);) {
+        tokens.push_back(t);
+      }
+    } else if (!chat.empty()) {
       gufo::tokenization::ChatMessage message(
           gufo::tokenization::ChatRole::kUser, chat);
       const auto rendered =

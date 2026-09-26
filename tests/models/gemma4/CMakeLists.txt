@@ -31,6 +31,15 @@ if (ENGINE_ENABLE_HIP)
   foreach(name IN ITEMS attention_ops kernel_ops projection_ops)
     add_gemma4_test(${name} gufo_gemma4 "hip;gpu;gfx1151")
   endforeach()
+  add_executable(gemma4_target_test EXCLUDE_FROM_ALL target_test.cpp)
+  target_link_libraries(gemma4_target_test PRIVATE gufo_gemma4
+    gufo_gemma4_reference)
+  set_source_files_properties(target_test.cpp PROPERTIES COMPILE_OPTIONS "-O2")
+  add_test(NAME gemma4.target COMMAND gemma4_target_test)
+  set_tests_properties(gemma4.target PROPERTIES
+    LABELS "gemma4;hip;gpu;gfx1151;quality;external-model;slow"
+    SKIP_RETURN_CODE 77 RESOURCE_LOCK gemma4)
+  add_custom_target(gemma4_model_tests DEPENDS gemma4_target_test)
   add_executable(gemma4_gpu_probe EXCLUDE_FROM_ALL gpu_probe.cpp)
   target_link_libraries(gemma4_gpu_probe PRIVATE gufo_gemma4)
 endif()

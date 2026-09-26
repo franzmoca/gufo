@@ -99,6 +99,7 @@ void Usage() {
 int main(int argc, char** argv) {
   std::string model_path, tokens_path, output_path, trace_path, dump_dir;
   int dump_layer = 0;
+  bool flash_attention = true;
   std::uint32_t first = 0, stride = 1, batch = 512;
   for (int i = 1; i < argc; ++i) {
     const std::string arg = argv[i];
@@ -115,6 +116,7 @@ int main(int argc, char** argv) {
     else if (arg == "--trace-out") trace_path = value();
     else if (arg == "--dump-dir") dump_dir = value();
     else if (arg == "--dump-layer") dump_layer = std::stoi(value());
+    else if (arg == "--no-flash-attn") flash_attention = false;
     else Usage();
   }
   if (model_path.empty() || tokens_path.empty() || output_path.empty() ||
@@ -144,7 +146,8 @@ int main(int argc, char** argv) {
   cparams.n_batch = batch;
   cparams.n_ubatch = batch;
   cparams.n_seq_max = 1;
-  cparams.flash_attn_type = LLAMA_FLASH_ATTN_TYPE_ENABLED;
+  cparams.flash_attn_type = flash_attention ? LLAMA_FLASH_ATTN_TYPE_ENABLED
+                                            : LLAMA_FLASH_ATTN_TYPE_DISABLED;
   Trace trace{"l_out-"};
   trace.dump_dir = dump_dir;
   trace.dump_suffix = "-" + std::to_string(dump_layer);

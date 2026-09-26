@@ -267,3 +267,22 @@ Each milestone is a testable state with Conventional Commits on `feat/gemma`. M4
   (max 0.34), top-1 21/22, the miss at a 0.29-probability position. Gufo's
   quality bar is to stay at or below llama.cpp's distance from the exact
   oracle.
+
+**2026-09-26 — M2 GPU autoregressive path.**
+- `gufo prompt`/`chat` run Gemma 4 on ROCm. First unoptimized decode:
+  9.6 tok/s (120 tokens, greedy); load 3.4 s.
+- Decode arithmetic (FP32 activations, split-K attention) vs the exact CPU
+  oracle: mean KL 2.4e-7, top-1 22/22. Eight-row verification is bit-identical
+  to single-token decode. Prefill (Q8_1 activations, W8A8 WMMA): mean KL
+  0.0084 vs the oracle — 4.5x closer than llama.cpp (0.038).
+- 320-token oracle run: Gufo matches it at every sampled position (KL ≤ 3e-5);
+  llama.cpp departs at a high-entropy position in all its configurations.
+- 16K in-distribution (templated model turn): KL(llama.cpp ‖ Gufo) 0.022,
+  top-1 120/128, true-token NLL 3.347 (Gufo) vs 3.349 (llama.cpp). Raw text
+  is off-distribution for the IT model (NLL ~9–10 nats) and magnifies noise.
+- Fixed: fast-math `sinf`/`cosf` lost accuracy at large rope angles; rope now
+  evaluates the float angle's cosine/sine in double.
+- Host note: on Fedora 44 (glibc 2.43) Nix's hipClang links against the
+  system libm through `-L/usr/lib64`; dev builds here are configured with
+  `-DCMAKE_EXE_LINKER_FLAGS=-L<nix glibc>/lib` (production `nix build` is
+  sandboxed and unaffected).
