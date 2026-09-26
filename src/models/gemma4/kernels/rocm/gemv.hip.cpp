@@ -26,15 +26,22 @@ __device__ __forceinline__ float Half(const std::uint8_t* p) {
   return __half2float(*reinterpret_cast<const __half*>(p));
 }
 
-/// ggml get_scale_min_k4: 6-bit scale and min of 32-value sub-block j.
+/// ggml get_scale_min_k4 over the 12 scale bytes read as three aligned
+/// words (s[0..3], s[4..7], s[8..11]): 6-bit scale and min of 32-value
+/// sub-block j, extracted with shifts instead of byte indexing.
 __device__ __forceinline__ void ScaleMin(const std::uint8_t* s, int j,
                                          float* sc, float* m) {
+  const auto* w = reinterpret_cast<const std::uint32_t*>(s);
+  const std::uint32_t shift = 8U * static_cast<std::uint32_t>(j & 3);
+  const std::uint32_t a = (w[0] >> shift) & 0xFFU;
+  const std::uint32_t b = (w[1] >> shift) & 0xFFU;
   if (j < 4) {
-    *sc = static_cast<float>(s[j] & 63);
-    *m = static_cast<float>(s[j + 4] & 63);
+    *sc = static_cast<float>(a & 63U);
+    *m = static_cast<float>(b & 63U);
   } else {
-    *sc = static_cast<float>((s[j + 4] & 0xF) | ((s[j - 4] >> 6) << 4));
-    *m = static_cast<float>((s[j + 4] >> 4) | ((s[j] >> 6) << 4));
+    const std::uint32_t c = (w[2] >> shift) & 0xFFU;
+    *sc = static_cast<float>((c & 0xFU) | ((a >> 6) << 4));
+    *m = static_cast<float>((c >> 4) | ((b >> 6) << 4));
   }
 }
 
@@ -49,6 +56,16 @@ __device__ __forceinline__ Partial Dot16(const std::uint8_t* q, const float* x,
                                          int shift, int mask,
                                          const std::uint8_t* high, int hshift,
                                          int hmask, int hleft) {
+  // 16 activations are 64-byte aligned: four vector loads.
+  float xv[16];
+#pragma unroll
+  for (int i = 0; i < 16; i += 4) {
+    const float4 f = *reinterpret_cast<const float4*>(x + i);
+    xv[i] = f.x;
+    xv[i + 1] = f.y;
+    xv[i + 2] = f.z;
+    xv[i + 3] = f.w;
+  }
   float dot = 0.0F;
   float sum = 0.0F;
 #pragma unroll
@@ -57,8 +74,8 @@ __device__ __forceinline__ Partial Dot16(const std::uint8_t* q, const float* x,
     if (high != nullptr) {
       v |= ((high[i] >> hshift) & hmask) << hleft;
     }
-    dot = __builtin_fmaf(static_cast<float>(v), x[i], dot);
-    sum = __builtin_fmaf(1.0F, x[i], sum);
+    dot = __builtin_fmaf(static_cast<float>(v), xv[i], dot);
+    sum = __builtin_fmaf(1.0F, xv[i], sum);
   }
   return {dot, sum};
 }
