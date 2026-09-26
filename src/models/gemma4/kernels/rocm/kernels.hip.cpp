@@ -450,7 +450,7 @@ __global__ void __launch_bounds__(kThreads) AttentionKernel(AttentionArgs a) {
 template<int D, int G>
 struct SplitGeometry {
   static constexpr int kChunk = static_cast<int>(SplitChunk(D));
-  static constexpr int kHeadsPerWave = G < 4 ? G : 4;
+  static constexpr int kHeadsPerWave = G;
   static constexpr int kWaveGroups = G / kHeadsPerWave;
   static constexpr int kWavesPerGroup = kWaves / kWaveGroups;
   static constexpr int kKeysPerStep = kWave / kHeadsPerWave;
@@ -491,8 +491,11 @@ __global__ void __launch_bounds__(kThreads)
   constexpr int KS = S::kKeysPerStep;
   constexpr int P = S::kDimsPerLane;
   constexpr int DT = S::kDimsPerThread;
+  // 32 KiB at hd512, so two blocks share a compute unit; the softmax
+  // statistics reuse the query buffer once the scores are done.
   __shared__ float scores[G][C];
-  __shared__ float stats[G][2];
+  __shared__ __align__(16) float q_lds[G][D];
+  auto* stats = reinterpret_cast<float (*)[2]>(&q_lds[0][0]);
   const std::uint32_t row = blockIdx.x;
   const std::uint32_t kvh = blockIdx.y;
   const std::uint32_t split = first_split + blockIdx.z;
@@ -506,21 +509,16 @@ __global__ void __launch_bounds__(kThreads)
   const auto* k_cache = reinterpret_cast<const __half*>(a.k_cache) + kvh * D;
   const auto* v_cache = reinterpret_cast<const __half*>(a.v_cache) + kvh * D;
 
-  // Scores.
+  // Scores. The queries stay in shared memory: each step reloads one
+  // head's slice at a time instead of holding every head in registers.
   {
-    const int h0 = (wave / S::kWavesPerGroup) * HW;
-    float q[HW][P];
-#pragma unroll
-    for (int h = 0; h < HW; ++h) {
-      const float* qh =
-          a.q +
-          (static_cast<std::size_t>(row) * a.heads + kvh * G + h0 + h) * D +
-          lane * P;
-#pragma unroll
-      for (int i = 0; i < P; ++i) {
-        q[h][i] = qh[i];
-      }
+    const float* qg =
+        a.q + (static_cast<std::size_t>(row) * a.heads + kvh * G) * D;
+    for (int i = static_cast<int>(threadIdx.x); i < G * D; i += kThreads) {
+      q_lds[i / D][i % D] = qg[i];
     }
+    __syncthreads();
+    const int h0 = (wave / S::kWavesPerGroup) * HW;
     for (int step = wave % S::kWavesPerGroup; step < C / KS;
          step += S::kWavesPerGroup) {
       const std::uint32_t key0 = base + step * KS;
@@ -550,9 +548,19 @@ __global__ void __launch_bounds__(kThreads)
       }
       float part[kWave];
 #pragma unroll
-      for (int kk = 0; kk < KS; ++kk) {
+      for (int h = 0; h < HW; ++h) {
+        float q[P];
 #pragma unroll
-        for (int h = 0; h < HW; ++h) {
+        for (int i = 0; i < P; i += 4) {
+          const float4 f =
+              *reinterpret_cast<const float4*>(&q_lds[h0 + h][lane * P + i]);
+          q[i] = f.x;
+          q[i + 1] = f.y;
+          q[i + 2] = f.z;
+          q[i + 3] = f.w;
+        }
+#pragma unroll
+        for (int kk = 0; kk < KS; ++kk) {
           float dot = 0.0F;
 #pragma unroll
           for (int i = 0; i < P / 8; ++i) {
@@ -560,8 +568,8 @@ __global__ void __launch_bounds__(kThreads)
 #pragma unroll
             for (int j = 0; j < 4; ++j) {
               const float2 f = __half22float2(k2[j]);
-              dot = __builtin_fmaf(q[h][8 * i + 2 * j], f.x, dot);
-              dot = __builtin_fmaf(q[h][8 * i + 2 * j + 1], f.y, dot);
+              dot = __builtin_fmaf(q[8 * i + 2 * j], f.x, dot);
+              dot = __builtin_fmaf(q[8 * i + 2 * j + 1], f.y, dot);
             }
           }
           part[h * KS + kk] = dot;
@@ -715,17 +723,12 @@ void LaunchAttention(const AttentionArgs& a, hipStream_t stream) {
     }
     return;
   }
-  switch (a.heads / a.kv_heads) {
-    case 2:
-      LaunchSplitAttention<D, 2>(a, stream);
-      return;
-    case 8:
-      LaunchSplitAttention<D, 8>(a, stream);
-      return;
-    default:
-      throw std::invalid_argument(
-          "split attention supports 2 or 8 query heads per KV head");
+  // Gemma 4 groups 2 query heads per KV head at hd256, 8 at hd512.
+  constexpr std::uint32_t kGroup = D == 256 ? 2 : 8;
+  if (a.heads != a.kv_heads * kGroup) {
+    throw std::invalid_argument("split attention head grouping unsupported");
   }
+  LaunchSplitAttention<D, kGroup>(a, stream);
 }
 
 // ---------------------------------------------------------------------------
