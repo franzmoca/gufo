@@ -5,9 +5,11 @@
 #include <algorithm>
 #include <cmath>
 #include <limits>
+#include <optional>
 #include <stdexcept>
 
 #include "src/core/hip/hip_utils.hpp"
+#include "src/models/gemma4/kernels/rocm/gemv.hpp"
 #include "src/models/gemma4/kernels/rocm/kernels.hpp"
 #include "src/models/qwen/hip/ops/gemm.hpp"
 #include "src/models/qwen/hip/ops/token.hpp"
@@ -193,8 +195,38 @@ const void* Executor::Quantize(const float* x, std::uint32_t rows,
   return q8_;
 }
 
+namespace {
+
+std::optional<GemvFormat> GemvFormatOf(core::GgmlType type) {
+  switch (type) {
+    case core::GgmlType::kQ4_K:
+      return GemvFormat::kQ4_K;
+    case core::GgmlType::kQ5_K:
+      return GemvFormat::kQ5_K;
+    case core::GgmlType::kQ6_K:
+      return GemvFormat::kQ6_K;
+    default:
+      return std::nullopt;
+  }
+}
+
+}  // namespace
+
 void Executor::Project(const DeviceTensor& w, const float* x, const void* xq,
                        std::uint32_t rows, float* y) {
+  // The shape alone picks the kernel family (both are batch-invariant, so
+  // verification still equals decode). Measured with cold weights, the
+  // Gemma GEMV wins on wide outputs and long reductions; the shared kernel
+  // keeps the narrow K/V projections and the vocabulary head.
+  const bool gemma_shape =
+      (w.rows >= 8192 && w.rows <= 21504) || w.cols >= 8192;
+  if (rows <= kMaxGemvRows && gemma_shape) {
+    if (const auto format = GemvFormatOf(w.type);
+        format && LaunchKQuantGemv(*format, w.data, x, y, rows, w.rows, w.cols,
+                                   stream_)) {
+      return;
+    }
+  }
   if (rows == 1) {
     hip::LaunchGEMV(w.data, w.type, x, y, w.rows, w.cols, stream_);
   } else if (rows <= kSplitRows) {
