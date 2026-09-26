@@ -1,0 +1,23 @@
+# Gemma 4 31B experiments
+
+| Experiment | Decision / evidence |
+| --- | --- |
+| Scalar CPU oracle as the numerical arbiter | Retained; FP32 activations with binary16 KV. GPU decode matches it at mean KL ≤1e-6; it also showed that a 320-token raw-text disagreement with llama.cpp was llama.cpp prefill noise. |
+| Rope angles through fast-math `sinf`/`cosf` | Rejected: lost accuracy at large angles. Float angle with `__ocml_cos_f32`/`__ocml_sin_f32` retained (double was exact but slow in prefill). |
+| WMMA prefill attention (binary16 Q/K/V/P, FP32 accumulation) | Retained; pp2048 247 → 414 tok/s and prefill KL vs the oracle 0.0084 → 0.0039. |
+| Prefill attention K/V tiles shared by four query heads, next tile prefetched into registers | Retained; 512 rows at 32K keys, global layer 112 → 64 ms; 2048 rows 474 → 266 ms; pp2048 at d32K 205 → 262 tok/s. Output errors vs FP64 unchanged. |
+| Softmax spread over every wave of a row block | Retained with the above (67.5 → 64.3 ms); fixed reduction order, deterministic across launches. |
+| Forcing eight waves per SIMD on hd512 prefill attention | Rejected: 192 VGPRs with spills; 512 rows faster (54 ms) but 2048-row chunks 409 vs 266 ms. |
+| LDS-staged activations in the decode GEMV | Rejected: 181–209 GB/s vs 192–220 GB/s for cache-broadcast reads on the FFN shapes. |
+| One 16-byte Q4_K/Q5_K header load per super-block | Retained; bitwise-identical output, +3–9% on the FFN/Q shapes. |
+| Decode GEMV reduction split across the eight waves of a workgroup | Retained: gate/up 214 → 229 GB/s, down 192 → 225 GB/s, Q 193 → 216 GB/s; interleaved slices up to K 8192, contiguous runs beyond. Serves every K-quant decode projection including K/V and the vocabulary head. AR tg128 10.51 → 11.40 tok/s. |
+| Multi-row (verification) variant of the Gemma GEMV | Rejected: bitwise width-invariant, but five rows 9–40% slower than the shared small-batch kernel on most target shapes. Verification keeps the shared kernels. |
+| Verification through a row-group Gemma GEMV (each wave walks all eight slices; one-row arithmetic at every width) | Rejected for now: bit-identical to AR-only decode at widths 2–8, which would make greedy MTP equal an AR-only server, but 6–55% slower than the shared small-batch kernel at five rows; MTP tg128 39.05 → 34.59 tok/s. |
+| Residual norm rows cached in registers | Retained; unchanged element assignment and sum order, 11.40 → 11.45 tok/s. |
+| HIP graph replay of decode | Rejected before implementation: a 774-kernel graph saved 0.16 µs per kernel over eager launches on this ROCm; the gap between kernels is device-side. |
+| Split decode attention with one block per query head | Replaced: re-read K/V for each of the 8 (global) or 2 (sliding) heads per KV head and started splits at key 0 even for sliding layers; tg64 at d32K was 2.62 tok/s. |
+| Split decode attention per KV head, all grouped heads per block, reduce-scattered scores, splits from the window start | Retained; d32K 2.62 → 8.90 tok/s, then queries in shared memory and all eight heads per wave → 9.29 tok/s. Rows stay independent, so verification equals decode bit for bit. |
+| Smaller hd512 split chunks (256, 128 keys) | Rejected: no faster at 32K keys (more merge work); latency, not occupancy, bounded the kernel. |
+| Value loads batched 16 keys ahead in split attention | Rejected: bit-identical, but no faster (d32K global decode 1.55 → 1.61 ms, five rows 4.72 → 4.61 ms). |
+| All verification rows in one split-attention block at hd256 (key loads shared across rows) | Rejected: bit-identical per row, but five sliding rows at d32K 215 → 340 µs and single rows slower; fewer, longer blocks lose to the latency-bound per-row blocks. |
+| binary16 queries/WMMA for decode and verification attention | Not adopted: would lift 5-row verification at depth but change decode arithmetic beyond the declared decode KL limit. |

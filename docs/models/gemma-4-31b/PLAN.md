@@ -28,7 +28,7 @@ usually off, sampler temp 1 / top-k 64 / top-p 0.95 / repeat 1.05.
 
 ## Architecture facts (verified from the GGUF headers and llama.cpp 391fac16 `src/models/gemma4*.cpp`)
 
-The llama.cpp source is at `/home/franz/projects/halogen-uncensored-quant/work/llama.cpp`.
+The llama.cpp semantics were read from a local checkout at `391fac16`.
 
 **Target model**
 
@@ -310,3 +310,21 @@ Each milestone is a testable state with Conventional Commits on `feat/gemma`. M4
   replay: 502 then 597 of 604/701 prompt tokens reused; after a restart the
   disk cache restored 502 tokens in 441 ms. `gemma4.target` checks that a
   snapshot taken after the ring wraps restores bitwise.
+
+**2026-09-26/27 — decode and depth performance, M6 benchmarks and docs.**
+- Decode GEMV split across the eight waves of a workgroup with one header
+  load per super-block (all K-quant decode projections): AR 10.51 → 11.45 tok/s
+  in `gufo bench`.
+- Split decode attention per KV head with all grouped query heads per block
+  and splits from the window start: tg at d32K 2.62 → 9.29 tok/s.
+- Prefill attention tiles shared by four heads with register prefetch:
+  pp2048 at d32K 205 → 262 tok/s.
+- HTTP benchmarks (see BENCHMARKS.md): vs llama.cpp b11069 pp +30% (d0) to
+  +99% (128K), AR tg +7–9%, MTP mixed −3% to +9%, repetitive +7% to +211%;
+  vs the gemma-control fork pp +27–73%, AR tg +0–8%, MTP mixed −15% to +2%.
+- Open: MTP cycle cost (5-row verification projections ~12 ms above AR,
+  5-row sliding attention ~9 ms per cycle past the window), batched decode
+  for C>1, and greedy MTP equality with an AR-only server (needs a
+  verification kernel with the AR GEMV's summation order at shared-kernel
+  speed).
+

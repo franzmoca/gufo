@@ -141,6 +141,16 @@ correction; greedy verification follows target argmax. Draft and verification
 work can batch across ready requests. See the
 [Flash-Next benchmark and quality contract](models/qwen3.8-flash-next/BENCHMARKS.md).
 
+Gemma 4 31B serves sessions one decode step at a time (no batched decode).
+Its snapshots hold every global-layer row plus the live sliding-window rows,
+so RAM and `--cache-disk` reuse work as above; a changed history re-prefills
+from the latest retained checkpoint before the change. With `--speculative mtp`, the `gemma4-assistant`
+drafter reads the target's KV and drafts a fixed `--draft-tokens`; greedy
+output equals the same server's single-token decoding, but not necessarily an
+AR-only server's (different FP32 projection summation order). Reasoning appears as `reasoning_content` and Gemma
+tool calls as OpenAI `tool_calls`. See the
+[Gemma 4 benchmark and quality contract](models/gemma-4-31b/BENCHMARKS.md).
+
 Each model chooses its prefill chunk. `--prefill-chunk` limits prompt work
 between active decode rounds without changing a lone request's kernel policy.
 

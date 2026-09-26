@@ -94,8 +94,9 @@ distribution, but need not match an autoregressive run's sequence for the same
 seed. Speed depends on acceptance and verification cost.
 
 - `speculative` — `dflash2` for Qwen3.8-27B, `dspark` for DeepSeek V4 Flash,
-  `mtp` for models with a supported MTP head, or `off`. HTTP serving
-  supports `dflash2`, `dspark`, and Flash-Next `mtp`.
+  `mtp` for models with a supported MTP head or drafter (Flash-Next, Gemma 4
+  31B), or `off`. HTTP serving supports `dflash2`, `dspark`, and Flash-Next
+  and Gemma 4 `mtp`.
 - `dflashModel` — path to the DFlash2 companion draft.
 - `dsparkModel` — path to the DSpark support GGUF.
 - `mtpModel` — path to the MTP draft model.
@@ -104,7 +105,8 @@ seed. Speed depends on acceptance and verification cost.
 - `draftPolicy` (`"fixed"` / `"adaptive"`) — DFlash2 block-length policy;
   defaults to adaptive.
 - `minDraftTokens` — minimum draft length where supported. DFlash2, DSpark,
-  and Flash-Next MTP require the default of one.
+  and Flash-Next MTP require the default of one. Gemma 4 drafts a fixed
+  `draftTokens` (at most 7; 4 is fastest on prose).
 
 **Server limits (protecting the machine from clients)**
 

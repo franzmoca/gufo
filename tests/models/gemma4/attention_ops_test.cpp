@@ -245,6 +245,8 @@ int main() {
          true},
         {256, 32, 16, 1, 32767, 1024, 3072, false, kNoLimit,
          "sliding decode 32K", true},
+        {256, 32, 16, 5, 32763, 1024, 3072, false, kNoLimit,
+         "sliding verify 32K", true},
         {512, 32, 4, 512, 32768, 0, 0, false, kNoLimit, "global prefill 32K",
          true, 97},
         {512, 32, 4, 2048, 32768, 0, 0, false, kNoLimit,
