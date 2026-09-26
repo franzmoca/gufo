@@ -46,6 +46,24 @@ text.
 
 ![Single user, MTP](artifacts/charts/single-mtp.svg)
 
+### Focused MTP retest after parallel draft argmax
+
+September 27 release build, same single-user prose workload and four drafts.
+The run completed through 64K and was stopped before its 128K row; repetitive
+text was not remeasured. The full table above remains the prior complete sweep.
+Accepted drafts per cycle were unchanged at each completed depth. These are
+single samples, so small differences may include measurement noise.
+
+| Depth | Gufo mixed (tok/s) | Gain vs prior Gufo | Gain vs llama.cpp | Gain vs fork |
+| ---: | ---: | ---: | ---: | ---: |
+| 0 | 21.38 | +3.2% | +12.1% | -1.5% |
+| 4,096 | 20.09 | +1.5% | -1.1% | -13.3% |
+| 8,192 | 19.16 | +2.1% | +3.1% | -8.1% |
+| 12,288 | 18.03 | +0.8% | -0.6% | +3.1% |
+| 16,384 | 16.66 | +0.7% | +4.5% | -14.2% |
+| 32,768 | 15.42 | +0.7% | +3.6% | -6.4% |
+| 65,536 | 10.75 | +0.5% | +1.8% | -15.2% |
+
 ## Multiple users, autoregressive
 
 Same pp2048 prose prompt as single-user d0, tg128, context 4096 per user.

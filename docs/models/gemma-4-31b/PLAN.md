@@ -328,3 +328,11 @@ Each milestone is a testable state with Conventional Commits on `feat/gemma`. M4
   verification kernel with the AR GEMV's summation order at shared-kernel
   speed).
 
+**2026-09-27 — MTP draft argmax.**
+
+- Reused the idle draft FFN gate scratch for the shared two-pass GPU argmax.
+  Its median latency dropped from 272.3 to 9.9 + 1.9 µs; the real-model
+  `gemma4.target` test passed. A focused release HTTP prose retest through 64K
+  gained 0.5–3.2% over the prior Gufo rows without changing acceptance.
+  The fork remains ahead at six of seven measured depths, so verification
+  projection and attention cost are still open.

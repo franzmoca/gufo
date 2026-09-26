@@ -454,8 +454,12 @@ void Executor::DraftChain(KvCache& cache, std::int32_t token,
     // draft_h_ is the output-normalized state: vocabulary head and the
     // projection back to the target width for the next step.
     Project(dm.token_embd, draft_h_, nullptr, 1, draft_logits_);
-    hip::LaunchGPUArgmax(draft_logits_, draft_tokens_ + step + 1,
-                         model_.vocab_size(), stream_);
+    // The FFN gate buffer is idle after the vocabulary projection. Reuse it
+    // for parallel vocabulary tiles instead of reducing 262K logits in one
+    // workgroup.
+    hip::LaunchBatchedGPUArgmax(
+        draft_logits_, draft_tokens_ + step + 1, 1, model_.vocab_size(),
+        std::span<float>(draft_gate_, c.ffn_size), stream_);
     if (step + 1 < steps) {
       Project(dm.post_projection, draft_h_, nullptr, 1, draft_next_);
     }
