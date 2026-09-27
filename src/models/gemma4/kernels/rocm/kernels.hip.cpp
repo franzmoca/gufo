@@ -271,6 +271,18 @@ __global__ void __launch_bounds__(kThreads)
 
 /// Normalizes the head in `buf` (weight may be null) and applies NEOX rope
 /// when `rope` is set; the result stays in `buf`.
+/// The angle pair i turns by at `position`.
+__device__ inline float RopeAngle(std::uint32_t position, std::uint32_t i,
+                                  float theta_scale,
+                                  const float* freq_factors) {
+  float theta =
+      static_cast<float>(position) * powf(theta_scale, static_cast<float>(i));
+  if (freq_factors != nullptr) {
+    theta /= freq_factors[i];
+  }
+  return theta;
+}
+
 __device__ void NormRopeHead(float* buf, const float* weight, std::uint32_t dim,
                              float eps, bool rope, std::uint32_t position,
                              float theta_scale, const float* freq_factors,
@@ -294,11 +306,7 @@ __device__ void NormRopeHead(float* buf, const float* weight, std::uint32_t dim,
   float lo = 0.0F;
   float hi = 0.0F;
   if (i < half) {
-    float theta =
-        static_cast<float>(position) * powf(theta_scale, static_cast<float>(i));
-    if (freq_factors != nullptr) {
-      theta /= freq_factors[i];
-    }
+    const float theta = RopeAngle(position, i, theta_scale, freq_factors);
     // Fast-math sinf/cosf become native approximations that lose accuracy
     // for large angles (positions reach 262144 rad); the OCML routine keeps
     // full float accuracy, as ggml's sinf/cosf do.
@@ -329,66 +337,133 @@ __device__ void FoldKeyWeight(float* buf, std::uint32_t dim,
   __syncthreads();
 }
 
+/// One wave per (row, head), eight heads of a row per block. Lane L holds
+/// dims 32 w + L + 256 k (w < 8, k < D / 256): exactly the elements thread
+/// 32 w + L held in the block-per-head form, so the per-thread partial sums,
+/// the per-wave butterflies and the in-order sum over w reproduce BlockSum,
+/// and every rotation pair (d, d + D / 2) lies in one lane.
+template<int D>
 __global__ void __launch_bounds__(kThreads) QkvPostKernel(QkvPostArgs a) {
-  __shared__ float buf[512];
-  __shared__ float scratch[kWaves];
+  constexpr int K = D / kThreads;  // elements per former thread
+  const int lane = static_cast<int>(threadIdx.x) % kWave;
   const std::uint32_t row = blockIdx.x;
-  const std::uint32_t head = blockIdx.y;
-  const std::uint32_t dim = a.head_dim;
+  const std::uint32_t head = blockIdx.y * kWaves + threadIdx.x / kWave;
+  if (head >= a.heads + a.kv_heads) {
+    return;
+  }
   const std::uint32_t position = a.first_position + row;
+  const auto dim_of = [&](int w, int k) {
+    return static_cast<std::uint32_t>(kWave * w + lane + kThreads * k);
+  };
+  // v = rms(v) * weight (BlockSum order), then (optionally) the rotation.
+  const auto norm_rope = [&](float (&v)[kWaves][K], const float* weight,
+                             bool rope) {
+    float total = 0.0F;
+#pragma unroll
+    for (int w = 0; w < kWaves; ++w) {
+      float ss = 0.0F;
+#pragma unroll
+      for (int k = 0; k < K; ++k) {
+        ss += v[w][k] * v[w][k];
+      }
+      total += WaveSum(ss);
+    }
+    const float r = RmsScale(total, D, a.eps);
+#pragma unroll
+    for (int w = 0; w < kWaves; ++w) {
+#pragma unroll
+      for (int k = 0; k < K; ++k) {
+        const float x = v[w][k] * r;
+        v[w][k] = weight != nullptr ? x * weight[dim_of(w, k)] : x;
+      }
+    }
+    if (!rope) {
+      return;
+    }
+    // The partner of dim d < D / 2 is d + D / 2 = (w + kDw, k + kDk).
+    constexpr int kDw = (D / 2) % kThreads / kWave;
+    constexpr int kDk = (D / 2) / kThreads;
+#pragma unroll
+    for (int w = 0; w + kDw < kWaves; ++w) {
+#pragma unroll
+      for (int k = 0; k + kDk < K; ++k) {
+        const std::uint32_t d = dim_of(w, k);
+        if (d >= D / 2) {
+          continue;
+        }
+        const float theta =
+            RopeAngle(position, d, a.theta_scale, a.freq_factors);
+        const float c = __ocml_cos_f32(theta);
+        const float sn = __ocml_sin_f32(theta);
+        const float lo = v[w][k];
+        const float hi = v[w + kDw][k + kDk];
+        v[w][k] = lo * c - hi * sn;
+        v[w + kDw][k + kDk] = lo * sn + hi * c;
+      }
+    }
+  };
+  const auto load = [&](const float* src, float (&v)[kWaves][K]) {
+#pragma unroll
+    for (int w = 0; w < kWaves; ++w) {
+#pragma unroll
+      for (int k = 0; k < K; ++k) {
+        v[w][k] = src[dim_of(w, k)];
+      }
+    }
+  };
+  float v[kWaves][K];
   if (head < a.heads) {
-    float* q = a.q + (static_cast<std::size_t>(row) * a.heads + head) * dim;
-    for (std::uint32_t i = threadIdx.x; i < dim; i += kThreads) {
-      buf[i] = q[i];
-    }
-    __syncthreads();
-    NormRopeHead(buf, a.q_norm, dim, a.eps, true, position, a.theta_scale,
-                 a.freq_factors, scratch);
-    if (a.rotated_pairs != 0) {
-      FoldKeyWeight(buf, dim, a.k_norm, a.rotated_pairs);
-    }
-    for (std::uint32_t i = threadIdx.x; i < dim; i += kThreads) {
-      q[i] = buf[i];
+    float* q = a.q + (static_cast<std::size_t>(row) * a.heads + head) * D;
+    load(q, v);
+    norm_rope(v, a.q_norm, true);
+#pragma unroll
+    for (int w = 0; w < kWaves; ++w) {
+#pragma unroll
+      for (int k = 0; k < K; ++k) {
+        // Derived-key layers: the query carries k_norm on unrotated dims.
+        const std::uint32_t d = dim_of(w, k);
+        if (a.rotated_pairs != 0 && d % (D / 2) >= a.rotated_pairs) {
+          v[w][k] *= a.k_norm[d];
+        }
+        q[d] = v[w][k];
+      }
     }
     return;
   }
   const std::uint32_t kvh = head - a.heads;
-  const std::size_t in =
-      (static_cast<std::size_t>(row) * a.kv_heads + kvh) * dim;
+  const std::size_t in = (static_cast<std::size_t>(row) * a.kv_heads + kvh) * D;
   const std::uint32_t slot = a.ring != 0 ? position % a.ring : position;
   const std::size_t cache =
-      (static_cast<std::size_t>(slot) * a.kv_heads + kvh) * dim;
-  auto* v_cache = reinterpret_cast<__half*>(a.v_cache);
-  for (std::uint32_t i = threadIdx.x; i < dim; i += kThreads) {
-    buf[i] = a.k[in + i];
-  }
-  __syncthreads();
-  NormRopeHead(buf, a.k_norm, dim, a.eps, true, position, a.theta_scale,
-               a.freq_factors, scratch);
+      (static_cast<std::size_t>(slot) * a.kv_heads + kvh) * D;
   auto* k_cache = reinterpret_cast<__half*>(a.k_cache);
-  if (a.rotated_pairs == 0) {
-    for (std::uint32_t i = threadIdx.x; i < dim; i += kThreads) {
-      k_cache[cache + i] = __float2half(buf[i]);
-    }
-  } else {
-    // Rotated dims only: [0, pairs) then [dim / 2, dim / 2 + pairs).
-    const std::uint32_t width = 2 * a.rotated_pairs;
-    const std::size_t at =
-        (static_cast<std::size_t>(slot) * a.kv_heads + kvh) * width;
-    for (std::uint32_t i = threadIdx.x; i < width; i += kThreads) {
-      const std::uint32_t d =
-          i < a.rotated_pairs ? i : dim / 2 + i - a.rotated_pairs;
-      k_cache[at + i] = __float2half(buf[d]);
+  auto* v_cache = reinterpret_cast<__half*>(a.v_cache);
+  load(a.k + in, v);
+  norm_rope(v, a.k_norm, true);
+  const std::uint32_t pairs = a.rotated_pairs;
+  const std::size_t rot_at =
+      (static_cast<std::size_t>(slot) * a.kv_heads + kvh) * 2 * pairs;
+#pragma unroll
+  for (int w = 0; w < kWaves; ++w) {
+#pragma unroll
+    for (int k = 0; k < K; ++k) {
+      const std::uint32_t d = dim_of(w, k);
+      if (pairs == 0) {
+        k_cache[cache + d] = __float2half(v[w][k]);
+      } else if (d % (D / 2) < pairs) {
+        // Rotated dims only: [0, pairs) then [D / 2, D / 2 + pairs).
+        k_cache[rot_at + (d < D / 2 ? d : pairs + d - D / 2)] =
+            __float2half(v[w][k]);
+      }
     }
   }
-  __syncthreads();
-  for (std::uint32_t i = threadIdx.x; i < dim; i += kThreads) {
-    buf[i] = a.v[in + i];
-  }
-  __syncthreads();
-  NormRopeHead(buf, nullptr, dim, a.eps, false, 0, 0.0F, nullptr, scratch);
-  for (std::uint32_t i = threadIdx.x; i < dim; i += kThreads) {
-    v_cache[cache + i] = __float2half(buf[i]);
+  load(a.v + in, v);
+  norm_rope(v, nullptr, false);
+#pragma unroll
+  for (int w = 0; w < kWaves; ++w) {
+#pragma unroll
+    for (int k = 0; k < K; ++k) {
+      v_cache[cache + dim_of(w, k)] = __float2half(v[w][k]);
+    }
   }
 }
 
@@ -1178,11 +1253,18 @@ void RmsNorm(const float* x, const float* weight, float* y, std::uint32_t rows,
 }
 
 void QkvPost(const QkvPostArgs& args, hipStream_t stream) {
-  if (args.head_dim > 512) {
-    throw std::invalid_argument("QkvPost supports head_dim <= 512");
+  const dim3 grid(args.rows,
+                  (args.heads + args.kv_heads + kWaves - 1) / kWaves);
+  switch (args.head_dim) {
+    case 256:
+      QkvPostKernel<256><<<grid, kThreads, 0, stream>>>(args);
+      return;
+    case 512:
+      QkvPostKernel<512><<<grid, kThreads, 0, stream>>>(args);
+      return;
+    default:
+      throw std::invalid_argument("QkvPost supports head_dim 256 and 512");
   }
-  QkvPostKernel<<<dim3(args.rows, args.heads + args.kv_heads), kThreads, 0,
-                  stream>>>(args);
 }
 
 void QueryPost(float* q, const float* q_norm, float theta_scale,
