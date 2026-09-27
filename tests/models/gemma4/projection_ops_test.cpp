@@ -106,6 +106,19 @@ void CheckShape(const Format& f, std::size_t m, std::size_t k,
     Require(std::memcmp(batch.data(), gemv.data(), width * m * 4) == 0,
             name + ": width " + std::to_string(width) +
                 " differs from decode GEMV");
+    // The double-stage configuration verification uses for Gemma shapes.
+    if (width <= 8) {
+      HIP_CHECK(hipMemset(dy, 0xFF, width * m * sizeof(float)));
+      if (gufo::hip::LaunchKQuantSmallBatchDoubleStage(f.type, dw, dx, dy,
+                                                       width, m, k, nullptr)) {
+        HIP_CHECK(hipDeviceSynchronize());
+        HIP_CHECK(
+            hipMemcpy(batch.data(), dy, width * m * 4, hipMemcpyDeviceToHost));
+        Require(std::memcmp(batch.data(), gemv.data(), width * m * 4) == 0,
+                name + ": double-stage width " + std::to_string(width) +
+                    " differs from decode GEMV");
+      }
+    }
   }
 
   // Decode against an FP64 dot of the CPU-dequantized row, on a row sample;
@@ -193,10 +206,15 @@ void CheckShape(const Format& f, std::size_t m, std::size_t k,
       gufo::hip::LaunchBatchedQuantGEMMFp32(f.type, wp, dx, dy, 5, m, k,
                                             nullptr);
     });
+    const double staged5 = time([&](std::uint8_t* wp) {
+      (void)gufo::hip::LaunchKQuantSmallBatchDoubleStage(f.type, wp, dx, dy, 5,
+                                                         m, k, nullptr);
+    });
     std::cout << name << ": one row: Gemma GEMV " << gemma * 1e6
               << " us, shared GEMV " << qwen * 1e6 << " us, shared small-batch "
               << qwen1 * 1e6 << " us; five rows: shared small-batch "
-              << qwen5 * 1e6 << " us (" << bytes / 1e6 << " MB)\n";
+              << qwen5 * 1e6 << " us, double-stage " << staged5 * 1e6 << " us ("
+              << bytes / 1e6 << " MB)\n";
     for (auto* ptr : rot)
       HIP_CHECK(hipFree(ptr));
   }

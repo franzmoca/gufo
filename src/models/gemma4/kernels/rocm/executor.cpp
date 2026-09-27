@@ -290,6 +290,14 @@ void Executor::Project(const DeviceTensor& w, const float* x, const void* xq,
     return;
   }
   if (rows > 1) {
+    // Gemma's K-quant shapes lie outside the Qwen-tuned dispatch; the
+    // double-stage configuration is faster on them (the vocabulary head keeps
+    // the default). Both round like the one-row twins below.
+    if (w.rows < 65536 &&
+        hip::LaunchKQuantSmallBatchDoubleStage(w.type, w.data, x, y, rows,
+                                               w.rows, w.cols, stream_)) {
+      return;
+    }
     hip::LaunchBatchedQuantGEMMFp32(w.type, w.data, x, y, rows, w.rows, w.cols,
                                     stream_);
     return;

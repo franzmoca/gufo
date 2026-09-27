@@ -368,3 +368,12 @@ Each milestone is a testable state with Conventional Commits on `feat/gemma`. M4
 - Measured ceilings: prefill GEMMs reach ~82% of the int8 WMMA peak, so
   prefill gains are limited to attention (hd512 WMMA at ~32% of peak, LDS
   bound) and the small elementwise kernels.
+
+**2026-09-27 — Prefill attention and verification projections.**
+
+- hd512 WMMA prefill attention stages the next tile's keys during the softmax
+  and its values after the value pass: 2048 rows at 32K keys 245.7 → 187.6 ms.
+- Verification projections use the shared small-batch kernel's double-stage
+  configuration (bit-identical to decode): MTP cycle at depth 0 136.6 → 133.0
+  ms. A Gemma-owned verification GEMV reached 103 ms per token of projections
+  against the shared kernel's 93 ms and was dropped.

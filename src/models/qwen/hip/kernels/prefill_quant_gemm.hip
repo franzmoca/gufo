@@ -1695,6 +1695,65 @@ void LaunchBatchedQuantGEMMBf16(core::GgmlType type, const void* w,
       type, w, reinterpret_cast<const hip_bfloat16*>(bf16_x), y, m, k);
 }
 
+bool LaunchKQuantSmallBatchDoubleStage(core::GgmlType type, const void* w,
+                                       const float* fp32_x, float* y,
+                                       std::size_t batch, std::size_t m,
+                                       std::size_t k, hipStream_t stream) {
+  if (batch < 2 || batch > 8 || m == 0 || k == 0 ||
+      (type != core::GgmlType::kQ4_K && type != core::GgmlType::kQ5_K &&
+       type != core::GgmlType::kQ6_K) ||
+      !FitsSmallBatch32BitIndices(batch, m, k,
+                                  quant::QuantizedRowBytes(type, k))) {
+    return false;
+  }
+  constexpr std::uint32_t kWaves = 16;
+  constexpr std::size_t kRows = 3;
+  const dim3 grid(static_cast<unsigned>((m + kWaves * kRows - 1) /
+                                        (kWaves * kRows)));
+  const auto launch = [&]<core::GgmlType Type, std::size_t Batch>() {
+    SmallBatchKQuantExactFp32GEMMKernel<kWaves, Batch, kRows, Type, 2, 12, 1,
+                                        true>
+        <<<grid, kWaves * 32, 0, stream>>>(w, fp32_x, y, m, k);
+  };
+  const auto typed = [&]<core::GgmlType Type>() {
+    switch (batch) {
+      case 2:
+        launch.template operator()<Type, 2>();
+        break;
+      case 3:
+        launch.template operator()<Type, 3>();
+        break;
+      case 4:
+        launch.template operator()<Type, 4>();
+        break;
+      case 5:
+        launch.template operator()<Type, 5>();
+        break;
+      case 6:
+        launch.template operator()<Type, 6>();
+        break;
+      case 7:
+        launch.template operator()<Type, 7>();
+        break;
+      default:
+        launch.template operator()<Type, 8>();
+        break;
+    }
+  };
+  switch (type) {
+    case core::GgmlType::kQ4_K:
+      typed.template operator()<core::GgmlType::kQ4_K>();
+      break;
+    case core::GgmlType::kQ5_K:
+      typed.template operator()<core::GgmlType::kQ5_K>();
+      break;
+    default:
+      typed.template operator()<core::GgmlType::kQ6_K>();
+      break;
+  }
+  return true;
+}
+
 void LaunchBatchedQuantGEMMFp32(core::GgmlType type, const void* w,
                                 const float* fp32_x, float* y,
                                 std::size_t batch, std::size_t m, std::size_t k,
