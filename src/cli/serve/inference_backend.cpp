@@ -3018,7 +3018,7 @@ public:
       throw std::runtime_error("Gemma 4 token selection has no logits");
     }
     const auto token = static_cast<std::int32_t>(sampler.Sample(logits));
-    if (model_->IsStopToken(token)) {
+    if (state.stop_at_eos() && model_->IsStopToken(token)) {
       return {.stop = true, .token = 0, .piece = {}};
     }
     return {.stop = false,
@@ -3055,13 +3055,13 @@ public:
     std::string error;
     if (!session.DecodeStep(
             std::min<std::size_t>(max_tokens, model_->DraftTokens() + 1),
-            working, &decoded, &error)) {
+            working, &decoded, &error, state.stop_at_eos())) {
       throw std::runtime_error("Gemma 4 MTP decode failed: " + error);
     }
     sampler.CopyDrawStateFrom(working);
     TextDecodeStep step;
     for (const std::int32_t token : decoded.tokens) {
-      if (model_->IsStopToken(token)) {
+      if (state.stop_at_eos() && model_->IsStopToken(token)) {
         step.stop = true;
         break;
       }
