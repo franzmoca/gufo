@@ -204,30 +204,64 @@ __global__ void __launch_bounds__((kPrefillThreads<D, kHeads, kQueryBlocks>))
       }
     }
   };
-  if (block_lo < block_hi) {
-    fetch(block_lo);
-  }
-
-  for (std::uint32_t key0 = block_lo; key0 < block_hi; key0 += kKeys) {
-    __syncthreads();
-    // Stage K row-major and V transposed; lane-major keys keep the V^T
-    // writes on distinct banks.
+  // Staging. K goes row-major; V is transposed with adjacent keys paired
+  // into 32-bit words: lanes 2m and 2m + 1 hold keys 2m and 2m + 1 of the
+  // same 8 dims, swap half of them, and each writes 4 dims' key pairs.
+  const auto store_keys = [&] {
+#pragma unroll
+    for (std::uint32_t j = 0; j < kStage; ++j) {
+      const std::uint32_t idx = tid + j * kThreads;
+      *reinterpret_cast<uint4*>(
+          &k_lds[(idx % kKeys) * kKStride + (idx / kKeys) * 8]) = k_next[j];
+    }
+  };
+  const auto store_values = [&] {
+    const bool even = (tid & 1U) == 0;
 #pragma unroll
     for (std::uint32_t j = 0; j < kStage; ++j) {
       const std::uint32_t idx = tid + j * kThreads;
       const std::uint32_t key = idx % kKeys;
       const std::uint32_t d8 = (idx / kKeys) * 8;
-      *reinterpret_cast<uint4*>(&k_lds[key * kKStride + d8]) = k_next[j];
-      const auto* vh = reinterpret_cast<const __half*>(&v_next[j]);
+      const uint4 v = v_next[j];
+      // Even lanes keep dims 0..3 and receive the odd key's, odd lanes keep
+      // dims 4..7 and receive the even key's.
+      const std::uint32_t send0 = even ? v.z : v.x;
+      const std::uint32_t send1 = even ? v.w : v.y;
+      const std::uint32_t recv0 =
+          static_cast<std::uint32_t>(__builtin_amdgcn_mov_dpp(
+              static_cast<int>(send0), 0xB1, 0xF, 0xF, true));
+      const std::uint32_t recv1 =
+          static_cast<std::uint32_t>(__builtin_amdgcn_mov_dpp(
+              static_cast<int>(send1), 0xB1, 0xF, 0xF, true));
+      const std::uint32_t own[2] = {even ? v.x : v.z, even ? v.y : v.w};
+      const std::uint32_t other[2] = {recv0, recv1};
+      auto* rows = reinterpret_cast<std::uint32_t*>(vt_lds);
+      const std::uint32_t dim = d8 + (even ? 0U : 4U);
 #pragma unroll
-      for (std::uint32_t i = 0; i < 8; ++i) {
-        vt_lds[(d8 + i) * kVtStride + key] = vh[i];
+      for (std::uint32_t i = 0; i < 4; ++i) {
+        const std::uint32_t mine = (own[i / 2] >> (16 * (i % 2))) & 0xFFFFU;
+        const std::uint32_t theirs = (other[i / 2] >> (16 * (i % 2))) & 0xFFFFU;
+        const std::uint32_t pair =
+            even ? (mine | (theirs << 16)) : (theirs | (mine << 16));
+        rows[(dim + i) * (kVtStride / 2) + key / 2] = pair;
       }
     }
-    if (key0 + kKeys < block_hi) {
+  };
+  if (block_lo < block_hi) {
+    fetch(block_lo);
+    store_keys();
+    store_values();
+  }
+  __syncthreads();
+
+  // Three barriers per tile: after the scores (the next keys may replace
+  // this tile's), after the softmax (probabilities and next keys are
+  // staged), after the values (the next values may replace this tile's).
+  for (std::uint32_t key0 = block_lo; key0 < block_hi; key0 += kKeys) {
+    const bool more = key0 + kKeys < block_hi;
+    if (more) {
       fetch(key0 + kKeys);
     }
-    __syncthreads();
 
     // Partial scores over this wave's dim slice.
     {
@@ -286,6 +320,10 @@ __global__ void __launch_bounds__((kPrefillThreads<D, kHeads, kQueryBlocks>))
         row_scale[rb][sm_row] = scale;
       }
     }
+    // The scores are done with this tile's keys: stage the next ones.
+    if (more) {
+      store_keys();
+    }
     __syncthreads();
 
     float scale[8];
@@ -302,6 +340,12 @@ __global__ void __launch_bounds__((kPrefillThreads<D, kHeads, kQueryBlocks>))
       }
       const v16h v_frag = LoadFrag(&vt_lds[(dim0 + t * 16 + sub) * kVtStride]);
       o_acc[t] = Wmma(p_frag, v_frag, o_acc[t]);
+    }
+    // Every wave is done with this tile's values and probabilities before the
+    // next values replace them.
+    __syncthreads();
+    if (more) {
+      store_values();
     }
   }
 
