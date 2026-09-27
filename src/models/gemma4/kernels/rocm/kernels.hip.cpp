@@ -807,7 +807,9 @@ __global__ void __launch_bounds__(kThreads* WPH)
   uint4 staged[kStageLoads];
   // Rotated key dims of a tile: 32 keys x 2 pairs values in 16-byte pieces.
   constexpr int kRotLoads =
-      kStaged ? kWave * 2 * kMaxRopePairs / 8 / kBlockThreads : 1;
+      kStaged
+          ? (kWave * 2 * kMaxRopePairs / 8 + kBlockThreads - 1) / kBlockThreads
+          : 1;
   uint4 staged_rot[kRotLoads];
   const int rot_chunks = 2 * pairs / 8;  // per key
   const auto* k_rotated = reinterpret_cast<const __half*>(a.k_cache);
@@ -1129,11 +1131,23 @@ void LaunchSplitAttention(const AttentionArgs& a, hipStream_t stream) {
             a, first_split, splits);
   } else if constexpr (G == kWaves) {
     // hd512: two waves per head, three rows each, keep a block's rows within
-    // the register file.
-    constexpr std::uint32_t kRows = 3 * 2;
-    RowSplitAttentionKernel<D, G, 3, 2>
-        <<<dim3((a.rows + kRows - 1) / kRows, a.kv_heads, chunk_blocks),
-           2 * kThreads, 0, stream>>>(a, first_split, splits);
+    // the register file; seven or eight rows take four waves of two, so one
+    // block still streams each key once.
+    if (a.rows > 6) {
+      constexpr std::uint32_t kRows = 4 * 2;
+      RowSplitAttentionKernel<D, G, 4, 2>
+          <<<dim3((a.rows + kRows - 1) / kRows, a.kv_heads, chunk_blocks),
+             2 * kThreads, 0, stream>>>(a, first_split, splits);
+    } else {
+      constexpr std::uint32_t kRows = 3 * 2;
+      RowSplitAttentionKernel<D, G, 3, 2>
+          <<<dim3((a.rows + kRows - 1) / kRows, a.kv_heads, chunk_blocks),
+             2 * kThreads, 0, stream>>>(a, first_split, splits);
+    }
+  } else if (a.rows > kRowBlock && a.rows <= 8) {
+    RowSplitAttentionKernel<D, G, 8, 1>
+        <<<dim3(1, a.kv_heads, chunk_blocks), kThreads, 0, stream>>>(
+            a, first_split, splits);
   } else {
     RowSplitAttentionKernel<D, G, kRowBlock, 1>
         <<<dim3((a.rows + kRowBlock - 1) / kRowBlock, a.kv_heads, chunk_blocks),

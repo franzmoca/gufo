@@ -1711,8 +1711,10 @@ bool LaunchKQuantSmallBatchDoubleStage(core::GgmlType type, const void* w,
   const dim3 grid(static_cast<unsigned>((m + kWaves * kRows - 1) /
                                         (kWaves * kRows)));
   const auto launch = [&]<core::GgmlType Type, std::size_t Batch>() {
-    SmallBatchKQuantExactFp32GEMMKernel<kWaves, Batch, kRows, Type, 2, 12, 1,
-                                        true>
+    // Seven and eight rows are faster with the looser occupancy hint.
+    constexpr std::uint32_t kMinWaves = Batch >= 7 ? 8 : 12;
+    SmallBatchKQuantExactFp32GEMMKernel<kWaves, Batch, kRows, Type, 2,
+                                        kMinWaves, 1, true>
         <<<grid, kWaves * 32, 0, stream>>>(w, fp32_x, y, m, k);
   };
   const auto typed = [&]<core::GgmlType Type>() {
