@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <cmath>
 #include <stdexcept>
+#include <utility>
 
 #include "src/models/gemma4/kernels/rocm/attention_wmma.hpp"
 #include "src/models/qwen/hip/kernels/prefill_quant_gemm.hpp"
@@ -681,6 +682,7 @@ __device__ __forceinline__ float ReduceScatterN(float (&v)[N]) {
 /// the load batching (LG keys) varies with R. Writes (m, l, unnormalized acc).
 template<int D, int G, int R, int WPH>
 __global__ void __launch_bounds__(kThreads* WPH)
+    __attribute__((amdgpu_waves_per_eu(R == 4 ? 8 : 1)))
     RowSplitAttentionKernel(AttentionArgs a, std::uint32_t first_split,
                             std::uint32_t splits) {
   constexpr int P = D / kWave;
@@ -878,45 +880,51 @@ __global__ void __launch_bounds__(kThreads* WPH)
     }
   }
 
-  for (std::uint32_t key0 = begin & ~std::uint32_t{kWave - 1}; key0 < end;
-       key0 += kWave) {
-    const bool more = key0 + kWave < end;
-    if constexpr (kStaged) {
-      stage_store();
-      if (derived) {
-        // One value tile serves keys and values: the next one (values and
-        // rotated key dims) loads under both passes.
-        if (more) {
-          rot_load(key0 + kWave);
-          stage_load(v_head, key0 + kWave);
+  // Up to five rows per wave (three at hd512) the tile loop compiles once
+  // per row count, so each row's dot and accumulator chains are independent
+  // code the scheduler can interleave; wider waves keep one guarded copy,
+  // which holds fewer rows live. A wave without rows still joins the
+  // block's barriers.
+  constexpr bool kExactRows = R <= (D == 512 ? 3 : 5);
+  const auto tiles = [&]<int RR>() {
+    for (std::uint32_t key0 = begin & ~std::uint32_t{kWave - 1}; key0 < end;
+         key0 += kWave) {
+      const bool more = key0 + kWave < end;
+      if constexpr (kStaged) {
+        stage_store();
+        if (derived) {
+          // One value tile serves keys and values: the next one (values and
+          // rotated key dims) loads under both passes.
+          if (more) {
+            rot_load(key0 + kWave);
+            stage_load(v_head, key0 + kWave);
+          }
+        } else {
+          // Keys to shared memory; the values load under the scores.
+          stage_load(v_head, key0);
         }
-      } else {
-        // Keys to shared memory; the values load under the scores.
-        stage_load(v_head, key0);
       }
-    }
-    // Scores: lane L holds key key0 + L of every row.
-    float s[R];
+      // Scores: lane L holds key key0 + L of every row.
+      float s[RR];
 #pragma unroll
-    for (int r = 0; r < R; ++r) {
-      s[r] = -INFINITY;
-    }
+      for (int r = 0; r < RR; ++r) {
+        s[r] = -INFINITY;
+      }
 #pragma unroll 1
-    for (int g0 = 0; g0 < kWave; g0 += LG) {
-      uint4 kraw[LG][P / 8];
+      for (int g0 = 0; g0 < kWave; g0 += LG) {
+        uint4 kraw[LG][P / 8];
 #pragma unroll
-      for (int kk = 0; kk < LG; ++kk) {
-        load(k_head, true, key0, g0 + kk, kraw[kk]);
-      }
+        for (int kk = 0; kk < LG; ++kk) {
+          load(k_head, true, key0, g0 + kk, kraw[kk]);
+        }
 #pragma unroll
-      for (int g = 0; g < LG; g += KG) {
-#pragma unroll
-        for (int r = 0; r < R; ++r) {
-          if (r < rows) {
-            float part[KG];
+        for (int g = 0; g < LG; g += KG) {
+          // Each key converts once for every row where registers allow.
+          constexpr bool kConvertOnce = R <= (D == 512 ? 3 : 5);
+          float kf[kConvertOnce ? KG : 1][kConvertOnce ? P : 1];
+          if constexpr (kConvertOnce) {
 #pragma unroll
             for (int kk = 0; kk < KG; ++kk) {
-              float dot = 0.0F;
 #pragma unroll
               for (int i = 0; i < P / 8; ++i) {
                 const auto* k2 =
@@ -924,8 +932,37 @@ __global__ void __launch_bounds__(kThreads* WPH)
 #pragma unroll
                 for (int j = 0; j < 4; ++j) {
                   const float2 f = __half22float2(k2[j]);
-                  dot = __builtin_fmaf(q[r][8 * i + 2 * j], f.x, dot);
-                  dot = __builtin_fmaf(q[r][8 * i + 2 * j + 1], f.y, dot);
+                  kf[kk][8 * i + 2 * j] = f.x;
+                  kf[kk][8 * i + 2 * j + 1] = f.y;
+                }
+              }
+            }
+          }
+#pragma unroll
+          for (int r = 0; r < RR; ++r) {
+            if (!kExactRows && r >= rows) {
+              continue;
+            }
+            float part[KG];
+#pragma unroll
+            for (int kk = 0; kk < KG; ++kk) {
+              float dot = 0.0F;
+              if constexpr (kConvertOnce) {
+#pragma unroll
+                for (int i = 0; i < P; ++i) {
+                  dot = __builtin_fmaf(q[r][i], kf[kk][i], dot);
+                }
+              } else {
+#pragma unroll
+                for (int i = 0; i < P / 8; ++i) {
+                  const auto* k2 =
+                      reinterpret_cast<const __half2*>(&kraw[g + kk][i]);
+#pragma unroll
+                  for (int j = 0; j < 4; ++j) {
+                    const float2 f = __half22float2(k2[j]);
+                    dot = __builtin_fmaf(q[r][8 * i + 2 * j], f.x, dot);
+                    dot = __builtin_fmaf(q[r][8 * i + 2 * j + 1], f.y, dot);
+                  }
                 }
               }
               part[kk] = dot;
@@ -937,87 +974,88 @@ __global__ void __launch_bounds__(kThreads* WPH)
           }
         }
       }
-    }
-    // The first values load under the softmax.
-    uint4 vraw[LG][P / 8];
-    if constexpr (!kStaged) {
+      // The first values load under the softmax.
+      uint4 vraw[LG][P / 8];
+      if constexpr (!kStaged) {
 #pragma unroll
-      for (int kk = 0; kk < LG; ++kk) {
-        load(v_head, false, key0, kk, vraw[kk]);
+        for (int kk = 0; kk < LG; ++kk) {
+          load(v_head, false, key0, kk, vraw[kk]);
+        }
       }
-    }
-    // Online softmax per row; a tile without keys for a row leaves it as is.
-    float p[R];
+      // Online softmax per row; a tile without keys for a row leaves it as is.
+      float p[RR];
 #pragma unroll
-    for (int r = 0; r < R; ++r) {
-      p[r] = 0.0F;
-      if (r < rows) {
-        const std::uint32_t key = key0 + lane;
-        const float sr = key >= lo[r] && key < hi[r] ? s[r] : -INFINITY;
-        // Wave-uniform statistics live in scalar registers.
-        const float mt = Uniform(WaveMax(sr));
-        if (mt != -INFINITY) {
-          const float mn = fmaxf(m[r], mt);
-          const float scale = Uniform(expf(m[r] - mn));
-          p[r] = expf(sr - mn);
-          l[r] = __builtin_fmaf(l[r], scale, Uniform(WaveSum(p[r])));
-          m[r] = mn;
+      for (int r = 0; r < RR; ++r) {
+        p[r] = 0.0F;
+        if (kExactRows || r < rows) {
+          const std::uint32_t key = key0 + lane;
+          const float sr = key >= lo[r] && key < hi[r] ? s[r] : -INFINITY;
+          // Wave-uniform statistics live in scalar registers.
+          const float mt = Uniform(WaveMax(sr));
+          if (mt != -INFINITY) {
+            const float mn = fmaxf(m[r], mt);
+            const float scale = Uniform(expf(m[r] - mn));
+            p[r] = expf(sr - mn);
+            l[r] = __builtin_fmaf(l[r], scale, Uniform(WaveSum(p[r])));
+            m[r] = mn;
 #pragma unroll
-          for (int i = 0; i < P; ++i) {
-            acc[r][i] *= scale;
+            for (int i = 0; i < P; ++i) {
+              acc[r][i] *= scale;
+            }
           }
         }
       }
-    }
-    if constexpr (kStaged) {
-      if (!derived) {
-        // Values to shared memory; the next keys load under the products.
-        stage_store();
-        if (more) {
-          stage_load(k_head, key0 + kWave);
-        }
-      }
-    }
-    // Values, the next batch loading under the current one.
-#pragma unroll
-    for (int g0 = 0; g0 < kWave; g0 += LG) {
-      uint4 cur[LG][P / 8];
       if constexpr (kStaged) {
-#pragma unroll
-        for (int kk = 0; kk < LG; ++kk) {
-          load(v_head, false, key0, g0 + kk, cur[kk]);
-        }
-      } else {
-#pragma unroll
-        for (int kk = 0; kk < LG; ++kk) {
-#pragma unroll
-          for (int i = 0; i < P / 8; ++i) {
-            cur[kk][i] = vraw[kk][i];
+        if (!derived) {
+          // Values to shared memory; the next keys load under the products.
+          stage_store();
+          if (more) {
+            stage_load(k_head, key0 + kWave);
           }
         }
-        if (g0 + LG < kWave) {
+      }
+      // Values, the next batch loading under the current one.
+#pragma unroll
+      for (int g0 = 0; g0 < kWave; g0 += LG) {
+        uint4 cur[LG][P / 8];
+        if constexpr (kStaged) {
 #pragma unroll
           for (int kk = 0; kk < LG; ++kk) {
-            load(v_head, false, key0, g0 + LG + kk, vraw[kk]);
+            load(v_head, false, key0, g0 + kk, cur[kk]);
+          }
+        } else {
+#pragma unroll
+          for (int kk = 0; kk < LG; ++kk) {
+#pragma unroll
+            for (int i = 0; i < P / 8; ++i) {
+              cur[kk][i] = vraw[kk][i];
+            }
+          }
+          if (g0 + LG < kWave) {
+#pragma unroll
+            for (int kk = 0; kk < LG; ++kk) {
+              load(v_head, false, key0, g0 + LG + kk, vraw[kk]);
+            }
           }
         }
-      }
 #pragma unroll
-      for (int kk = 0; kk < LG; ++kk) {
-        float v[P];
+        for (int kk = 0; kk < LG; ++kk) {
+          float v[P];
 #pragma unroll
-        for (int i = 0; i < P / 8; ++i) {
-          const auto* v2 = reinterpret_cast<const __half2*>(&cur[kk][i]);
+          for (int i = 0; i < P / 8; ++i) {
+            const auto* v2 = reinterpret_cast<const __half2*>(&cur[kk][i]);
 #pragma unroll
-          for (int j = 0; j < 4; ++j) {
-            const float2 f = __half22float2(v2[j]);
-            v[8 * i + 2 * j] = f.x;
-            v[8 * i + 2 * j + 1] = f.y;
+            for (int j = 0; j < 4; ++j) {
+              const float2 f = __half22float2(v2[j]);
+              v[8 * i + 2 * j] = f.x;
+              v[8 * i + 2 * j + 1] = f.y;
+            }
           }
-        }
 #pragma unroll
-        for (int r = 0; r < R; ++r) {
-          if (r < rows) {
+          for (int r = 0; r < RR; ++r) {
+            if (!kExactRows && r >= rows) {
+              continue;
+            }
             const float pk = __int_as_float(
                 __builtin_amdgcn_readlane(__float_as_int(p[r]), g0 + kk));
 #pragma unroll
@@ -1028,6 +1066,14 @@ __global__ void __launch_bounds__(kThreads* WPH)
         }
       }
     }
+  };
+  if constexpr (kExactRows) {
+    [&]<int... I>(std::integer_sequence<int, I...>) {
+      const int count = max(rows, 1);
+      ((count == I + 1 ? tiles.template operator()<I + 1>() : void()), ...);
+    }(std::make_integer_sequence<int, R>{});
+  } else {
+    tiles.template operator()<R>();
   }
 #pragma unroll
   for (int r = 0; r < R; ++r) {
