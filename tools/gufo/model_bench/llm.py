@@ -211,14 +211,16 @@ class Session:
     def request(self, base_url: str, prompt: str, max_tokens: int, *, index: int = 0,
                 messages: list[dict[str, Any]] | None = None,
                 cache_prompt: bool | None = "default",  # type: ignore[assignment]
-                extra_body: dict[str, Any] | None = None) -> RequestObservation:
+                extra_body: dict[str, Any] | None = None,
+                temperature: float | None = None) -> RequestObservation:
         if self.target == "reference" and self.reference_kind == "ds4":
             extra_body = {"thinking": {"type": "disabled"}, **(extra_body or {})}
         use_log = self.target == "reference" and self.reference_kind == "ds4"
         offset = self.active_log.stat().st_size if use_log else 0
         sample = run_request(
             base_url=base_url, model=self.request_model, prompt=prompt, max_tokens=max_tokens,
-            temperature=float(self.config.data["sampling"]["temperature"]),
+            temperature=(float(self.config.data["sampling"]["temperature"])
+                         if temperature is None else temperature),
             timeout_seconds=REQUEST_TIMEOUT, client_id=CLIENT_ID, concurrency=1,
             repetition=1, request_index=index, endpoint_profile=self.profile,
             cache_prompt=self.cache_prompt if cache_prompt == "default" else cache_prompt, messages=messages,
@@ -412,7 +414,7 @@ def run_single(session: Session, table: TableSpec, display_table: TableSpec | No
                     _measure_depth(session, server.base_url, tokenizer, depth=depth,
                                    prompt_tokens=prompt_tokens, output_tokens=output_tokens,
                                    fraction=fraction, seed=base_seed, repetition=repetition,
-                                   task=task)
+                                   task=task, sampling=spec.get("sampling"))
                     for repetition in range(repetitions)
                 ]
             except (RuntimeError, OSError) as failure:  # OSError: server died mid-request
@@ -507,7 +509,7 @@ def turn_prompt(new_target: int, ratio: float, *, task: str, depth: int = 0,
 
 def _measure_depth(session: Session, base_url: str, tokenizer: Tokenizer, *, depth: int, prompt_tokens: int,
                    output_tokens: int, fraction: float, seed: int, repetition: int,
-                   task: str = "prose") -> RequestObservation:
+                   task: str = "prose", sampling: dict[str, Any] | None = None) -> RequestObservation:
     """Time pp/tg after a cached conversation prefix of about `depth` tokens.
 
     Both servers reuse a prior turn's state: the prefix is sent as its own turn
@@ -516,6 +518,10 @@ def _measure_depth(session: Session, base_url: str, tokenizer: Tokenizer, *, dep
     for a long natural-prose answer, so greedy decoding does not stop at EOS
     before the requested output length on either server and the generated
     text is representative for speculative drafting.
+
+    `sampling` (temperature, top_k, top_p, repeat_penalty, seed) applies to the
+    measured turn only; the prefix turn stays greedy so both servers cache the
+    same conversation. Repetitions advance the seed.
     """
     new_target = prompt_tokens - tokenizer.overhead
     ratio = tokenizer.ratio
@@ -534,8 +540,14 @@ def _measure_depth(session: Session, base_url: str, tokenizer: Tokenizer, *, dep
         new_text = turn_prompt(new_target, ratio, task=task, depth=depth,
                                repetition=repetition, attempt=attempt)
         messages.append({"role": "user", "content": new_text})
+        body = dict(extra or {})
+        temperature = None
+        if sampling:
+            temperature = float(sampling["temperature"])
+            body.update({key: value for key, value in sampling.items() if key not in ("temperature", "seed")})
+            body["seed"] = int(sampling.get("seed", 1)) + repetition
         observation = session.request(base_url, new_text, output_tokens, index=attempt, messages=messages,
-                                      extra_body=extra)
+                                      extra_body=body or None, temperature=temperature)
         if observation.completion_tokens < output_tokens:
             raise RuntimeError(
                 f"depth {depth}: server generated {observation.completion_tokens} of {output_tokens} tokens "
