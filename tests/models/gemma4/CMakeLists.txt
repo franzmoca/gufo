@@ -35,6 +35,8 @@ if (ENGINE_ENABLE_HIP)
   target_link_libraries(gemma4_target_test PRIVATE gufo_gemma4
     gufo_gemma4_reference)
   set_source_files_properties(target_test.cpp PROPERTIES COMPILE_OPTIONS "-O2")
+  target_compile_definitions(gemma4_target_test PRIVATE
+    GUFO_GEMMA4_FIXTURES="${PROJECT_SOURCE_DIR}/tests/models/gemma4/fixtures")
   add_test(NAME gemma4.target COMMAND gemma4_target_test)
   set_tests_properties(gemma4.target PROPERTIES
     LABELS "gemma4;hip;gpu;gfx1151;quality;external-model;slow"

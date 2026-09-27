@@ -8,6 +8,7 @@
 #include <cmath>
 #include <cstdint>
 #include <cstdlib>
+#include <fstream>
 #include <iostream>
 #include <string>
 #include <vector>
@@ -28,9 +29,11 @@ namespace {
 /// never loosened. Observed: decode mean KL 2.4e-7, prefill mean KL 0.0084.
 constexpr double kDecodeMeanKl = 1e-5;
 constexpr double kPrefillMeanKl = 0.015;
-/// Bulk prefill vs exact rows over the 1353-token snapshot prompt;
-/// observed 1.39 (2026-09-26).
-constexpr double kLongPrefillMeanKl = 1.6;
+/// Bulk prefill vs exact rows over a realistic conversation that wraps the
+/// sliding ring (fixtures/long_conversation.txt). Set 2026-09-27 at about
+/// twice the values observed under rounding-only kernel changes
+/// (0.056-0.076); a broken window, ring or tile gives values above 1.
+constexpr double kLongPrefillMeanKl = 0.15;
 
 struct Stats {
   double mean_kl{0.0};
@@ -130,6 +133,42 @@ std::vector<g4::TokenId> Generate(
     *stats_out = stats;
   }
   return out;
+}
+
+/// The fixture conversation: turns separated by "@@ user" / "@@ model".
+std::vector<g4::TokenId> ConversationTokens(const g4::Model& model) {
+  std::ifstream in(std::string(GUFO_GEMMA4_FIXTURES) +
+                   "/long_conversation.txt");
+  Require(in.good(), "long_conversation.txt is missing");
+  std::vector<gufo::tokenization::ChatMessage> messages;
+  std::string line;
+  std::string text;
+  auto role = gufo::tokenization::ChatRole::kUser;
+  bool open = false;
+  const auto flush = [&] {
+    if (open) {
+      while (!text.empty() && text.back() == '\n') {
+        text.pop_back();
+      }
+      messages.emplace_back(role, text);
+    }
+    text.clear();
+  };
+  while (std::getline(in, line)) {
+    if (line == "@@ user" || line == "@@ model") {
+      flush();
+      role = line == "@@ user" ? gufo::tokenization::ChatRole::kUser
+                               : gufo::tokenization::ChatRole::kAssistant;
+      open = true;
+    } else {
+      text += line + "\n";
+    }
+  }
+  flush();
+  std::string error;
+  const auto rendered = g4::ChatTemplate::Render(messages, {}, {}, &error);
+  Require(rendered.has_value(), error);
+  return model.Tokenize(rendered->text);
 }
 
 std::vector<g4::TokenId> PromptTokens(const g4::Model& model,
@@ -265,18 +304,33 @@ int main() {
     serialized.reset();
 
     // Bulk prefill over many attention tiles and a wrapped ring stays close
-    // to the exact small-batch rows. The repeated text makes this prompt very
-    // sensitive to prefill's binary16/Q8_1 rounding: llama.cpp's teacher-forced
-    // logits sit at mean KL 2.93 from the same exact rows.
+    // to the exact small-batch rows on a realistic conversation.
     {
-      const auto exact = GpuLogits(*model, long_prompt, 8);
-      const auto bulk = GpuLogits(*model, long_prompt, long_prompt.size());
+      const auto conversation = ConversationTokens(*model);
+      Require(conversation.size() > model->SessionRingSlots() + 64 &&
+                  conversation.size() + 16 < options.max_context,
+              "conversation (" + std::to_string(conversation.size()) +
+                  " tokens) does not wrap the sliding ring");
+      const auto exact = GpuLogits(*model, conversation, 8);
+      const auto bulk = GpuLogits(*model, conversation, conversation.size());
       const Stats lp = Compare(exact, bulk, vocab);
       std::cout << "long prefill vs exact rows (" << lp.rows
                 << " tokens): mean KL " << lp.mean_kl << ", max " << lp.max_kl
                 << ", top-1 " << lp.top1 << "/" << lp.rows << '\n';
       Require(lp.mean_kl < kLongPrefillMeanKl,
               "long prefill exceeds its KL envelope");
+    }
+    // Reported only: the repeated snapshot prompt is ill-conditioned (many
+    // near-tied predictions), so any rounding change moves this value
+    // (llama.cpp's teacher-forced logits sit at mean KL 2.93 from the same
+    // exact rows).
+    {
+      const auto exact = GpuLogits(*model, long_prompt, 8);
+      const auto bulk = GpuLogits(*model, long_prompt, long_prompt.size());
+      const Stats lp = Compare(exact, bulk, vocab);
+      std::cout << "repetitive prefill vs exact rows (" << lp.rows
+                << " tokens, reported): mean KL " << lp.mean_kl << ", top-1 "
+                << lp.top1 << "/" << lp.rows << '\n';
     }
 
     if (draft == nullptr || *draft == '\0') {
