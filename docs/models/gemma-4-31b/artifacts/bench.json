@@ -31,7 +31,7 @@
       "--mtp-model",
       "{mtp}",
       "--draft-tokens",
-      "4"
+      "7"
     ],
     "reference": {
       "args": [

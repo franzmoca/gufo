@@ -14,15 +14,15 @@
       "gpuName": "AMD Radeon 8060S Graphics",
       "gpuPciId": "1002:1586",
       "kernelRelease": "7.2.7-200.fc44.x86_64",
-      "memoryTotalBytes": 133610647552,
+      "memoryTotalBytes": 133616873472,
       "memoryType": "LPDDR5X (Unified)",
       "rocmVersion": "7.2.3",
       "schemaVersion": "1.0.0"
     },
-    "fingerprintId": "8b3d0a6355518b274a90b737c79631a4da9653721411bc60e4d6847f4605ebcb",
+    "fingerprintId": "f94b1af68c1490af59badc77b6ee2b002119985fa41fd820f3db1d38a94eb12a",
     "schemaVersion": "1.0.0"
   },
-  "measuredOn": "2026-09-26",
+  "measuredOn": "2026-09-27",
   "mode": "mtp",
   "model": {
     "id": "Gemma-4-31B-It",
@@ -35,8 +35,8 @@
   "referenceName": "llama.cpp",
   "rows": {
     "default": {
-      "command": "gufo serve --port 46619 --sessions 1 llm --model gemma-4-31B-it-UD-Q4_K_XL.gguf --context 262144 --served-model-name bench --think off --max-pending-per-client 8 --speculative mtp --mtp-model mtp-gemma-4-31B-it-Q8_0.gguf --draft-tokens 4",
-      "ready_s": 4.159,
+      "command": "gufo serve --port 49733 --sessions 1 llm --model gemma-4-31B-it-UD-Q4_K_XL.gguf --context 262144 --served-model-name bench --think off --max-pending-per-client 8 --speculative mtp --mtp-model mtp-gemma-4-31B-it-Q8_0.gguf --draft-tokens 7",
+      "ready_s": 4.409,
       "ready_s_sd": null,
       "samples": 1
     }
@@ -47,7 +47,7 @@
       "gufo",
       "serve",
       "--port",
-      "46619",
+      "49733",
       "--sessions",
       "1",
       "llm",
@@ -66,13 +66,13 @@
       "--mtp-model",
       "mtp-gemma-4-31B-it-Q8_0.gguf",
       "--draft-tokens",
-      "4"
+      "7"
     ]
   },
   "source": {
     "buildMode": "nix-release",
     "dirty": true,
-    "revision": "2d9ed3ece2a41089d649033323d30a4ef727de87"
+    "revision": "85e370831200973e9ac2410322de8b5ad41a8bd2"
   },
   "table": "loading",
   "target": "gufo"

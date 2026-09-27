@@ -377,3 +377,14 @@ Each milestone is a testable state with Conventional Commits on `feat/gemma`. M4
   configuration (bit-identical to decode): MTP cycle at depth 0 136.6 → 133.0
   ms. A Gemma-owned verification GEMV reached 103 ms per token of projections
   against the shared kernel's 93 ms and was dropped.
+
+**2026-09-27 — MTP draft cost and length, benchmark refresh.**
+
+- The drafter's vocabulary head is read as Q4_K (draft step −0.57 ms, same
+  acceptance); seven and eight verification rows no longer take a second
+  attention pass.
+- Draft chains end when the drafter's confidence that all drafts are
+  accepted falls below a floor; Gufo now benchmarks with up to seven drafts.
+- Release refresh: MTP prose +0–7% and repetitive text +8–21% over the
+  previous tables, sampled MTP within noise to +11%; prefill +5–16% from the
+  prefill attention work. Loading 4.16 → 4.41 s (includes the head repack).

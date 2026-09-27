@@ -54,8 +54,9 @@ is a skip, not a pass. For teacher-forced comparisons with llama.cpp:
 
 ## Benchmark method
 
-September 26–27, 2026; one warmed sample per point, greedy, thinking off, four
-MTP draft tokens on both engines. Single-user uses pp2048/tg128 after a cached
+September 26–27, 2026; one warmed sample per point, greedy, thinking off. MTP
+drafts up to seven tokens under Gufo's confidence-based length control
+(`--draft-tokens 7`) and up to four on llama.cpp and the fork. Single-user uses pp2048/tg128 after a cached
 prefix of the stated depth. Loading: cold files (page cache dropped with
 `echo 3 > /proc/sys/vm/drop_caches`), C1, MTP, capacity 262144. Memory: C1, AR,
 capacity 133121, peak device-global HIP allocation. The llama.cpp reference is

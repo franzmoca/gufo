@@ -35,198 +35,198 @@
   "referenceName": "llama.cpp",
   "rows": {
     "0": {
-      "acceptance": 38.66,
-      "acceptance_sd": 3.25,
-      "accepted_per_step": 1.48,
+      "acceptance": 50.65,
+      "acceptance_sd": 3.48,
+      "accepted_per_step": 1.25,
       "accepted_per_step_sd": 0.12,
-      "command": "gufo serve --port 35181 --sessions 1 llm --model gemma-4-31B-it-UD-Q4_K_XL.gguf --context 133760 --served-model-name bench --think off --max-pending-per-client 8 --speculative mtp --mtp-model mtp-gemma-4-31B-it-Q8_0.gguf --draft-tokens 4",
+      "command": "gufo serve --port 59169 --sessions 1 llm --model gemma-4-31B-it-UD-Q4_K_XL.gguf --context 133760 --served-model-name bench --think off --max-pending-per-client 8 --speculative mtp --mtp-model mtp-gemma-4-31B-it-Q8_0.gguf --draft-tokens 7",
       "counts": [
         {
           "cache_n": 0,
-          "completion_sha256": "c7c6f3f42d6b9b6bd0bf2a2a3bcec2add35670dae6550d8430a59fddf28ae4d5",
-          "draft_n": 201,
-          "draft_n_accepted": 76,
+          "completion_sha256": "7109e29c71a8f3e722e5370f40be5256fbdeda60419d582982304f32f7bd2721",
+          "draft_n": 143,
+          "draft_n_accepted": 68,
           "predicted_n": 128,
           "prompt_n": 2038
         },
         {
           "cache_n": 0,
-          "completion_sha256": "c03e427859013b8ec5d523ae6d74ec9e22ac4ac29fae928630673839c9aed77a",
-          "draft_n": 187,
-          "draft_n_accepted": 79,
-          "predicted_n": 128,
-          "prompt_n": 2038
-        },
-        {
-          "cache_n": 0,
-          "completion_sha256": "697b03e4759144b9de25affea089085595edf8827e056866269c6fc3bc2499de",
-          "draft_n": 206,
+          "completion_sha256": "b5e4adacc3c6b3fc581a1fa673dfa3912083f3e9486da86735c1dd202849ed37",
+          "draft_n": 136,
           "draft_n_accepted": 74,
+          "predicted_n": 128,
+          "prompt_n": 2038
+        },
+        {
+          "cache_n": 0,
+          "completion_sha256": "8185636526f461b226a36e74e3169293982a475ba527cae448e1ff038b01e64b",
+          "draft_n": 142,
+          "draft_n_accepted": 71,
           "predicted_n": 128,
           "prompt_n": 2051
         }
       ],
-      "pp": 393.19,
-      "pp_sd": 1.86,
+      "pp": 418.29,
+      "pp_sd": 3.52,
       "samples": 3,
-      "tg": 19.84,
-      "tg_sd": 0.92,
+      "tg": 19.78,
+      "tg_sd": 0.8,
       "workload": "story"
     },
     "16384": {
-      "acceptance": 37.58,
-      "acceptance_sd": 4.55,
-      "accepted_per_step": 1.44,
-      "accepted_per_step_sd": 0.16,
-      "command": "gufo serve --port 35181 --sessions 1 llm --model gemma-4-31B-it-UD-Q4_K_XL.gguf --context 133760 --served-model-name bench --think off --max-pending-per-client 8 --speculative mtp --mtp-model mtp-gemma-4-31B-it-Q8_0.gguf --draft-tokens 4",
+      "acceptance": 53.47,
+      "acceptance_sd": 4.28,
+      "accepted_per_step": 1.29,
+      "accepted_per_step_sd": 0.11,
+      "command": "gufo serve --port 59169 --sessions 1 llm --model gemma-4-31B-it-UD-Q4_K_XL.gguf --context 133760 --served-model-name bench --think off --max-pending-per-client 8 --speculative mtp --mtp-model mtp-gemma-4-31B-it-Q8_0.gguf --draft-tokens 7",
       "counts": [
         {
           "cache_n": 16360,
-          "completion_sha256": "b32e9567fdfbfaa06614afde7d65605516c732cd13f1d8cac9b22f87e706aa72",
-          "draft_n": 204,
-          "draft_n_accepted": 75,
+          "completion_sha256": "03a441ede08d9bf3e3155c15ff6f99e0a1fcd46a267a3516944789f8bfbe916c",
+          "draft_n": 129,
+          "draft_n_accepted": 73,
           "predicted_n": 128,
           "prompt_n": 2066
         },
         {
           "cache_n": 16360,
-          "completion_sha256": "595c52396739de76a932230b52f47428db236d31241220e8c4c314db4ae8f054",
-          "draft_n": 215,
-          "draft_n_accepted": 72,
+          "completion_sha256": "7bdc7ae2b42d94a025978dc7d668cbfe1200f449341f0b81dd0633aa80896472",
+          "draft_n": 142,
+          "draft_n_accepted": 69,
           "predicted_n": 128,
           "prompt_n": 2056
         },
         {
           "cache_n": 16360,
-          "completion_sha256": "483b51efc066a8b1b9bbdc8e9e9d553a51cebe62aacd4f2c975cf5f577461b6b",
-          "draft_n": 186,
-          "draft_n_accepted": 79,
+          "completion_sha256": "fbd1eba34464f4d74151dc9f415799d1078c8753f14351a65312058fb79f067e",
+          "draft_n": 134,
+          "draft_n_accepted": 74,
           "predicted_n": 128,
           "prompt_n": 2060
         }
       ],
-      "pp": 308.22,
-      "pp_sd": 2.63,
+      "pp": 335.9,
+      "pp_sd": 3.8,
       "samples": 3,
-      "tg": 17.95,
-      "tg_sd": 1.18,
+      "tg": 18.26,
+      "tg_sd": 0.75,
       "workload": "story"
     },
     "32768": {
-      "acceptance": 35.04,
-      "acceptance_sd": 5.53,
-      "accepted_per_step": 1.34,
+      "acceptance": 53.4,
+      "acceptance_sd": 4.06,
+      "accepted_per_step": 1.27,
       "accepted_per_step_sd": 0.21,
-      "command": "gufo serve --port 35181 --sessions 1 llm --model gemma-4-31B-it-UD-Q4_K_XL.gguf --context 133760 --served-model-name bench --think off --max-pending-per-client 8 --speculative mtp --mtp-model mtp-gemma-4-31B-it-Q8_0.gguf --draft-tokens 4",
+      "command": "gufo serve --port 59169 --sessions 1 llm --model gemma-4-31B-it-UD-Q4_K_XL.gguf --context 133760 --served-model-name bench --think off --max-pending-per-client 8 --speculative mtp --mtp-model mtp-gemma-4-31B-it-Q8_0.gguf --draft-tokens 7",
       "counts": [
         {
           "cache_n": 32751,
-          "completion_sha256": "f89a67b67b828b5a4e1f8e54b8da840debd655ca5392275b01940528b1840790",
-          "draft_n": 209,
-          "draft_n_accepted": 73,
+          "completion_sha256": "942f5cc5de2f9cde8dab81dc3ca155530bc468ec59ccfd21609ee3d21e2f98e6",
+          "draft_n": 138,
+          "draft_n_accepted": 69,
           "predicted_n": 128,
           "prompt_n": 2050
         },
         {
           "cache_n": 32751,
-          "completion_sha256": "0fb5a7e9d2ce61b8b68650db059637ba9adbf0acb53d421f4cf164062b8b38f8",
-          "draft_n": 192,
-          "draft_n_accepted": 78,
+          "completion_sha256": "77d4d5a36f98699b6fde9dcb12fad86ac5d611a2d0f2b442cf65c1f9f9dee1c9",
+          "draft_n": 133,
+          "draft_n_accepted": 77,
           "predicted_n": 128,
           "prompt_n": 2073
         },
         {
           "cache_n": 32751,
-          "completion_sha256": "053616964af81957d6644cc3ee1213e3191a8f7dbb49610822eb4be3a4ec6bc6",
-          "draft_n": 230,
+          "completion_sha256": "9780474e7877949f17bed919ee58503ddd2881841c2edc77337e705145340e90",
+          "draft_n": 130,
           "draft_n_accepted": 68,
           "predicted_n": 128,
           "prompt_n": 2051
         }
       ],
-      "pp": 261.85,
-      "pp_sd": 3.56,
+      "pp": 292.59,
+      "pp_sd": 4.28,
       "samples": 3,
-      "tg": 16.04,
-      "tg_sd": 1.41,
+      "tg": 16.99,
+      "tg_sd": 1.29,
       "workload": "story"
     },
     "4096": {
-      "acceptance": 35.81,
-      "acceptance_sd": 8.16,
-      "accepted_per_step": 1.37,
-      "accepted_per_step_sd": 0.33,
-      "command": "gufo serve --port 35181 --sessions 1 llm --model gemma-4-31B-it-UD-Q4_K_XL.gguf --context 133760 --served-model-name bench --think off --max-pending-per-client 8 --speculative mtp --mtp-model mtp-gemma-4-31B-it-Q8_0.gguf --draft-tokens 4",
+      "acceptance": 57.22,
+      "acceptance_sd": 5.67,
+      "accepted_per_step": 1.45,
+      "accepted_per_step_sd": 0.18,
+      "command": "gufo serve --port 59169 --sessions 1 llm --model gemma-4-31B-it-UD-Q4_K_XL.gguf --context 133760 --served-model-name bench --think off --max-pending-per-client 8 --speculative mtp --mtp-model mtp-gemma-4-31B-it-Q8_0.gguf --draft-tokens 7",
       "counts": [
         {
           "cache_n": 4073,
-          "completion_sha256": "7ba5ff7596f683fb10bfda2870ce6d5ac5d0eade96ed020214f691dfeda87aab",
-          "draft_n": 233,
-          "draft_n_accepted": 66,
+          "completion_sha256": "44a407d39e72583075026cbba78fb8317003dd035c5ec7d3cc4314c6d133a784",
+          "draft_n": 120,
+          "draft_n_accepted": 73,
           "predicted_n": 128,
           "prompt_n": 2056
         },
         {
           "cache_n": 4073,
-          "completion_sha256": "989ffd5832789386620dd58b468f1ee534cd771bbfea53dbfaaa37fba4966d63",
-          "draft_n": 182,
-          "draft_n_accepted": 81,
+          "completion_sha256": "b3abe54264fe67190d9f2789f8dbaa1585af14052eafb8ca296041815aec21e9",
+          "draft_n": 133,
+          "draft_n_accepted": 80,
           "predicted_n": 128,
           "prompt_n": 2045
         },
         {
           "cache_n": 4073,
-          "completion_sha256": "82e14ce501a61245d59425daf4ee87853df305c87fee734993595b091c6e21ee",
-          "draft_n": 211,
-          "draft_n_accepted": 73,
+          "completion_sha256": "d335b90be55f7cc0803ace991046e43a4d66da599d78f808352b0ad9a5b47cf2",
+          "draft_n": 146,
+          "draft_n_accepted": 74,
           "predicted_n": 128,
           "prompt_n": 2042
         }
       ],
-      "pp": 365.31,
-      "pp_sd": 2.51,
+      "pp": 389.09,
+      "pp_sd": 3.03,
       "samples": 3,
-      "tg": 18.49,
-      "tg_sd": 2.45,
+      "tg": 20.47,
+      "tg_sd": 1.31,
       "workload": "story"
     },
     "65536": {
-      "acceptance": 40.34,
-      "acceptance_sd": 4.37,
-      "accepted_per_step": 1.53,
-      "accepted_per_step_sd": 0.15,
-      "command": "gufo serve --port 35181 --sessions 1 llm --model gemma-4-31B-it-UD-Q4_K_XL.gguf --context 133760 --served-model-name bench --think off --max-pending-per-client 8 --speculative mtp --mtp-model mtp-gemma-4-31B-it-Q8_0.gguf --draft-tokens 4",
+      "acceptance": 51.2,
+      "acceptance_sd": 7.35,
+      "accepted_per_step": 1.33,
+      "accepted_per_step_sd": 0.21,
+      "command": "gufo serve --port 59169 --sessions 1 llm --model gemma-4-31B-it-UD-Q4_K_XL.gguf --context 133760 --served-model-name bench --think off --max-pending-per-client 8 --speculative mtp --mtp-model mtp-gemma-4-31B-it-Q8_0.gguf --draft-tokens 7",
       "counts": [
         {
           "cache_n": 65543,
-          "completion_sha256": "d6be34fefceb068b60a62e6943ab34145e09ba41cee4598d111790cd6c803851",
-          "draft_n": 180,
-          "draft_n_accepted": 80,
+          "completion_sha256": "60afd58c029846e3af004fe84af41a12ad27d9dbb1951c875d77f94a0652b355",
+          "draft_n": 135,
+          "draft_n_accepted": 77,
           "predicted_n": 128,
           "prompt_n": 2075
         },
         {
           "cache_n": 65543,
-          "completion_sha256": "5f7f9793df0985bcb224ed2205df2fe9af38ed835924676d958d5b8a4c5a1dd1",
-          "draft_n": 207,
-          "draft_n_accepted": 74,
+          "completion_sha256": "cd07c7d8cd9721b819768f5bb1b7d14a4bd24a3dec41c2092657903db85f71a2",
+          "draft_n": 156,
+          "draft_n_accepted": 67,
           "predicted_n": 128,
           "prompt_n": 2062
         },
         {
           "cache_n": 65543,
-          "completion_sha256": "9dd2936ed6b48ef1927b4ad83f0d29d0a09b74e34457a903a13b049fe61002c3",
-          "draft_n": 191,
-          "draft_n_accepted": 78,
+          "completion_sha256": "2b64b7cd959138117ca9fb4322984fbf2b30cd6157208dda809404ed9e8f758b",
+          "draft_n": 138,
+          "draft_n_accepted": 74,
           "predicted_n": 128,
           "prompt_n": 2075
         }
       ],
-      "pp": 197.77,
-      "pp_sd": 0.61,
+      "pp": 225.93,
+      "pp_sd": 1.08,
       "samples": 3,
-      "tg": 15.1,
-      "tg_sd": 0.91,
+      "tg": 15.11,
+      "tg_sd": 1.29,
       "workload": "story"
     }
   },
@@ -236,7 +236,7 @@
       "gufo",
       "serve",
       "--port",
-      "35181",
+      "59169",
       "--sessions",
       "1",
       "llm",
@@ -255,13 +255,13 @@
       "--mtp-model",
       "mtp-gemma-4-31B-it-Q8_0.gguf",
       "--draft-tokens",
-      "4"
+      "7"
     ]
   },
   "source": {
     "buildMode": "nix-release",
     "dirty": true,
-    "revision": "dbf64ab72da7e6784500da66fe2cd949381ac9d7"
+    "revision": "85e370831200973e9ac2410322de8b5ad41a8bd2"
   },
   "table": "single-mtp-sampled",
   "target": "gufo"
