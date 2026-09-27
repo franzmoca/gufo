@@ -107,20 +107,30 @@ void Attention(const AttentionArgs& args, hipStream_t stream);
                                                  std::uint32_t max_keys);
 
 /// x[r] += rms(o[r]) * post_norm; h[r] = rms(x[r]) * next_norm.
+/// With `q8`, h is written instead as the tiled Q8_1 prefill activation of
+/// hip::LaunchQuantizeActivationQ8_1FromFp32 (same layout and rounding; a
+/// block scale may differ by one ulp).
 void PostAttentionNorm(const float* o, const float* post_norm, float* x,
                        const float* next_norm, float* h, std::uint32_t rows,
-                       std::uint32_t dim, float eps, hipStream_t stream);
+                       std::uint32_t dim, float eps, hipStream_t stream,
+                       void* q8 = nullptr);
 
 /// x[r] = (x[r] + rms(f[r]) * post_norm) * scale;
-/// h[r] = rms(x[r]) * next_norm (next_norm null skips h).
+/// h[r] = rms(x[r]) * next_norm (next_norm null skips h); with `q8`, h is
+/// written as the Q8_1 prefill activation instead (see PostAttentionNorm).
 void PostFeedForwardNorm(const float* f, const float* post_norm, float scale,
                          float* x, const float* next_norm, float* h,
                          std::uint32_t rows, std::uint32_t dim, float eps,
-                         hipStream_t stream);
+                         hipStream_t stream, void* q8 = nullptr);
 
 /// out = gelu_tanh(gate) * up, elementwise over `count` values.
 void GeGlu(const float* gate, const float* up, float* out, std::size_t count,
            hipStream_t stream);
+/// GeGlu over [rows][cols] written as the Q8_1 prefill activation, as GeGlu
+/// followed by hip::LaunchQuantizeActivationQ8_1FromFp32 (see
+/// PostAttentionNorm).
+void GeGluQuantize(const float* gate, const float* up, void* q8,
+                   std::uint32_t rows, std::uint32_t cols, hipStream_t stream);
 
 /// y = x * scale, elementwise (y may alias x).
 void Scale(const float* x, float scale, float* y, std::size_t count,

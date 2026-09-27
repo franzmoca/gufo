@@ -346,11 +346,16 @@ void Executor::Forward(KvCache& cache, std::span<const std::int32_t> tokens,
   ScaleRmsNorm(x_, std::sqrt(static_cast<float>(d)), layers[0].attn_norm.f32(),
                h_, n, d, eps, stream_);
 
+  // Prefill (rows past the small-batch width) quantizes activations for the
+  // W8A8 GEMMs; the norms and GeGLU write that encoding directly.
+  const bool prefill = n > kSplitRows;
   for (std::uint32_t l = 0; l < c.num_layers; ++l) {
     const DeviceLayer& L = layers[l];
     const bool sliding = c.IsSliding(l);
     const std::uint32_t dim = c.HeadDim(l);
-    const void* hq = Quantize(h_, n, d);
+    // Layer l > 0 of a prefill reads the Q8_1 rows the previous layer's
+    // post-FFN norm wrote.
+    const void* hq = prefill && l > 0 ? q8_ : Quantize(h_, n, d);
     Project(L.attn_q, h_, hq, n, q_);
     Project(L.attn_k, h_, hq, n, k_);
     const float* v_source = k_;
@@ -399,16 +404,25 @@ void Executor::Forward(KvCache& cache, std::span<const std::int32_t> tokens,
 
     Project(L.attn_output, attn_, Quantize(attn_, n, c.QDim(l)), n, o_);
     PostAttentionNorm(o_, L.post_attn_norm.f32(), x_, L.ffn_norm.f32(), h_, n,
-                      d, eps, stream_);
-    const void* fq = Quantize(h_, n, d);
+                      d, eps, stream_, prefill ? q8_ : nullptr);
+    const void* fq = prefill ? q8_ : nullptr;
     Project(L.ffn_gate, h_, fq, n, gate_);
     Project(L.ffn_up, h_, fq, n, up_);
-    GeGlu(gate_, up_, gate_, std::size_t{n} * c.ffn_size, stream_);
-    Project(L.ffn_down, gate_, Quantize(gate_, n, c.ffn_size), n, o_);
-    const float* next = l + 1 < c.num_layers ? layers[l + 1].attn_norm.f32()
-                                             : model_.output_norm().f32();
+    const void* gq = nullptr;
+    if (prefill) {
+      GeGluQuantize(gate_, up_, q8_, n, c.ffn_size, stream_);
+      gq = q8_;
+    } else {
+      GeGlu(gate_, up_, gate_, std::size_t{n} * c.ffn_size, stream_);
+    }
+    Project(L.ffn_down, gate_, gq, n, o_);
+    const bool last = l + 1 == c.num_layers;
+    const float* next =
+        !last ? layers[l + 1].attn_norm.f32() : model_.output_norm().f32();
+    // The output-normed rows of the last layer feed the vocabulary head and
+    // the drafter in FP32.
     PostFeedForwardNorm(o_, L.post_ffn_norm.f32(), L.output_scale, x_, next, h_,
-                        n, d, eps, stream_);
+                        n, d, eps, stream_, prefill && !last ? q8_ : nullptr);
   }
 
   const auto m = static_cast<std::uint32_t>(logit_rows.size());

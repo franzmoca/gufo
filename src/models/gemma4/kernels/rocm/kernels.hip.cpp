@@ -8,6 +8,7 @@
 #include <stdexcept>
 
 #include "src/models/gemma4/kernels/rocm/attention_wmma.hpp"
+#include "src/models/qwen/hip/kernels/prefill_quant_gemm.hpp"
 
 namespace gufo::models::gemma4::rocm {
 namespace {
@@ -93,6 +94,28 @@ __device__ inline float RmsScale(float sum_squares, std::uint32_t dim,
   return rsqrtf(sum_squares / static_cast<float>(dim) + eps);
 }
 
+/// One lane's value of a 32-element block into the tiled Q8_1 prefill
+/// activation, in hip::LaunchQuantizeActivationQ8_1FromFp32's layout and
+/// rounding (built here with fast-math, a scale may differ by one ulp). The
+/// wave holds the whole block; `batch` is the real row count.
+__device__ inline void QuantizeQ8Lane(void* q8, std::size_t batch,
+                                      std::size_t num_blocks, std::size_t tok,
+                                      std::size_t blk, float val) {
+  const float max_abs = WaveMax(fabsf(val));
+  const float d = max_abs / 127.0F;
+  const float id = d != 0.0F ? 1.0F / d : 0.0F;
+  const auto q = static_cast<std::int8_t>(roundf(val * id));
+  hip::StoreQ8ActLane<true>(q8, batch, num_blocks, tok, blk,
+                            threadIdx.x % kWave, d, q);
+}
+
+/// Q8_1 tiles cover whole 16-row groups; rows past the batch quantize zeros.
+__host__ __device__ inline std::uint32_t Q8Rows(std::uint32_t rows) {
+  return (rows + static_cast<std::uint32_t>(hip::kQ8ActTileTokens) - 1) /
+         static_cast<std::uint32_t>(hip::kQ8ActTileTokens) *
+         static_cast<std::uint32_t>(hip::kQ8ActTileTokens);
+}
+
 // ---------------------------------------------------------------------------
 // Norms
 // ---------------------------------------------------------------------------
@@ -137,12 +160,47 @@ __global__ void __launch_bounds__(kThreads)
 /// of every strided loop here.
 constexpr std::uint32_t kRowRegisters = 24;
 
+/// h = x * r * next_norm for this block's row (thread t holds elements
+/// t + 256 j), or, with `q8`, those values quantized into the prefill
+/// activation: each 32-element block lies in one wave.
+__device__ inline void StoreNormedRow(const float (&xv)[kRowRegisters], float r,
+                                      const float* next_norm, float* h,
+                                      void* q8, std::uint32_t rows,
+                                      std::uint32_t dim) {
+  const std::size_t base = static_cast<std::size_t>(blockIdx.x) * dim;
+#pragma unroll
+  for (std::uint32_t j = 0; j < kRowRegisters; ++j) {
+    const std::uint32_t i = threadIdx.x + j * kThreads;
+    const float v = i < dim ? xv[j] * r * next_norm[i] : 0.0F;
+    if (q8 == nullptr) {
+      if (i < dim) {
+        h[base + i] = v;
+      }
+    } else if (i - threadIdx.x % kWave < dim) {
+      QuantizeQ8Lane(q8, rows, dim / 32, blockIdx.x, i / 32, v);
+    }
+  }
+}
+
+/// Zero quantized blocks for a padding row of the last 16-row Q8_1 tile.
+__device__ inline void QuantizeRowTail(void* q8, std::uint32_t rows,
+                                       std::uint32_t dim) {
+  for (std::uint32_t i = threadIdx.x; i - threadIdx.x % kWave < dim;
+       i += kThreads) {
+    QuantizeQ8Lane(q8, rows, dim / 32, blockIdx.x, i / 32, 0.0F);
+  }
+}
+
 __global__ void __launch_bounds__(kThreads)
     PostAttentionNormKernel(const float* o, const float* post_norm, float* x,
                             const float* next_norm, float* h, std::uint32_t dim,
-                            float eps) {
+                            float eps, void* q8, std::uint32_t rows) {
   __shared__ float scratch[kWaves];
   const std::size_t base = static_cast<std::size_t>(blockIdx.x) * dim;
+  if (blockIdx.x >= rows) {
+    QuantizeRowTail(q8, rows, dim);
+    return;
+  }
   float ov[kRowRegisters];
   float xv[kRowRegisters];
   float ss = 0.0F;
@@ -165,21 +223,20 @@ __global__ void __launch_bounds__(kThreads)
     }
   }
   const float r2 = RmsScale(BlockSum(ss2, scratch), dim, eps);
-#pragma unroll
-  for (std::uint32_t j = 0; j < kRowRegisters; ++j) {
-    const std::uint32_t i = threadIdx.x + j * kThreads;
-    if (i < dim) {
-      h[base + i] = xv[j] * r2 * next_norm[i];
-    }
-  }
+  StoreNormedRow(xv, r2, next_norm, h, q8, rows, dim);
 }
 
 __global__ void __launch_bounds__(kThreads)
     PostFeedForwardNormKernel(const float* f, const float* post_norm,
                               float scale, float* x, const float* next_norm,
-                              float* h, std::uint32_t dim, float eps) {
+                              float* h, std::uint32_t dim, float eps, void* q8,
+                              std::uint32_t rows) {
   __shared__ float scratch[kWaves];
   const std::size_t base = static_cast<std::size_t>(blockIdx.x) * dim;
+  if (blockIdx.x >= rows) {
+    QuantizeRowTail(q8, rows, dim);
+    return;
+  }
   float fv[kRowRegisters];
   float xv[kRowRegisters];
   float ss = 0.0F;
@@ -205,13 +262,7 @@ __global__ void __launch_bounds__(kThreads)
     return;
   }
   const float r2 = RmsScale(BlockSum(ss2, scratch), dim, eps);
-#pragma unroll
-  for (std::uint32_t j = 0; j < kRowRegisters; ++j) {
-    const std::uint32_t i = threadIdx.x + j * kThreads;
-    if (i < dim) {
-      h[base + i] = xv[j] * r2 * next_norm[i];
-    }
-  }
+  StoreNormedRow(xv, r2, next_norm, h, q8, rows, dim);
 }
 
 // ---------------------------------------------------------------------------
@@ -1041,18 +1092,45 @@ void LaunchAttention(const AttentionArgs& a, hipStream_t stream) {
 // Elementwise
 // ---------------------------------------------------------------------------
 
-__global__ void GeGluKernel(const float* gate, const float* up, float* out,
-                            std::size_t count) {
+/// gelu_tanh(x) * u; one out-of-line body so decode and the fused prefill
+/// path round identically.
+__device__ __attribute__((noinline)) float GeGluValue(float x, float u) {
   constexpr float kSqrt2OverPi = 0.79788456080286535587989211986876F;
   constexpr float kCoefA = 0.044715F;
+  const float g =
+      0.5F * x * (1.0F + tanhf(kSqrt2OverPi * x * (1.0F + kCoefA * x * x)));
+  return g * u;
+}
+
+__global__ void GeGluKernel(const float* gate, const float* up, float* out,
+                            std::size_t count) {
   const std::size_t i =
       static_cast<std::size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
   if (i < count) {
-    const float x = gate[i];
-    const float g =
-        0.5F * x * (1.0F + tanhf(kSqrt2OverPi * x * (1.0F + kCoefA * x * x)));
-    out[i] = g * up[i];
+    out[i] = GeGluValue(gate[i], up[i]);
   }
+}
+
+/// GeGluKernel's values quantized straight into the prefill activation:
+/// one wave per 32-element block of one row.
+__global__ void GeGluQuantizeKernel(const float* gate, const float* up,
+                                    void* q8, std::uint32_t rows,
+                                    std::uint32_t cols) {
+  const std::uint32_t blocks = cols / 32;
+  const std::size_t unit =
+      static_cast<std::size_t>(blockIdx.x) * kWaves + threadIdx.x / kWave;
+  const auto row = static_cast<std::uint32_t>(unit / blocks);
+  const auto blk = static_cast<std::uint32_t>(unit % blocks);
+  if (row >= Q8Rows(rows)) {
+    return;
+  }
+  float value = 0.0F;
+  if (row < rows) {
+    const std::size_t i =
+        static_cast<std::size_t>(row) * cols + blk * 32 + threadIdx.x % kWave;
+    value = GeGluValue(gate[i], up[i]);
+  }
+  QuantizeQ8Lane(q8, rows, blocks, row, blk, value);
 }
 
 __global__ void ScaleKernel(const float* x, float scale, float* y,
@@ -1150,23 +1228,34 @@ std::size_t AttentionPartialFloats(std::uint32_t rows, std::uint32_t heads,
 
 void PostAttentionNorm(const float* o, const float* post_norm, float* x,
                        const float* next_norm, float* h, std::uint32_t rows,
-                       std::uint32_t dim, float eps, hipStream_t stream) {
+                       std::uint32_t dim, float eps, hipStream_t stream,
+                       void* q8) {
   if (dim > kRowRegisters * kThreads) {
     throw std::invalid_argument("PostAttentionNorm row is too wide");
   }
-  PostAttentionNormKernel<<<rows, kThreads, 0, stream>>>(
-      o, post_norm, x, next_norm, h, dim, eps);
+  PostAttentionNormKernel<<<q8 != nullptr ? Q8Rows(rows) : rows, kThreads, 0,
+                            stream>>>(o, post_norm, x, next_norm, h, dim, eps,
+                                      q8, rows);
 }
 
 void PostFeedForwardNorm(const float* f, const float* post_norm, float scale,
                          float* x, const float* next_norm, float* h,
                          std::uint32_t rows, std::uint32_t dim, float eps,
-                         hipStream_t stream) {
+                         hipStream_t stream, void* q8) {
   if (dim > kRowRegisters * kThreads) {
     throw std::invalid_argument("PostFeedForwardNorm row is too wide");
   }
-  PostFeedForwardNormKernel<<<rows, kThreads, 0, stream>>>(
-      f, post_norm, scale, x, next_norm, h, dim, eps);
+  PostFeedForwardNormKernel<<<q8 != nullptr ? Q8Rows(rows) : rows, kThreads, 0,
+                              stream>>>(f, post_norm, scale, x, next_norm, h,
+                                        dim, eps, q8, rows);
+}
+
+void GeGluQuantize(const float* gate, const float* up, void* q8,
+                   std::uint32_t rows, std::uint32_t cols, hipStream_t stream) {
+  const std::size_t units =
+      static_cast<std::size_t>(Q8Rows(rows)) * (cols / 32);
+  GeGluQuantizeKernel<<<static_cast<unsigned>((units + kWaves - 1) / kWaves),
+                        kThreads, 0, stream>>>(gate, up, q8, rows, cols);
 }
 
 void GeGlu(const float* gate, const float* up, float* out, std::size_t count,

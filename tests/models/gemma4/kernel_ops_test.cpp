@@ -1,18 +1,22 @@
 // Gemma 4 elementwise and per-row kernels against FP64 formulas: Q/K/V
 // post-processing (weighted and unweighted norms, NEOX rope with frequency
 // divisors, binary16 cache slots in linear and ring caches), the fused
-// residual norms, GeGLU and the logit softcap.
+// residual norms, GeGLU and the logit softcap; the fused prefill
+// quantization writes the shared Q8_1 activation.
 #include <hip/hip_runtime.h>
 
+#include <algorithm>
 #include <cmath>
 #include <cstdint>
 #include <cstring>
+#include <iostream>
 #include <random>
 #include <string>
 #include <vector>
 
 #include "src/core/hip/hip_utils.hpp"
 #include "src/models/gemma4/kernels/rocm/kernels.hpp"
+#include "src/models/qwen/hip/ops/gemm.hpp"
 #include "tests/models/gemma4/check.hpp"
 
 namespace k = gufo::models::gemma4::rocm;
@@ -304,6 +308,121 @@ void CheckElementwise() {
 
 }  // namespace
 
+/// Prefill producers that write the Q8_1 activation directly match the FP32
+/// producer followed by the shared quantizer, including the zeroed padding
+/// rows of a partial 16-row tile.
+void CheckFusedQuantize(std::mt19937& rng) {
+  std::normal_distribution<float> normal(0.0F, 1.0F);
+  for (const std::uint32_t rows : {37U, 64U}) {
+    constexpr std::uint32_t kDim = 5376;
+    constexpr std::uint32_t kFfn = 2048;
+    const std::size_t bytes =
+        std::max(gufo::hip::QuantizedActivationBytes(rows, kDim),
+                 gufo::hip::QuantizedActivationBytes(rows, kFfn));
+    const auto random = [&](std::size_t n, float scale) {
+      std::vector<float> v(n);
+      for (float& x : v)
+        x = normal(rng) * scale;
+      return v;
+    };
+    void* want = nullptr;
+    void* got = nullptr;
+    HIP_CHECK(hipMalloc(&want, bytes));
+    HIP_CHECK(hipMalloc(&got, bytes));
+    // Dequantized values agree within one quantization step (the fused
+    // producers build with fast-math, so a block scale may differ by an ulp);
+    // padding rows of the last 16-row tile are exactly zero in both.
+    const auto compare = [&](std::uint32_t cols, const std::string& what) {
+      HIP_CHECK(hipDeviceSynchronize());
+      const std::size_t n = gufo::hip::QuantizedActivationBytes(rows, cols);
+      std::vector<std::uint8_t> a(n), b(n);
+      HIP_CHECK(hipMemcpy(a.data(), want, n, hipMemcpyDeviceToHost));
+      HIP_CHECK(hipMemcpy(b.data(), got, n, hipMemcpyDeviceToHost));
+      constexpr std::size_t kTile = 576;
+      const std::size_t blocks = cols / 32;
+      const std::size_t tiles = (rows + 15) / 16;
+      double worst = 0.0;
+      std::size_t differing = 0;
+      for (std::size_t tt = 0; tt < tiles; ++tt) {
+        for (std::size_t blk = 0; blk < blocks; ++blk) {
+          const std::uint8_t* ta = a.data() + (tt * blocks + blk) * kTile;
+          const std::uint8_t* tb = b.data() + (tt * blocks + blk) * kTile;
+          for (std::size_t tl = 0; tl < 16; ++tl) {
+            float da, db;
+            std::memcpy(&da, ta + 512 + tl * 4, 4);
+            std::memcpy(&db, tb + 512 + tl * 4, 4);
+            for (std::size_t lane = 0; lane < 32; ++lane) {
+              const std::size_t at = (lane >> 4) * 256 + tl * 16 + (lane & 15);
+              const double va = static_cast<std::int8_t>(ta[at]) * double{da};
+              const double vb = static_cast<std::int8_t>(tb[at]) * double{db};
+              if (tt * 16 + tl >= rows) {
+                Require(va == 0.0 && vb == 0.0,
+                        what + ": padding row not zero");
+              }
+              worst = std::max(worst, std::fabs(va - vb) / (da + 1e-30));
+              differing += ta[at] != tb[at] || da != db;
+            }
+          }
+        }
+      }
+      std::cout << what << " at " << rows << " rows: " << differing
+                << " values differ from the unfused quantization\n";
+      Require(worst <= 1.01, what + ": fused quantization off by " +
+                                 std::to_string(worst) + " steps at " +
+                                 std::to_string(rows) + " rows");
+    };
+    // GeGLU.
+    float* gate = Device(random(std::size_t{rows} * kFfn, 1.5F));
+    float* up = Device(random(std::size_t{rows} * kFfn, 1.0F));
+    float* act = Device(std::vector<float>(std::size_t{rows} * kFfn));
+    HIP_CHECK(hipMemset(want, 0x5A, bytes));
+    HIP_CHECK(hipMemset(got, 0x5A, bytes));
+    k::GeGlu(gate, up, act, std::size_t{rows} * kFfn, nullptr);
+    gufo::hip::LaunchQuantizeActivationQ8_1FromFp32(act, want, rows, kFfn,
+                                                    nullptr);
+    k::GeGluQuantize(gate, up, got, rows, kFfn, nullptr);
+    compare(kFfn, "GeGluQuantize");
+    // Residual norms.
+    const auto o = random(std::size_t{rows} * kDim, 3.0F);
+    const auto x0 = random(std::size_t{rows} * kDim, 10.0F);
+    const auto w1 = random(kDim, 0.3F);
+    const auto w2 = random(kDim, 0.3F);
+    float* d_o = Device(o);
+    float* d_w1 = Device(w1);
+    float* d_w2 = Device(w2);
+    float* x = Device(x0);
+    float* h = Device(std::vector<float>(std::size_t{rows} * kDim));
+    for (int kind = 0; kind < 2; ++kind) {
+      HIP_CHECK(hipMemcpy(x, x0.data(), x0.size() * 4, hipMemcpyHostToDevice));
+      HIP_CHECK(hipMemset(want, 0x5A, bytes));
+      HIP_CHECK(hipMemset(got, 0x5A, bytes));
+      if (kind == 0) {
+        k::PostAttentionNorm(d_o, d_w1, x, d_w2, h, rows, kDim, 1e-6F, nullptr);
+      } else {
+        k::PostFeedForwardNorm(d_o, d_w1, 0.7F, x, d_w2, h, rows, kDim, 1e-6F,
+                               nullptr);
+      }
+      gufo::hip::LaunchQuantizeActivationQ8_1FromFp32(h, want, rows, kDim,
+                                                      nullptr);
+      HIP_CHECK(hipMemcpy(x, x0.data(), x0.size() * 4, hipMemcpyHostToDevice));
+      if (kind == 0) {
+        k::PostAttentionNorm(d_o, d_w1, x, d_w2, h, rows, kDim, 1e-6F, nullptr,
+                             got);
+      } else {
+        k::PostFeedForwardNorm(d_o, d_w1, 0.7F, x, d_w2, h, rows, kDim, 1e-6F,
+                               nullptr, got);
+      }
+      compare(kDim, kind == 0 ? "PostAttentionNorm" : "PostFeedForwardNorm");
+    }
+    for (void* p : {static_cast<void*>(gate), static_cast<void*>(up),
+                    static_cast<void*>(act), static_cast<void*>(d_o),
+                    static_cast<void*>(d_w1), static_cast<void*>(d_w2),
+                    static_cast<void*>(x), static_cast<void*>(h), want, got}) {
+      HIP_CHECK(hipFree(p));
+    }
+  }
+}
+
 int main() {
   int devices = 0;
   if (hipGetDeviceCount(&devices) != hipSuccess || devices == 0) {
@@ -316,5 +435,6 @@ int main() {
     CheckQkvPost(512, true, rng);
     CheckNorms(rng);
     CheckElementwise();
+    CheckFusedQuantize(rng);
   });
 }
