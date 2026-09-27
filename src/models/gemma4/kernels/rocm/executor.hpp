@@ -7,6 +7,7 @@
 #include <cstdint>
 #include <functional>
 #include <memory>
+#include <optional>
 #include <span>
 #include <string>
 #include <vector>
@@ -20,9 +21,10 @@ struct MtpCandidateLogits;
 
 namespace gufo::models::gemma4::rocm {
 
-/// Picks a sampled draft token from the drafter's top candidate logits.
-using DraftProposer =
-    std::function<std::int32_t(const qwen38_flash_next::MtpCandidateLogits&)>;
+/// Picks the next draft token from the drafter's top candidate logits, or
+/// nothing to end the chain before that step's token.
+using DraftProposer = std::function<std::optional<std::int32_t>(
+    const qwen38_flash_next::MtpCandidateLogits&)>;
 
 /// One session's attention state. Global layers keep every position in a
 /// token-major binary16 cache; sliding layers keep a ring of `ring` slots,
@@ -82,15 +84,14 @@ public:
   /// state for drafting.
   void CommitHidden(KvCache& cache, std::uint32_t row);
 
-  /// Drafts `steps` tokens with the MTP drafter after `token` at position
-  /// `position` (the committed frontier), reading the target's KV strictly
-  /// before it and the cache's frontier hidden state. Without `propose` the
-  /// drafts are greedy and every step runs on the device, with one host sync
-  /// for `drafts`. With it, each step hands the drafter's top-64 logits to
-  /// `propose` and embeds the token it returns.
+  /// Drafts up to `steps` tokens with the MTP drafter after `token` at
+  /// position `position` (the committed frontier), reading the target's KV
+  /// strictly before it and the cache's frontier hidden state. Each step
+  /// hands the drafter's top-64 logits to `propose` and embeds the token it
+  /// returns; `drafts` ends where it returns nothing.
   void DraftChain(KvCache& cache, std::int32_t token, std::uint32_t position,
                   std::uint32_t steps, std::vector<std::int32_t>* drafts,
-                  const DraftProposer& propose = {});
+                  const DraftProposer& propose);
 
   /// Copies the logits of the last Forward to the host, [rows][vocab].
   void CopyLogits(std::size_t rows, std::vector<float>* out) const;

@@ -4,8 +4,10 @@
 
 #include <algorithm>
 #include <array>
+#include <cmath>
 #include <cstring>
 #include <exception>
+#include <optional>
 #include <utility>
 
 #include "src/core/gguf_reader.hpp"
@@ -313,6 +315,48 @@ bool Session::EvaluateAll(std::span<const TokenId> tokens,
   return true;
 }
 
+namespace {
+
+// Draft-length control: a chain continues while the drafter's estimate that
+// every draft so far is accepted (the product of its confidences) stays at
+// or above a floor; the draft that falls below it is not verified. Greedy
+// chains use the drafter's top-1 share of its top-64 candidates, sampled
+// chains the probability of the sampled proposal, capped at four drafts
+// because temperature-1 acceptance does not pay for longer ones. Fitted on
+// instrumented prose, repetitive and sampled runs from 0 to 64K (see
+// docs/models/gemma-4-31b/EXPERIMENTS.md).
+constexpr float kGreedyChainFloor = 0.5F;
+constexpr float kSampledChainFloor = 0.3F;
+constexpr std::uint32_t kSampledDraftCap = 4;
+
+/// The top candidate's softmax share among the top-64 logits.
+float TopShare(const qwen38_flash_next::MtpCandidateLogits& candidates) {
+  float top = candidates.logits[0];
+  for (std::size_t i = 1; i < candidates.size; ++i) {
+    top = std::max(top, candidates.logits[i]);
+  }
+  double total = 0.0;
+  for (std::size_t i = 0; i < candidates.size; ++i) {
+    total += std::exp(static_cast<double>(candidates.logits[i] - top));
+  }
+  return static_cast<float>(1.0 / total);
+}
+
+/// The argmax candidate, lowest token id on ties.
+std::int32_t TopToken(const qwen38_flash_next::MtpCandidateLogits& candidates) {
+  std::size_t best = 0;
+  for (std::size_t i = 1; i < candidates.size; ++i) {
+    if (candidates.logits[i] > candidates.logits[best] ||
+        (candidates.logits[i] == candidates.logits[best] &&
+         candidates.ids[i] < candidates.ids[best])) {
+      best = i;
+    }
+  }
+  return static_cast<std::int32_t>(candidates.ids[best]);
+}
+
+}  // namespace
+
 bool Session::DecodeStep(std::size_t max_tokens,
                          sampling::SamplerState& sampler, DecodeResult* result,
                          std::string* error_msg, bool stop_at_eos) {
@@ -357,11 +401,16 @@ bool Session::DecodeStep(std::size_t max_tokens,
   // verified by p/q rejection with residual correction; greedy decoding
   // keeps argmax drafts accepted when the target's own choice agrees.
   const bool sampled = steps > 0 && sampler.config().uses_random_sampling();
+  if (sampled) {
+    steps = std::min(steps, kSampledDraftCap);
+  }
   std::vector<qwen38_flash_next::MtpProposal> proposals;
   try {
     std::lock_guard lock(model_->mutex_);
     if (steps > 0) {
       std::vector<std::int32_t> drafts;
+      float chain = 1.0F;
+      std::uint32_t proposed = 0;
       if (sampled) {
         // A cycle-local proposal stream; target draws keep the sampler's.
         std::uint64_t draft_rng =
@@ -369,14 +418,29 @@ bool Session::DecodeStep(std::size_t max_tokens,
         sampling::SamplerState draft_sampler = sampler;
         executor.DraftChain(
             *cache_, pending, position, steps, &drafts,
-            [&](const qwen38_flash_next::MtpCandidateLogits& candidates) {
-              proposals.push_back(qwen38_flash_next::SampleMtpProposal(
-                  candidates, draft_sampler, &draft_rng));
-              draft_sampler.Accept(proposals.back().token);
-              return static_cast<std::int32_t>(proposals.back().token);
+            [&](const qwen38_flash_next::MtpCandidateLogits& candidates)
+                -> std::optional<std::int32_t> {
+              auto proposal = qwen38_flash_next::SampleMtpProposal(
+                  candidates, draft_sampler, &draft_rng);
+              chain *= proposal.probability;
+              if (!proposals.empty() && chain < kSampledChainFloor) {
+                return std::nullopt;
+              }
+              draft_sampler.Accept(proposal.token);
+              proposals.push_back(proposal);
+              return static_cast<std::int32_t>(proposal.token);
             });
       } else {
-        executor.DraftChain(*cache_, pending, position, steps, &drafts);
+        executor.DraftChain(
+            *cache_, pending, position, steps, &drafts,
+            [&](const qwen38_flash_next::MtpCandidateLogits& candidates)
+                -> std::optional<std::int32_t> {
+              chain *= TopShare(candidates);
+              if (proposed++ > 0 && chain < kGreedyChainFloor) {
+                return std::nullopt;
+              }
+              return TopToken(candidates);
+            });
       }
       rows.insert(rows.end(), drafts.begin(), drafts.end());
     }
@@ -420,7 +484,7 @@ bool Session::DecodeStep(std::size_t max_tokens,
   valid_ = true;
   pending_ = result->tokens.back();
   stats_.cycles += 1;
-  stats_.drafted += steps;
+  stats_.drafted += rows.size() - 1;
   stats_.accepted += accepted;
   return true;
 }

@@ -458,7 +458,8 @@ void Executor::DraftChain(KvCache& cache, std::int32_t token,
                           std::uint32_t position, std::uint32_t steps,
                           std::vector<std::int32_t>* drafts,
                           const DraftProposer& propose) {
-  if (!model_.has_draft() || steps == 0 || steps > kMaxDraftTokens) {
+  if (!model_.has_draft() || steps == 0 || steps > kMaxDraftTokens ||
+      !propose) {
     throw std::invalid_argument("gemma4 draft chain exceeds its capacity");
   }
   const Config& tc = model_.config();
@@ -469,6 +470,8 @@ void Executor::DraftChain(KvCache& cache, std::int32_t token,
   const float embed_scale = std::sqrt(static_cast<float>(target_hidden));
   HIP_CHECK(hipMemcpyAsync(draft_tokens_, &token, sizeof(token),
                            hipMemcpyHostToDevice, stream_));
+  drafts->clear();
+  drafts->reserve(steps);
   for (std::uint32_t step = 0; step < steps; ++step) {
     // [scaled target embedding of the token ; target-width hidden state]
     hip::LaunchBatchedEmbeddingLookup(
@@ -534,46 +537,36 @@ void Executor::DraftChain(KvCache& cache, std::int32_t token,
                           dm.token_embd.rows, dm.token_embd.cols, stream_)) {
       Project(dm.token_embd, draft_h_, nullptr, 1, draft_logits_);
     }
-    if (propose) {
-      // Sampled drafting: the host draws from the top-64 candidates and
-      // returns the proposal the next step embeds.
-      using qwen38_flash_next::kMtpCandidates;
-      using qwen38_flash_next::MtpCandidateLogits;
-      const std::uint32_t vocab = model_.vocab_size();
-      qwen38_flash_next::rocm::MtpTopCandidates(
-          draft_logits_, draft_candidates_, draft_candidate_scratch_,
-          reinterpret_cast<float*>(draft_candidates_ + kMtpCandidates), vocab,
-          stream_);
-      auto& host = *draft_candidates_host_;
-      host.size = std::min<std::size_t>(vocab, kMtpCandidates);
-      static_assert(offsetof(MtpCandidateLogits, logits) ==
-                    kMtpCandidates * sizeof(std::uint32_t));
-      HIP_CHECK(hipMemcpyAsync(
-          &host, draft_candidates_,
-          offsetof(MtpCandidateLogits, logits) + host.size * sizeof(float),
-          hipMemcpyDeviceToHost, stream_));
-      HIP_CHECK(hipStreamSynchronize(stream_));
-      const std::int32_t proposal = propose(host);
-      HIP_CHECK(hipMemcpyAsync(draft_tokens_ + step + 1, &proposal,
-                               sizeof(proposal), hipMemcpyHostToDevice,
-                               stream_));
-    } else {
-      // The FFN gate buffer is idle after the vocabulary projection. Reuse
-      // it for parallel vocabulary tiles instead of reducing 262K logits in
-      // one workgroup.
-      hip::LaunchBatchedGPUArgmax(
-          draft_logits_, draft_tokens_ + step + 1, 1, model_.vocab_size(),
-          std::span<float>(draft_gate_, c.ffn_size), stream_);
+    // The host picks each proposal (and where the chain ends) from the
+    // top-64 candidates; the next step embeds it.
+    using qwen38_flash_next::kMtpCandidates;
+    using qwen38_flash_next::MtpCandidateLogits;
+    const std::uint32_t vocab = model_.vocab_size();
+    qwen38_flash_next::rocm::MtpTopCandidates(
+        draft_logits_, draft_candidates_, draft_candidate_scratch_,
+        reinterpret_cast<float*>(draft_candidates_ + kMtpCandidates), vocab,
+        stream_);
+    auto& host = *draft_candidates_host_;
+    host.size = std::min<std::size_t>(vocab, kMtpCandidates);
+    static_assert(offsetof(MtpCandidateLogits, logits) ==
+                  kMtpCandidates * sizeof(std::uint32_t));
+    HIP_CHECK(hipMemcpyAsync(
+        &host, draft_candidates_,
+        offsetof(MtpCandidateLogits, logits) + host.size * sizeof(float),
+        hipMemcpyDeviceToHost, stream_));
+    HIP_CHECK(hipStreamSynchronize(stream_));
+    const std::optional<std::int32_t> proposal = propose(host);
+    if (!proposal) {
+      break;
     }
+    drafts->push_back(*proposal);
+    HIP_CHECK(hipMemcpyAsync(draft_tokens_ + step + 1, &drafts->back(),
+                             sizeof(std::int32_t), hipMemcpyHostToDevice,
+                             stream_));
     if (step + 1 < steps) {
       Project(dm.post_projection, draft_h_, nullptr, 1, draft_next_);
     }
   }
-  drafts->resize(steps);
-  HIP_CHECK(hipMemcpyAsync(drafts->data(), draft_tokens_ + 1,
-                           steps * sizeof(std::int32_t), hipMemcpyDeviceToHost,
-                           stream_));
-  HIP_CHECK(hipStreamSynchronize(stream_));
 }
 
 void Executor::CopyLogits(std::size_t rows, std::vector<float>* out) const {

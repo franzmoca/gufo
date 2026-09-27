@@ -31,7 +31,9 @@ min(1, p/q) against the target's filtered distribution p, drawing a rejected
 position from the residual max(0, p − q); emitted tokens follow the target
 distribution exactly (the rule is shared with Flash-Next and unit-tested
 there). A seed replays the same tokens (`gemma4.target`), but they consume
-different random draws than an AR run with the same seed.
+different random draws than an AR run with the same seed. How many drafts a
+cycle proposes depends only on the drafter's confidences, never on timings,
+so neither greedy equality nor seeded replay depends on it.
 
 ## Reproduce
 

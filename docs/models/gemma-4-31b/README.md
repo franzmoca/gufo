@@ -20,17 +20,19 @@ MODEL=models/gemma-4-31b/gemma-4-31B-it-UD-Q4_K_XL.gguf
 MTP=models/gemma-4-31b/MTP/mtp-gemma-4-31B-it-Q8_0.gguf
 ./result/bin/gufo chat --model "$MODEL"
 ./result/bin/gufo serve llm --model "$MODEL" --speculative mtp \
-  --mtp-model "$MTP" -d 4 --context 131072
+  --mtp-model "$MTP" --context 131072
 ```
 
 Omit the speculative options for autoregressive decoding. `-d`/`--draft-tokens`
-sets the fixed draft length (1–7; 4 measured fastest on prose). The drafter
-attends to the target's own KV cache, so it adds no per-session cache.
+caps the drafts per cycle (1–7, default 7); each cycle stops drafting once the
+drafter's confidence that all its drafts will be accepted falls below a floor;
+sampled chains use at most four. The drafter attends to the target's own KV cache,
+so it adds no per-session cache.
 Greedy speculative output equals single-token decoding of the same
 configuration token for token; an AR-only server uses a faster one-row
 projection kernel with a different FP32 summation order, so long greedy
-completions of the two configurations can differ. Sampled requests draft greedily and accept a draft when the target's own
-sample matches it, so emitted tokens follow the target distribution.
+completions of the two configurations can differ. Sampled requests verify
+drafts by p/q rejection, so emitted tokens follow the target distribution.
 
 The chat template is Unsloth's variant (SHA-256 `845f1ee4…73d1b`), compiled
 into the engine and checked against Jinja renders. It defaults to thinking
