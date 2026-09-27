@@ -336,3 +336,21 @@ Each milestone is a testable state with Conventional Commits on `feat/gemma`. M4
   gained 0.5–3.2% over the prior Gufo rows without changing acceptance.
   The fork remains ahead at six of seven measured depths, so verification
   projection and attention cost are still open.
+
+**2026-09-27 — MTP cycle cost: row-shared split attention.**
+
+- Replaced the per-row split decode/verification attention with one wave per
+  (query head, chunk) serving up to five rows from registers (online softmax
+  per 32-key tile, DPP lane exchanges, parallel split merge), then staged the
+  hd512 K/V tiles once per block in shared memory. Verification still equals
+  decode bit for bit; decode mean KL vs the oracle 9.8e-7 → 5.5e-7.
+- d32K five-row verify attention: global 4.79 → 1.82 ms, sliding 198 → 65 µs;
+  one-row global decode 1.56 → 1.36 ms.
+- HTTP prose MTP now leads llama.cpp by 10–75% and the fork at six of seven
+  measured depths (−3.3% at 4K, where the fork's text accepts 1.91 drafts per
+  cycle vs 1.67; Gufo's cycle is still shorter). AR tg +10–12% vs llama.cpp.
+- Rejected: LDS-staged values in the old kernel, a bit-exact multi-row Gemma
+  GEMV for verification (18% slower than the shared small-batch kernel).
+- Open: five-row verification projections (~92 ms per cycle vs a ~79 ms
+  bandwidth floor), drafter head and global attention (~15 ms per cycle at
+  32K), batched decode for C>1.
