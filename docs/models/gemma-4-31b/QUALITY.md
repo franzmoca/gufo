@@ -22,9 +22,14 @@ not unquantized-model or GGUF-conversion checks. Measured September 26, 2026.
 | Kernels | Attention vs FP64 on window, ring, key-limit and 32K shapes (split ≤5e-6, WMMA ≤0.007 absolute), repeated launches bit-identical; every decode projection within 2e-6 of an FP64 dot relative to Σ\|wx\| |
 | Serving | Streaming, `reasoning_content`, Gemma tool calls and tool-result turns, multi-turn prompt reuse and disk-cache restore across a restart |
 
-Sampled MTP drafts greedily and accepts a draft when the target's own sample
-equals it, as llama.cpp does; emitted tokens follow the target distribution
-but consume different random draws than an AR run with the same seed.
+Greedy MTP drafts the drafter's argmax and keeps it while the target's own
+choice agrees. Sampled MTP samples each draft from the drafter's top-64
+logits under the request's sampler (q) and accepts it with probability
+min(1, p/q) against the target's filtered distribution p, drawing a rejected
+position from the residual max(0, p − q); emitted tokens follow the target
+distribution exactly (the rule is shared with Flash-Next and unit-tested
+there). A seed replays the same tokens (`gemma4.target`), but they consume
+different random draws than an AR run with the same seed.
 
 ## Reproduce
 

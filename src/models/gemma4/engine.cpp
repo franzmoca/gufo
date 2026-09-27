@@ -13,6 +13,7 @@
 #include "src/models/gemma4/kernels/rocm/device_model.hpp"
 #include "src/models/gemma4/kernels/rocm/executor.hpp"
 #include "src/models/gemma4/weights.hpp"
+#include "src/models/qwen38_flash_next/mtp_sampling.hpp"
 
 namespace gufo::models::gemma4 {
 namespace {
@@ -351,11 +352,31 @@ bool Session::DecodeStep(std::size_t max_tokens,
   auto& executor = *model_->executor_;
   std::vector<float> logits;
   std::vector<TokenId> rows{pending};
+  // With random sampling the drafter samples its proposals too, and each is
+  // verified by p/q rejection with residual correction; greedy decoding
+  // keeps argmax drafts accepted when the target's own choice agrees.
+  const bool sampled = steps > 0 && sampler.config().uses_random_sampling();
+  std::vector<qwen38_flash_next::MtpProposal> proposals;
   try {
     std::lock_guard lock(model_->mutex_);
     if (steps > 0) {
       std::vector<std::int32_t> drafts;
-      executor.DraftChain(*cache_, pending, position, steps, &drafts);
+      if (sampled) {
+        // A cycle-local proposal stream; target draws keep the sampler's.
+        std::uint64_t draft_rng =
+            sampling::NextRandom(sampler.mutable_rng_state());
+        sampling::SamplerState draft_sampler = sampler;
+        executor.DraftChain(
+            *cache_, pending, position, steps, &drafts,
+            [&](const qwen38_flash_next::MtpCandidateLogits& candidates) {
+              proposals.push_back(qwen38_flash_next::SampleMtpProposal(
+                  candidates, draft_sampler, &draft_rng));
+              draft_sampler.Accept(proposals.back().token);
+              return static_cast<std::int32_t>(proposals.back().token);
+            });
+      } else {
+        executor.DraftChain(*cache_, pending, position, steps, &drafts);
+      }
       rows.insert(rows.end(), drafts.begin(), drafts.end());
     }
     std::vector<std::uint32_t> logit_rows(rows.size());
@@ -375,9 +396,16 @@ bool Session::DecodeStep(std::size_t max_tokens,
   std::uint64_t accepted = 0;
   for (;; ++row) {
     const std::span<const float> row_logits(logits.data() + row * vocab, vocab);
-    emit(static_cast<TokenId>(sampler.Sample(row_logits)));
-    const bool agrees =
-        row + 1 < rows.size() && result->tokens.back() == rows[row + 1];
+    bool agrees = false;
+    if (sampled && row + 1 < rows.size()) {
+      const auto verified = qwen38_flash_next::VerifyMtpProposal(
+          row_logits, proposals[row], sampler);
+      emit(static_cast<TokenId>(verified.token));
+      agrees = verified.accepted;
+    } else {
+      emit(static_cast<TokenId>(sampler.Sample(row_logits)));
+      agrees = row + 1 < rows.size() && result->tokens.back() == rows[row + 1];
+    }
     if (!agrees || result->stop || result->tokens.size() >= max_tokens) {
       break;
     }

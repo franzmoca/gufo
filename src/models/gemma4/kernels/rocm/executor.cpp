@@ -13,6 +13,8 @@
 #include "src/models/gemma4/kernels/rocm/kernels.hpp"
 #include "src/models/qwen/hip/ops/gemm.hpp"
 #include "src/models/qwen/hip/ops/token.hpp"
+#include "src/models/qwen38_flash_next/kernels/rocm/kernels.hpp"
+#include "src/models/qwen38_flash_next/mtp_sampling.hpp"
 
 namespace gufo::models::gemma4::rocm {
 namespace {
@@ -27,7 +29,8 @@ struct Layout {
   std::size_t tokens, logit_index, x, h, q, k, v, attn, o, gate, up, hsel,
       logits, partials, q8;
   std::size_t draft_tokens, draft_concat, draft_x, draft_h, draft_q, draft_attn,
-      draft_o, draft_gate, draft_up, draft_logits, draft_next;
+      draft_o, draft_gate, draft_up, draft_logits, draft_next, draft_candidates,
+      draft_candidate_scratch;
   std::size_t total;
 };
 
@@ -93,6 +96,11 @@ Layout Plan(const Config& c, const Config* draft, std::uint32_t vocab,
     l.draft_up = take(std::size_t{draft->ffn_size} * f);
     l.draft_logits = take(std::size_t{vocab} * f);
     l.draft_next = take(std::size_t{draft->target_hidden_size} * f);
+    // Top-64 proposal candidates for sampled drafting: ids, then scores.
+    const std::size_t candidate_ids =
+        qwen38_flash_next::rocm::MtpCandidateWorkspaceSize(vocab);
+    l.draft_candidates = take(candidate_ids * sizeof(std::uint32_t));
+    l.draft_candidate_scratch = take(candidate_ids * sizeof(std::uint32_t));
   }
   l.total = at;
   return l;
@@ -173,10 +181,19 @@ Executor::Executor(const DeviceModel& model, std::uint32_t max_rows,
     draft_up_ = reinterpret_cast<float*>(base + l.draft_up);
     draft_logits_ = reinterpret_cast<float*>(base + l.draft_logits);
     draft_next_ = reinterpret_cast<float*>(base + l.draft_next);
+    draft_candidates_ =
+        reinterpret_cast<std::uint32_t*>(base + l.draft_candidates);
+    draft_candidate_scratch_ =
+        reinterpret_cast<std::uint32_t*>(base + l.draft_candidate_scratch);
+    HIP_CHECK(hipHostMalloc(&draft_candidates_host_,
+                            sizeof(qwen38_flash_next::MtpCandidateLogits)));
   }
 }
 
 Executor::~Executor() {
+  if (draft_candidates_host_ != nullptr) {
+    hip::LogCleanupError(hipHostFree(draft_candidates_host_));
+  }
   if (scratch_ != nullptr) {
     hip::LogCleanupError(hipFree(scratch_));
   }
@@ -386,7 +403,8 @@ void Executor::CommitHidden(KvCache& cache, std::uint32_t row) {
 
 void Executor::DraftChain(KvCache& cache, std::int32_t token,
                           std::uint32_t position, std::uint32_t steps,
-                          std::vector<std::int32_t>* drafts) {
+                          std::vector<std::int32_t>* drafts,
+                          const DraftProposer& propose) {
   if (!model_.has_draft() || steps == 0 || steps > kMaxDraftTokens) {
     throw std::invalid_argument("gemma4 draft chain exceeds its capacity");
   }
@@ -454,12 +472,37 @@ void Executor::DraftChain(KvCache& cache, std::int32_t token,
     // draft_h_ is the output-normalized state: vocabulary head and the
     // projection back to the target width for the next step.
     Project(dm.token_embd, draft_h_, nullptr, 1, draft_logits_);
-    // The FFN gate buffer is idle after the vocabulary projection. Reuse it
-    // for parallel vocabulary tiles instead of reducing 262K logits in one
-    // workgroup.
-    hip::LaunchBatchedGPUArgmax(
-        draft_logits_, draft_tokens_ + step + 1, 1, model_.vocab_size(),
-        std::span<float>(draft_gate_, c.ffn_size), stream_);
+    if (propose) {
+      // Sampled drafting: the host draws from the top-64 candidates and
+      // returns the proposal the next step embeds.
+      using qwen38_flash_next::kMtpCandidates;
+      using qwen38_flash_next::MtpCandidateLogits;
+      const std::uint32_t vocab = model_.vocab_size();
+      qwen38_flash_next::rocm::MtpTopCandidates(
+          draft_logits_, draft_candidates_, draft_candidate_scratch_,
+          reinterpret_cast<float*>(draft_candidates_ + kMtpCandidates), vocab,
+          stream_);
+      auto& host = *draft_candidates_host_;
+      host.size = std::min<std::size_t>(vocab, kMtpCandidates);
+      static_assert(offsetof(MtpCandidateLogits, logits) ==
+                    kMtpCandidates * sizeof(std::uint32_t));
+      HIP_CHECK(hipMemcpyAsync(
+          &host, draft_candidates_,
+          offsetof(MtpCandidateLogits, logits) + host.size * sizeof(float),
+          hipMemcpyDeviceToHost, stream_));
+      HIP_CHECK(hipStreamSynchronize(stream_));
+      const std::int32_t proposal = propose(host);
+      HIP_CHECK(hipMemcpyAsync(draft_tokens_ + step + 1, &proposal,
+                               sizeof(proposal), hipMemcpyHostToDevice,
+                               stream_));
+    } else {
+      // The FFN gate buffer is idle after the vocabulary projection. Reuse
+      // it for parallel vocabulary tiles instead of reducing 262K logits in
+      // one workgroup.
+      hip::LaunchBatchedGPUArgmax(
+          draft_logits_, draft_tokens_ + step + 1, 1, model_.vocab_size(),
+          std::span<float>(draft_gate_, c.ffn_size), stream_);
+    }
     if (step + 1 < steps) {
       Project(dm.post_projection, draft_h_, nullptr, 1, draft_next_);
     }

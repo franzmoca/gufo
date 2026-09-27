@@ -28,7 +28,9 @@ if (ENGINE_ENABLE_HIP)
     COMPILE_OPTIONS "-fno-fast-math;-ffp-contract=off")
   target_compile_options(gufo_gemma4 PRIVATE
     $<$<COMPILE_LANGUAGE:HIP>:-O3;-ffast-math;-fno-finite-math-only;-Wno-unused-command-line-argument>)
-  target_link_libraries(gufo_gemma4 PUBLIC hip::host roc::hipblas)
+  # Sampled MTP reuses Flash-Next's top-64 proposal kernel and p/q rules.
+  target_link_libraries(gufo_gemma4 PUBLIC hip::host roc::hipblas
+    gufo_qwen38_flash_next)
 endif()
 
 add_library(gufo_gemma4_reference STATIC EXCLUDE_FROM_ALL reference.cpp)

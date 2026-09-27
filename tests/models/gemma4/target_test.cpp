@@ -94,16 +94,16 @@ std::vector<float> GpuLogits(g4::Model& model,
   return all;
 }
 
-/// Greedy tokens from autoregressive evaluation and from DecodeStep.
-std::vector<g4::TokenId> Generate(g4::Model& model,
-                                  std::span<const g4::TokenId> prompt,
-                                  std::size_t count, bool speculative) {
+/// Tokens from autoregressive evaluation and from DecodeStep (greedy by
+/// default).
+std::vector<g4::TokenId> Generate(
+    g4::Model& model, std::span<const g4::TokenId> prompt, std::size_t count,
+    bool speculative, gufo::sampling::SamplingConfig config = {},
+    g4::Session::SpeculativeStats* stats_out = nullptr) {
   std::string error;
   auto session = model.CreateSession(0, &error);
   Require(session && session->Sync(prompt, &error), error);
-  gufo::sampling::SamplingConfig greedy;
-  greedy.temperature = 0.0F;
-  gufo::sampling::SamplerState sampler(greedy, {});
+  gufo::sampling::SamplerState sampler(config, {});
   std::vector<g4::TokenId> out;
   if (!speculative) {
     while (out.size() < count) {
@@ -126,6 +126,9 @@ std::vector<g4::TokenId> Generate(g4::Model& model,
   const auto& stats = session->Statistics();
   std::cout << "speculative: cycles " << stats.cycles << ", drafted "
             << stats.drafted << ", accepted " << stats.accepted << '\n';
+  if (stats_out != nullptr) {
+    *stats_out = stats;
+  }
   return out;
 }
 
@@ -299,5 +302,21 @@ int main() {
       const auto spec = Generate(*mtp, prompt, 64, true);
       Require(ar == spec, std::string("greedy MTP differs from AR: ") + text);
     }
+    // Sampled MTP (a chat front end's sampler): drafts are sampled and
+    // verified by p/q rejection; a seed replays the same tokens.
+    gufo::sampling::SamplingConfig chat;
+    chat.temperature = 1.0F;
+    chat.top_k = 64;
+    chat.top_p = 0.95F;
+    chat.repeat_penalty = 1.05F;
+    chat.seed = 7;
+    const auto prompt =
+        PromptTokens(*mtp, "Write a short story about a lighthouse keeper.");
+    g4::Session::SpeculativeStats stats;
+    const auto first = Generate(*mtp, prompt, 96, true, chat, &stats);
+    const auto again = Generate(*mtp, prompt, 96, true, chat);
+    Require(first.size() == 96 && first == again,
+            "sampled MTP does not replay its seed");
+    Require(stats.accepted > 0, "sampled MTP accepted no drafts");
   });
 }

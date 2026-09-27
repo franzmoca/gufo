@@ -5,6 +5,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <span>
 #include <string>
@@ -12,7 +13,15 @@
 
 #include "src/models/gemma4/kernels/rocm/device_model.hpp"
 
+namespace gufo::models::qwen38_flash_next {
+struct MtpCandidateLogits;
+}  // namespace gufo::models::qwen38_flash_next
+
 namespace gufo::models::gemma4::rocm {
+
+/// Picks a sampled draft token from the drafter's top candidate logits.
+using DraftProposer =
+    std::function<std::int32_t(const qwen38_flash_next::MtpCandidateLogits&)>;
 
 /// One session's attention state. Global layers keep every position in a
 /// token-major binary16 cache; sliding layers keep a ring of `ring` slots,
@@ -65,12 +74,15 @@ public:
   /// state for drafting.
   void CommitHidden(KvCache& cache, std::uint32_t row);
 
-  /// Drafts `steps` greedy tokens with the MTP drafter after `token` at
-  /// position `position` (the committed frontier), reading the target's KV
-  /// strictly before it and the cache's frontier hidden state. Every step
-  /// runs on the device; `drafts` receives the tokens with one host sync.
+  /// Drafts `steps` tokens with the MTP drafter after `token` at position
+  /// `position` (the committed frontier), reading the target's KV strictly
+  /// before it and the cache's frontier hidden state. Without `propose` the
+  /// drafts are greedy and every step runs on the device, with one host sync
+  /// for `drafts`. With it, each step hands the drafter's top-64 logits to
+  /// `propose` and embeds the token it returns.
   void DraftChain(KvCache& cache, std::int32_t token, std::uint32_t position,
-                  std::uint32_t steps, std::vector<std::int32_t>* drafts);
+                  std::uint32_t steps, std::vector<std::int32_t>* drafts,
+                  const DraftProposer& propose = {});
 
   /// Copies the logits of the last Forward to the host, [rows][vocab].
   void CopyLogits(std::size_t rows, std::vector<float>* out) const;
@@ -122,6 +134,9 @@ private:
   float* draft_up_{nullptr};
   float* draft_logits_{nullptr};
   float* draft_next_{nullptr};
+  std::uint32_t* draft_candidates_{nullptr};
+  std::uint32_t* draft_candidate_scratch_{nullptr};
+  qwen38_flash_next::MtpCandidateLogits* draft_candidates_host_{nullptr};
 };
 
 /// Longest draft chain one cycle may request; verification then carries

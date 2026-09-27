@@ -46,6 +46,26 @@ text.
 
 ![Single user, MTP](artifacts/charts/single-mtp.svg)
 
+## Single user, sampled MTP
+
+The sampler of a typical chat front end: temperature 1, top-k 64, top-p 0.95,
+repeat penalty 1.05; a story-writing turn after the cached prefix (the prefix
+turn itself is greedy). Mean of three requests with seeds 1–3; sampled text
+differs between engines and runs, so acceptance varies more than in the
+greedy tables.
+
+<!-- bench:single-mtp-sampled -->
+| Gemma 4 31B Q4 MTP<br>Depth (tokens) | Gufo pp (tok/s) | llama.cpp pp (tok/s) | Gain | Gufo tg (tok/s) | llama.cpp tg (tok/s) | Gain |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 0 | 400.80 ± 3.06 | TODO | TODO | 19.94 ± 2.34 | TODO | TODO |
+| 4,096 | 371.54 ± 2.74 | TODO | TODO | 19.94 ± 1.20 | TODO | TODO |
+| 16,384 | 305.04 ± 2.81 | TODO | TODO | 17.28 ± 0.43 | TODO | TODO |
+| 32,768 | 257.43 ± 3.69 | TODO | TODO | 16.32 ± 1.15 | TODO | TODO |
+| 65,536 | 193.12 ± 0.90 | TODO | TODO | 14.07 ± 1.15 | TODO | TODO |
+<!-- /bench -->
+
+![Single user, sampled MTP](artifacts/charts/single-mtp-sampled.svg)
+
 ## Multiple users, autoregressive
 
 Same pp2048 prose prompt as single-user d0, tg128, context 4096 per user.
