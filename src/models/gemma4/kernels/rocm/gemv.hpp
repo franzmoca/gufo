@@ -16,6 +16,12 @@ enum class GemvFormat : std::uint8_t { kQ4_K, kQ5_K, kQ6_K };
                                     const float* x, float* y, std::uint32_t m,
                                     std::uint32_t k, hipStream_t stream);
 
+/// Requantizes Q8_0 rows ([rows][cols], cols % 256 == 0) as Q4_K with
+/// ggml's reference Q4_K quantizer (weighted scale/min fit per 32 values,
+/// 6-bit scales). `dst` holds rows * cols / 256 * 144 bytes.
+void RepackQ8_0AsQ4K(const void* src, void* dst, std::uint32_t rows,
+                     std::uint32_t cols, hipStream_t stream);
+
 }  // namespace gufo::models::gemma4::rocm
 
 #endif  // GUFO_MODELS_GEMMA4_KERNELS_ROCM_GEMV_HPP_

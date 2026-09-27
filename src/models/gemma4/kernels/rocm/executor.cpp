@@ -525,8 +525,15 @@ void Executor::DraftChain(KvCache& cache, std::int32_t token,
                           stream_);
     }
     // draft_h_ is the output-normalized state: vocabulary head and the
-    // projection back to the target width for the next step.
-    Project(dm.token_embd, draft_h_, nullptr, 1, draft_logits_);
+    // projection back to the target width for the next step. Proposals have
+    // no decode twin to match, so the fastest one-row kernel reads the head
+    // (repacked as Q4_K at load).
+    if (const auto format = GemvFormatOf(dm.token_embd.type);
+        !format ||
+        !LaunchKQuantGemv(*format, dm.token_embd.data, draft_h_, draft_logits_,
+                          dm.token_embd.rows, dm.token_embd.cols, stream_)) {
+      Project(dm.token_embd, draft_h_, nullptr, 1, draft_logits_);
+    }
     if (propose) {
       // Sampled drafting: the host draws from the top-64 candidates and
       // returns the proposal the next step embeds.

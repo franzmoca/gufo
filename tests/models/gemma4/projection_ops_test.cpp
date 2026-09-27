@@ -6,10 +6,12 @@
 // the Qwen-owned kernels that breaks any of this fails here.
 #include <hip/hip_runtime.h>
 
+#include <algorithm>
 #include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <cstring>
+#include <iostream>
 #include <optional>
 #include <random>
 #include <span>
@@ -250,6 +252,50 @@ void CheckShape(const Format& f, std::size_t m, std::size_t k,
 
 }  // namespace
 
+/// The drafter head repack: Q4_K rows reproduce the Q8_0 values within the
+/// error of a 16-level fit per 32 values.
+void CheckRepack(std::mt19937& rng) {
+  constexpr std::size_t kRows = 257;
+  constexpr std::size_t kCols = 1024;
+  const Format q8{GgmlType::kQ8_0, std::nullopt, 32, 34, {0}, "Q8_0"};
+  auto src = RandomMatrix(q8, kRows, kCols, rng);
+  // Gaussian-like values, as in trained weights, instead of uniform bytes.
+  std::normal_distribution<float> normal(0.0F, 30.0F);
+  for (std::size_t b = 0; b < kRows * kCols / 32; ++b) {
+    for (std::size_t i = 0; i < 32; ++i) {
+      src[b * 34 + 2 + i] = static_cast<std::uint8_t>(
+          static_cast<std::int8_t>(std::clamp(normal(rng), -127.0F, 127.0F)));
+    }
+  }
+  const std::size_t q4_bytes = kRows * kCols / 256 * 144;
+  std::uint8_t* dsrc = Device(src.data(), src.size());
+  std::uint8_t* ddst = nullptr;
+  HIP_CHECK(hipMalloc(&ddst, q4_bytes));
+  gufo::models::gemma4::rocm::RepackQ8_0AsQ4K(dsrc, ddst, kRows, kCols,
+                                              nullptr);
+  HIP_CHECK(hipDeviceSynchronize());
+  std::vector<std::uint8_t> dst(q4_bytes);
+  HIP_CHECK(hipMemcpy(dst.data(), ddst, q4_bytes, hipMemcpyDeviceToHost));
+  std::vector<float> want(kCols), got(kCols);
+  double error = 0.0, energy = 0.0;
+  for (std::size_t r = 0; r < kRows; ++r) {
+    gufo::quant::Dequantize(GgmlType::kQ8_0, src.data() + r * kCols / 32 * 34,
+                            want.data(), kCols);
+    gufo::quant::Dequantize(GgmlType::kQ4_K, dst.data() + r * kCols / 256 * 144,
+                            got.data(), kCols);
+    for (std::size_t c = 0; c < kCols; ++c) {
+      error += (double{got[c]} - want[c]) * (double{got[c]} - want[c]);
+      energy += double{want[c]} * want[c];
+    }
+  }
+  const double relative = std::sqrt(error / energy);
+  std::cout << "draft head repack: relative RMS error " << relative << "\n";
+  Require(relative < 0.08,
+          "Q8_0 -> Q4_K repack error " + std::to_string(relative));
+  HIP_CHECK(hipFree(dsrc));
+  HIP_CHECK(hipFree(ddst));
+}
+
 int main() {
   int devices = 0;
   if (hipGetDeviceCount(&devices) != hipSuccess || devices == 0) {
@@ -289,5 +335,6 @@ int main() {
         CheckShape(f, m, k, rng);
       }
     }
+    CheckRepack(rng);
   });
 }

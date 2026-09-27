@@ -6,6 +6,7 @@
 #include <cmath>
 
 #include "src/core/hip/weight_upload.hpp"
+#include "src/models/gemma4/kernels/rocm/gemv.hpp"
 
 namespace gufo::models::gemma4::rocm {
 namespace {
@@ -183,6 +184,33 @@ std::unique_ptr<DeviceModel> DeviceModel::Upload(
           std::string("weight upload failed: ") + hipGetErrorString(status);
     }
     return nullptr;
+  }
+  if (m->has_draft_) {
+    // The drafter's vocabulary head only proposes tokens; verification
+    // decides every emitted one. Read as Q4_K it moves half the bytes per
+    // draft step.
+    DeviceTensor& head = m->draft_.token_embd;
+    if (head.type == core::GgmlType::kQ8_0 && head.cols % 256 == 0) {
+      const std::size_t size = std::size_t{head.rows} * head.cols / 256 * 144;
+      void* q4 = up.Allocate(size, "draft vocabulary head (Q4_K)");
+      if (q4 == nullptr) {
+        return nullptr;
+      }
+      RepackQ8_0AsQ4K(head.data, q4, head.rows, head.cols, nullptr);
+      if (hipDeviceSynchronize() != hipSuccess) {
+        if (error_msg != nullptr) {
+          *error_msg = "draft vocabulary head repack failed";
+        }
+        return nullptr;
+      }
+      auto& allocations = m->allocations_;
+      allocations.erase(
+          std::find(allocations.begin(), allocations.end(), head.data));
+      (void)hipFree(head.data);
+      m->bytes_ -= std::size_t{head.rows} * head.cols / 32 * 34 + kTailMargin;
+      head.data = q4;
+      head.type = core::GgmlType::kQ4_K;
+    }
   }
   return m;
 }
