@@ -266,6 +266,18 @@ __device__ void NormRopeHead(float* buf, const float* weight, std::uint32_t dim,
   __syncthreads();
 }
 
+/// Derived-key layers keep only the rotated key dims; every other key dim
+/// is its value times k_norm, so the query carries that weight instead.
+__device__ void FoldKeyWeight(float* buf, std::uint32_t dim,
+                              const float* key_weight, std::uint32_t pairs) {
+  for (std::uint32_t i = threadIdx.x; i < dim; i += kThreads) {
+    if (i % (dim / 2) >= pairs) {
+      buf[i] *= key_weight[i];
+    }
+  }
+  __syncthreads();
+}
+
 __global__ void __launch_bounds__(kThreads) QkvPostKernel(QkvPostArgs a) {
   __shared__ float buf[512];
   __shared__ float scratch[kWaves];
@@ -281,6 +293,9 @@ __global__ void __launch_bounds__(kThreads) QkvPostKernel(QkvPostArgs a) {
     __syncthreads();
     NormRopeHead(buf, a.q_norm, dim, a.eps, true, position, a.theta_scale,
                  a.freq_factors, scratch);
+    if (a.rotated_pairs != 0) {
+      FoldKeyWeight(buf, dim, a.k_norm, a.rotated_pairs);
+    }
     for (std::uint32_t i = threadIdx.x; i < dim; i += kThreads) {
       q[i] = buf[i];
     }
@@ -292,6 +307,7 @@ __global__ void __launch_bounds__(kThreads) QkvPostKernel(QkvPostArgs a) {
   const std::uint32_t slot = a.ring != 0 ? position % a.ring : position;
   const std::size_t cache =
       (static_cast<std::size_t>(slot) * a.kv_heads + kvh) * dim;
+  auto* v_cache = reinterpret_cast<__half*>(a.v_cache);
   for (std::uint32_t i = threadIdx.x; i < dim; i += kThreads) {
     buf[i] = a.k[in + i];
   }
@@ -299,9 +315,20 @@ __global__ void __launch_bounds__(kThreads) QkvPostKernel(QkvPostArgs a) {
   NormRopeHead(buf, a.k_norm, dim, a.eps, true, position, a.theta_scale,
                a.freq_factors, scratch);
   auto* k_cache = reinterpret_cast<__half*>(a.k_cache);
-  auto* v_cache = reinterpret_cast<__half*>(a.v_cache);
-  for (std::uint32_t i = threadIdx.x; i < dim; i += kThreads) {
-    k_cache[cache + i] = __float2half(buf[i]);
+  if (a.rotated_pairs == 0) {
+    for (std::uint32_t i = threadIdx.x; i < dim; i += kThreads) {
+      k_cache[cache + i] = __float2half(buf[i]);
+    }
+  } else {
+    // Rotated dims only: [0, pairs) then [dim / 2, dim / 2 + pairs).
+    const std::uint32_t width = 2 * a.rotated_pairs;
+    const std::size_t at =
+        (static_cast<std::size_t>(slot) * a.kv_heads + kvh) * width;
+    for (std::uint32_t i = threadIdx.x; i < width; i += kThreads) {
+      const std::uint32_t d =
+          i < a.rotated_pairs ? i : dim / 2 + i - a.rotated_pairs;
+      k_cache[at + i] = __float2half(buf[d]);
+    }
   }
   __syncthreads();
   for (std::uint32_t i = threadIdx.x; i < dim; i += kThreads) {
@@ -318,7 +345,8 @@ __global__ void __launch_bounds__(kThreads)
     QueryPostKernel(float* q, const float* q_norm, float theta_scale,
                     const float* freq_factors, std::uint32_t heads,
                     std::uint32_t dim, std::uint32_t position,
-                    bool shared_position, float eps) {
+                    bool shared_position, float eps, const float* key_weight,
+                    std::uint32_t rotated_pairs) {
   __shared__ float buf[512];
   __shared__ float scratch[kWaves];
   const std::uint32_t row = blockIdx.x;
@@ -330,6 +358,9 @@ __global__ void __launch_bounds__(kThreads)
   NormRopeHead(buf, q_norm, dim, eps, true,
                shared_position ? position : position + row, theta_scale,
                freq_factors, scratch);
+  if (rotated_pairs != 0) {
+    FoldKeyWeight(buf, dim, key_weight, rotated_pairs);
+  }
   for (std::uint32_t i = threadIdx.x; i < dim; i += kThreads) {
     qh[i] = buf[i];
   }
@@ -488,6 +519,9 @@ __device__ __forceinline__ float Uniform(float v) {
   return __int_as_float(__builtin_amdgcn_readfirstlane(__float_as_int(v)));
 }
 
+/// Rotation pairs a derived-key tile can hold (Gemma 4 global layers: 64).
+constexpr int kMaxRopePairs = static_cast<int>(kMaxDerivedKeyPairs);
+
 /// Rows per block of the row-shared split kernel.
 constexpr int kRowBlock = 5;
 
@@ -519,35 +553,43 @@ __device__ __forceinline__ float ReduceScatterN(float (&v)[N]) {
 /// Online softmax per 32-key tile. A row's arithmetic does not depend on R or
 /// on the rows sharing its block: scores reduce in groups of KG keys and only
 /// the load batching (LG keys) varies with R. Writes (m, l, unnormalized acc).
-template<int D, int G, int R>
-__global__ void __launch_bounds__(kThreads)
+template<int D, int G, int R, int WPH>
+__global__ void __launch_bounds__(kThreads* WPH)
     RowSplitAttentionKernel(AttentionArgs a, std::uint32_t first_split,
                             std::uint32_t splits) {
   constexpr int P = D / kWave;
   constexpr int C = static_cast<int>(SplitChunk(D));
   constexpr int CW = kWaves / G;  // chunks per block
   constexpr int KG = P >= 16 ? 2 : 4;
-  constexpr int LG = R == 1 ? 8 : KG;
+  constexpr int LG = R == 1 && WPH == 1 ? 8 : KG;
+  constexpr int kBlockThreads = kThreads * WPH;
   const int lane = threadIdx.x % kWave;
-  const int wave = threadIdx.x / kWave;
+  const int wave = (threadIdx.x / kWave) % kWaves;
+  // Row group: WPH waves per head split the block's rows, R each.
+  const int rg = static_cast<int>(threadIdx.x) / kThreads;
   const std::uint32_t local = blockIdx.z * CW + wave / G;
   if (local >= splits) {
     return;
   }
   const std::uint32_t head = blockIdx.y * G + wave % G;
-  const std::uint32_t row0 = blockIdx.x * R;
-  const int rows = min(R, static_cast<int>(a.rows - row0));
+  const std::uint32_t block_row0 = blockIdx.x * R * WPH;
+  const std::uint32_t block_rows =
+      min(static_cast<std::uint32_t>(R * WPH), a.rows - block_row0);
+  const std::uint32_t row0 = block_row0 + rg * R;
+  const int rows =
+      max(0, min(R, static_cast<int>(a.rows) - static_cast<int>(row0)));
   const std::uint32_t base = (first_split + local) * C;
   const std::size_t stride = static_cast<std::size_t>(a.kv_heads) * D;
   const auto* k_head =
       reinterpret_cast<const __half*>(a.k_cache) + blockIdx.y * D;
   const auto* v_head =
       reinterpret_cast<const __half*>(a.v_cache) + blockIdx.y * D;
-  // At hd512 the eight waves are the heads of one KV head and each reads
-  // every key and value: the block stages each 32-key tile once in shared
-  // memory instead of issuing eight copies of every load.
+  // At hd512 the eight head waves (per row group) read every key and value:
+  // the block stages each 32-key tile once in shared memory instead of
+  // issuing a copy of every load per wave.
   constexpr bool kStaged = G == kWaves;
-  constexpr int kStageLoads = kStaged ? kWave * D / 8 / kThreads : 1;
+  static_assert(kStaged || WPH == 1);
+  constexpr int kStageLoads = kStaged ? kWave * D / 8 / kBlockThreads : 1;
   __shared__ __align__(16) __half tile[kStaged ? kWave * D : 8];
 
   std::uint32_t lo[R];
@@ -558,7 +600,8 @@ __global__ void __launch_bounds__(kThreads)
   float acc[R][P];
 #pragma unroll
   for (int r = 0; r < R; ++r) {
-    const std::uint32_t row = row0 + min(r, rows - 1);
+    const std::uint32_t row =
+        block_row0 + min(rg * R + r, static_cast<int>(block_rows) - 1);
     const KeyRange keys = RowKeys(a, row);
     lo[r] = r < rows ? keys.lo : 0;
     hi[r] = r < rows ? keys.hi : 0;
@@ -581,14 +624,31 @@ __global__ void __launch_bounds__(kThreads)
   }
   // Keys any row of the block attends in this chunk; rows' ranges grow with
   // the row index. Keys outside [begin, end) load as zeros.
-  const std::uint32_t begin = max(base, lo[0]);
-  const std::uint32_t end = min(base + C, RowKeys(a, row0 + rows - 1).hi);
-  // Row kk of the tile at key0: shared memory when staged, else the cache.
-  auto load = [&](const __half* head_cache, std::uint32_t key0, int kk,
-                  uint4(&raw)[P / 8]) {
+  const std::uint32_t begin = max(base, RowKeys(a, block_row0).lo);
+  const std::uint32_t end =
+      min(base + C, RowKeys(a, block_row0 + block_rows - 1).hi);
+  // Derived keys (rope_pairs > 0): the cache keeps only the rotated key
+  // dims, staged beside the value tile; every other key dim is its value
+  // (the query carries the key weight).
+  const bool derived = a.rope_pairs != 0;
+  const int pairs = static_cast<int>(a.rope_pairs);
+  __shared__ __align__(16)
+      __half rotated[kStaged ? kWave * 2 * kMaxRopePairs : 8];
+  // This lane's key dims [lane P, lane P + P) in the rotated tile, or -1.
+  const int dim0 = lane * P;
+  const int rot_offset = dim0 < pairs ? dim0
+                         : dim0 >= D / 2 && dim0 < D / 2 + pairs
+                             ? pairs + dim0 - D / 2
+                             : -1;
+  // Row kk of the tile at key0 (keys or values): shared memory when staged,
+  // else the cache.
+  auto load = [&](const __half* head_cache, bool keys, std::uint32_t key0,
+                  int kk, uint4(&raw)[P / 8]) {
     if constexpr (kStaged) {
-      const auto* src =
-          reinterpret_cast<const uint4*>(tile + kk * D + lane * P);
+      const __half* row = keys && rot_offset >= 0
+                              ? rotated + kk * 2 * pairs + rot_offset
+                              : tile + kk * D + dim0;
+      const auto* src = reinterpret_cast<const uint4*>(row);
 #pragma unroll
       for (int i = 0; i < P / 8; ++i) {
         raw[i] = src[i];
@@ -597,8 +657,8 @@ __global__ void __launch_bounds__(kThreads)
       const std::uint32_t key = key0 + kk;
       if (key >= begin && key < end) {
         const std::uint32_t slot = a.ring != 0 ? key % a.ring : key;
-        const auto* src = reinterpret_cast<const uint4*>(
-            head_cache + slot * stride + lane * P);
+        const auto* src =
+            reinterpret_cast<const uint4*>(head_cache + slot * stride + dim0);
 #pragma unroll
         for (int i = 0; i < P / 8; ++i) {
           raw[i] = src[i];
@@ -611,40 +671,101 @@ __global__ void __launch_bounds__(kThreads)
       }
     }
   };
-  // Staging: each thread moves kStageLoads 16-byte pieces of a tile.
+  // Staging: thread t moves, for keys t / 32 + 8 m of a tile, the two
+  // 8-dim chunks of rotation pair group t % 32 (dims 8 (t % 32) + j and
+  // D / 2 + 8 (t % 32) + j), so derived keys rotate within one thread.
+  constexpr int kGroups = D / 16;
+  constexpr int kKeysPerPass = kBlockThreads / kGroups;
+  static_assert(!kStaged || kStageLoads == 2 * kWave / kKeysPerPass);
+  const int group = static_cast<int>(threadIdx.x) % kGroups;
   uint4 staged[kStageLoads];
+  // Rotated key dims of a tile: 32 keys x 2 pairs values in 16-byte pieces.
+  constexpr int kRotLoads =
+      kStaged ? kWave * 2 * kMaxRopePairs / 8 / kBlockThreads : 1;
+  uint4 staged_rot[kRotLoads];
+  const int rot_chunks = 2 * pairs / 8;  // per key
+  const auto* k_rotated = reinterpret_cast<const __half*>(a.k_cache);
   auto stage_load = [&](const __half* head_cache, std::uint32_t key0) {
 #pragma unroll
-    for (int n = 0; n < kStageLoads; ++n) {
-      const int u = static_cast<int>(threadIdx.x) + n * kThreads;
-      const std::uint32_t key = key0 + u / (D / 8);
+    for (int n = 0; n < kStageLoads / 2; ++n) {
+      const std::uint32_t key =
+          key0 + static_cast<int>(threadIdx.x) / kGroups + n * kKeysPerPass;
       if (key >= begin && key < end) {
         const std::uint32_t slot = a.ring != 0 ? key % a.ring : key;
-        staged[n] = *reinterpret_cast<const uint4*>(head_cache + slot * stride +
-                                                    (u % (D / 8)) * 8);
+        const __half* row = head_cache + slot * stride + group * 8;
+        staged[2 * n] = *reinterpret_cast<const uint4*>(row);
+        staged[2 * n + 1] = *reinterpret_cast<const uint4*>(row + D / 2);
       } else {
-        staged[n] = uint4{0, 0, 0, 0};
+        staged[2 * n] = uint4{0, 0, 0, 0};
+        staged[2 * n + 1] = uint4{0, 0, 0, 0};
+      }
+    }
+  };
+  auto rot_store = [&] {
+#pragma unroll
+    for (int n = 0; n < kRotLoads; ++n) {
+      const int u = static_cast<int>(threadIdx.x) + n * kBlockThreads;
+      if (u < kWave * rot_chunks) {
+        reinterpret_cast<uint4*>(rotated)[u] = staged_rot[n];
       }
     }
   };
   auto stage_store = [&] {
     __syncthreads();
 #pragma unroll
-    for (int n = 0; n < kStageLoads; ++n) {
-      reinterpret_cast<uint4*>(tile)[threadIdx.x + n * kThreads] = staged[n];
+    for (int n = 0; n < kStageLoads / 2; ++n) {
+      const int kk = static_cast<int>(threadIdx.x) / kGroups + n * kKeysPerPass;
+      __half* dst = tile + kk * D + group * 8;
+      *reinterpret_cast<uint4*>(dst) = staged[2 * n];
+      *reinterpret_cast<uint4*>(dst + D / 2) = staged[2 * n + 1];
+    }
+    if (derived) {
+      rot_store();
     }
     __syncthreads();
   };
+  auto rot_load = [&](std::uint32_t key0) {
+#pragma unroll
+    for (int n = 0; n < kRotLoads; ++n) {
+      const int u = static_cast<int>(threadIdx.x) + n * kBlockThreads;
+      const std::uint32_t key = key0 + u / rot_chunks;
+      staged_rot[n] = uint4{0, 0, 0, 0};
+      if (u < kWave * rot_chunks && key >= begin && key < end) {
+        const std::uint32_t slot = a.ring != 0 ? key % a.ring : key;
+        staged_rot[n] = *reinterpret_cast<const uint4*>(
+            k_rotated +
+            (static_cast<std::size_t>(slot) * a.kv_heads + blockIdx.y) * 2 *
+                pairs +
+            (u % rot_chunks) * 8);
+      }
+    }
+  };
   if constexpr (kStaged) {
-    stage_load(k_head, begin & ~std::uint32_t{kWave - 1});
+    const std::uint32_t first = begin & ~std::uint32_t{kWave - 1};
+    if (derived) {
+      rot_load(first);
+      stage_load(v_head, first);
+    } else {
+      stage_load(k_head, first);
+    }
   }
 
   for (std::uint32_t key0 = begin & ~std::uint32_t{kWave - 1}; key0 < end;
        key0 += kWave) {
+    const bool more = key0 + kWave < end;
     if constexpr (kStaged) {
-      // Keys to shared memory; the values load under the scores.
       stage_store();
-      stage_load(v_head, key0);
+      if (derived) {
+        // One value tile serves keys and values: the next one (values and
+        // rotated key dims) loads under both passes.
+        if (more) {
+          rot_load(key0 + kWave);
+          stage_load(v_head, key0 + kWave);
+        }
+      } else {
+        // Keys to shared memory; the values load under the scores.
+        stage_load(v_head, key0);
+      }
     }
     // Scores: lane L holds key key0 + L of every row.
     float s[R];
@@ -657,7 +778,7 @@ __global__ void __launch_bounds__(kThreads)
       uint4 kraw[LG][P / 8];
 #pragma unroll
       for (int kk = 0; kk < LG; ++kk) {
-        load(k_head, key0, g0 + kk, kraw[kk]);
+        load(k_head, true, key0, g0 + kk, kraw[kk]);
       }
 #pragma unroll
       for (int g = 0; g < LG; g += KG) {
@@ -694,7 +815,7 @@ __global__ void __launch_bounds__(kThreads)
     if constexpr (!kStaged) {
 #pragma unroll
       for (int kk = 0; kk < LG; ++kk) {
-        load(v_head, key0, kk, vraw[kk]);
+        load(v_head, false, key0, kk, vraw[kk]);
       }
     }
     // Online softmax per row; a tile without keys for a row leaves it as is.
@@ -721,10 +842,12 @@ __global__ void __launch_bounds__(kThreads)
       }
     }
     if constexpr (kStaged) {
-      // Values to shared memory; the next keys load under the products.
-      stage_store();
-      if (key0 + kWave < end) {
-        stage_load(k_head, key0 + kWave);
+      if (!derived) {
+        // Values to shared memory; the next keys load under the products.
+        stage_store();
+        if (more) {
+          stage_load(k_head, key0 + kWave);
+        }
       }
     }
     // Values, the next batch loading under the current one.
@@ -734,7 +857,7 @@ __global__ void __launch_bounds__(kThreads)
       if constexpr (kStaged) {
 #pragma unroll
         for (int kk = 0; kk < LG; ++kk) {
-          load(v_head, key0, g0 + kk, cur[kk]);
+          load(v_head, false, key0, g0 + kk, cur[kk]);
         }
       } else {
 #pragma unroll
@@ -747,7 +870,7 @@ __global__ void __launch_bounds__(kThreads)
         if (g0 + LG < kWave) {
 #pragma unroll
           for (int kk = 0; kk < LG; ++kk) {
-            load(v_head, key0, g0 + LG + kk, vraw[kk]);
+            load(v_head, false, key0, g0 + LG + kk, vraw[kk]);
           }
         }
       }
@@ -871,15 +994,24 @@ void LaunchSplitAttention(const AttentionArgs& a, hipStream_t stream) {
     throw std::invalid_argument("split attention context too long");
   }
   constexpr std::uint32_t kChunksPerBlock = kWaves / G;
-  const dim3 grid((a.rows + kRowBlock - 1) / kRowBlock, a.kv_heads,
-                  (splits + kChunksPerBlock - 1) / kChunksPerBlock);
-  // Single-token decode batches loads deeper; the arithmetic is the same.
+  const std::uint32_t chunk_blocks =
+      (splits + kChunksPerBlock - 1) / kChunksPerBlock;
   if (a.rows == 1) {
-    RowSplitAttentionKernel<D, G, 1>
-        <<<grid, kThreads, 0, stream>>>(a, first_split, splits);
+    // Single-token decode batches loads deeper; the arithmetic is the same.
+    RowSplitAttentionKernel<D, G, 1, 1>
+        <<<dim3(1, a.kv_heads, chunk_blocks), kThreads, 0, stream>>>(
+            a, first_split, splits);
+  } else if constexpr (G == kWaves) {
+    // hd512: two waves per head, three rows each, keep a block's rows within
+    // the register file.
+    constexpr std::uint32_t kRows = 3 * 2;
+    RowSplitAttentionKernel<D, G, 3, 2>
+        <<<dim3((a.rows + kRows - 1) / kRows, a.kv_heads, chunk_blocks),
+           2 * kThreads, 0, stream>>>(a, first_split, splits);
   } else {
-    RowSplitAttentionKernel<D, G, kRowBlock>
-        <<<grid, kThreads, 0, stream>>>(a, first_split, splits);
+    RowSplitAttentionKernel<D, G, kRowBlock, 1>
+        <<<dim3((a.rows + kRowBlock - 1) / kRowBlock, a.kv_heads, chunk_blocks),
+           kThreads, 0, stream>>>(a, first_split, splits);
   }
   AttentionMergeKernel<D>
       <<<dim3(a.heads, a.rows, D / kMergeThreads), kMergeThreads, 0, stream>>>(
@@ -890,6 +1022,9 @@ template<int D>
 void LaunchAttention(const AttentionArgs& a, hipStream_t stream) {
   if (a.rows > kSplitRows) {
     if (!LaunchWmmaPrefillAttention(a, stream)) {
+      if (a.rope_pairs != 0) {
+        throw std::invalid_argument("derived keys need the WMMA prefill path");
+      }
       AttentionKernel<D><<<dim3(1, a.heads, a.rows), kThreads, 0, stream>>>(a);
     }
     return;
@@ -976,13 +1111,20 @@ void QueryPost(float* q, const float* q_norm, float theta_scale,
                const float* freq_factors, std::uint32_t rows,
                std::uint32_t heads, std::uint32_t head_dim,
                std::uint32_t position, bool shared_position, float eps,
+               const float* key_weight, std::uint32_t rotated_pairs,
                hipStream_t stream) {
   QueryPostKernel<<<dim3(rows, heads), kThreads, 0, stream>>>(
       q, q_norm, theta_scale, freq_factors, heads, head_dim, position,
-      shared_position, eps);
+      shared_position, eps, key_weight, rotated_pairs);
 }
 
 void Attention(const AttentionArgs& args, hipStream_t stream) {
+  if (args.rope_pairs != 0 &&
+      (args.head_dim != 512 || args.rope_pairs % 16 != 0 ||
+       args.rope_pairs > static_cast<std::uint32_t>(kMaxRopePairs))) {
+    throw std::invalid_argument(
+        "derived keys need head_dim 512 and 16-aligned pairs up to 64");
+  }
   switch (args.head_dim) {
     case 256:
       LaunchAttention<256>(args, stream);

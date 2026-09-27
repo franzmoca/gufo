@@ -161,6 +161,31 @@ __global__ void __launch_bounds__((kPrefillThreads<D, kHeads, kQueryBlocks>))
   constexpr std::uint32_t kStage = kChunks / kThreads;
   uint4 k_next[kStage];
   uint4 v_next[kStage];
+  // Derived keys (rope_pairs > 0): a thread's two chunks are dims d and
+  // d + D / 2 of one key; rotated dims come from the rotated-dims K cache,
+  // every other key dim is its value (the query carries the key weight).
+  // Each chunk's key source is fixed per thread; only the key slot moves.
+  static_assert(kStage == 2 && kThreads == D,
+                "a thread's chunks must pair dims d and d + D / 2");
+  const __half* key_base[kStage];
+  std::uint32_t key_stride[kStage];
+#pragma unroll
+  for (std::uint32_t j = 0; j < kStage; ++j) {
+    const std::uint32_t d8 = ((tid + j * kThreads) / kKeys) * 8;
+    const std::uint32_t pair0 = d8 % (D / 2);
+    const std::uint32_t pairs = a.rope_pairs;
+    if (pairs == 0) {
+      key_base[j] = k_cache + kv_head * D + d8;
+      key_stride[j] = static_cast<std::uint32_t>(kv_stride);
+    } else if (pair0 < pairs) {
+      key_base[j] =
+          k_cache + kv_head * 2 * pairs + (d8 < D / 2 ? 0 : pairs) + pair0;
+      key_stride[j] = a.kv_heads * 2 * pairs;
+    } else {
+      key_base[j] = v_cache + kv_head * D + d8;
+      key_stride[j] = static_cast<std::uint32_t>(kv_stride);
+    }
+  }
   const auto fetch = [&](std::uint32_t key0) {
 #pragma unroll
     for (std::uint32_t j = 0; j < kStage; ++j) {
@@ -170,11 +195,12 @@ __global__ void __launch_bounds__((kPrefillThreads<D, kHeads, kQueryBlocks>))
       k_next[j] = make_uint4(0U, 0U, 0U, 0U);
       v_next[j] = make_uint4(0U, 0U, 0U, 0U);
       if (position < block_hi) {
-        const std::size_t at =
-            static_cast<std::size_t>(slot_of(position)) * kv_stride +
-            static_cast<std::size_t>(kv_head) * D + d8;
-        k_next[j] = *reinterpret_cast<const uint4*>(k_cache + at);
-        v_next[j] = *reinterpret_cast<const uint4*>(v_cache + at);
+        const std::size_t slot = slot_of(position);
+        k_next[j] =
+            *reinterpret_cast<const uint4*>(key_base[j] + slot * key_stride[j]);
+        v_next[j] = *reinterpret_cast<const uint4*>(
+            v_cache + slot * kv_stride + static_cast<std::size_t>(kv_head) * D +
+            d8);
       }
     }
   };

@@ -24,6 +24,10 @@ void RmsNorm(const float* x, const float* weight, float* y, std::uint32_t rows,
 ///   K = rope(rms(k) * k_norm), V = rms(v_source) written as binary16 into the
 ///   caches at slot (position % ring) — ring = 0 means a linear cache.
 /// `v` may alias `k` (global layers use the raw K projection as V).
+/// With `rotated_pairs` > 0 (V is the normalized K projection) the K cache
+/// keeps only the rotated dims of each head, [0, pairs) then [dim / 2,
+/// dim / 2 + pairs), and Q's other dims are multiplied by k_norm (see
+/// AttentionArgs).
 /// Pair i turns by position * theta_scale^i / freq_factors[i] with
 /// theta_scale = theta^(-2/dim) (`freq_factors` null means 1), as ggml's
 /// NEOX rope computes it.
@@ -44,15 +48,18 @@ struct QkvPostArgs {
   std::uint32_t first_position;
   std::uint32_t ring;
   float eps;
+  std::uint32_t rotated_pairs;
 };
 void QkvPost(const QkvPostArgs& args, hipStream_t stream);
 
 /// Query-only post-processing (MTP draft layers): Q = rope(rms(q) * q_norm)
-/// at one shared position for every row.
+/// at one shared position for every row; with `rotated_pairs` > 0 the
+/// unrotated dims are multiplied by `key_weight` as QkvPost does.
 void QueryPost(float* q, const float* q_norm, float theta_scale,
                const float* freq_factors, std::uint32_t rows,
                std::uint32_t heads, std::uint32_t head_dim,
                std::uint32_t position, bool shared_position, float eps,
+               const float* key_weight, std::uint32_t rotated_pairs,
                hipStream_t stream);
 
 /// Scale-1 attention of FP32 queries over binary16 K/V caches.
@@ -66,9 +73,15 @@ void QueryPost(float* q, const float* q_norm, float theta_scale,
 /// depend on the batch it runs in; `partials` must hold
 /// AttentionPartialFloats(...) floats. Larger batches (prefill) attend in a
 /// single pass per (row, head).
+///
+/// With `rope_pairs` > 0 (head_dim 512 only) V is the layer's normalized K
+/// projection and K = rope(k_norm * V): the K cache holds just the rotated
+/// dims, [rope_pairs) and [head_dim / 2, + rope_pairs) of each head
+/// (rope_pairs * 2 values), and every unrotated key dim is its value, the
+/// queries carrying k_norm on those dims (QkvPost, QueryPost).
 struct AttentionArgs {
   const float* q;
-  const std::uint16_t* k_cache;  ///< binary16
+  const std::uint16_t* k_cache;  ///< binary16; rotated dims when derived
   const std::uint16_t* v_cache;  ///< binary16
   float* out;
   float* partials;
@@ -81,8 +94,12 @@ struct AttentionArgs {
   std::uint32_t key_limit;
   std::uint32_t window;
   std::uint32_t ring;
+  std::uint32_t rope_pairs;  ///< rotated pairs of derived keys, or 0
 };
 inline constexpr std::uint32_t kSplitRows = 16;
+/// Derived keys: rope_pairs must be a multiple of 16 and at most this.
+inline constexpr std::uint32_t kMaxDerivedKeyPairs = 64;
+
 void Attention(const AttentionArgs& args, hipStream_t stream);
 [[nodiscard]] std::size_t AttentionPartialFloats(std::uint32_t rows,
                                                  std::uint32_t heads,

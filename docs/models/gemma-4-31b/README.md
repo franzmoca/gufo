@@ -38,9 +38,12 @@ off; the [reasoning controls](../../SERVER.md#reasoning-controls) turn the
 thinking channel on, returned as `reasoning_content`. Gemma tool calls
 (`<|tool_call>call:NAME{…}<tool_call|>`) are returned as OpenAI `tool_calls`.
 
-Native context is 262144. Global layers keep every token (80 KiB per token
-for K and V), sliding layers a fixed ring, so a 131072 context needs about
-10 GiB of KV plus 2.3 GiB of rings next to the 17.5 GiB of weights.
+Native context is 262144. Global layers keep every token, sliding layers a
+fixed ring. A global layer's K and V come from one projection, so its cache
+stores V and only the 128 rotated key dims of each head (50 KiB per token
+across the ten global layers; the other key dims are V scaled by `k_norm`).
+A 131072 context needs about 6.3 GiB of global KV plus 2.3 GiB of rings next
+to the 17.5 GiB of weights.
 Prompt snapshots feed the RAM and `--cache-disk` prompt caches; a trimmed or
 edited history re-prefills from the latest retained checkpoint before the
 change, so dropping the oldest messages costs a full prefill.

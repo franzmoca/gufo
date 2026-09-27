@@ -176,7 +176,8 @@ std::size_t Model::ResidentBytes() const noexcept {
 }
 
 std::size_t Model::SessionBytes(std::uint32_t context) const noexcept {
-  return rocm::Executor::CacheBytes(config(), context, executor_->ring());
+  return rocm::Executor::CacheBytes(config(), context, executor_->ring(),
+                                    executor_->key_widths());
 }
 
 std::size_t Model::SessionRingSlots() const noexcept {
@@ -436,8 +437,10 @@ std::uint64_t Session::SnapshotBytes() const {
   const Config& c = model_->config();
   const auto n = static_cast<std::uint32_t>(tokens_.size());
   std::uint64_t bytes = sizeof(SnapshotHeader) + std::uint64_t{n} * 4;
+  const auto& key_widths = model_->executor_->key_widths();
   for (std::uint32_t l = 0; l < c.num_layers; ++l) {
-    bytes += 2ULL * (n - FirstLiveRow(c, l, n)) * c.KvDim(l) * 2;
+    bytes += std::uint64_t{n - FirstLiveRow(c, l, n)} *
+             (key_widths[l] + c.KvDim(l)) * 2;
   }
   return bytes + std::uint64_t{c.hidden_size} * 4 +
          std::uint64_t{model_->VocabSize()} * 4;
@@ -466,8 +469,8 @@ std::unique_ptr<SessionSnapshot> Session::SaveSnapshot(
   const hipStream_t stream = model_->executor_->stream();
   std::lock_guard lock(model_->mutex_);
   const auto copy_rows = [&](const std::uint16_t* cache, std::uint32_t layer,
-                             std::uint32_t first) {
-    const std::size_t row = std::size_t{c.KvDim(layer)} * 2;
+                             std::uint32_t first, std::uint32_t width) {
+    const std::size_t row = std::size_t{width} * 2;
     const bool ring = c.IsSliding(layer);
     for (std::uint32_t p = first; p < n;) {
       const std::uint32_t slot = ring ? p % cache_->ring : p;
@@ -484,8 +487,8 @@ std::unique_ptr<SessionSnapshot> Session::SaveSnapshot(
   };
   for (std::uint32_t l = 0; l < c.num_layers; ++l) {
     const std::uint32_t first = FirstLiveRow(c, l, n);
-    copy_rows(cache_->k[l], l, first);
-    copy_rows(cache_->v[l], l, first);
+    copy_rows(cache_->k[l], l, first, model_->executor_->key_widths()[l]);
+    copy_rows(cache_->v[l], l, first, c.KvDim(l));
   }
   (void)hipMemcpyAsync(at, cache_->hidden, std::size_t{c.hidden_size} * 4,
                        hipMemcpyDeviceToHost, stream);
@@ -533,8 +536,8 @@ bool Session::RestoreSnapshot(std::span<const std::uint8_t> payload,
   const hipStream_t stream = model_->executor_->stream();
   std::lock_guard lock(model_->mutex_);
   const auto copy_rows = [&](std::uint16_t* cache, std::uint32_t layer,
-                             std::uint32_t first) {
-    const std::size_t row = std::size_t{c.KvDim(layer)} * 2;
+                             std::uint32_t first, std::uint32_t width) {
+    const std::size_t row = std::size_t{width} * 2;
     const bool ring = c.IsSliding(layer);
     for (std::uint32_t p = first; p < n;) {
       const std::uint32_t slot = ring ? p % cache_->ring : p;
@@ -549,8 +552,8 @@ bool Session::RestoreSnapshot(std::span<const std::uint8_t> payload,
   };
   for (std::uint32_t l = 0; l < c.num_layers; ++l) {
     const std::uint32_t first = FirstLiveRow(c, l, n);
-    copy_rows(cache_->k[l], l, first);
-    copy_rows(cache_->v[l], l, first);
+    copy_rows(cache_->k[l], l, first, model_->executor_->key_widths()[l]);
+    copy_rows(cache_->v[l], l, first, c.KvDim(l));
   }
   (void)hipMemcpyAsync(cache_->hidden, at, std::size_t{c.hidden_size} * 4,
                        hipMemcpyHostToDevice, stream);

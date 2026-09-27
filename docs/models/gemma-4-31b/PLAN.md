@@ -354,3 +354,17 @@ Each milestone is a testable state with Conventional Commits on `feat/gemma`. M4
 - Open: five-row verification projections (~92 ms per cycle vs a ~79 ms
   bandwidth floor), drafter head and global attention (~15 ms per cycle at
   32K), batched decode for C>1.
+
+**2026-09-27 — Sampled MTP and a smaller global cache.**
+
+- A sampled single-user MTP table (temperature 1, top-k 64, top-p 0.95,
+  repeat penalty 1.05, story workload): Gufo leads llama.cpp by 10–54%.
+- Sampled MTP now verifies drafts by p/q rejection with residual correction;
+  expected acceptance per draft 0.640 → 0.655. At temperature 1 acceptance is
+  bounded by drafter/target overlap, not the rule.
+- Global layers store V and only the 64 rotated rope pairs of K (K = rope(
+  k_norm · V)); 80 → 50 KiB per token, AR tg +4% at 32K, +8% at 64K,
+  quality unchanged against llama.cpp at 16K.
+- Measured ceilings: prefill GEMMs reach ~82% of the int8 WMMA peak, so
+  prefill gains are limited to attention (hd512 WMMA at ~32% of peak, LDS
+  bound) and the small elementwise kernels.

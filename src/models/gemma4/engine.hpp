@@ -181,7 +181,7 @@ public:
   void Reset();
 
   /// Compatibility version; bump on payload or inference arithmetic changes.
-  static constexpr std::uint32_t kSnapshotPayloadVersion = 1;
+  static constexpr std::uint32_t kSnapshotPayloadVersion = 2;
   [[nodiscard]] std::uint64_t SnapshotBytes() const;
   [[nodiscard]] std::unique_ptr<SessionSnapshot> SaveSnapshot(
       std::string* error_msg = nullptr) const;

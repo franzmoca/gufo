@@ -64,6 +64,11 @@ public:
   [[nodiscard]] const float* rope_factors() const noexcept {
     return rope_factors_;
   }
+  /// Leading global-layer rope pairs that turn at some position; the
+  /// divisors of the others (1e30 in this checkpoint) leave them unrotated.
+  [[nodiscard]] std::uint32_t global_rope_pairs() const noexcept {
+    return global_rope_pairs_;
+  }
   [[nodiscard]] const std::vector<DeviceLayer>& layers() const noexcept {
     return layers_;
   }
@@ -80,6 +85,7 @@ private:
   std::uint32_t vocab_{0};
   DeviceTensor token_embd_, output_, output_norm_;
   float* rope_factors_{nullptr};
+  std::uint32_t global_rope_pairs_{0};
   std::vector<DeviceLayer> layers_;
   bool has_draft_{false};
   DeviceDraft draft_;

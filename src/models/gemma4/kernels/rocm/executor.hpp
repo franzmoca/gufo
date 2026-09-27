@@ -12,6 +12,7 @@
 #include <vector>
 
 #include "src/models/gemma4/kernels/rocm/device_model.hpp"
+#include "src/models/gemma4/kernels/rocm/kernels.hpp"
 
 namespace gufo::models::qwen38_flash_next {
 struct MtpCandidateLogits;
@@ -33,7 +34,9 @@ struct KvCache {
   std::size_t bytes{0};
   std::uint32_t max_context{0};
   std::uint32_t ring{0};
-  std::vector<std::uint16_t*> k;  ///< Per layer, binary16.
+  /// Per layer, binary16: whole keys, or their rotated dims where keys are
+  /// derived from V (Executor::KeyWidths).
+  std::vector<std::uint16_t*> k;
   std::vector<std::uint16_t*> v;  ///< Per layer, binary16.
   /// Target post-norm hidden state of the frontier token (MTP draft input).
   float* hidden{nullptr};
@@ -55,9 +58,14 @@ public:
       const Config& config, const Config* draft, std::uint32_t vocab,
       std::size_t max_cols, std::uint32_t max_rows,
       std::uint32_t max_logit_rows, std::uint32_t max_context);
-  [[nodiscard]] static std::size_t CacheBytes(const Config& config,
-                                              std::uint32_t max_context,
-                                              std::uint32_t ring);
+  /// Per-session cache bytes for per-layer K row widths (KeyWidths).
+  [[nodiscard]] static std::size_t CacheBytes(
+      const Config& config, std::uint32_t max_context, std::uint32_t ring,
+      const std::vector<std::uint32_t>& key_widths);
+  /// Values per K cache row: the whole K, or only the rotated dims where one
+  /// projection feeds K and V (K = rope(k_norm * V)).
+  [[nodiscard]] static std::vector<std::uint32_t> KeyWidths(
+      const DeviceModel& model);
 
   [[nodiscard]] std::unique_ptr<KvCache> CreateCache(
       std::uint32_t max_context, std::string* error_msg = nullptr) const;
@@ -91,6 +99,9 @@ public:
   [[nodiscard]] hipStream_t stream() const noexcept { return stream_; }
   [[nodiscard]] std::uint32_t max_rows() const noexcept { return max_rows_; }
   [[nodiscard]] std::uint32_t ring() const noexcept { return ring_; }
+  [[nodiscard]] const std::vector<std::uint32_t>& key_widths() const noexcept {
+    return key_widths_;
+  }
   [[nodiscard]] const DeviceModel& model() const noexcept { return model_; }
 
 private:
@@ -99,12 +110,16 @@ private:
   void Project(const DeviceTensor& w, const float* x, const void* xq,
                std::uint32_t rows, float* y);
   const void* Quantize(const float* x, std::uint32_t rows, std::uint32_t cols);
+  [[nodiscard]] bool DerivedKeys(std::uint32_t layer) const;
+  /// Marks `att` as a derived-key layer.
+  void DeriveKeys(AttentionArgs& att, std::uint32_t layer) const;
 
   const DeviceModel& model_;
   std::uint32_t max_rows_;
   std::uint32_t max_logit_rows_;
   std::uint32_t max_context_;
   std::uint32_t ring_;
+  std::vector<std::uint32_t> key_widths_;
   hipStream_t stream_{nullptr};
   void* scratch_{nullptr};
   std::int32_t* tokens_{nullptr};

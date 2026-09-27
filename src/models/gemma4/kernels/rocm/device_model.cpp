@@ -3,6 +3,7 @@
 #include <hip/hip_runtime.h>
 
 #include <algorithm>
+#include <cmath>
 
 #include "src/core/hip/weight_upload.hpp"
 
@@ -135,6 +136,21 @@ std::unique_ptr<DeviceModel> DeviceModel::Upload(
   m->output_ = weights.TiedOutput() ? m->token_embd_ : up.Copy(weights.output);
   m->output_norm_ = up.Copy(weights.output_norm);
   m->rope_factors_ = up.Floats(weights.rope_factors.values, "rope factors");
+  {
+    // A pair whose angle stays below 1e-12 rad at 2^24 positions rounds to
+    // the identity in binary16 keys.
+    const auto& factors = weights.rope_factors.values;
+    const double scale =
+        std::pow(static_cast<double>(m->config_.rope_theta_global),
+                 -2.0 / m->config_.head_dim_global);
+    for (std::size_t i = 0; i < factors.size(); ++i) {
+      const double angle =
+          16777216.0 * std::pow(scale, static_cast<double>(i)) / factors[i];
+      if (angle >= 1e-12) {
+        m->global_rope_pairs_ = static_cast<std::uint32_t>(i + 1);
+      }
+    }
+  }
   m->layers_.reserve(weights.layers.size());
   for (const auto& l : weights.layers) {
     m->layers_.push_back(up.Layer(l));

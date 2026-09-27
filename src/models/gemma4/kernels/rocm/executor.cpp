@@ -130,14 +130,31 @@ std::size_t Executor::ScratchBytes(const Config& config, const Config* draft,
 }
 
 std::size_t Executor::CacheBytes(const Config& c, std::uint32_t max_context,
-                                 std::uint32_t ring) {
+                                 std::uint32_t ring,
+                                 const std::vector<std::uint32_t>& key_widths) {
   std::size_t bytes = 0;
   for (std::uint32_t l = 0; l < c.num_layers; ++l) {
     const std::size_t slots =
         c.IsSliding(l) ? std::min(ring, max_context) : max_context;
-    bytes += 2 * AlignUp(slots * c.KvDim(l) * sizeof(std::uint16_t));
+    bytes += AlignUp(slots * key_widths[l] * sizeof(std::uint16_t)) +
+             AlignUp(slots * c.KvDim(l) * sizeof(std::uint16_t));
   }
   return bytes + AlignUp(std::size_t{c.hidden_size} * sizeof(float));
+}
+
+std::vector<std::uint32_t> Executor::KeyWidths(const DeviceModel& model) {
+  const Config& c = model.config();
+  std::vector<std::uint32_t> widths(c.num_layers);
+  for (std::uint32_t l = 0; l < c.num_layers; ++l) {
+    // One projection feeds K and V: the cache keeps only the rotated key
+    // dims; the others are the values scaled by k_norm.
+    const std::uint32_t pairs = model.global_rope_pairs();
+    const bool derived = !c.IsSliding(l) && c.HeadDim(l) == 512 &&
+                         model.layers()[l].attn_v.empty() && pairs % 16 == 0 &&
+                         pairs <= kMaxDerivedKeyPairs;
+    widths[l] = derived ? c.kv_heads[l] * 2 * pairs : c.KvDim(l);
+  }
+  return widths;
 }
 
 Executor::Executor(const DeviceModel& model, std::uint32_t max_rows,
@@ -146,7 +163,8 @@ Executor::Executor(const DeviceModel& model, std::uint32_t max_rows,
       max_rows_(max_rows),
       max_logit_rows_(max_logit_rows),
       max_context_(max_context),
-      ring_(RingSlots(model.config(), max_rows)) {
+      ring_(RingSlots(model.config(), max_rows)),
+      key_widths_(KeyWidths(model)) {
   const Layout l =
       Plan(model.config(), model.has_draft() ? &model.draft().config : nullptr,
            model.vocab_size(), model.max_cols(), max_rows, max_logit_rows,
@@ -214,7 +232,7 @@ std::unique_ptr<KvCache> Executor::CreateCache(std::uint32_t max_context,
   auto cache = std::make_unique<KvCache>();
   cache->max_context = max_context;
   cache->ring = ring_;
-  cache->bytes = CacheBytes(c, max_context, ring_);
+  cache->bytes = CacheBytes(c, max_context, ring_, key_widths_);
   if (hipMalloc(&cache->allocation, cache->bytes) != hipSuccess) {
     if (error_msg != nullptr) {
       *error_msg = "KV cache allocation failed (" +
@@ -230,8 +248,9 @@ std::unique_ptr<KvCache> Executor::CreateCache(std::uint32_t max_context,
     const std::size_t bytes =
         AlignUp(slots * c.KvDim(l) * sizeof(std::uint16_t));
     cache->k.push_back(reinterpret_cast<std::uint16_t*>(at));
-    cache->v.push_back(reinterpret_cast<std::uint16_t*>(at + bytes));
-    at += 2 * bytes;
+    at += AlignUp(slots * key_widths_[l] * sizeof(std::uint16_t));
+    cache->v.push_back(reinterpret_cast<std::uint16_t*>(at));
+    at += bytes;
   }
   cache->hidden = reinterpret_cast<float*>(at);
   return cache;
@@ -296,6 +315,16 @@ void Executor::Project(const DeviceTensor& w, const float* x, const void* xq,
   hip::LaunchGEMV(w.data, w.type, x, y, w.rows, w.cols, stream_);
 }
 
+bool Executor::DerivedKeys(std::uint32_t layer) const {
+  return key_widths_[layer] != model_.config().KvDim(layer);
+}
+
+void Executor::DeriveKeys(AttentionArgs& att, std::uint32_t layer) const {
+  if (DerivedKeys(layer)) {
+    att.rope_pairs = model_.global_rope_pairs();
+  }
+}
+
 void Executor::Forward(KvCache& cache, std::span<const std::int32_t> tokens,
                        std::uint32_t first_position,
                        std::span<const std::uint32_t> logit_rows) {
@@ -347,6 +376,7 @@ void Executor::Forward(KvCache& cache, std::span<const std::int32_t> tokens,
     post.first_position = first_position;
     post.ring = sliding ? cache.ring : 0;
     post.eps = eps;
+    post.rotated_pairs = DerivedKeys(l) ? model_.global_rope_pairs() : 0;
     QkvPost(post, stream_);
 
     AttentionArgs att{};
@@ -364,6 +394,7 @@ void Executor::Forward(KvCache& cache, std::span<const std::int32_t> tokens,
     att.key_limit = std::numeric_limits<std::uint32_t>::max();
     att.window = sliding ? c.sliding_window : 0;
     att.ring = sliding ? cache.ring : 0;
+    DeriveKeys(att, l);
     Attention(att, stream_);
 
     Project(L.attn_output, attn_, Quantize(attn_, n, c.QDim(l)), n, o_);
@@ -437,7 +468,8 @@ void Executor::DraftChain(KvCache& cache, std::int32_t token,
       QueryPost(draft_q_, L.attn_q_norm.f32(),
                 std::pow(c.RopeTheta(l), -2.0F / static_cast<float>(dim)),
                 sliding ? nullptr : dm.rope_factors, 1, c.num_heads, dim,
-                position, true, eps, stream_);
+                position, true, eps, model_.layers()[source].attn_k_norm.f32(),
+                DerivedKeys(source) ? model_.global_rope_pairs() : 0, stream_);
       AttentionArgs att{};
       att.q = draft_q_;
       att.k_cache = cache.k[source];
@@ -453,6 +485,7 @@ void Executor::DraftChain(KvCache& cache, std::int32_t token,
       att.key_limit = position;  // committed keys only
       att.window = sliding ? c.sliding_window : 0;
       att.ring = sliding ? cache.ring : 0;
+      DeriveKeys(att, source);
       Attention(att, stream_);
       Project(L.attn_output, draft_attn_, nullptr, 1, draft_o_);
       PostAttentionNorm(draft_o_, L.post_attn_norm.f32(), draft_x_,

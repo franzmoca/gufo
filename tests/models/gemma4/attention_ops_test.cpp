@@ -3,10 +3,12 @@
 // single-pass modes, and batch invariance of the split mode.
 #include <hip/hip_runtime.h>
 
+#include <algorithm>
 #include <cmath>
 #include <cstdint>
 #include <cstring>
 #include <limits>
+#include <optional>
 #include <random>
 #include <string>
 #include <vector>
@@ -46,6 +48,12 @@ struct Case {
   const char* name;
   bool timed = false;            ///< also report the launch time (deep shapes)
   std::uint32_t row_stride = 1;  ///< rows checked against FP64
+  bool derived = false;          ///< keys rebuilt from V (no K cache)
+};
+
+/// A derived-key case: the K cache holds the rotated dims of `pairs` pairs.
+struct DerivedKeys {
+  std::uint32_t pairs;
 };
 
 template<class T>
@@ -60,7 +68,8 @@ T* Device(const std::vector<T>& host) {
 std::vector<float> RunKernel(const Case& c, const std::vector<float>& q,
                              const std::vector<std::uint16_t>& kc,
                              const std::vector<std::uint16_t>& vc,
-                             std::uint32_t max_keys, bool timed = false) {
+                             std::uint32_t max_keys, bool timed = false,
+                             const DerivedKeys* derived = nullptr) {
   float* dq = Device(q);
   auto* dk = Device(kc);
   auto* dv = Device(vc);
@@ -84,6 +93,9 @@ std::vector<float> RunKernel(const Case& c, const std::vector<float>& q,
   a.key_limit = c.key_limit;
   a.window = c.window;
   a.ring = c.ring;
+  if (derived != nullptr) {
+    a.rope_pairs = derived->pairs;
+  }
   k::Attention(a, nullptr);
   HIP_CHECK(hipDeviceSynchronize());
   if (timed) {
@@ -134,9 +146,62 @@ void Check(const Case& c, std::mt19937& rng) {
   for (auto& v : vc)
     v = ToHalf(normal(rng));
 
-  const auto out = RunKernel(c, q, kc, vc, max_keys, c.timed);
+  // Reference keys (FP32 copies of the binary16 cache).
+  std::vector<float> kref(kc.size());
+  for (std::size_t i = 0; i < kc.size(); ++i)
+    kref[i] = FromHalf(kc[i]);
+  // Derived keys: V is the normalized K projection, K = rope(w * V) turns
+  // the first 64 pairs (Gemma 4 global rope, theta 1e6) and the K cache
+  // keeps only those rotated dims; every other key dim is w * V, which the
+  // producer folds into the query (q * w) so the kernel reads V.
+  std::optional<DerivedKeys> derived;
+  if (c.derived) {
+    constexpr std::uint32_t kPairs = 64;
+    std::uniform_real_distribution<float> scale(0.75F, 1.25F);
+    std::vector<float> weight(D);
+    for (float& w : weight)
+      w = scale(rng);
+    for (std::size_t row = 0; row < q.size() / D; ++row) {
+      for (std::uint32_t d = 0; d < D; ++d) {
+        if (d % (D / 2) >= kPairs) {
+          q[row * D + d] *= weight[d];
+        }
+      }
+    }
+    kc.assign(std::size_t{slots} * c.kv_heads * 2 * kPairs, 0);
+    for (std::uint32_t key = 0; key < max_keys; ++key) {
+      const std::uint32_t slot = c.ring != 0 ? key % c.ring : key;
+      for (std::uint32_t kvh = 0; kvh < c.kv_heads; ++kvh) {
+        const std::size_t row = (std::size_t{slot} * c.kv_heads + kvh) * D;
+        const std::size_t rot =
+            (std::size_t{slot} * c.kv_heads + kvh) * 2 * kPairs;
+        for (std::uint32_t i = 0; i < D / 2; ++i) {
+          if (i >= kPairs) {
+            kref[row + i] = FromHalf(vc[row + i]);
+            kref[row + D / 2 + i] = FromHalf(vc[row + D / 2 + i]);
+            continue;
+          }
+          const double x0 = double{FromHalf(vc[row + i])} * weight[i];
+          const double x1 =
+              double{FromHalf(vc[row + D / 2 + i])} * weight[D / 2 + i];
+          const double theta =
+              key * std::pow(1e6, -2.0 * i / static_cast<double>(D));
+          const double cs = std::cos(theta);
+          const double sn = std::sin(theta);
+          kc[rot + i] = ToHalf(static_cast<float>(x0 * cs - x1 * sn));
+          kc[rot + kPairs + i] = ToHalf(static_cast<float>(x0 * sn + x1 * cs));
+          kref[row + i] = FromHalf(kc[rot + i]);
+          kref[row + D / 2 + i] = FromHalf(kc[rot + kPairs + i]);
+        }
+      }
+    }
+    derived = DerivedKeys{kPairs};
+  }
+  const DerivedKeys* dk = derived ? &*derived : nullptr;
+
+  const auto out = RunKernel(c, q, kc, vc, max_keys, c.timed, dk);
   // Repeated launches produce the same bits.
-  Require(RunKernel(c, q, kc, vc, max_keys) == out,
+  Require(RunKernel(c, q, kc, vc, max_keys, false, dk) == out,
           std::string(c.name) + ": output differs between launches");
   double worst = 0.0;
   for (std::uint32_t r = 0; r < c.rows; r += c.row_stride) {
@@ -155,7 +220,7 @@ void Check(const Case& c, std::mt19937& rng) {
         double s = 0.0;
         for (std::uint32_t d = 0; d < D; ++d) {
           s += qh[d] *
-               FromHalf(kc[(std::size_t{slot} * c.kv_heads + kvh) * D + d]);
+               double{kref[(std::size_t{slot} * c.kv_heads + kvh) * D + d]};
         }
         scores.push_back(s);
         m = std::max(m, s);
@@ -196,7 +261,7 @@ void Check(const Case& c, std::mt19937& rng) {
       single.first_position = c.first_position + r;
       std::vector<float> q1(q.begin() + std::size_t{r} * c.heads * D,
                             q.begin() + std::size_t{r + 1} * c.heads * D);
-      const auto one = RunKernel(single, q1, kc, vc, max_keys);
+      const auto one = RunKernel(single, q1, kc, vc, max_keys, false, dk);
       Require(std::memcmp(one.data(), &out[std::size_t{r} * c.heads * D],
                           one.size() * 4) == 0,
               std::string(c.name) + ": row " + std::to_string(r) +
@@ -239,18 +304,29 @@ int main() {
         {512, 32, 4, 47, 0, 0, 0, false, kNoLimit, "global prefill from zero"},
         {512, 8, 1, 3, 1500, 0, 0, true, 1500, "draft global frontier"},
         {256, 8, 4, 3, 2000, 1024, 3072, true, 2000, "draft sliding frontier"},
-        {512, 32, 4, 1, 32767, 0, 0, false, kNoLimit, "global decode 32K",
-         true},
-        {512, 32, 4, 5, 32763, 0, 0, false, kNoLimit, "global verify 32K",
-         true},
+        // Production global layers derive K from V.
+        {512, 32, 4, 1, 2999, 0, 0, false, kNoLimit,
+         "derived global multi-split", false, 1, true},
+        {512, 8, 1, 7, 1500, 0, 0, false, kNoLimit, "derived global verify",
+         false, 1, true},
+        {512, 8, 1, 33, 600, 0, 0, false, kNoLimit, "derived global prefill",
+         false, 1, true},
+        {512, 32, 4, 47, 0, 0, 0, false, kNoLimit,
+         "derived global prefill from zero", false, 1, true},
+        {512, 8, 1, 3, 1500, 0, 0, true, 1500, "derived draft global frontier",
+         false, 1, true},
+        {512, 32, 4, 1, 32767, 0, 0, false, kNoLimit, "global decode 32K", true,
+         1, true},
+        {512, 32, 4, 5, 32763, 0, 0, false, kNoLimit, "global verify 32K", true,
+         1, true},
         {256, 32, 16, 1, 32767, 1024, 3072, false, kNoLimit,
          "sliding decode 32K", true},
         {256, 32, 16, 5, 32763, 1024, 3072, false, kNoLimit,
          "sliding verify 32K", true},
         {512, 32, 4, 512, 32768, 0, 0, false, kNoLimit, "global prefill 32K",
-         true, 97},
+         true, 97, true},
         {512, 32, 4, 2048, 32768, 0, 0, false, kNoLimit,
-         "global prefill 2048 rows at 32K", true, 389},
+         "global prefill 2048 rows at 32K", true, 389, true},
         {256, 32, 16, 512, 32768, 1024, 1536, false, kNoLimit,
          "sliding prefill 32K", true, 97},
     };
