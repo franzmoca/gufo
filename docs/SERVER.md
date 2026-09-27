@@ -76,6 +76,9 @@ Text serving defaults match llama.cpp for context and generation length:
 | `--sessions` | `1` |
 | Thinking / reasoning effort | Model template defaults |
 
+Qwen chat prompts are bounded by the session context, not a fixed size: the
+rendered template may use up to 128 bytes per context token (at least 1 MiB).
+
 Clients can set a positive `max_tokens` / `max_completion_tokens` (Chat
 Completions) or `max_output_tokens` (Responses). These include reasoning tokens.
 Omitting the field uses the server default. A response cannot exceed remaining
@@ -160,11 +163,23 @@ the result can still populate the cache. DeepSeek and Qwen tool requests retain
 a checkpoint before the assistant-generation suffix, including when a client
 drops the interrupted assistant and appends `"."` after a tool result. DeepSeek
 also accounts for tokenization changes where adjacent user/tool turns join.
-Qwen requests that remove previous reasoning retain this checkpoint too.
+Qwen requests retain this checkpoint with thinking enabled or disabled.
+Warm continuations checkpoint the reused frontier and prefill the new suffix
+together. A second full-prompt checkpoint enables exact retries without
+prefill; both checkpoints share the existing snapshot-memory budget.
 Exact live continuations reuse generated tokens. The server reports cached
 and newly processed tokens separately; resuming from the checkpoint processes
 the short suffix. System instructions, tool definitions and image identities
 must match the retained prefix.
+
+Qwen image identity is checked only for images consumed before each checkpoint.
+Appending an image reuses the preceding text/image state in RAM or on disk;
+changing, removing or moving an earlier image invalidates checkpoints after it.
+New images get a checkpoint before assistant framing so later turns do not
+encode or prefill them again.
+With `preserve_thinking=false`, a new user turn removes reasoning from the
+preceding tool cycle. Gufo retains the state before that cycle and processes
+its changed suffix again.
 
 `SIGINT` and `SIGTERM` cancel active requests and drain accepted disk writes
 before exiting. `--cache-disk DIR` defaults to 8 GiB retained on disk.
@@ -193,6 +208,8 @@ reasoning replay, greedy/seeded sampling, and explicit cache bypass. Use
 For persistence, enable `--cache-disk` before the check, restart the same server,
 and add `--restore /tmp/cache-check.json`.
 Use `--image /path/to/image.png` for Qwen image conversations.
+Add `--append-image` to introduce the image after a cached text turn, and
+`--reasoning-effort high` to check a specific thinking effort.
 Each case continues for a third turn; repeat `--case NAME` to select only the
 cases needed for a change.
 The check requires exact snapshot and matched-history replay. It separately
@@ -479,18 +496,33 @@ The other compatibility routes are deliberately limited:
 
 | Route | Supported request | Output limit |
 | --- | --- | --- |
-| `/v1/completions` | One prompt string, one non-streaming completion | `max_tokens` |
+| `/v1/completions` | One prompt string, buffered or SSE completion | `max_tokens` |
 | `/v1/messages` | Text messages and optional text system instructions | `max_tokens` |
 | `/completion` | One prompt string, non-streaming completion | `n_predict` |
 
 All four routes validate the loaded model, positive integer limits and shared
-sampling controls. The three routes above reject streaming; all reject multiple
-candidates. Responses and Messages honor the server's thinking defaults.
+sampling controls. Messages and `/completion` reject streaming; all reject
+multiple candidates. Responses and Messages honor the server's thinking defaults.
 Native Messages rejects tools, `thinking`, and `output_config`; use Chat
 Completions for tool/reasoning controls. Completions routes accept `stop`;
 Messages accepts `stop_sequences`. Responses has no stop-sequence field.
 `/infill` and `/v1/messages/count_tokens` return 501: suffix-conditioned infill
 and template-aware message counting are not implemented.
+
+Raw Completions accepts `stream: true` and
+`stream_options: {"include_usage": true}`. The final usage event reports prompt,
+cached and completion token counts before the `[DONE]` sentinel. Local benchmark
+clients can set `ignore_eos: true` to generate exactly `max_tokens`; context
+capacity remains the hard limit. Chat Completions, Responses, Messages and
+`/completion` reject `ignore_eos`: Raw Completions owns the fixed-length
+contract. `GET /v1/models` reports that configured limit as `context_length` on
+the loaded text model.
+
+`ignore_eos` measures decode past the model's stop tokens, which speculative
+backends do not accelerate: verification ends its accepted run at every EOS it
+emits, so each crossing clips the draft window. Expect decode near the
+autoregressive rate in that region, not the rate the same model reaches on an
+ordinary continuation.
 
 ## Chat Completions Adapter
 
@@ -554,9 +586,10 @@ clients behind the same proxy or NAT share a peer quota.
 ## Model Discovery
 
 `GET /v1/models` lists the configured text model and ready audio/video
-services. Entries provide `id`, `object`, `created` and `owned_by`; audio/video
-entries also describe their capability. Send the returned model ID in requests.
-Text requests naming another model return 404.
+services. Entries provide `id`, `object`, `created` and `owned_by`; the text
+entry also provides `context_length`, while audio/video entries describe their
+capability. Send the returned model ID in requests. Text requests naming another
+model return 404.
 
 ## Errors
 
@@ -653,6 +686,11 @@ Server lifecycle and request logs go to stderr. Each request gets an
 requests log receipt and completion; streaming completion is logged after the
 stream ends. Successful health/metrics and video-status polls are quiet.
 
+Pass `--log-progress` to `gufo serve llm` to log each prefill chunk, each
+50-token decode boundary, and the final decode remainder. Each line includes the
+request ID, completed and total tokens, percentage, current speed and average
+speed. Speculative requests also include accepted and proposed drafts.
+
 Text completion logs include stop/length/cancellation, queue and first-token
 latency, prefill/decode speed, execution width, memory/disk cache hits and reused
 tokens, plus accepted/proposed drafts and acceptance percentage. These metrics
@@ -660,11 +698,13 @@ are logged even when a streaming client does not request a usage chunk.
 Errors include a stable error code; disconnects and stream failures are marked.
 On a cache miss, `cache_miss_reason` distinguishes a missing checkpoint, changed
 token prefix, changed image input, and explicit cache bypass. Common-prefix and
-nearest-checkpoint token counts explain how far the inputs agree, without
-logging prompt text. Adding tools or editing system/developer instructions near
-the beginning invalidates the later state: keep those inputs stable during an
-agent conversation. A disconnected SSE stream may never deliver its terminal
-usage chunk; proxy counters can then show zero despite generated tokens.
+nearest-checkpoint token counts report token agreement even when image
+identity differs; matching image-placeholder tokens do not imply matching
+pixels. Prompt text is not logged. Adding tools or editing system/developer
+instructions near the beginning invalidates the later state: keep those inputs
+stable during an agent conversation. A disconnected SSE stream may never
+deliver its terminal usage chunk; proxy counters can then show zero despite
+generated tokens.
 The server's cancellation log retains the actual token counts.
 
 Routine cache replacement is quiet; failed captures, disk corruption and cache

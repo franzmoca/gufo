@@ -72,6 +72,10 @@ QwenGpuExecutor::QwenGpuExecutor(std::shared_ptr<const QwenGpuModel> model,
 
 QwenGpuExecutor::~QwenGpuExecutor() {
   (void)hipStreamSynchronize(arena_.stream);
+  for (const auto event : prefill_events_) {
+    if (event)
+      (void)hipEventDestroy(event);
+  }
   if (d_verification_logits_ != nullptr) {
     (void)hipFree(d_verification_logits_);
   }
@@ -145,7 +149,7 @@ std::unique_ptr<QwenGpuSnapshot> QwenGpuExecutor::SaveSnapshot(
     std::uint32_t valid_context) {
   CheckReset();
   auto snapshot = arena_.SaveSnapshot(valid_context);
-  snapshot->vision_layout_ = vision_input_.layout();
+  snapshot->vision_layout_ = vision_input_.layout().Prefix(valid_context);
   return snapshot;
 }
 

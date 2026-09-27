@@ -45,6 +45,7 @@ struct TextSchedulerPolicy {
   std::size_t max_buffered_output_bytes_total{
       kDefaultMaxBufferedOutputBytesTotal};
   std::chrono::milliseconds request_timeout{0};
+  bool log_progress{false};
 };
 
 /// Single-owner scheduler for opaque text-model runner states.
@@ -65,6 +66,7 @@ public:
     std::shared_ptr<const TextPromptContext> prompt_context;
     bool cache_prompt{true};
     std::size_t cache_prefix_tokens{0};
+    bool stop_at_eos{true};
     std::vector<std::string> stop_sequences;
   };
 
