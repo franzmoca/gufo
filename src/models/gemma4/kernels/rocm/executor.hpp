@@ -21,10 +21,16 @@ struct MtpCandidateLogits;
 
 namespace gufo::models::gemma4::rocm {
 
-/// Picks the next draft token from the drafter's top candidate logits, or
-/// nothing to end the chain before that step's token.
-using DraftProposer = std::function<std::optional<std::int32_t>(
-    const qwen38_flash_next::MtpCandidateLogits&)>;
+/// A step's draft token, or none to end the chain before it; `last` keeps
+/// the token and ends the chain after it.
+struct DraftProposal {
+  std::optional<std::int32_t> token;
+  bool last{false};
+};
+
+/// Picks the next draft from the drafter's top candidate logits.
+using DraftProposer =
+    std::function<DraftProposal(const qwen38_flash_next::MtpCandidateLogits&)>;
 
 /// One session's attention state. Global layers keep every position in a
 /// token-major binary16 cache; sliding layers keep a ring of `ring` slots,
@@ -88,7 +94,7 @@ public:
   /// position `position` (the committed frontier), reading the target's KV
   /// strictly before it and the cache's frontier hidden state. Each step
   /// hands the drafter's top-64 logits to `propose` and embeds the token it
-  /// returns; `drafts` ends where it returns nothing.
+  /// returns; `drafts` ends where it returns nothing or a last token.
   void DraftChain(KvCache& cache, std::int32_t token, std::uint32_t position,
                   std::uint32_t steps, std::vector<std::int32_t>* drafts,
                   const DraftProposer& propose);

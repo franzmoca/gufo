@@ -555,11 +555,14 @@ void Executor::DraftChain(KvCache& cache, std::int32_t token,
         offsetof(MtpCandidateLogits, logits) + host.size * sizeof(float),
         hipMemcpyDeviceToHost, stream_));
     HIP_CHECK(hipStreamSynchronize(stream_));
-    const std::optional<std::int32_t> proposal = propose(host);
-    if (!proposal) {
+    const DraftProposal proposal = propose(host);
+    if (!proposal.token) {
       break;
     }
-    drafts->push_back(*proposal);
+    drafts->push_back(*proposal.token);
+    if (proposal.last) {
+      break;
+    }
     HIP_CHECK(hipMemcpyAsync(draft_tokens_ + step + 1, &drafts->back(),
                              sizeof(std::int32_t), hipMemcpyHostToDevice,
                              stream_));

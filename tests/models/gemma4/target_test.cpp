@@ -128,7 +128,9 @@ std::vector<g4::TokenId> Generate(
   }
   const auto& stats = session->Statistics();
   std::cout << "speculative: cycles " << stats.cycles << ", drafted "
-            << stats.drafted << ", accepted " << stats.accepted << '\n';
+            << stats.drafted << ", accepted " << stats.accepted << ", copied "
+            << stats.copied << ", copies accepted " << stats.copied_accepted
+            << '\n';
   if (stats_out != nullptr) {
     *stats_out = stats;
   }
@@ -356,6 +358,24 @@ int main() {
       const auto spec = Generate(*mtp, prompt, 64, true);
       Require(ar == spec, std::string("greedy MTP differs from AR: ") + text);
     }
+    // Prompt lookup: repeating a passage from the prompt proposes copies,
+    // verified like drafts, so greedy output still equals AR.
+    const auto copy_prompt = PromptTokens(
+        *mtp,
+        "Repeat the following paragraph word for word, with nothing else:\n\n"
+        "A harbour town usually begins with a sheltered cove and a handful of "
+        "families who fish close to shore. The first boats are small, pulled "
+        "up on the beach at night, and the village lives by the rhythm of the "
+        "seasons: anchovies in spring, sardines in summer, storms that keep "
+        "everyone ashore in winter.");
+    g4::Session::SpeculativeStats copy_stats;
+    const auto copy_ar = Generate(*mtp, copy_prompt, 64, false);
+    const auto copy_spec =
+        Generate(*mtp, copy_prompt, 64, true, {}, &copy_stats);
+    Require(copy_ar == copy_spec,
+            "greedy MTP with prompt lookup differs from AR");
+    Require(copy_stats.copied_accepted > 0,
+            "prompt lookup proposed no accepted copies");
     // Sampled MTP (a chat front end's sampler): drafts are sampled and
     // verified by p/q rejection; a seed replays the same tokens.
     gufo::sampling::SamplingConfig chat;
@@ -372,5 +392,13 @@ int main() {
     Require(first.size() == 96 && first == again,
             "sampled MTP does not replay its seed");
     Require(stats.accepted > 0, "sampled MTP accepted no drafts");
+    // Sampled copies are point-mass proposals under the same rule.
+    g4::Session::SpeculativeStats sampled_copy_stats;
+    const auto sampled_copy =
+        Generate(*mtp, copy_prompt, 64, true, chat, &sampled_copy_stats);
+    Require(sampled_copy == Generate(*mtp, copy_prompt, 64, true, chat),
+            "sampled MTP with prompt lookup does not replay its seed");
+    Require(sampled_copy_stats.copied_accepted > 0,
+            "sampled prompt lookup accepted no copies");
   });
 }

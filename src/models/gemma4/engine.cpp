@@ -208,6 +208,7 @@ std::size_t Session::AllocatedBytes() const noexcept {
 void Session::Reset() {
   pending_.reset();
   tokens_.clear();
+  lookup_.Clear();
   logits_.clear();
   valid_ = false;
 }
@@ -232,6 +233,7 @@ bool Session::Extend(std::size_t begin, std::string* error_msg) {
     executor.CopyLogits(1, &logits_);
   } catch (const std::exception& e) {
     tokens_.resize(begin);
+    lookup_.Clear();
     return Fail(error_msg, e.what());
   }
   valid_ = true;
@@ -263,6 +265,7 @@ bool Session::Sync(std::span<const TokenId> prompt, std::string* error_msg) {
     common = 0;
   }
   tokens_.assign(prompt.begin(), prompt.end());
+  lookup_.Clear();
   return Extend(common, error_msg);
 }
 
@@ -401,16 +404,37 @@ bool Session::DecodeStep(std::size_t max_tokens,
   // verified by p/q rejection with residual correction; greedy decoding
   // keeps argmax drafts accepted when the target's own choice agrees.
   const bool sampled = steps > 0 && sampler.config().uses_random_sampling();
+  // Prompt lookup may fill every slot; MTP drafts stop earlier when sampled.
+  const std::uint32_t max_drafts = steps;
   if (sampled) {
     steps = std::min(steps, kSampledDraftCap);
   }
   std::vector<qwen38_flash_next::MtpProposal> proposals;
+  std::size_t copied = 0;
   try {
     std::lock_guard lock(model_->mutex_);
     if (steps > 0) {
       std::vector<std::int32_t> drafts;
+      // The context the next token continues: pending plus kept drafts.
+      std::vector<std::int32_t> context{pending};
+      std::vector<std::int32_t> copies;
+      lookup_.Extend(tokens_);
+      // Prompt lookup: when the context repeats an earlier passage of at
+      // least 12 tokens, the tokens that followed it fill the remaining
+      // slots (verified like any draft) and end the MTP chain.
+      const auto copy = [&] {
+        const auto match = lookup_.Find(tokens_, context);
+        const std::size_t room = max_drafts - (context.size() - 1);
+        if (match.length == 0 || room == 0) {
+          return false;
+        }
+        const std::size_t count = std::min(room, tokens_.size() - match.start);
+        copies.assign(
+            tokens_.begin() + static_cast<std::ptrdiff_t>(match.start),
+            tokens_.begin() + static_cast<std::ptrdiff_t>(match.start + count));
+        return count != 0;
+      };
       float chain = 1.0F;
-      std::uint32_t proposed = 0;
       if (sampled) {
         // A cycle-local proposal stream; target draws keep the sampler's.
         std::uint64_t draft_rng =
@@ -418,31 +442,49 @@ bool Session::DecodeStep(std::size_t max_tokens,
         sampling::SamplerState draft_sampler = sampler;
         executor.DraftChain(
             *cache_, pending, position, steps, &drafts,
-            [&](const qwen38_flash_next::MtpCandidateLogits& candidates)
-                -> std::optional<std::int32_t> {
+            [&](const qwen38_flash_next::MtpCandidateLogits& candidates) {
               auto proposal = qwen38_flash_next::SampleMtpProposal(
                   candidates, draft_sampler, &draft_rng);
               chain *= proposal.probability;
               if (!proposals.empty() && chain < kSampledChainFloor) {
-                return std::nullopt;
+                (void)copy();
+                return rocm::DraftProposal{};
               }
               draft_sampler.Accept(proposal.token);
               proposals.push_back(proposal);
-              return static_cast<std::int32_t>(proposal.token);
+              context.push_back(static_cast<std::int32_t>(proposal.token));
+              return rocm::DraftProposal{
+                  .token = static_cast<std::int32_t>(proposal.token),
+                  .last = copy()};
             });
+        // A copied token is a point-mass proposal: accepted with the
+        // target's probability, a rejection resampling without it.
+        for (const std::int32_t token : copies) {
+          qwen38_flash_next::MtpProposal proposal;
+          proposal.ids[0] = static_cast<sampling::TokenId>(token);
+          proposal.probabilities[0] = 1.0F;
+          proposal.size = 1;
+          proposal.token = proposal.ids[0];
+          proposal.probability = 1.0F;
+          proposals.push_back(proposal);
+        }
       } else {
         executor.DraftChain(
             *cache_, pending, position, steps, &drafts,
-            [&](const qwen38_flash_next::MtpCandidateLogits& candidates)
-                -> std::optional<std::int32_t> {
+            [&](const qwen38_flash_next::MtpCandidateLogits& candidates) {
               chain *= TopShare(candidates);
-              if (proposed++ > 0 && chain < kGreedyChainFloor) {
-                return std::nullopt;
+              if (context.size() > 1 && chain < kGreedyChainFloor) {
+                (void)copy();
+                return rocm::DraftProposal{};
               }
-              return TopToken(candidates);
+              const std::int32_t token = TopToken(candidates);
+              context.push_back(token);
+              return rocm::DraftProposal{.token = token, .last = copy()};
             });
       }
       rows.insert(rows.end(), drafts.begin(), drafts.end());
+      rows.insert(rows.end(), copies.begin(), copies.end());
+      copied = copies.size();
     }
     std::vector<std::uint32_t> logit_rows(rows.size());
     for (std::uint32_t i = 0; i < logit_rows.size(); ++i) {
@@ -486,6 +528,10 @@ bool Session::DecodeStep(std::size_t max_tokens,
   stats_.cycles += 1;
   stats_.drafted += rows.size() - 1;
   stats_.accepted += accepted;
+  // Copies trail the MTP drafts.
+  const std::size_t mtp = rows.size() - 1 - copied;
+  stats_.copied += copied;
+  stats_.copied_accepted += accepted > mtp ? accepted - mtp : 0;
   return true;
 }
 
@@ -590,6 +636,7 @@ bool Session::RestoreSnapshot(std::span<const std::uint8_t> payload,
     return Fail(error_msg, "snapshot position exceeds the session context");
   }
   tokens_.resize(n);
+  lookup_.Clear();
   if (payload.size() != SnapshotBytes()) {
     tokens_.clear();
     return Fail(error_msg, "snapshot size does not match its header");

@@ -33,7 +33,10 @@ distribution exactly (the rule is shared with Flash-Next and unit-tested
 there). A seed replays the same tokens (`gemma4.target`), but they consume
 different random draws than an AR run with the same seed. How many drafts a
 cycle proposes depends only on the drafter's confidences, never on timings,
-so neither greedy equality nor seeded replay depends on it.
+so neither greedy equality nor seeded replay depends on it. Prompt-lookup
+copies are verified like drafts (sampled: as point-mass proposals under the
+same rule); `gemma4.target` checks greedy equality and seeded replay on a
+prompt that copies a paragraph, with accepted copies.
 
 ## Reproduce
 

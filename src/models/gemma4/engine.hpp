@@ -14,6 +14,7 @@
 #include "src/core/sampling.hpp"
 #include "src/models/gemma4/config.hpp"
 #include "src/models/gemma4/tokenizer.hpp"
+#include "src/models/qwen38_flash_next/prompt_lookup.hpp"
 
 namespace gufo::core {
 class GgufReader;
@@ -159,8 +160,10 @@ public:
                                 bool stop_at_eos = true);
   struct SpeculativeStats {
     std::uint64_t cycles{0};
-    std::uint64_t drafted{0};
-    std::uint64_t accepted{0};
+    std::uint64_t drafted{0};   ///< MTP drafts and copied tokens
+    std::uint64_t accepted{0};  ///< MTP drafts and copied tokens
+    std::uint64_t copied{0};    ///< prompt-lookup tokens among `drafted`
+    std::uint64_t copied_accepted{0};
   };
   [[nodiscard]] const SpeculativeStats& Statistics() const noexcept {
     return stats_;
@@ -199,6 +202,9 @@ private:
   std::shared_ptr<Model> model_;
   std::unique_ptr<rocm::KvCache> cache_;
   std::vector<TokenId> tokens_;
+  /// Prompt-lookup index over tokens_; cleared whenever tokens_ is rewritten
+  /// rather than appended to.
+  qwen38_flash_next::PromptLookup lookup_;
   std::vector<float> logits_;
   bool valid_{false};
   /// Emitted but not yet evaluated; its predecessor's hidden state is the
