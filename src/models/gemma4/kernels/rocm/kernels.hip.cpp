@@ -483,6 +483,11 @@ __global__ void __launch_bounds__(kThreads) AttentionKernel(AttentionArgs a) {
   MergeWaves<D>(st, dst, true);
 }
 
+/// A wave-uniform value moved to a scalar register.
+__device__ __forceinline__ float Uniform(float v) {
+  return __int_as_float(__builtin_amdgcn_readfirstlane(__float_as_int(v)));
+}
+
 /// Rows per block of the row-shared split kernel.
 constexpr int kRowBlock = 5;
 
@@ -534,10 +539,16 @@ __global__ void __launch_bounds__(kThreads)
   const int rows = min(R, static_cast<int>(a.rows - row0));
   const std::uint32_t base = (first_split + local) * C;
   const std::size_t stride = static_cast<std::size_t>(a.kv_heads) * D;
-  const auto* k_cache =
-      reinterpret_cast<const __half*>(a.k_cache) + blockIdx.y * D + lane * P;
-  const auto* v_cache =
-      reinterpret_cast<const __half*>(a.v_cache) + blockIdx.y * D + lane * P;
+  const auto* k_head =
+      reinterpret_cast<const __half*>(a.k_cache) + blockIdx.y * D;
+  const auto* v_head =
+      reinterpret_cast<const __half*>(a.v_cache) + blockIdx.y * D;
+  // At hd512 the eight waves are the heads of one KV head and each reads
+  // every key and value: the block stages each 32-key tile once in shared
+  // memory instead of issuing eight copies of every load.
+  constexpr bool kStaged = G == kWaves;
+  constexpr int kStageLoads = kStaged ? kWave * D / 8 / kThreads : 1;
+  __shared__ __align__(16) __half tile[kStaged ? kWave * D : 8];
 
   std::uint32_t lo[R];
   std::uint32_t hi[R];
@@ -572,24 +583,69 @@ __global__ void __launch_bounds__(kThreads)
   // the row index. Keys outside [begin, end) load as zeros.
   const std::uint32_t begin = max(base, lo[0]);
   const std::uint32_t end = min(base + C, RowKeys(a, row0 + rows - 1).hi);
-  auto load = [&](const __half* cache, std::uint32_t key, uint4(&raw)[P / 8]) {
-    if (key >= begin && key < end) {
-      const std::uint32_t slot = a.ring != 0 ? key % a.ring : key;
-      const auto* src = reinterpret_cast<const uint4*>(cache + slot * stride);
+  // Row kk of the tile at key0: shared memory when staged, else the cache.
+  auto load = [&](const __half* head_cache, std::uint32_t key0, int kk,
+                  uint4(&raw)[P / 8]) {
+    if constexpr (kStaged) {
+      const auto* src =
+          reinterpret_cast<const uint4*>(tile + kk * D + lane * P);
 #pragma unroll
       for (int i = 0; i < P / 8; ++i) {
         raw[i] = src[i];
       }
     } else {
+      const std::uint32_t key = key0 + kk;
+      if (key >= begin && key < end) {
+        const std::uint32_t slot = a.ring != 0 ? key % a.ring : key;
+        const auto* src = reinterpret_cast<const uint4*>(
+            head_cache + slot * stride + lane * P);
 #pragma unroll
-      for (int i = 0; i < P / 8; ++i) {
-        raw[i] = uint4{0, 0, 0, 0};
+        for (int i = 0; i < P / 8; ++i) {
+          raw[i] = src[i];
+        }
+      } else {
+#pragma unroll
+        for (int i = 0; i < P / 8; ++i) {
+          raw[i] = uint4{0, 0, 0, 0};
+        }
       }
     }
   };
+  // Staging: each thread moves kStageLoads 16-byte pieces of a tile.
+  uint4 staged[kStageLoads];
+  auto stage_load = [&](const __half* head_cache, std::uint32_t key0) {
+#pragma unroll
+    for (int n = 0; n < kStageLoads; ++n) {
+      const int u = static_cast<int>(threadIdx.x) + n * kThreads;
+      const std::uint32_t key = key0 + u / (D / 8);
+      if (key >= begin && key < end) {
+        const std::uint32_t slot = a.ring != 0 ? key % a.ring : key;
+        staged[n] = *reinterpret_cast<const uint4*>(head_cache + slot * stride +
+                                                    (u % (D / 8)) * 8);
+      } else {
+        staged[n] = uint4{0, 0, 0, 0};
+      }
+    }
+  };
+  auto stage_store = [&] {
+    __syncthreads();
+#pragma unroll
+    for (int n = 0; n < kStageLoads; ++n) {
+      reinterpret_cast<uint4*>(tile)[threadIdx.x + n * kThreads] = staged[n];
+    }
+    __syncthreads();
+  };
+  if constexpr (kStaged) {
+    stage_load(k_head, begin & ~std::uint32_t{kWave - 1});
+  }
 
   for (std::uint32_t key0 = begin & ~std::uint32_t{kWave - 1}; key0 < end;
        key0 += kWave) {
+    if constexpr (kStaged) {
+      // Keys to shared memory; the values load under the scores.
+      stage_store();
+      stage_load(v_head, key0);
+    }
     // Scores: lane L holds key key0 + L of every row.
     float s[R];
 #pragma unroll
@@ -601,7 +657,7 @@ __global__ void __launch_bounds__(kThreads)
       uint4 kraw[LG][P / 8];
 #pragma unroll
       for (int kk = 0; kk < LG; ++kk) {
-        load(k_cache, key0 + g0 + kk, kraw[kk]);
+        load(k_head, key0, g0 + kk, kraw[kk]);
       }
 #pragma unroll
       for (int g = 0; g < LG; g += KG) {
@@ -635,9 +691,11 @@ __global__ void __launch_bounds__(kThreads)
     }
     // The first values load under the softmax.
     uint4 vraw[LG][P / 8];
+    if constexpr (!kStaged) {
 #pragma unroll
-    for (int kk = 0; kk < LG; ++kk) {
-      load(v_cache, key0 + kk, vraw[kk]);
+      for (int kk = 0; kk < LG; ++kk) {
+        load(v_head, key0, kk, vraw[kk]);
+      }
     }
     // Online softmax per row; a tile without keys for a row leaves it as is.
     float p[R];
@@ -647,12 +705,13 @@ __global__ void __launch_bounds__(kThreads)
       if (r < rows) {
         const std::uint32_t key = key0 + lane;
         const float sr = key >= lo[r] && key < hi[r] ? s[r] : -INFINITY;
-        const float mt = WaveMax(sr);
+        // Wave-uniform statistics live in scalar registers.
+        const float mt = Uniform(WaveMax(sr));
         if (mt != -INFINITY) {
           const float mn = fmaxf(m[r], mt);
-          const float scale = expf(m[r] - mn);
+          const float scale = Uniform(expf(m[r] - mn));
           p[r] = expf(sr - mn);
-          l[r] = __builtin_fmaf(l[r], scale, WaveSum(p[r]));
+          l[r] = __builtin_fmaf(l[r], scale, Uniform(WaveSum(p[r])));
           m[r] = mn;
 #pragma unroll
           for (int i = 0; i < P; ++i) {
@@ -661,21 +720,35 @@ __global__ void __launch_bounds__(kThreads)
         }
       }
     }
+    if constexpr (kStaged) {
+      // Values to shared memory; the next keys load under the products.
+      stage_store();
+      if (key0 + kWave < end) {
+        stage_load(k_head, key0 + kWave);
+      }
+    }
     // Values, the next batch loading under the current one.
 #pragma unroll
     for (int g0 = 0; g0 < kWave; g0 += LG) {
       uint4 cur[LG][P / 8];
-#pragma unroll
-      for (int kk = 0; kk < LG; ++kk) {
-#pragma unroll
-        for (int i = 0; i < P / 8; ++i) {
-          cur[kk][i] = vraw[kk][i];
-        }
-      }
-      if (g0 + LG < kWave) {
+      if constexpr (kStaged) {
 #pragma unroll
         for (int kk = 0; kk < LG; ++kk) {
-          load(v_cache, key0 + g0 + LG + kk, vraw[kk]);
+          load(v_head, key0, g0 + kk, cur[kk]);
+        }
+      } else {
+#pragma unroll
+        for (int kk = 0; kk < LG; ++kk) {
+#pragma unroll
+          for (int i = 0; i < P / 8; ++i) {
+            cur[kk][i] = vraw[kk][i];
+          }
+        }
+        if (g0 + LG < kWave) {
+#pragma unroll
+          for (int kk = 0; kk < LG; ++kk) {
+            load(v_head, key0, g0 + LG + kk, vraw[kk]);
+          }
         }
       }
 #pragma unroll
