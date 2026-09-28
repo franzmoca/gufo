@@ -90,6 +90,14 @@ class BenchConfig:
             return list(reference["args"])
         return None
 
+    @property
+    def speculative_self_reference(self) -> bool:
+        """Multi-user speculative completions are checked against the same
+        mode's C1 instead of the AR artifact: set for engines whose greedy
+        speculation equals single-token decode with the drafter loaded but
+        not an AR-only server (Gemma 4, see its QUALITY.md)."""
+        return self.data.get("speculative", {}).get("exactness_reference") == "self"
+
     def substitute(self, args: list[str], variant: str | None) -> list[str]:
         """Replace `{role}` placeholders with the variant's file paths."""
         out = []

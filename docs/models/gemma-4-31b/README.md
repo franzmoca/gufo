@@ -29,7 +29,8 @@ drafter's confidence that all its drafts will be accepted falls below a floor;
 sampled chains use at most four. When the recent context repeats an earlier
 passage of at least 12 tokens (a rewritten file, a quoted log), the tokens that
 followed it fill the remaining draft slots and are verified like drafts (prompt
-lookup, shared with gufo-org/gufo#295). The drafter attends to the target's own KV cache,
+lookup, shared with gufo-org/gufo#295). `--sessions N` serves up to N concurrent requests; up to eight
+decode in one forward. The drafter attends to the target's own KV cache,
 so it adds no per-session cache.
 Greedy speculative output equals single-token decoding of the same
 configuration token for token; an AR-only server uses a faster one-row

@@ -363,25 +363,54 @@ std::int32_t TopToken(const qwen38_flash_next::MtpCandidateLogits& candidates) {
 bool Session::DecodeStep(std::size_t max_tokens,
                          sampling::SamplerState& sampler, DecodeResult* result,
                          std::string* error_msg, bool stop_at_eos) {
-  result->tokens.clear();
-  result->stop = false;
-  if (max_tokens == 0) {
+  Cycle cycle{.max_tokens = max_tokens,
+              .sampler = &sampler,
+              .result = result,
+              .stop_at_eos = stop_at_eos};
+  std::lock_guard lock(model_->mutex_);
+  if (!BeginCycle(cycle, model_->DraftTokens(), error_msg)) {
+    return false;
+  }
+  if (cycle.done) {
     return true;
   }
-  const auto emit = [&](TokenId token) {
-    sampler.Accept(static_cast<sampling::TokenId>(token));
-    result->tokens.push_back(token);
-    if (stop_at_eos && model_->IsStopToken(token)) {
-      result->stop = true;
+  auto& executor = *model_->executor_;
+  std::vector<float> logits;
+  try {
+    std::vector<std::uint32_t> logit_rows(cycle.rows.size());
+    for (std::uint32_t i = 0; i < logit_rows.size(); ++i) {
+      logit_rows[i] = i;
     }
-  };
+    executor.Forward(*cache_, cycle.rows, cycle.position, logit_rows);
+    executor.CopyLogits(cycle.rows.size(), &logits);
+  } catch (const std::exception& e) {
+    Reset();
+    return Fail(error_msg, e.what());
+  }
+  FinishCycle(cycle, logits, 0);
+  return true;
+}
+
+bool Session::BeginCycle(Cycle& cycle, std::uint32_t draft_limit,
+                         std::string* error_msg) {
+  auto& sampler = *cycle.sampler;
+  auto* result = cycle.result;
+  result->tokens.clear();
+  result->stop = false;
+  cycle.done = true;
+  if (cycle.max_tokens == 0) {
+    return true;
+  }
   if (!pending_) {
     if (!valid_) {
       return Fail(error_msg, "session has no logits to decode from");
     }
-    emit(static_cast<TokenId>(sampler.Sample(logits_)));
-    pending_ = result->tokens.back();
-    if (result->stop || result->tokens.size() >= max_tokens) {
+    const auto token = static_cast<TokenId>(sampler.Sample(logits_));
+    sampler.Accept(static_cast<sampling::TokenId>(token));
+    result->tokens.push_back(token);
+    result->stop = cycle.stop_at_eos && model_->IsStopToken(token);
+    pending_ = token;
+    if (result->stop || result->tokens.size() >= cycle.max_tokens) {
       return true;
     }
   }
@@ -390,148 +419,283 @@ bool Session::DecodeStep(std::size_t max_tokens,
   if (position + 1 >= cache_->max_context) {
     return Fail(error_msg, "session context is full");
   }
-  const std::size_t budget = max_tokens - result->tokens.size();
+  cycle.done = false;
+  cycle.position = position;
+  cycle.rows.assign(1, pending);
+  const std::size_t budget = cycle.max_tokens - result->tokens.size();
   std::uint32_t steps = 0;
   if (model_->HasMtp() && budget > 1) {
-    steps = static_cast<std::uint32_t>(
-        std::min<std::size_t>({model_->DraftTokens(), budget - 1,
-                               cache_->max_context - position - 1}));
+    steps = static_cast<std::uint32_t>(std::min<std::size_t>(
+        {draft_limit, budget - 1, cache_->max_context - position - 1}));
   }
-  auto& executor = *model_->executor_;
-  std::vector<float> logits;
-  std::vector<TokenId> rows{pending};
   // With random sampling the drafter samples its proposals too, and each is
   // verified by p/q rejection with residual correction; greedy decoding
   // keeps argmax drafts accepted when the target's own choice agrees.
-  const bool sampled = steps > 0 && sampler.config().uses_random_sampling();
+  cycle.sampled = steps > 0 && sampler.config().uses_random_sampling();
   // Prompt lookup may fill every slot; MTP drafts stop earlier when sampled.
   const std::uint32_t max_drafts = steps;
-  if (sampled) {
+  if (cycle.sampled) {
     steps = std::min(steps, kSampledDraftCap);
   }
-  std::vector<qwen38_flash_next::MtpProposal> proposals;
-  std::size_t copied = 0;
+  if (steps == 0) {
+    return true;
+  }
+  auto& executor = *model_->executor_;
+  auto& proposals = cycle.proposals;
   try {
-    std::lock_guard lock(model_->mutex_);
-    if (steps > 0) {
-      std::vector<std::int32_t> drafts;
-      // The context the next token continues: pending plus kept drafts.
-      std::vector<std::int32_t> context{pending};
-      std::vector<std::int32_t> copies;
-      lookup_.Extend(tokens_);
-      // Prompt lookup: when the context repeats an earlier passage of at
-      // least 12 tokens, the tokens that followed it fill the remaining
-      // slots (verified like any draft) and end the MTP chain.
-      const auto copy = [&] {
-        const auto match = lookup_.Find(tokens_, context);
-        const std::size_t room = max_drafts - (context.size() - 1);
-        if (match.length == 0 || room == 0) {
-          return false;
-        }
-        const std::size_t count = std::min(room, tokens_.size() - match.start);
-        copies.assign(
-            tokens_.begin() + static_cast<std::ptrdiff_t>(match.start),
-            tokens_.begin() + static_cast<std::ptrdiff_t>(match.start + count));
-        return count != 0;
-      };
-      float chain = 1.0F;
-      if (sampled) {
-        // A cycle-local proposal stream; target draws keep the sampler's.
-        std::uint64_t draft_rng =
-            sampling::NextRandom(sampler.mutable_rng_state());
-        sampling::SamplerState draft_sampler = sampler;
-        executor.DraftChain(
-            *cache_, pending, position, steps, &drafts,
-            [&](const qwen38_flash_next::MtpCandidateLogits& candidates) {
-              auto proposal = qwen38_flash_next::SampleMtpProposal(
-                  candidates, draft_sampler, &draft_rng);
-              chain *= proposal.probability;
-              if (!proposals.empty() && chain < kSampledChainFloor) {
-                (void)copy();
-                return rocm::DraftProposal{};
-              }
-              draft_sampler.Accept(proposal.token);
-              proposals.push_back(proposal);
-              context.push_back(static_cast<std::int32_t>(proposal.token));
-              return rocm::DraftProposal{
-                  .token = static_cast<std::int32_t>(proposal.token),
-                  .last = copy()};
-            });
-        // A copied token is a point-mass proposal: accepted with the
-        // target's probability, a rejection resampling without it.
-        for (const std::int32_t token : copies) {
-          qwen38_flash_next::MtpProposal proposal;
-          proposal.ids[0] = static_cast<sampling::TokenId>(token);
-          proposal.probabilities[0] = 1.0F;
-          proposal.size = 1;
-          proposal.token = proposal.ids[0];
-          proposal.probability = 1.0F;
-          proposals.push_back(proposal);
-        }
-      } else {
-        executor.DraftChain(
-            *cache_, pending, position, steps, &drafts,
-            [&](const qwen38_flash_next::MtpCandidateLogits& candidates) {
-              chain *= TopShare(candidates);
-              if (context.size() > 1 && chain < kGreedyChainFloor) {
-                (void)copy();
-                return rocm::DraftProposal{};
-              }
-              const std::int32_t token = TopToken(candidates);
-              context.push_back(token);
-              return rocm::DraftProposal{.token = token, .last = copy()};
-            });
+    std::vector<std::int32_t> drafts;
+    // The context the next token continues: pending plus kept drafts.
+    std::vector<std::int32_t> context{pending};
+    std::vector<std::int32_t> copies;
+    lookup_.Extend(tokens_);
+    // Prompt lookup: when the context repeats an earlier passage of at
+    // least 12 tokens, the tokens that followed it fill the remaining
+    // slots (verified like any draft) and end the MTP chain.
+    const auto copy = [&] {
+      const auto match = lookup_.Find(tokens_, context);
+      const std::size_t room = max_drafts - (context.size() - 1);
+      if (match.length == 0 || room == 0) {
+        return false;
       }
-      rows.insert(rows.end(), drafts.begin(), drafts.end());
-      rows.insert(rows.end(), copies.begin(), copies.end());
-      copied = copies.size();
+      const std::size_t count = std::min(room, tokens_.size() - match.start);
+      copies.assign(
+          tokens_.begin() + static_cast<std::ptrdiff_t>(match.start),
+          tokens_.begin() + static_cast<std::ptrdiff_t>(match.start + count));
+      return count != 0;
+    };
+    float chain = 1.0F;
+    if (cycle.sampled) {
+      // A cycle-local proposal stream; target draws keep the sampler's.
+      std::uint64_t draft_rng =
+          sampling::NextRandom(sampler.mutable_rng_state());
+      sampling::SamplerState draft_sampler = sampler;
+      executor.DraftChain(
+          *cache_, pending, position, steps, &drafts,
+          [&](const qwen38_flash_next::MtpCandidateLogits& candidates) {
+            auto proposal = qwen38_flash_next::SampleMtpProposal(
+                candidates, draft_sampler, &draft_rng);
+            chain *= proposal.probability;
+            if (!proposals.empty() && chain < kSampledChainFloor) {
+              (void)copy();
+              return rocm::DraftProposal{};
+            }
+            draft_sampler.Accept(proposal.token);
+            proposals.push_back(proposal);
+            context.push_back(static_cast<std::int32_t>(proposal.token));
+            return rocm::DraftProposal{
+                .token = static_cast<std::int32_t>(proposal.token),
+                .last = copy()};
+          });
+      // A copied token is a point-mass proposal: accepted with the
+      // target's probability, a rejection resampling without it.
+      for (const std::int32_t token : copies) {
+        qwen38_flash_next::MtpProposal proposal;
+        proposal.ids[0] = static_cast<sampling::TokenId>(token);
+        proposal.probabilities[0] = 1.0F;
+        proposal.size = 1;
+        proposal.token = proposal.ids[0];
+        proposal.probability = 1.0F;
+        proposals.push_back(proposal);
+      }
+    } else {
+      executor.DraftChain(
+          *cache_, pending, position, steps, &drafts,
+          [&](const qwen38_flash_next::MtpCandidateLogits& candidates) {
+            chain *= TopShare(candidates);
+            if (context.size() > 1 && chain < kGreedyChainFloor) {
+              (void)copy();
+              return rocm::DraftProposal{};
+            }
+            const std::int32_t token = TopToken(candidates);
+            context.push_back(token);
+            return rocm::DraftProposal{.token = token, .last = copy()};
+          });
     }
-    std::vector<std::uint32_t> logit_rows(rows.size());
-    for (std::uint32_t i = 0; i < logit_rows.size(); ++i) {
-      logit_rows[i] = i;
-    }
-    executor.Forward(*cache_, rows, position, logit_rows);
-    executor.CopyLogits(rows.size(), &logits);
+    cycle.rows.insert(cycle.rows.end(), drafts.begin(), drafts.end());
+    cycle.rows.insert(cycle.rows.end(), copies.begin(), copies.end());
+    cycle.copied = copies.size();
   } catch (const std::exception& e) {
     Reset();
     return Fail(error_msg, e.what());
   }
+  return true;
+}
+
+void Session::FinishCycle(Cycle& cycle, std::span<const float> logits,
+                          std::uint32_t first_hidden_row) {
+  auto& sampler = *cycle.sampler;
+  auto* result = cycle.result;
+  const auto& rows = cycle.rows;
+  const auto emit = [&](TokenId token) {
+    sampler.Accept(static_cast<sampling::TokenId>(token));
+    result->tokens.push_back(token);
+    if (cycle.stop_at_eos && model_->IsStopToken(token)) {
+      result->stop = true;
+    }
+  };
   // Row i predicts the token after rows[i]; drafts stay while the target's
   // own sample agrees with them.
   const std::size_t vocab = model_->VocabSize();
   std::size_t row = 0;
   std::uint64_t accepted = 0;
   for (;; ++row) {
-    const std::span<const float> row_logits(logits.data() + row * vocab, vocab);
+    const auto row_logits = logits.subspan(row * vocab, vocab);
     bool agrees = false;
-    if (sampled && row + 1 < rows.size()) {
+    if (cycle.sampled && row + 1 < rows.size()) {
       const auto verified = qwen38_flash_next::VerifyMtpProposal(
-          row_logits, proposals[row], sampler);
+          row_logits, cycle.proposals[row], sampler);
       emit(static_cast<TokenId>(verified.token));
       agrees = verified.accepted;
     } else {
       emit(static_cast<TokenId>(sampler.Sample(row_logits)));
       agrees = row + 1 < rows.size() && result->tokens.back() == rows[row + 1];
     }
-    if (!agrees || result->stop || result->tokens.size() >= max_tokens) {
+    if (!agrees || result->stop || result->tokens.size() >= cycle.max_tokens) {
       break;
     }
     ++accepted;
   }
   // Rows [0, row] are committed; the last emitted token becomes pending.
   tokens_.insert(tokens_.end(), rows.begin(), rows.begin() + row + 1);
-  executor.CommitHidden(*cache_, static_cast<std::uint32_t>(row));
-  logits_.assign(logits.begin() + row * vocab,
-                 logits.begin() + (row + 1) * vocab);
+  model_->executor_->CommitHidden(
+      *cache_, first_hidden_row + static_cast<std::uint32_t>(row));
+  const auto kept = logits.subspan(row * vocab, vocab);
+  logits_.assign(kept.begin(), kept.end());
   valid_ = true;
   pending_ = result->tokens.back();
   stats_.cycles += 1;
   stats_.drafted += rows.size() - 1;
   stats_.accepted += accepted;
   // Copies trail the MTP drafts.
-  const std::size_t mtp = rows.size() - 1 - copied;
-  stats_.copied += copied;
+  const std::size_t mtp = rows.size() - 1 - cycle.copied;
+  stats_.copied += cycle.copied;
   stats_.copied_accepted += accepted > mtp ? accepted - mtp : 0;
+}
+
+bool Session::DecodeBatch(std::span<BatchDecode> decodes) {
+  if (decodes.empty()) {
+    return true;
+  }
+  Model& model = *decodes.front().session->model_;
+  std::lock_guard lock(model.mutex_);
+  // One verification forward keeps its single-session arithmetic up to
+  // kSplitRows rows, shared evenly.
+  const auto draft_limit = static_cast<std::uint32_t>(std::min<std::size_t>(
+      model.DraftTokens(),
+      std::max<std::size_t>(1, rocm::kSplitRows / decodes.size()) - 1));
+  std::vector<Cycle> cycles(decodes.size());
+  std::vector<rocm::Executor::Segment> segments;
+  std::vector<std::int32_t> tokens;
+  std::vector<std::size_t> active;
+  bool ok = true;
+  for (std::size_t i = 0; i < decodes.size(); ++i) {
+    auto& d = decodes[i];
+    if (d.session->model_.get() != &model) {
+      throw std::invalid_argument("gemma4 batch mixes models");
+    }
+    cycles[i] = Cycle{.max_tokens = d.max_tokens,
+                      .sampler = d.sampler,
+                      .result = d.result,
+                      .stop_at_eos = d.stop_at_eos};
+    if (!d.session->BeginCycle(cycles[i], draft_limit, &d.error)) {
+      ok = false;
+      continue;
+    }
+    if (cycles[i].done) {
+      continue;
+    }
+    segments.push_back({d.session->cache_.get(), cycles[i].position,
+                        static_cast<std::uint32_t>(cycles[i].rows.size())});
+    tokens.insert(tokens.end(), cycles[i].rows.begin(), cycles[i].rows.end());
+    active.push_back(i);
+  }
+  if (active.empty()) {
+    return ok;
+  }
+  auto& executor = *model.executor_;
+  std::vector<float> logits;
+  try {
+    std::vector<std::uint32_t> logit_rows(tokens.size());
+    for (std::uint32_t i = 0; i < logit_rows.size(); ++i) {
+      logit_rows[i] = i;
+    }
+    executor.Forward(segments, tokens, logit_rows);
+    executor.CopyLogits(tokens.size(), &logits);
+  } catch (const std::exception& e) {
+    for (const std::size_t i : active) {
+      decodes[i].session->Reset();
+      decodes[i].error = e.what();
+    }
+    return false;
+  }
+  const std::size_t vocab = model.VocabSize();
+  std::uint32_t row0 = 0;
+  for (const std::size_t i : active) {
+    const std::size_t count = cycles[i].rows.size();
+    decodes[i].session->FinishCycle(
+        cycles[i],
+        std::span<const float>(logits).subspan(row0 * vocab, count * vocab),
+        row0);
+    row0 += static_cast<std::uint32_t>(count);
+  }
+  return ok;
+}
+
+bool Session::EvaluateBatch(std::span<Session* const> sessions,
+                            std::span<const TokenId> tokens,
+                            std::string* error_msg) {
+  if (sessions.size() != tokens.size()) {
+    return Fail(error_msg, "gemma4 batch needs one token per session");
+  }
+  if (sessions.empty()) {
+    return true;
+  }
+  if (sessions.size() > rocm::kSplitRows) {
+    return Fail(error_msg, "gemma4 batch is wider than one decode forward");
+  }
+  Model& model = *sessions.front()->model_;
+  std::lock_guard lock(model.mutex_);
+  std::vector<rocm::Executor::Segment> segments;
+  for (std::size_t i = 0; i < sessions.size(); ++i) {
+    Session& s = *sessions[i];
+    if (s.model_.get() != &model) {
+      throw std::invalid_argument("gemma4 batch mixes models");
+    }
+    if (s.tokens_.size() >= s.cache_->max_context) {
+      return Fail(error_msg, "session context is full");
+    }
+    segments.push_back(
+        {s.cache_.get(), static_cast<std::uint32_t>(s.tokens_.size()), 1});
+  }
+  std::vector<std::int32_t> rows(tokens.begin(), tokens.end());
+  std::vector<std::uint32_t> logit_rows(rows.size());
+  for (std::uint32_t i = 0; i < logit_rows.size(); ++i) {
+    logit_rows[i] = i;
+  }
+  auto& executor = *model.executor_;
+  std::vector<float> logits;
+  try {
+    executor.Forward(segments, rows, logit_rows);
+    for (std::uint32_t i = 0; i < sessions.size(); ++i) {
+      executor.CommitHidden(*sessions[i]->cache_, i);
+    }
+    executor.CopyLogits(rows.size(), &logits);
+  } catch (const std::exception& e) {
+    for (Session* s : sessions) {
+      s->Reset();
+    }
+    return Fail(error_msg, e.what());
+  }
+  const std::size_t vocab = model.VocabSize();
+  for (std::size_t i = 0; i < sessions.size(); ++i) {
+    Session& s = *sessions[i];
+    s.pending_.reset();
+    s.tokens_.push_back(tokens[i]);
+    s.logits_.assign(
+        logits.begin() + static_cast<std::ptrdiff_t>(i * vocab),
+        logits.begin() + static_cast<std::ptrdiff_t>((i + 1) * vocab));
+    s.valid_ = true;
+  }
   return true;
 }
 

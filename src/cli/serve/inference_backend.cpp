@@ -2868,8 +2868,8 @@ public:
                 .final_token_advance_required = false,
                 .incremental_text_is_exact = true,
                 .multi_token_decode = model_->HasMtp(),
-                .batched_multi_token_decode = false,
-                .batched_multi_token_decode_max_width = 0,
+                .batched_multi_token_decode = model_->HasMtp(),
+                .batched_multi_token_decode_max_width = 8,
                 .prefix_reuse = true,
             },
         .persistence = persistence_,
@@ -2894,7 +2894,14 @@ public:
   }
 
   [[nodiscard]] std::vector<TextExecutionPlan> SupportedPlans() const override {
-    return {{.kind = TextExecutionPlanKind::kSerial, .physical_width = 1}};
+    // Up to eight sessions share one forward (decode widths stay exact).
+    std::vector<TextExecutionPlan> plans{
+        {.kind = TextExecutionPlanKind::kSerial, .physical_width = 1}};
+    for (std::size_t width = 2; width <= 8; ++width) {
+      plans.push_back(
+          {.kind = TextExecutionPlanKind::kBatched, .physical_width = width});
+    }
+    return plans;
   }
 
   [[nodiscard]] std::vector<TextRunnerToken> Tokenize(
@@ -3042,10 +3049,12 @@ public:
   [[nodiscard]] TextDecodeStep DecodeStep(
       TextRunnerState& state, std::size_t max_tokens,
       sampling::SamplerState& sampler) const override {
-    if (!model_->HasMtp() || max_tokens == 1) {
+    auto& session = RequireGemma4State(state).session();
+    // Select-and-advance samples Logits(), which only predicts the next
+    // token while no emitted token is pending.
+    if (!model_->HasMtp() || (max_tokens == 1 && !session.HasPendingToken())) {
       return TextModelRunner::DecodeStep(state, max_tokens, sampler);
     }
-    auto& session = RequireGemma4State(state).session();
     if (session.Position() >= max_context_) {
       return {.selections = {}, .stop = true};
     }
@@ -3073,6 +3082,99 @@ public:
     step.draft_tokens = after.drafted - before.drafted;
     step.draft_accepted_tokens = after.accepted - before.accepted;
     return step;
+  }
+
+  void AdvanceBatch(
+      std::span<const TextRunnerAdvance> advances) const override {
+    if (advances.size() < 2) {
+      return TextModelRunner::AdvanceBatch(advances);
+    }
+    std::vector<Gemma4Session*> sessions;
+    std::vector<std::int32_t> tokens;
+    for (const auto& advance : advances) {
+      sessions.push_back(&RequireGemma4State(advance.state.get()).session());
+      tokens.push_back(Gemma4EngineToken(advance.token));
+    }
+    std::string error;
+    if (!Gemma4Session::EvaluateBatch(sessions, tokens, &error)) {
+      const auto failure = std::make_exception_ptr(
+          std::runtime_error("Gemma 4 batched decode failed: " + error));
+      for (const auto& advance : advances) {
+        if (!advance.failure) {
+          std::rethrow_exception(failure);
+        }
+        *advance.failure = failure;
+      }
+    }
+  }
+
+  [[nodiscard]] std::vector<TextDecodeStep> DecodeBatch(
+      std::span<const TextRunnerDecode> decodes) const override {
+    if (decodes.size() < 2 || !model_->HasMtp()) {
+      return TextModelRunner::DecodeBatch(decodes);
+    }
+    std::vector<TextDecodeStep> steps(decodes.size());
+    std::vector<Gemma4Session::DecodeResult> results(decodes.size());
+    std::vector<Gemma4Session::SpeculativeStats> before(decodes.size());
+    std::vector<sampling::SamplerState> working;
+    working.reserve(decodes.size());
+    std::vector<Gemma4Session::BatchDecode> batch;
+    std::vector<std::size_t> index;
+    for (std::size_t i = 0; i < decodes.size(); ++i) {
+      auto& state = RequireGemma4State(decodes[i].state.get());
+      auto& session = state.session();
+      if (decodes[i].max_tokens == 1 && !session.HasPendingToken()) {
+        // A one-token step evaluates its token, as DecodeStep does.
+        try {
+          steps[i] = DecodeStep(state, 1, decodes[i].sampler.get());
+        } catch (...) {
+          steps[i].failure = std::current_exception();
+        }
+        continue;
+      }
+      if (session.Position() >= max_context_) {
+        steps[i].stop = true;
+        continue;
+      }
+      before[i] = session.Statistics();
+      working.push_back(decodes[i].sampler.get());
+      batch.push_back({.session = &session,
+                       .max_tokens = std::min<std::size_t>(
+                           decodes[i].max_tokens, model_->DraftTokens() + 1),
+                       .sampler = &working.back(),
+                       .result = &results[i],
+                       .stop_at_eos = state.stop_at_eos(),
+                       .error = {}});
+      index.push_back(i);
+    }
+    (void)Gemma4Session::DecodeBatch(batch);
+    const TextExecutionPlan plan{.kind = TextExecutionPlanKind::kBatched,
+                                 .physical_width = batch.size()};
+    for (std::size_t k = 0; k < batch.size(); ++k) {
+      const std::size_t i = index[k];
+      auto& step = steps[i];
+      if (!batch[k].error.empty()) {
+        step.failure = std::make_exception_ptr(
+            std::runtime_error("Gemma 4 MTP decode failed: " + batch[k].error));
+        continue;
+      }
+      decodes[i].sampler.get().CopyDrawStateFrom(working[k]);
+      const bool stop_at_eos = batch[k].stop_at_eos;
+      for (const std::int32_t token : results[i].tokens) {
+        if (stop_at_eos && model_->IsStopToken(token)) {
+          step.stop = true;
+          break;
+        }
+        step.selections.push_back({.stop = false,
+                                   .token = static_cast<TextRunnerToken>(token),
+                                   .piece = model_->TokenText(token)});
+      }
+      const auto after = batch[k].session->Statistics();
+      step.draft_tokens = after.drafted - before[i].drafted;
+      step.draft_accepted_tokens = after.accepted - before[i].accepted;
+      step.execution_plan = plan;
+    }
+    return steps;
   }
 
   [[nodiscard]] std::size_t CheckpointPosition(

@@ -24,6 +24,7 @@
   },
   "speculative": {
     "mode": "mtp",
+    "exactness_reference": "self",
     "label": "MTP",
     "gufo_args": [
       "--speculative",

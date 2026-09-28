@@ -606,9 +606,12 @@ def run_multi(session: Session, table: TableSpec, display_table: TableSpec | Non
         path = artifact_path(cfg, table, session.target, None if (session.target != "gufo" and mode == "ar") else mode)
         reference = None
         ar_path = artifact_path(cfg, table, "gufo", "ar")
-        if path != ar_path and ar_path.exists():
+        # Gufo compares concurrent completions with an isolated run: the AR
+        # artifact's C1, or this artifact's own C1 when the config says so.
+        self_reference = session.target == "gufo" and mode != "ar" and cfg.speculative_self_reference
+        if path != ar_path and ar_path.exists() and not self_reference:
             reference = load_reference_report(ar_path)
-        if mode != "ar":
+        if mode != "ar" and not self_reference:
             missing = case_ids - set((reference or {}).get("hashes", {}))
             if missing:
                 raise RuntimeError(
@@ -617,9 +620,10 @@ def run_multi(session: Session, table: TableSpec, display_table: TableSpec | Non
                 )
         combined = None if session.fresh else load_artifact(path)
         for users in keys:
-            if path == ar_path and reference is None and combined is not None and "c1" in combined.get("results", {}):
-                # Gufo AR C2+ compares against this same artifact's C1 completions.
-                reference = load_reference_report(ar_path) if ar_path.exists() else None
+            if ((path == ar_path or self_reference) and reference is None and combined is not None
+                    and "c1" in combined.get("results", {})):
+                # Gufo C2+ compares against this same artifact's C1 completions.
+                reference = load_reference_report(path) if path.exists() else None
             context = int(spec["context"])
             server = session.server(table, mode=mode, context=context if session.target == "gufo" else context * users,
                                     sessions=users, tag=f"{mode or 'ref'}-c{users}")

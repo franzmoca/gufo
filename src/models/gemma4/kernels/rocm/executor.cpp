@@ -336,11 +336,29 @@ void Executor::DeriveKeys(AttentionArgs& att, std::uint32_t layer) const {
 void Executor::Forward(KvCache& cache, std::span<const std::int32_t> tokens,
                        std::uint32_t first_position,
                        std::span<const std::uint32_t> logit_rows) {
+  const Segment segment{&cache, first_position,
+                        static_cast<std::uint32_t>(tokens.size())};
+  Forward(std::span<const Segment>(&segment, 1), tokens, logit_rows);
+}
+
+void Executor::Forward(std::span<const Segment> segments,
+                       std::span<const std::int32_t> tokens,
+                       std::span<const std::uint32_t> logit_rows) {
   const Config& c = model_.config();
   const auto n = static_cast<std::uint32_t>(tokens.size());
-  if (n == 0 || n > max_rows_ ||
-      first_position + static_cast<std::uint64_t>(n) > cache.max_context ||
-      logit_rows.size() > max_logit_rows_ || cache.ring != ring_) {
+  std::uint64_t total = 0;
+  for (const Segment& s : segments) {
+    if (s.rows == 0 || s.cache->ring != ring_ ||
+        s.first_position + std::uint64_t{s.rows} > s.cache->max_context) {
+      throw std::invalid_argument("gemma4 forward segment exceeds its cache");
+    }
+    total += s.rows;
+  }
+  // Several sessions share a forward only at decode widths, where every
+  // projection keeps its single-session arithmetic.
+  if (n == 0 || n > max_rows_ || total != n ||
+      (segments.size() > 1 && n > kSplitRows) ||
+      logit_rows.size() > max_logit_rows_) {
     throw std::invalid_argument("gemma4 forward exceeds its capacity");
   }
   const std::uint32_t d = c.hidden_size;
@@ -371,44 +389,49 @@ void Executor::Forward(KvCache& cache, std::span<const std::int32_t> tokens,
       Project(L.attn_v, h_, hq, n, v_);
       v_source = v_;
     }
-    QkvPostArgs post{};
-    post.q = q_;
-    post.k = k_;
-    post.v = v_source;
-    post.q_norm = L.attn_q_norm.f32();
-    post.k_norm = L.attn_k_norm.f32();
-    post.theta_scale =
-        std::pow(c.RopeTheta(l), -2.0F / static_cast<float>(dim));
-    post.freq_factors = sliding ? nullptr : model_.rope_factors();
-    post.k_cache = cache.k[l];
-    post.v_cache = cache.v[l];
-    post.rows = n;
-    post.heads = c.num_heads;
-    post.kv_heads = c.kv_heads[l];
-    post.head_dim = dim;
-    post.first_position = first_position;
-    post.ring = sliding ? cache.ring : 0;
-    post.eps = eps;
-    post.rotated_pairs = DerivedKeys(l) ? model_.global_rope_pairs() : 0;
-    QkvPost(post, stream_);
+    std::uint32_t row0 = 0;
+    for (const Segment& seg : segments) {
+      KvCache& cache = *seg.cache;
+      QkvPostArgs post{};
+      post.q = q_ + std::size_t{row0} * c.QDim(l);
+      post.k = k_ + std::size_t{row0} * c.KvDim(l);
+      post.v = v_source + std::size_t{row0} * c.KvDim(l);
+      post.q_norm = L.attn_q_norm.f32();
+      post.k_norm = L.attn_k_norm.f32();
+      post.theta_scale =
+          std::pow(c.RopeTheta(l), -2.0F / static_cast<float>(dim));
+      post.freq_factors = sliding ? nullptr : model_.rope_factors();
+      post.k_cache = cache.k[l];
+      post.v_cache = cache.v[l];
+      post.rows = seg.rows;
+      post.heads = c.num_heads;
+      post.kv_heads = c.kv_heads[l];
+      post.head_dim = dim;
+      post.first_position = seg.first_position;
+      post.ring = sliding ? cache.ring : 0;
+      post.eps = eps;
+      post.rotated_pairs = DerivedKeys(l) ? model_.global_rope_pairs() : 0;
+      QkvPost(post, stream_);
 
-    AttentionArgs att{};
-    att.q = q_;
-    att.k_cache = cache.k[l];
-    att.v_cache = cache.v[l];
-    att.out = attn_;
-    att.partials = partials_;
-    att.rows = n;
-    att.heads = c.num_heads;
-    att.kv_heads = c.kv_heads[l];
-    att.head_dim = dim;
-    att.first_position = first_position;
-    att.shared_position = false;
-    att.key_limit = std::numeric_limits<std::uint32_t>::max();
-    att.window = sliding ? c.sliding_window : 0;
-    att.ring = sliding ? cache.ring : 0;
-    DeriveKeys(att, l);
-    Attention(att, stream_);
+      AttentionArgs att{};
+      att.q = q_ + std::size_t{row0} * c.QDim(l);
+      att.k_cache = cache.k[l];
+      att.v_cache = cache.v[l];
+      att.out = attn_ + std::size_t{row0} * c.QDim(l);
+      att.partials = partials_;
+      att.rows = seg.rows;
+      att.heads = c.num_heads;
+      att.kv_heads = c.kv_heads[l];
+      att.head_dim = dim;
+      att.first_position = seg.first_position;
+      att.shared_position = false;
+      att.key_limit = std::numeric_limits<std::uint32_t>::max();
+      att.window = sliding ? c.sliding_window : 0;
+      att.ring = sliding ? cache.ring : 0;
+      DeriveKeys(att, l);
+      Attention(att, stream_);
+      row0 += seg.rows;
+    }
 
     Project(L.attn_output, attn_, Quantize(attn_, n, c.QDim(l)), n, o_);
     PostAttentionNorm(o_, L.post_attn_norm.f32(), x_, L.ffn_norm.f32(), h_, n,

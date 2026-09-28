@@ -14,6 +14,7 @@
 #include "src/core/sampling.hpp"
 #include "src/models/gemma4/config.hpp"
 #include "src/models/gemma4/tokenizer.hpp"
+#include "src/models/qwen38_flash_next/mtp_sampling.hpp"
 #include "src/models/qwen38_flash_next/prompt_lookup.hpp"
 
 namespace gufo::core {
@@ -158,6 +159,25 @@ public:
                                 DecodeResult* result,
                                 std::string* error_msg = nullptr,
                                 bool stop_at_eos = true);
+  /// One session's work in DecodeBatch.
+  struct BatchDecode {
+    Session* session;
+    std::size_t max_tokens;
+    sampling::SamplerState* sampler;
+    DecodeResult* result;
+    bool stop_at_eos{true};
+    std::string error;  ///< set when this session failed
+  };
+  /// DecodeStep for several sessions of one model with a single verification
+  /// forward. Each session drafts at most 16 / sessions - 1 tokens, so every
+  /// row keeps the arithmetic of its own session's decode. Returns false if
+  /// any session failed (see BatchDecode::error); the others completed.
+  static bool DecodeBatch(std::span<BatchDecode> decodes);
+  /// Evaluate for several sessions of one model in a single forward.
+  static bool EvaluateBatch(std::span<Session* const> sessions,
+                            std::span<const TokenId> tokens,
+                            std::string* error_msg = nullptr);
+
   struct SpeculativeStats {
     std::uint64_t cycles{0};
     std::uint64_t drafted{0};   ///< MTP drafts and copied tokens
@@ -179,6 +199,11 @@ public:
     return static_cast<std::uint32_t>(tokens_.size());
   }
   [[nodiscard]] std::uint32_t ContextSize() const noexcept;
+  /// True after DecodeStep: the last emitted token is not yet evaluated, so
+  /// Logits() still predicts that token rather than the next one.
+  [[nodiscard]] bool HasPendingToken() const noexcept {
+    return pending_.has_value();
+  }
   [[nodiscard]] bool IsValid() const noexcept { return valid_; }
   [[nodiscard]] std::size_t AllocatedBytes() const noexcept;
   void Reset();
@@ -198,6 +223,26 @@ private:
   /// Evaluates tokens_[begin, end) in prefill chunks; the last row's logits
   /// land in logits_.
   bool Extend(std::size_t begin, std::string* error_msg);
+
+  /// One decode cycle: Begin emits the pending token if needed and drafts
+  /// (rows = pending plus drafts), the caller verifies `rows` at `position`,
+  /// and Finish accepts from those rows' logits.
+  struct Cycle {
+    std::size_t max_tokens{0};
+    sampling::SamplerState* sampler{nullptr};
+    DecodeResult* result{nullptr};
+    bool stop_at_eos{true};
+    bool done{false};  ///< nothing to verify: the result is complete
+    std::uint32_t position{0};
+    std::vector<TokenId> rows;
+    bool sampled{false};
+    std::vector<qwen38_flash_next::MtpProposal> proposals;
+    std::size_t copied{0};
+  };
+  bool BeginCycle(Cycle& cycle, std::uint32_t draft_limit,
+                  std::string* error_msg);
+  void FinishCycle(Cycle& cycle, std::span<const float> logits,
+                   std::uint32_t first_hidden_row);
 
   std::shared_ptr<Model> model_;
   std::unique_ptr<rocm::KvCache> cache_;

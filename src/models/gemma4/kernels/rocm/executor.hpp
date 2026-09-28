@@ -86,6 +86,20 @@ public:
                std::uint32_t first_position,
                std::span<const std::uint32_t> logit_rows);
 
+  /// Consecutive rows of one session in a batched forward.
+  struct Segment {
+    KvCache* cache;
+    std::uint32_t first_position;
+    std::uint32_t rows;
+  };
+  /// Forward over several sessions' rows (`tokens` holds the segments' rows
+  /// in order; logit and hidden rows index that concatenation). Row-wise work
+  /// runs once for all rows, attention and cache writes per segment, so each
+  /// row computes what its session's own forward of the same width would.
+  void Forward(std::span<const Segment> segments,
+               std::span<const std::int32_t> tokens,
+               std::span<const std::uint32_t> logit_rows);
+
   /// Keeps hidden row `row` of the last Forward as the cache's frontier
   /// state for drafting.
   void CommitHidden(KvCache& cache, std::uint32_t row);

@@ -358,6 +358,79 @@ int main() {
       const auto spec = Generate(*mtp, prompt, 64, true);
       Require(ar == spec, std::string("greedy MTP differs from AR: ") + text);
     }
+    // Batched decoding: sessions sharing a forward reproduce their own
+    // single-session output (greedy), for plain and speculative steps.
+    {
+      const char* texts[] = {
+          "Write one sentence about the sea near Genoa.",
+          "List the first twelve prime numbers, separated by commas.",
+          "Explain in three sentences why the sky is blue."};
+      std::vector<std::vector<g4::TokenId>> want;
+      std::vector<std::unique_ptr<g4::Session>> sessions;
+      for (const char* text : texts) {
+        const auto prompt = PromptTokens(*mtp, text);
+        want.push_back(Generate(*mtp, prompt, 48, false));
+        sessions.push_back(mtp->CreateSession(0, &error));
+        Require(sessions.back() && sessions.back()->Sync(prompt, &error),
+                error);
+      }
+      // Plain decode: one token per session per forward.
+      std::vector<std::vector<g4::TokenId>> got(std::size(texts));
+      std::vector<gufo::sampling::SamplerState> samplers;
+      for (std::size_t i = 0; i < std::size(texts); ++i) {
+        samplers.emplace_back(gufo::sampling::SamplingConfig{},
+                              std::span<const gufo::sampling::TokenId>{});
+      }
+      std::vector<g4::Session*> raw;
+      for (auto& session : sessions) {
+        raw.push_back(session.get());
+      }
+      while (got[0].size() < 48) {
+        std::vector<g4::TokenId> next;
+        for (std::size_t i = 0; i < raw.size(); ++i) {
+          const auto token =
+              static_cast<g4::TokenId>(samplers[i].Sample(raw[i]->Logits()));
+          samplers[i].Accept(static_cast<gufo::sampling::TokenId>(token));
+          got[i].push_back(token);
+          next.push_back(token);
+        }
+        Require(g4::Session::EvaluateBatch(raw, next, &error), error);
+      }
+      Require(got == want, "batched decode differs from single sessions");
+      // Speculative decode: every session drafts and all verify together.
+      std::vector<std::vector<g4::TokenId>> spec(std::size(texts));
+      for (std::size_t i = 0; i < std::size(texts); ++i) {
+        Require(sessions[i]->Sync(PromptTokens(*mtp, texts[i]), &error), error);
+        samplers[i] = gufo::sampling::SamplerState(
+            gufo::sampling::SamplingConfig{},
+            std::span<const gufo::sampling::TokenId>{});
+      }
+      std::vector<g4::Session::DecodeResult> results(std::size(texts));
+      while (true) {
+        std::vector<g4::Session::BatchDecode> batch;
+        for (std::size_t i = 0; i < std::size(texts); ++i) {
+          if (spec[i].size() < 48) {
+            batch.push_back({.session = raw[i],
+                             .max_tokens = 48 - spec[i].size(),
+                             .sampler = &samplers[i],
+                             .result = &results[i],
+                             .stop_at_eos = false,
+                             .error = {}});
+          }
+        }
+        if (batch.empty()) {
+          break;
+        }
+        Require(g4::Session::DecodeBatch(batch), batch.front().error);
+        for (std::size_t i = 0; i < std::size(texts); ++i) {
+          if (spec[i].size() < 48) {
+            spec[i].insert(spec[i].end(), results[i].tokens.begin(),
+                           results[i].tokens.end());
+          }
+        }
+      }
+      Require(spec == want, "batched speculative decode differs from AR");
+    }
     // Prompt lookup: repeating a passage from the prompt proposes copies,
     // verified like drafts, so greedy output still equals AR.
     const auto copy_prompt = PromptTokens(

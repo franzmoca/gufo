@@ -388,3 +388,13 @@ Each milestone is a testable state with Conventional Commits on `feat/gemma`. M4
 - Release refresh: MTP prose +0–7% and repetitive text +8–21% over the
   previous tables, sampled MTP within noise to +11%; prefill +5–16% from the
   prefill attention work. Loading 4.16 → 4.41 s (includes the head repack).
+
+**2026-09-28 — Prompt lookup and batched decoding.**
+
+- Prompt lookup (upstream #295's index) fills draft slots with tokens copied
+  from an earlier 12+ token match: repetitive text +32–35%, a code rewrite
+  +14% greedy / +21% sampled, prose unchanged.
+- Up to eight sessions decode in one forward. Multi-user AR leads llama.cpp
+  by 11–34%; multi-user MTP leads at C1–C2 on repetitive text but trails
+  llama.cpp by 4–19% on prose from C2 (verification stops at 16 exact rows,
+  drafting is per session).

@@ -71,34 +71,44 @@ greedy tables.
 
 Same pp2048 prose prompt as single-user d0, tg128, context 4096 per user.
 All sessions prefilled before timed decoding; throughput sums individual rates.
-Gufo serves Gemma 4 requests one at a time (no batched decode yet), so its
-summed per-request rates would overstate throughput; its cells stay TODO.
+Gufo decodes up to eight sessions in one forward: row-wise work runs once for
+all of them, attention per session. Every session reads its own sliding-window
+cache (16 MB per layer), about a fifth of an eight-user step.
 
 <!-- bench:multi-ar -->
 | Gemma 4 31B Q4 AR<br>Users | Gufo AR (tok/s) | llama.cpp AR (tok/s) | Gain |
 | ---: | ---: | ---: | ---: |
-| 1 | TODO | 9.79 | TODO |
-| 2 | TODO | 17.54 | TODO |
-| 4 | TODO | 28.83 | TODO |
-| 6 | TODO | 34.03 | TODO |
-| 8 | TODO | 35.08 | TODO |
+| 1 | 10.71 | 9.79 | +9.4% |
+| 2 | 19.44 | 17.54 | +10.8% |
+| 4 | 32.73 | 28.83 | +13.5% |
+| 6 | 43.81 | 34.03 | +28.7% |
+| 8 | 47.01 | 35.08 | +34.0% |
 <!-- /bench -->
+
+![Multiple users, autoregressive](artifacts/charts/multi-ar.svg)
 
 ## Multiple users, MTP
 
 Same pp2048 mixed/repetitive prompts as single-user d0, tg128, context 4096
 per user. All sessions prefilled before timed decoding; rates sum individual
-request decode rates. C1 cross-checks the single-user table.
+request decode rates. C1 cross-checks the single-user table. Gufo verifies all
+sessions' drafts in one forward of at most 16 rows (16 / users − 1 drafts per
+session), which keeps each row's arithmetic equal to its own session's decode;
+llama.cpp verifies up to 4 drafts per user with Q8_1-activation matrix kernels,
+which scale further with rows. Gufo's lead from AR does not carry past two
+users.
 
 <!-- bench:multi-mtp -->
 | Gemma 4 31B Q4 MTP<br>Users | Gufo mixed (tok/s) | llama.cpp mixed (tok/s) | Gain | Gufo repetitive (tok/s) | llama.cpp repetitive (tok/s) | Gain |
 | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| 1 | TODO | 20.73 | TODO | TODO | 30.93 | TODO |
-| 2 | TODO | 32.25 | TODO | TODO | 49.44 | TODO |
-| 4 | TODO | 48.28 | TODO | TODO | 75.05 | TODO |
-| 6 | TODO | 58.11 | TODO | TODO | 99.65 | TODO |
-| 8 | TODO | 57.05 | TODO | TODO | 87.82 | TODO |
+| 1 | 23.27 | 20.73 | +12.3% | 59.68 | 30.93 | +93.0% |
+| 2 | 30.80 | 32.25 | -4.5% | 68.28 | 49.44 | +38.1% |
+| 4 | 39.00 | 48.28 | -19.2% | 63.44 | 75.05 | -15.5% |
+| 6 | 48.04 | 58.11 | -17.3% | 53.60 | 99.65 | -46.2% |
+| 8 | 50.13 | 57.05 | -12.1% | 55.58 | 87.82 | -36.7% |
 <!-- /bench -->
+
+![Multiple users, MTP](artifacts/charts/multi-mtp.svg)
 
 
 ## gemma-control fork (single user)
