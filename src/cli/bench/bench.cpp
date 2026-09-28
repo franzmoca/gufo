@@ -1231,6 +1231,7 @@ std::optional<BenchOptions> ParseBenchOptions(std::span<const char* const> args,
   return opt;
 }
 
+#if defined(ENGINE_ENABLE_HIP)
 /// llama-bench style pp/tg for Gemma 4: prefill of `n_prompts` tokens after
 /// `n_depths` cached tokens, and autoregressive generation of `n_gens` tokens.
 int RunGemma4Benchmark(const BenchOptions& options,
@@ -1395,6 +1396,7 @@ int RunGemma4Benchmark(const BenchOptions& options,
   std::cout << '\n';
   return 0;
 }
+#endif
 
 int RunBench(std::span<const char* const> args) {
   std::string parse_err;
