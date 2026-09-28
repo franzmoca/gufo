@@ -32,6 +32,8 @@ Approximately pp2048 / tg128; depth is the cached prefix in tokens.
 pp is the highest measured rate per engine and depth across mixed/repetitive
 text.
 
+\* Gufo cells measured with the previous `--draft-policy confidence` default; see [MTP draft policy](#mtp-draft-policy) for the calibrated default at d0 and 8K.
+
 <!-- bench:single-mtp -->
 | Gemma 4 31B Q4 MTP<br>Depth (tokens) | Gufo pp (tok/s) | llama.cpp pp (tok/s) | Gain pp | Gufo tg mixed (tok/s) | llama.cpp tg mixed (tok/s) | Gain mixed | Gufo tg repetitive (tok/s) | llama.cpp tg repetitive (tok/s) | Gain repetitive |
 | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
@@ -54,6 +56,8 @@ repeat penalty 1.05; a story-writing turn after the cached prefix (the prefix
 turn itself is greedy). Mean of three requests with seeds 1–3; sampled text
 differs between engines and runs, so acceptance varies more than in the
 greedy tables.
+
+\* Gufo cells measured with the previous `--draft-policy confidence` default; see [MTP draft policy](#mtp-draft-policy) for the calibrated default at d0 and 8K.
 
 <!-- bench:single-mtp-sampled -->
 | Gemma 4 31B Q4 MTP<br>Depth (tokens) | Gufo pp (tok/s) | llama.cpp pp (tok/s) | Gain | Gufo tg (tok/s) | llama.cpp tg (tok/s) | Gain |
@@ -98,6 +102,8 @@ llama.cpp verifies up to 4 drafts per user with Q8_1-activation matrix kernels,
 which scale further with rows. Gufo's lead from AR does not carry past two
 users.
 
+\* Gufo cells measured with the previous `--draft-policy confidence` default; see [MTP draft policy](#mtp-draft-policy) for the calibrated default at d0 and 8K.
+
 <!-- bench:multi-mtp -->
 | Gemma 4 31B Q4 MTP<br>Users | Gufo mixed (tok/s) | llama.cpp mixed (tok/s) | Gain | Gufo repetitive (tok/s) | llama.cpp repetitive (tok/s) | Gain |
 | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
@@ -110,6 +116,30 @@ users.
 
 ![Multiple users, MTP](artifacts/charts/multi-mtp.svg)
 
+
+## MTP draft policy
+
+`--draft-policy calibrated` became the default on September 28, 2026, after
+the MTP tables above were measured with the previous `confidence` rule
+(cells marked \*). Relative A/B of the two policies on one development
+build (`gpu-test` preset), two runs each in ABBA order with one server per
+run; greedy texts are identical under both policies, sampled texts differ
+because draft counts change the random draws. Depth is a shared earlier
+conversation turn reused from the prompt cache.
+[d0](artifacts/draft-policy-ab-d0k.json) · [8K](artifacts/draft-policy-ab-d8k.json) ·
+`tools/gemma4/draft_policy_bench.py`
+
+| Gemma 4 31B Q4 MTP<br>Workload | d0 confidence (tok/s) | d0 calibrated (tok/s) | Gain | 8K confidence (tok/s) | 8K calibrated (tok/s) | Gain |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| Prose, greedy (12 prompts) | 22.81 | 23.05 | +1.0% | 20.90 | 21.39 | +2.4% |
+| Story, temperature 1 (12 seeds) | 19.87 | 20.02 | +0.8% | 19.49 | 19.24 | -1.3% |
+| Code writing, greedy | 35.28 | 36.16 | +2.5% | 30.09 | 31.15 | +3.5% |
+| Code writing, temperature 0.6 (12 seeds) | 27.82 | 28.00 | +0.7% | 25.79 | 26.03 | +0.9% |
+| Code edit in context, greedy | 54.50 | 54.38 | -0.2% | 52.76 | 51.94 | -1.5% |
+| Repetitive, greedy | 57.38 | 57.03 | -0.6% | 55.27 | 55.06 | -0.4% |
+
+Prose and new code gain; verbatim copying is within about 1.5%. Per-run
+values and draft counts are in the artifacts.
 
 ## Image requests
 
@@ -162,6 +192,8 @@ shorter at every measured depth: 117 vs 120 ms at d0, 118 vs 126 ms at 4K,
 | 131,072 | 156.09 | 74.00 | +110.9% | 7.84 | 6.10 | +28.5% |
 
 ---
+
+\* Gufo cells measured with the previous `--draft-policy confidence` default; see [MTP draft policy](#mtp-draft-policy) for the calibrated default at d0 and 8K.
 
 | Gemma 4 31B Q4 MTP mixed<br>Depth (tokens) | Gufo pp (tok/s) | fork pp (tok/s) | Gain | Gufo tg (tok/s) | fork tg (tok/s) | Gain | Gufo / fork accepted per cycle |
 | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
