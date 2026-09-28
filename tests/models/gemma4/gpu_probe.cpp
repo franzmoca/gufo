@@ -97,9 +97,8 @@ int main(int argc, char** argv) {
     std::string error;
     g4::ModelOptions options;
     // A chat turn has at most one token per byte of its text.
-    options.max_context = static_cast<std::uint32_t>(tokens.size() +
-                                                     chat.size() + generate +
-                                                     4096);
+    options.max_context = static_cast<std::uint32_t>(
+        tokens.size() + chat.size() + generate + 4096);
     const auto start = std::chrono::steady_clock::now();
     auto m = g4::Model::Load(model, options, &error);
     Require(m != nullptr, error);
