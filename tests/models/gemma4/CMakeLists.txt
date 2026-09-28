@@ -16,6 +16,7 @@ add_gemma4_test(config gufo_gemma4 "cpu")
 add_gemma4_test(tokenizer_contract gufo_gemma4 "cpu;tokenization")
 add_gemma4_test(template gufo_gemma4 "cpu;chat_template")
 add_gemma4_test(tool_syntax gufo_gemma4 "cpu;tools")
+add_gemma4_test(vision_prompt gufo_gemma4 "cpu;vision")
 add_gemma4_test(artifact gufo_gemma4 "cpu;tokenization;chat_template;external-model")
 foreach(target gemma4_template_test gemma4_artifact_test)
   target_compile_definitions(${target} PRIVATE

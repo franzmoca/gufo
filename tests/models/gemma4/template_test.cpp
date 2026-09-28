@@ -2,6 +2,7 @@
 #include <iostream>
 #include <span>
 #include <string>
+#include <vector>
 
 #include "src/core/crypto/sha256.hpp"
 #include "src/models/gemma4/chat_template.hpp"
@@ -32,9 +33,20 @@ void CheckGoldens() {
   Require(cases.size() == expected->size(), "case/golden count mismatch");
   for (const auto& c : cases) {
     std::string error;
-    const auto rendered =
-        g4::ChatTemplate::Render(c.messages, c.tools, c.options, &error);
+    std::vector<std::size_t> images;
+    const auto rendered = g4::ChatTemplate::Render(c.messages, c.tools,
+                                                   c.options, &error, &images);
     Require(rendered.has_value(), c.name + ": " + error);
+    std::size_t expected_images = 0;
+    for (const auto& message : c.messages) {
+      expected_images += message.images.size();
+    }
+    Require(images.size() == expected_images, c.name + ": image count");
+    for (const auto offset : images) {
+      Require(rendered->text.compare(offset, g4::kImagePlaceholder.size(),
+                                     g4::kImagePlaceholder) == 0,
+              c.name + ": image offset is not a placeholder");
+    }
     const auto* golden = expected->find(c.name);
     Require(golden != nullptr, c.name + ": no golden");
     if (Sha256(rendered->text) != golden->member_str("rendered_sha256")) {
@@ -46,7 +58,8 @@ void CheckGoldens() {
     // The generation prompt is a pure suffix of the stable conversation.
     auto without = c.options;
     without.add_generation_prompt = false;
-    const auto prefix = g4::ChatTemplate::Render(c.messages, c.tools, without);
+    const auto prefix = g4::ChatTemplate::Render(c.messages, c.tools, without,
+                                                 nullptr, &images);
     Require(
         prefix && prefix->text == rendered->text.substr(
                                       0, rendered->generation_prompt_offset),
@@ -75,7 +88,7 @@ void CheckRejections() {
   std::string error;
   Require(!g4::ChatTemplate::Render(std::span(&image, 1), {}, {}, &error) &&
               !error.empty(),
-          "image input accepted by the text-only renderer");
+          "image input accepted without image offsets");
   gufo::tokenization::ChatTool bad;
   bad.definition_json = "[1]";
   Require(!g4::ChatTemplate::Render({}, std::span(&bad, 1), {}, &error),

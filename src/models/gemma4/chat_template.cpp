@@ -625,16 +625,31 @@ bool ChatTemplate::ValidateGgufTemplate(const core::GgufReader& reader,
 
 std::optional<RenderedPrompt> ChatTemplate::Render(
     std::span<const ChatMessage> messages, std::span<const ChatTool> tools,
-    const ChatOptions& options, std::string* error_msg) {
+    const ChatOptions& options, std::string* error_msg,
+    std::vector<std::size_t>* image_offsets) {
   const auto fail = [&](std::string message) -> std::optional<RenderedPrompt> {
     if (error_msg != nullptr) {
       *error_msg = std::move(message);
     }
     return std::nullopt;
   };
+  if (image_offsets != nullptr) {
+    image_offsets->clear();
+  }
   for (const auto& message : messages) {
-    if (!message.images.empty()) {
-      return fail("gemma4 runs text-only; image inputs are not supported");
+    if (message.images.empty()) {
+      continue;
+    }
+    if (image_offsets == nullptr) {
+      return fail("gemma4 image input requires a vision sidecar");
+    }
+    std::size_t previous = 0;
+    for (const auto& image : message.images) {
+      if (message.role != ChatRole::kUser || image.bytes == nullptr ||
+          image.offset < previous || image.offset > message.content.size()) {
+        return fail("invalid user image content");
+      }
+      previous = image.offset;
     }
   }
   std::vector<Value> tool_data;
@@ -740,8 +755,24 @@ std::optional<RenderedPrompt> ChatTemplate::Render(
       }
     }
 
-    const std::string content = role == "model" ? StripThinking(message.content)
-                                                : PyTrim(message.content);
+    std::string content;
+    if (!message.images.empty()) {
+      // A content-part list: every text part is trimmed on its own and each
+      // image renders as a placeholder. Adjacent flattened text parts form
+      // one segment.
+      std::size_t cursor = 0;
+      for (const auto& image : message.images) {
+        content += PyTrim(std::string_view(message.content)
+                              .substr(cursor, image.offset - cursor));
+        image_offsets->push_back(out.size() + content.size());
+        content += kImagePlaceholder;
+        cursor = image.offset;
+      }
+      content += PyTrim(std::string_view(message.content).substr(cursor));
+    } else {
+      content = role == "model" ? StripThinking(message.content)
+                                : PyTrim(message.content);
+    }
     out += content;
     const bool has_content = !PyTrim(content).empty();
 

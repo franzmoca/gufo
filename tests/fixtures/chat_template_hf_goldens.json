@@ -259,6 +259,18 @@
       "special_text": {
         "rendered_sha256": "7d808a58c7d91f3e869e0816d85f7ca040df9d31d9c70e8f518f92116c8b2f61",
         "rendered_bytes": 100
+      },
+      "image_only": {
+        "rendered_sha256": "41e2a322c1fe3c95bef68099e29ff7ab2ccbce888a6a8f6c019adbe7e886b0e0",
+        "rendered_bytes": 75
+      },
+      "image_text": {
+        "rendered_sha256": "8668f3873d04bde0b3fa3cdb9a0d58ec5a4aa2ea808fac7eee8c99b8be38e82a",
+        "rendered_bytes": 167
+      },
+      "image_history": {
+        "rendered_sha256": "c41300066c8d81cffeab6d329ff9c1b54a2733763360f5fa3d259b3afc0d065e",
+        "rendered_bytes": 160
       }
     }
   }

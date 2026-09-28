@@ -3,6 +3,7 @@
 
 #include <fstream>
 #include <map>
+#include <memory>
 #include <sstream>
 #include <string>
 #include <vector>
@@ -77,7 +78,22 @@ inline std::vector<TemplateCase> LoadTemplateCases(const std::string& path) {
     for (const auto& m : c.find("messages")->items()) {
       gufo::tokenization::ChatMessage message;
       message.role = ParseRole(m.member_str("role"));
-      message.content = m.member_str("content");
+      const auto* content = m.find("content");
+      if (content != nullptr && content->is_array()) {
+        // Content parts, flattened as the OpenAI adapter does: text appends,
+        // an image records its byte offset.
+        for (const auto& part : content->items()) {
+          if (part.member_str("type") == "image_url") {
+            message.images.push_back(
+                {message.content.size(),
+                 std::make_shared<const std::vector<std::uint8_t>>()});
+          } else {
+            message.content += part.member_str("text");
+          }
+        }
+      } else {
+        message.content = m.member_str("content");
+      }
       message.name = m.member_str("name");
       message.thought = m.member_str("reasoning_content");
       message.tool_call_id = m.member_str("tool_call_id");

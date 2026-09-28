@@ -6,6 +6,7 @@
 #include <span>
 #include <string>
 #include <string_view>
+#include <vector>
 
 #include "src/core/gguf_reader.hpp"
 #include "src/core/reasoning.hpp"
@@ -39,7 +40,7 @@ struct RenderedPrompt {
 /// Known, documented approximations of the Jinja source: message content
 /// parts arrive flattened by the HTTP layer, JSON numbers render as Python
 /// ints when integral (Python would print 5.0 for a float literal), and
-/// images are rejected because this runtime is text-only.
+/// text parts between two images are trimmed as one segment.
 class ChatTemplate {
 public:
   [[nodiscard]] static constexpr std::string_view
@@ -56,7 +57,8 @@ public:
   [[nodiscard]] static std::optional<RenderedPrompt> Render(
       std::span<const tokenization::ChatMessage> messages,
       std::span<const tokenization::ChatTool> tools, const ChatOptions& options,
-      std::string* error_msg = nullptr);
+      std::string* error_msg = nullptr,
+      std::vector<std::size_t>* image_offsets = nullptr);
 };
 
 /// Reasoning channel markup produced by the model.
@@ -64,6 +66,10 @@ inline constexpr std::string_view kThoughtStart = "<|channel>thought\n";
 inline constexpr std::string_view kThoughtEnd = "<channel|>";
 inline constexpr std::string_view kToolCallStart = "<|tool_call>";
 inline constexpr std::string_view kToolCallEnd = "<tool_call|>";
+/// Rendered in place of each user image; the prompt builder replaces it with
+/// the image's soft tokens. Render reports the byte offset of each one it
+/// emits through `image_offsets`; without that output images are rejected.
+inline constexpr std::string_view kImagePlaceholder = "<|image|>";
 /// String delimiter of the tool-call argument syntax.
 inline constexpr std::string_view kStringQuote = "<|\"|>";
 

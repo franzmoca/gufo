@@ -216,6 +216,28 @@
       "messages": [
         {"role": "user", "content": "Literal <|turn> and <|\"|> markers."}
       ]
+    },
+    "image_only": {
+      "messages": [
+        {"role": "user", "content": [{"type": "image_url", "image_url": {"url": "data:,"}}]}
+      ]
+    },
+    "image_text": {
+      "messages": [
+        {"role": "system", "content": "You describe pictures."},
+        {"role": "user", "content": [
+          {"type": "text", "text": "  Compare these two. "}, {"type": "image_url", "image_url": {"url": "data:,"}},
+          {"type": "text", "text": "\n and \n"}, {"type": "image_url", "image_url": {"url": "data:,"}},
+          {"type": "text", "text": " Which is brighter?  "}]}
+      ]
+    },
+    "image_history": {
+      "enable_thinking": true,
+      "messages": [
+        {"role": "user", "content": [{"type": "image_url", "image_url": {"url": "data:,"}}, {"type": "text", "text": "What is shown?"}]},
+        {"role": "assistant", "content": "A red square."},
+        {"role": "user", "content": "And its size?"}
+      ]
     }
   }
 }
