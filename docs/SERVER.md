@@ -10,7 +10,7 @@ versioned contract: supported fields behave as documented, and unsupported
 fields return explicit errors.
 
 Chat Completions is the main API, including streaming, images and tools.
-Responses supports text with optional streaming; Anthropic Messages exposes a
+Responses supports text and image inputs with optional streaming; Anthropic Messages exposes a
 synchronous text subset.
 The reference protocols are:
 
@@ -287,7 +287,7 @@ cache snapshots. HTTP handlers do not implement model kernels.
 | Method | Path | Purpose |
 | --- | --- | --- |
 | `GET` | `/v1/models` | List loaded model aliases and capabilities |
-| `POST` | `/v1/responses` | Text, optional SSE streaming |
+| `POST` | `/v1/responses` | Text/images, structured output, optional SSE streaming |
 | `POST` | `/v1/chat/completions` | Main chat, streaming, image and tool API |
 | `POST` | `/v1/completions` | Optional legacy text completion adapter |
 | `GET` | `/health` | Process liveness (aliases: `/v1/health`, `/healthz`) |
@@ -460,13 +460,14 @@ request limits, cancellation, cache accounting and completion state.
 
 ## Responses API Subset
 
-`POST /v1/responses` accepts `model`, `input` as text or text-message arrays,
-`instructions`, `max_output_tokens`, `stream`, and the shared sampling controls.
+`POST /v1/responses` accepts `model`, `input` as text or message arrays,
+`instructions`, `max_output_tokens`, `stream`, `reasoning.effort`,
+`text.format`, and the shared sampling controls. Message content supports
+`input_text` and `input_image` with an `image_url` (HTTPS or a data URL).
 Clients supply the complete conversation, including prior Gufo `output` items
 when retaining reasoning. `store` and `background` must be false
-when present. Images, tools, structured output, server-side conversations and
-`previous_response_id` are rejected on this route. Use Chat Completions for images
-and tools.
+when present. Tools, server-side conversations and `previous_response_id`
+remain unsupported on this route; use Chat Completions for tools.
 
 Responses report `incomplete` with reason `max_output_tokens` when generation
 hits its limit. Otherwise they report `completed`. `stream: true` sends typed
@@ -576,12 +577,53 @@ labelled executed model state. Stops must be nonempty, at most 4 KiB each and
 Nullable Chat Completions defaults retain server settings, including sampling
 and token limits. `logprobs: false`, empty `logit_bias`,
 `response_format: {"type":"text"}` and `modalities: ["text"]` are accepted.
-Actual log probabilities, token biases, structured outputs and audio output
-remain unsupported and return explicit errors.
+Actual log probabilities, token biases and audio output remain unsupported
+and return explicit errors.
 
-Admission groups text requests by the socket peer's IP address across chat and
-compatibility endpoints. Caller-provided identity headers do not affect quotas;
-clients behind the same proxy or NAT share a peer quota.
+### Structured output
+
+Chat Completions accepts `response_format: {"type":"json_object"}` or
+`{"type":"json_schema","json_schema":{"name":"Reply","strict":true,"schema":…}}`.
+Responses uses `text: {"format":{"type":"json_schema","name":"Reply","strict":true,"schema":…}}`.
+The official SDK supports typed parsing and streaming through
+`client.chat.completions.parse/stream(response_format=Model)` and
+`client.responses.parse/stream(text_format=Model)`.
+
+Constraints apply before target sampling in AR, DFlash2, MTP and DSpark, including
+streaming, images and concurrent requests. Reasoning stays separate from JSON
+and counts toward the output budget. Changing the schema changes the cache prefix.
+
+Parse the returned content: leading whitespace is valid JSON, and stops or token
+limits can leave it incomplete. `finish_reason: "stop"` includes matched stop
+sequences and does not guarantee complete JSON. Token limits return `"length"`
+in Chat or `status: "incomplete"` with reason `max_output_tokens` in Responses.
+
+Supported: objects, arrays, nullable types, `enum`/`const`, `anyOf`, recursive local
+`$ref`/`$defs`, numeric bounds/`multipleOf`, string patterns/lengths/formats and
+array length bounds. Formats include date/time, duration, email, hostname,
+IP addresses and UUID.
+
+The root must resolve to an object. Objects require `additionalProperties:false`;
+strict schemas require every property (use null for optional values).
+Unsupported keywords, external references and unusable cycles are rejected.
+Schemas are limited to 2 MiB, 5,000 properties, 1,000 enum values and 120,000
+characters in names and enum/const strings. Patterns use ECMA-262 Unicode
+semantics; lookbehind, backreferences, inline flags and unbounded repetition
+of assertions are unsupported.
+
+In Chat Completions, function `strict:true` constrains tool arguments independently
+of `response_format`.
+With `tool_choice: "auto"`, the model may call a tool or give a final answer;
+the response schema constrains the latter. Use `"none"` for JSON answers only,
+`"required"` to require a call, or select a named function.
+`parallel_tool_calls:false` allows at most one call. Interrupted calls are omitted.
+
+References: [OpenAI Chat Completions](https://developers.openai.com/api/reference/resources/chat/subresources/completions/methods/create),
+[structured outputs](https://developers.openai.com/api/docs/guides/structured-outputs),
+[JSON Schema patterns](https://json-schema.org/draft/2020-12/json-schema-validation#name-pattern)
+and [llama.cpp grammar sampling](https://github.com/ggml-org/llama.cpp/blob/68d9053afd4f4d0752ced6187585f862355a40be/common/sampling.cpp).
+Verify with `tools/serving/check-openai-sdk.py --suite structured` or
+`--suite structured-limits` (add `--vision` for an image-capable server).
 
 ## Model Discovery
 
@@ -651,6 +693,10 @@ The HTTP transport bounds connection count and request-body size. The scheduler
 bounds admission and output buffering and propagates client cancellation to
 model runners. An in-flight GPU operation may finish before its request retires.
 See [CLI.md](CLI.md) for supported configuration flags.
+
+Admission groups text requests by the socket peer's IP address across chat and
+compatibility endpoints. Caller-provided identity headers do not affect quotas;
+clients behind the same proxy or NAT share a peer quota.
 
 Cancellation retains the last successfully executed conversation frontier and
 the immutable prompt snapshot. It does not execute a selected but unfinished
