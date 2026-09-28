@@ -165,3 +165,30 @@ constraint vocabulary. Downloaded and verified the BF16 sidecar.
   - `tools/gemma4/compare_stages.py`.
 - `gemma4.vision_encoder` gates the GPU encoder against the reference
   (`GUFO_GEMMA4_MMPROJ`).
+
+**2026-09-28 — V3 engine.**
+- `Executor::Forward` takes `ImageRows`: unscaled embeddings, plus per-row
+  key ends so sliding layers see the whole image (`AttentionArgs::key_ends`,
+  in the WMMA, single-pass and split kernels).
+- `Session::Sync(prompt, images, embed)`:
+  - Stops reuse at the first changed image and never resumes inside one.
+  - Asks for embeddings only for images it evaluates.
+  - Ends prefill chunks before an image that does not fit.
+- Snapshots record image spans (payload v3).
+- Teacher-forced on the 624×960 photo prompt (greedy 80-token description, 96 text positions from `<image|>` on):
+
+  | Comparison | Mean KL | Max KL | Top-1 |
+  |---|---:|---:|---:|
+  | Gufo vs llama.cpp (`use_gelu` sidecar) | 0.0151 | 0.34 | 96/96 |
+  | Gufo vs stock llama.cpp (GELU-quick) | 0.475 | 43.8 | 92/96 |
+
+  - The 16K text-only figure is 0.0092.
+  - The two llama.cpp activations differ from each other by 0.21.
+- Gufo's description is correct: the "Test Images" grid plus the "Grayscales" and "Primary Colors" charts.
+- Timings: 598 ms to encode, 872 ms to prefill 281 tokens.
+- `gemma4.vision_session` (model-backed) checks the reuse and chunking rules:
+  - A red and a blue image behind identical tokens answer differently (KL 32).
+  - A changed image, rewind, extension, snapshot restore and a prefill chunk
+    ending inside an image all match fresh sessions inside the prefill
+    envelope.
+- `gemma4.attention_ops` covers image rows across the window, ring wrap and the split path.

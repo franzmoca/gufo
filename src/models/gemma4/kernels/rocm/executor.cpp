@@ -26,8 +26,8 @@ std::size_t AlignUp(std::size_t n) {
 }
 
 struct Layout {
-  std::size_t tokens, logit_index, x, h, q, k, v, attn, o, gate, up, hsel,
-      logits, partials, q8;
+  std::size_t tokens, logit_index, key_ends, x, h, q, k, v, attn, o, gate, up,
+      hsel, logits, partials, q8;
   std::size_t draft_tokens, draft_concat, draft_x, draft_h, draft_q, draft_attn,
       draft_o, draft_gate, draft_up, draft_logits, draft_next, draft_candidates,
       draft_candidate_scratch;
@@ -68,6 +68,7 @@ Layout Plan(const Config& c, const Config* draft, std::uint32_t vocab,
   };
   l.tokens = take(rows * sizeof(std::int32_t));
   l.logit_index = take(logit_rows * sizeof(std::uint32_t));
+  l.key_ends = take(rows * sizeof(std::uint32_t));
   l.x = take(std::size_t{rows} * c.hidden_size * f);
   l.h = take(std::size_t{rows} * c.hidden_size * f);
   l.q = take(std::size_t{rows} * MaxQDim(c) * f);
@@ -174,6 +175,7 @@ Executor::Executor(const DeviceModel& model, std::uint32_t max_rows,
   auto* base = static_cast<std::uint8_t*>(scratch_);
   tokens_ = reinterpret_cast<std::int32_t*>(base + l.tokens);
   logit_index_ = reinterpret_cast<std::uint32_t*>(base + l.logit_index);
+  key_ends_ = reinterpret_cast<std::uint32_t*>(base + l.key_ends);
   x_ = reinterpret_cast<float*>(base + l.x);
   h_ = reinterpret_cast<float*>(base + l.h);
   q_ = reinterpret_cast<float*>(base + l.q);
@@ -335,15 +337,17 @@ void Executor::DeriveKeys(AttentionArgs& att, std::uint32_t layer) const {
 
 void Executor::Forward(KvCache& cache, std::span<const std::int32_t> tokens,
                        std::uint32_t first_position,
-                       std::span<const std::uint32_t> logit_rows) {
+                       std::span<const std::uint32_t> logit_rows,
+                       std::span<const ImageRows> images) {
   const Segment segment{&cache, first_position,
                         static_cast<std::uint32_t>(tokens.size())};
-  Forward(std::span<const Segment>(&segment, 1), tokens, logit_rows);
+  Forward(std::span<const Segment>(&segment, 1), tokens, logit_rows, images);
 }
 
 void Executor::Forward(std::span<const Segment> segments,
                        std::span<const std::int32_t> tokens,
-                       std::span<const std::uint32_t> logit_rows) {
+                       std::span<const std::uint32_t> logit_rows,
+                       std::span<const ImageRows> images) {
   const Config& c = model_.config();
   const auto n = static_cast<std::uint32_t>(tokens.size());
   std::uint64_t total = 0;
@@ -371,6 +375,35 @@ void Executor::Forward(std::span<const Segment> segments,
       reinterpret_cast<const std::uint32_t*>(tokens_), x_, n, d, stream_);
   ScaleRmsNorm(x_, std::sqrt(static_cast<float>(d)), layers[0].attn_norm.f32(),
                h_, n, d, eps, stream_);
+  // Image rows take their embeddings unscaled; each image's rows see all of
+  // its keys in sliding layers.
+  const std::uint32_t* key_ends = nullptr;
+  if (!images.empty()) {
+    if (segments.size() != 1) {
+      throw std::invalid_argument(
+          "gemma4 images need a single-session forward");
+    }
+    key_ends_host_.assign(n, 0);
+    std::uint32_t previous_end = 0;
+    for (const ImageRows& image : images) {
+      if (image.count == 0 || image.row < previous_end ||
+          image.count > n - image.row || image.embedding == nullptr) {
+        throw std::invalid_argument("gemma4 image rows are out of order");
+      }
+      previous_end = image.row + image.count;
+      HIP_CHECK(hipMemcpyAsync(x_ + std::size_t{image.row} * d, image.embedding,
+                               std::size_t{image.count} * d * sizeof(float),
+                               hipMemcpyDeviceToDevice, stream_));
+      RmsNorm(x_ + std::size_t{image.row} * d, layers[0].attn_norm.f32(),
+              h_ + std::size_t{image.row} * d, image.count, d, eps, stream_);
+      std::fill_n(key_ends_host_.begin() + image.row, image.count,
+                  segments[0].first_position + previous_end);
+    }
+    HIP_CHECK(hipMemcpyAsync(key_ends_, key_ends_host_.data(),
+                             n * sizeof(std::uint32_t), hipMemcpyHostToDevice,
+                             stream_));
+    key_ends = key_ends_;
+  }
 
   // Prefill (rows past the small-batch width) quantizes activations for the
   // W8A8 GEMMs; the norms and GeGLU write that encoding directly.
@@ -428,6 +461,7 @@ void Executor::Forward(std::span<const Segment> segments,
       att.key_limit = std::numeric_limits<std::uint32_t>::max();
       att.window = sliding ? c.sliding_window : 0;
       att.ring = sliding ? cache.ring : 0;
+      att.key_ends = sliding ? key_ends : nullptr;
       DeriveKeys(att, l);
       Attention(att, stream_);
       row0 += seg.rows;

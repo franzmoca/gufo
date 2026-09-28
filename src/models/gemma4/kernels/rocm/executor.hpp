@@ -50,6 +50,15 @@ struct KvCache {
   float* hidden{nullptr};
 };
 
+/// Image soft-token rows of one forward: rows [row, row + count) take
+/// `embedding` (device FP32 [count][hidden]) unscaled in place of their token
+/// embeddings and attend to each other bidirectionally in sliding layers.
+struct ImageRows {
+  std::uint32_t row;
+  std::uint32_t count;
+  const float* embedding;
+};
+
 /// Runs the Gemma 4 graph on device-resident weights. Scratch is shared by
 /// every session; calls are serialized on one stream.
 class Executor {
@@ -82,9 +91,11 @@ public:
   /// writes softcapped logits of `logit_rows` (indices into `tokens`, in
   /// order) to the device logits buffer. Every earlier position must already
   /// be in `cache`.
+  /// `images` (ordered, disjoint, inside `tokens`) replace those rows' inputs.
   void Forward(KvCache& cache, std::span<const std::int32_t> tokens,
                std::uint32_t first_position,
-               std::span<const std::uint32_t> logit_rows);
+               std::span<const std::uint32_t> logit_rows,
+               std::span<const ImageRows> images = {});
 
   /// Consecutive rows of one session in a batched forward.
   struct Segment {
@@ -98,7 +109,8 @@ public:
   /// row computes what its session's own forward of the same width would.
   void Forward(std::span<const Segment> segments,
                std::span<const std::int32_t> tokens,
-               std::span<const std::uint32_t> logit_rows);
+               std::span<const std::uint32_t> logit_rows,
+               std::span<const ImageRows> images = {});
 
   /// Keeps hidden row `row` of the last Forward as the cache's frontier
   /// state for drafting.
@@ -153,6 +165,9 @@ private:
   void* scratch_{nullptr};
   std::int32_t* tokens_{nullptr};
   std::uint32_t* logit_index_{nullptr};
+  /// Per-row sliding-attention key ends of a forward with images.
+  std::uint32_t* key_ends_{nullptr};
+  std::vector<std::uint32_t> key_ends_host_;
   float* x_{nullptr};
   float* h_{nullptr};
   float* q_{nullptr};

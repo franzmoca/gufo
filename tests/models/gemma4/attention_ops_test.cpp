@@ -1,6 +1,7 @@
 // Gemma 4 attention kernels against an FP64 formula over the same binary16
 // caches: window and ring addressing, the draft key limit, split-K and
-// single-pass modes, and batch invariance of the split mode.
+// single-pass modes, batch invariance of the split mode, and image rows that
+// see their whole image.
 #include <hip/hip_runtime.h>
 
 #include <algorithm>
@@ -49,7 +50,21 @@ struct Case {
   bool timed = false;            ///< also report the launch time (deep shapes)
   std::uint32_t row_stride = 1;  ///< rows checked against FP64
   bool derived = false;          ///< keys rebuilt from V (no K cache)
+  /// Rows [image_row, image_row + image_count) form one image.
+  std::uint32_t image_row = 0;
+  std::uint32_t image_count = 0;
 };
+
+/// A row's exclusive key end: its image's end for image rows.
+std::uint32_t KeyEnd(const Case& c, std::uint32_t row) {
+  const std::uint32_t position =
+      c.shared_position ? c.first_position : c.first_position + row;
+  if (row >= c.image_row && row < c.image_row + c.image_count) {
+    return std::max(position + 1,
+                    c.first_position + c.image_row + c.image_count);
+  }
+  return position + 1;
+}
 
 /// A derived-key case: the K cache holds the rotated dims of `pairs` pairs.
 struct DerivedKeys {
@@ -96,6 +111,15 @@ std::vector<float> RunKernel(const Case& c, const std::vector<float>& q,
   if (derived != nullptr) {
     a.rope_pairs = derived->pairs;
   }
+  std::uint32_t* dends = nullptr;
+  if (c.image_count != 0) {
+    std::vector<std::uint32_t> ends(c.rows, 0);
+    for (std::uint32_t r = c.image_row; r < c.image_row + c.image_count; ++r) {
+      ends[r] = c.first_position + c.image_row + c.image_count;
+    }
+    dends = Device(ends);
+    a.key_ends = dends;
+  }
   k::Attention(a, nullptr);
   HIP_CHECK(hipDeviceSynchronize());
   if (timed) {
@@ -121,9 +145,9 @@ std::vector<float> RunKernel(const Case& c, const std::vector<float>& q,
     HIP_CHECK(hipEventDestroy(stop));
   }
   HIP_CHECK(hipMemcpy(out.data(), dout, out.size() * 4, hipMemcpyDeviceToHost));
-  for (void* p :
-       {static_cast<void*>(dq), static_cast<void*>(dk), static_cast<void*>(dv),
-        static_cast<void*>(dout), static_cast<void*>(dpart)}) {
+  for (void* p : {static_cast<void*>(dq), static_cast<void*>(dk),
+                  static_cast<void*>(dv), static_cast<void*>(dout),
+                  static_cast<void*>(dpart), static_cast<void*>(dends)}) {
     HIP_CHECK(hipFree(p));
   }
   return out;
@@ -207,7 +231,7 @@ void Check(const Case& c, std::mt19937& rng) {
   for (std::uint32_t r = 0; r < c.rows; r += c.row_stride) {
     const std::uint32_t pos =
         c.shared_position ? c.first_position : c.first_position + r;
-    const std::uint32_t hi = std::min(pos + 1, c.key_limit);
+    const std::uint32_t hi = std::min(KeyEnd(c, r), c.key_limit);
     const std::uint32_t lo =
         c.window != 0 && pos + 1 > c.window ? pos + 1 - c.window : 0;
     for (std::uint32_t h = 0; h < c.heads; ++h) {
@@ -254,7 +278,8 @@ void Check(const Case& c, std::mt19937& rng) {
           std::string(c.name) + ": max error " + std::to_string(worst));
 
   // Split mode: every row equals its single-row evaluation bit for bit.
-  if (c.rows > 1 && c.rows <= k::kSplitRows && !c.shared_position) {
+  if (c.rows > 1 && c.rows <= k::kSplitRows && !c.shared_position &&
+      c.image_count == 0) {
     for (std::uint32_t r = 0; r < c.rows; ++r) {
       Case single = c;
       single.rows = 1;
@@ -299,6 +324,15 @@ int main() {
          "sliding prefill ring wrap"},
         {256, 32, 16, 37, 2, 1024, 3072, false, kNoLimit,
          "sliding prefill start"},
+        // Image rows attend forward to the end of their image.
+        {256, 8, 4, 300, 900, 1024, 1536, false, kNoLimit,
+         "sliding prefill image across the window", false, 1, false, 20, 280},
+        {256, 8, 4, 70, 3000, 1024, 1280, false, kNoLimit,
+         "sliding prefill image ring wrap", false, 1, false, 10, 50},
+        {256, 32, 16, 40, 0, 1024, 3072, false, kNoLimit,
+         "sliding prefill image at start", false, 1, false, 0, 40},
+        {256, 8, 4, 12, 2000, 1024, 1280, false, kNoLimit,
+         "sliding split image", false, 1, false, 3, 7},
         {512, 32, 4, 1, 0, 0, 0, false, kNoLimit, "global first token"},
         {512, 32, 4, 1, 2999, 0, 0, false, kNoLimit, "global multi-split"},
         {512, 8, 1, 7, 1500, 0, 0, false, kNoLimit, "global verify"},

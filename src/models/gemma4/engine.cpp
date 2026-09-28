@@ -34,6 +34,8 @@ struct SnapshotHeader {
   std::uint32_t window;
 };
 static_assert(sizeof(SnapshotHeader) == 32);
+/// Snapshot image record: u32 offset, u32 rows, 32-byte identity.
+constexpr std::size_t kImageRecordBytes = 8 + 32;
 
 /// First position whose KV a later token may attend in `layer`.
 std::uint32_t FirstLiveRow(const Config& c, std::uint32_t layer,
@@ -225,31 +227,64 @@ std::size_t Session::AllocatedBytes() const noexcept {
 void Session::Reset() {
   pending_.reset();
   tokens_.clear();
+  images_.clear();
   lookup_.Clear();
   logits_.clear();
   valid_ = false;
 }
 
-bool Session::Extend(std::size_t begin, std::string* error_msg) {
+bool Session::Extend(std::size_t begin, std::string* error_msg,
+                     const ImageEmbeddings& embed) {
   auto& executor = *model_->executor_;
   const std::size_t chunk = executor.max_rows();
   valid_ = false;
   try {
     std::lock_guard lock(model_->mutex_);
-    for (std::size_t start = begin; start < tokens_.size(); start += chunk) {
-      const std::size_t count = std::min(chunk, tokens_.size() - start);
-      const bool last = start + count == tokens_.size();
-      const std::uint32_t last_row = static_cast<std::uint32_t>(count - 1);
+    std::vector<rocm::ImageRows> rows;
+    std::size_t count = 0;
+    for (std::size_t start = begin; start < tokens_.size(); start += count) {
+      std::size_t end = std::min(start + chunk, tokens_.size());
+      rows.clear();
+      for (std::size_t i = 0; i < images_.size(); ++i) {
+        const ImageSpan& image = images_[i];
+        const std::size_t image_end = std::size_t{image.offset} + image.rows;
+        if (image_end <= start || image.offset >= end) {
+          continue;
+        }
+        if (image.offset < start) {
+          throw std::logic_error("gemma4 prefill resumed inside an image");
+        }
+        if (image_end > end) {
+          // Stop before an image that does not fit; one that starts the
+          // chunk fits because images are at most a chunk long.
+          end = image.offset > start ? image.offset : image_end;
+          if (image.offset > start) {
+            break;
+          }
+        }
+        const float* embedding = embed ? embed(i) : nullptr;
+        if (embedding == nullptr) {
+          throw std::invalid_argument("gemma4 image has no embeddings");
+        }
+        rows.push_back({static_cast<std::uint32_t>(image.offset - start),
+                        image.rows, embedding});
+      }
+      count = end - start;
+      const bool last = end == tokens_.size();
+      const auto last_row = static_cast<std::uint32_t>(count - 1);
       executor.Forward(*cache_, std::span(tokens_).subspan(start, count),
                        static_cast<std::uint32_t>(start),
                        last ? std::span<const std::uint32_t>(&last_row, 1)
-                            : std::span<const std::uint32_t>{});
+                            : std::span<const std::uint32_t>{},
+                       rows);
     }
-    const std::size_t tail = (tokens_.size() - begin - 1) % chunk;
-    executor.CommitHidden(*cache_, static_cast<std::uint32_t>(tail));
+    executor.CommitHidden(*cache_, static_cast<std::uint32_t>(count - 1));
     executor.CopyLogits(1, &logits_);
   } catch (const std::exception& e) {
     tokens_.resize(begin);
+    std::erase_if(images_, [&](const ImageSpan& image) {
+      return std::size_t{image.offset} + image.rows > begin;
+    });
     lookup_.Clear();
     return Fail(error_msg, e.what());
   }
@@ -258,6 +293,12 @@ bool Session::Extend(std::size_t begin, std::string* error_msg) {
 }
 
 bool Session::Sync(std::span<const TokenId> prompt, std::string* error_msg) {
+  return Sync(prompt, {}, {}, error_msg);
+}
+
+bool Session::Sync(std::span<const TokenId> prompt,
+                   std::span<const ImageSpan> images,
+                   const ImageEmbeddings& embed, std::string* error_msg) {
   if (prompt.empty()) {
     Reset();
     return Fail(error_msg, "prompt is empty");
@@ -265,25 +306,57 @@ bool Session::Sync(std::span<const TokenId> prompt, std::string* error_msg) {
   if (prompt.size() > cache_->max_context) {
     return Fail(error_msg, "prompt exceeds the session context");
   }
+  std::size_t previous_end = 0;
+  for (const ImageSpan& image : images) {
+    // A text token follows every image, so the frontier is never inside one.
+    if (image.rows == 0 || image.offset < previous_end ||
+        std::size_t{image.offset} + image.rows >= prompt.size() ||
+        image.rows > model_->executor_->max_rows()) {
+      return Fail(error_msg, "invalid image placement");
+    }
+    previous_end = std::size_t{image.offset} + image.rows;
+  }
   pending_.reset();
   std::size_t common = 0;
   const std::size_t limit = std::min(prompt.size(), tokens_.size());
   while (common < limit && prompt[common] == tokens_[common]) {
     ++common;
   }
+  // Equal tokens do not mean equal images: stop at the first image that
+  // differs, and never resume inside an image of the new prompt.
+  for (std::size_t i = 0; i < std::max(images.size(), images_.size()); ++i) {
+    if (i < images.size() && i < images_.size() && images[i] == images_[i]) {
+      continue;
+    }
+    std::size_t differs = common;
+    if (i < images.size()) {
+      differs = std::min<std::size_t>(differs, images[i].offset);
+    }
+    if (i < images_.size()) {
+      differs = std::min<std::size_t>(differs, images_[i].offset);
+    }
+    common = differs;
+    break;
+  }
   if (common == prompt.size() && common == tokens_.size() && valid_) {
     return true;
   }
   // The last prompt token is re-evaluated to produce its logits.
   common = std::min(common, prompt.size() - 1);
+  for (const ImageSpan& image : images) {
+    if (common > image.offset && common < image.offset + image.rows) {
+      common = image.offset;
+    }
+  }
   // Rewinding needs the sliding window before `common` still in the ring.
   const Config& c = model_->config();
   if (tokens_.size() - common + c.sliding_window > cache_->ring) {
     common = 0;
   }
   tokens_.assign(prompt.begin(), prompt.end());
+  images_.assign(images.begin(), images.end());
   lookup_.Clear();
-  return Extend(common, error_msg);
+  return Extend(common, error_msg, embed);
 }
 
 bool Session::Evaluate(TokenId token, std::string* error_msg) {
@@ -727,7 +800,8 @@ bool SessionSnapshot::CopyTo(std::span<std::uint8_t> destination) const {
 std::uint64_t Session::SnapshotBytes() const {
   const Config& c = model_->config();
   const auto n = static_cast<std::uint32_t>(tokens_.size());
-  std::uint64_t bytes = sizeof(SnapshotHeader) + std::uint64_t{n} * 4;
+  std::uint64_t bytes = sizeof(SnapshotHeader) + std::uint64_t{n} * 4 + 4 +
+                        images_.size() * kImageRecordBytes;
   const auto& key_widths = model_->executor_->key_widths();
   for (std::uint32_t l = 0; l < c.num_layers; ++l) {
     bytes += std::uint64_t{n - FirstLiveRow(c, l, n)} *
@@ -757,6 +831,15 @@ std::unique_ptr<SessionSnapshot> Session::SaveSnapshot(
   at += sizeof(header);
   std::memcpy(at, tokens_.data(), tokens_.size() * 4);
   at += tokens_.size() * 4;
+  const auto image_count = static_cast<std::uint32_t>(images_.size());
+  std::memcpy(at, &image_count, 4);
+  at += 4;
+  for (const ImageSpan& image : images_) {
+    std::memcpy(at, &image.offset, 4);
+    std::memcpy(at + 4, &image.rows, 4);
+    std::memcpy(at + 8, image.identity.data(), image.identity.size());
+    at += kImageRecordBytes;
+  }
   const hipStream_t stream = model_->executor_->stream();
   std::lock_guard lock(model_->mutex_);
   const auto copy_rows = [&](const std::uint16_t* cache, std::uint32_t layer,
@@ -818,13 +901,37 @@ bool Session::RestoreSnapshot(std::span<const std::uint8_t> payload,
   }
   tokens_.resize(n);
   lookup_.Clear();
+  const std::size_t images_at = sizeof(header) + std::size_t{n} * 4;
+  std::uint32_t image_count = 0;
+  if (payload.size() >= images_at + 4) {
+    std::memcpy(&image_count, payload.data() + images_at, 4);
+  }
+  if (payload.size() < images_at + 4 ||
+      image_count > (payload.size() - images_at - 4) / kImageRecordBytes) {
+    Reset();
+    return Fail(error_msg, "snapshot size does not match its header");
+  }
+  images_.resize(image_count);
   if (payload.size() != SnapshotBytes()) {
-    tokens_.clear();
+    Reset();
     return Fail(error_msg, "snapshot size does not match its header");
   }
   const std::uint8_t* at = payload.data() + sizeof(header);
   std::memcpy(tokens_.data(), at, std::size_t{n} * 4);
-  at += std::size_t{n} * 4;
+  at += std::size_t{n} * 4 + 4;
+  std::size_t previous_end = 0;
+  for (ImageSpan& image : images_) {
+    std::memcpy(&image.offset, at, 4);
+    std::memcpy(&image.rows, at + 4, 4);
+    std::memcpy(image.identity.data(), at + 8, image.identity.size());
+    at += kImageRecordBytes;
+    if (image.rows == 0 || image.offset < previous_end ||
+        std::size_t{image.offset} + image.rows >= n) {
+      Reset();
+      return Fail(error_msg, "snapshot image placement is invalid");
+    }
+    previous_end = std::size_t{image.offset} + image.rows;
+  }
   const hipStream_t stream = model_->executor_->stream();
   std::lock_guard lock(model_->mutex_);
   const auto copy_rows = [&](std::uint16_t* cache, std::uint32_t layer,

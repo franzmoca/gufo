@@ -505,7 +505,9 @@ struct KeyRange {
 __device__ inline KeyRange RowKeys(const AttentionArgs& a, std::uint32_t row) {
   const std::uint32_t position =
       a.shared_position ? a.first_position : a.first_position + row;
-  const std::uint32_t hi = min(position + 1, a.key_limit);
+  const std::uint32_t end =
+      a.key_ends != nullptr ? max(position + 1, a.key_ends[row]) : position + 1;
+  const std::uint32_t hi = min(end, a.key_limit);
   std::uint32_t lo = 0;
   if (a.window != 0 && position + 1 > a.window) {
     lo = position + 1 - a.window;

@@ -56,7 +56,18 @@ if (ENGINE_ENABLE_HIP)
   set_tests_properties(gemma4.vision_encoder PROPERTIES
     LABELS "gemma4;hip;gpu;gfx1151;vision;external-model"
     SKIP_RETURN_CODE 77 RESOURCE_LOCK gemma4)
-  add_custom_target(gemma4_model_tests DEPENDS gemma4_target_test)
+  add_executable(gemma4_vision_session_test EXCLUDE_FROM_ALL
+    vision_session_test.cpp)
+  target_link_libraries(gemma4_vision_session_test PRIVATE gufo_gemma4)
+  add_test(NAME gemma4.vision_session COMMAND gemma4_vision_session_test)
+  set_tests_properties(gemma4.vision_session PROPERTIES
+    LABELS "gemma4;hip;gpu;gfx1151;vision;external-model;slow"
+    SKIP_RETURN_CODE 77 RESOURCE_LOCK gemma4)
+  add_executable(gemma4_vision_generate_probe EXCLUDE_FROM_ALL
+    vision_generate_probe.cpp)
+  target_link_libraries(gemma4_vision_generate_probe PRIVATE gufo_gemma4)
+  add_custom_target(gemma4_model_tests DEPENDS gemma4_target_test
+    gemma4_vision_session_test)
   add_executable(gemma4_gpu_probe EXCLUDE_FROM_ALL gpu_probe.cpp)
   target_link_libraries(gemma4_gpu_probe PRIVATE gufo_gemma4)
 endif()

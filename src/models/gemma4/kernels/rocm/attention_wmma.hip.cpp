@@ -54,9 +54,11 @@ struct Bounds {
   std::uint32_t hi;
 };
 
-__device__ inline Bounds KeyBounds(const AttentionArgs& a,
+__device__ inline Bounds KeyBounds(const AttentionArgs& a, std::uint32_t row,
                                    std::uint32_t position) {
-  const std::uint32_t hi = min(position + 1, a.key_limit);
+  const std::uint32_t end =
+      a.key_ends != nullptr ? max(position + 1, a.key_ends[row]) : position + 1;
+  const std::uint32_t hi = min(end, a.key_limit);
   std::uint32_t lo = 0;
   if (a.window != 0 && position + 1 > a.window) {
     lo = position + 1 - a.window;
@@ -108,8 +110,9 @@ __global__ void __launch_bounds__((kPrefillThreads<D, kHeads, kQueryBlocks>))
   // Keys the whole block may need.
   const std::uint32_t last_row = min(query_start + kQueries, a.rows) - 1;
   const std::uint32_t block_lo =
-      KeyBounds(a, position_of(query_start)).lo & ~(kKeys - 1);
-  const std::uint32_t block_hi = KeyBounds(a, position_of(last_row)).hi;
+      KeyBounds(a, query_start, position_of(query_start)).lo & ~(kKeys - 1);
+  const std::uint32_t block_hi =
+      KeyBounds(a, last_row, position_of(last_row)).hi;
 
   // Q slice fragments: row `sub` of this row block, dims [dim0, dim0 + 128).
   v16h q_frag[kSliceSteps];
@@ -145,7 +148,8 @@ __global__ void __launch_bounds__((kPrefillThreads<D, kHeads, kQueryBlocks>))
   const std::uint32_t sm_row = part * kRowsPerPart + lane / kSegLanes;
   const std::uint32_t sm_seg = lane % kSegLanes;
   const std::uint32_t sm_query = row0 + sm_row;
-  const Bounds sm_keys = KeyBounds(a, position_of(min(sm_query, a.rows - 1)));
+  const std::uint32_t sm_clamped = min(sm_query, a.rows - 1);
+  const Bounds sm_keys = KeyBounds(a, sm_clamped, position_of(sm_clamped));
 
   const std::size_t kv_stride = static_cast<std::size_t>(a.kv_heads) * D;
   const auto* k_cache = reinterpret_cast<const __half*>(a.k_cache);

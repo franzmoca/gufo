@@ -79,6 +79,11 @@ void QueryPost(float* q, const float* q_norm, float theta_scale,
 /// dims, [rope_pairs) and [head_dim / 2, + rope_pairs) of each head
 /// (rope_pairs * 2 values), and every unrotated key dim is its value, the
 /// queries carrying k_norm on those dims (QkvPost, QueryPost).
+///
+/// `key_ends` (device, per row; null means causal) raises a row's upper key
+/// bound to max(position + 1, key_ends[row]): image rows attend to every key
+/// of their image in sliding layers. Those bounds never decrease with the
+/// row and never pass the last row's position + 1.
 struct AttentionArgs {
   const float* q;
   const std::uint16_t* k_cache;  ///< binary16; rotated dims when derived
@@ -95,6 +100,7 @@ struct AttentionArgs {
   std::uint32_t window;
   std::uint32_t ring;
   std::uint32_t rope_pairs;  ///< rotated pairs of derived keys, or 0
+  const std::uint32_t* key_ends;
 };
 inline constexpr std::uint32_t kSplitRows = 16;
 /// Derived keys: rope_pairs must be a multiple of 16 and at most this.

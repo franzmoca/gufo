@@ -1,6 +1,7 @@
 #ifndef GUFO_MODELS_GEMMA4_ENGINE_HPP_
 #define GUFO_MODELS_GEMMA4_ENGINE_HPP_
 
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <functional>
@@ -47,6 +48,18 @@ struct ModelOptions {
 };
 
 class Session;
+
+/// One image of a prompt: its soft-token rows, and an identity that tells it
+/// apart from any other image behind the same tokens.
+struct ImageSpan {
+  std::uint32_t offset{0};  ///< first soft token
+  std::uint32_t rows{0};
+  std::array<std::uint8_t, 32> identity{};
+  bool operator==(const ImageSpan&) const = default;
+};
+/// Device embeddings ([rows][hidden] FP32) of prompt image `index`, valid
+/// until Sync returns. Sync asks only for images it must evaluate.
+using ImageEmbeddings = std::function<const float*(std::size_t index)>;
 
 /// Host copy of one session's context: tokens, the KV rows later tokens can
 /// still attend (every global row, the last window-1 sliding rows in logical
@@ -144,6 +157,13 @@ public:
 
   [[nodiscard]] bool Sync(std::span<const TokenId> prompt,
                           std::string* error_msg = nullptr);
+  /// Sync with images: `images` (ordered, each followed by a text token)
+  /// take their rows from `embed`. Reuse stops at the first image whose
+  /// identity or placement changed, and an image is always evaluated whole.
+  [[nodiscard]] bool Sync(std::span<const TokenId> prompt,
+                          std::span<const ImageSpan> images,
+                          const ImageEmbeddings& embed,
+                          std::string* error_msg = nullptr);
   [[nodiscard]] bool Evaluate(TokenId token, std::string* error_msg = nullptr);
   /// Appends `tokens` and returns the logits of every row ([n][vocab]);
   /// used for teacher-forced qualification.
@@ -202,6 +222,10 @@ public:
   [[nodiscard]] std::span<const TokenId> Tokens() const noexcept {
     return tokens_;
   }
+  /// Images inside Tokens().
+  [[nodiscard]] std::span<const ImageSpan> Images() const noexcept {
+    return images_;
+  }
   [[nodiscard]] std::uint32_t Position() const noexcept {
     return static_cast<std::uint32_t>(tokens_.size());
   }
@@ -216,7 +240,7 @@ public:
   void Reset();
 
   /// Compatibility version; bump on payload or inference arithmetic changes.
-  static constexpr std::uint32_t kSnapshotPayloadVersion = 2;
+  static constexpr std::uint32_t kSnapshotPayloadVersion = 3;
   [[nodiscard]] std::uint64_t SnapshotBytes() const;
   [[nodiscard]] std::unique_ptr<SessionSnapshot> SaveSnapshot(
       std::string* error_msg = nullptr) const;
@@ -227,9 +251,10 @@ public:
 
 private:
   Session(std::shared_ptr<Model> model, std::unique_ptr<rocm::KvCache> cache);
-  /// Evaluates tokens_[begin, end) in prefill chunks; the last row's logits
-  /// land in logits_.
-  bool Extend(std::size_t begin, std::string* error_msg);
+  /// Evaluates tokens_[begin, end) in prefill chunks that never split an
+  /// image; the last row's logits land in logits_.
+  bool Extend(std::size_t begin, std::string* error_msg,
+              const ImageEmbeddings& embed = {});
 
   /// One decode cycle: Begin emits the pending token if needed and drafts
   /// (rows = pending plus drafts), the caller verifies `rows` at `position`,
@@ -254,6 +279,7 @@ private:
   std::shared_ptr<Model> model_;
   std::unique_ptr<rocm::KvCache> cache_;
   std::vector<TokenId> tokens_;
+  std::vector<ImageSpan> images_;
   /// Prompt-lookup index over tokens_; cleared whenever tokens_ is rewritten
   /// rather than appended to.
   qwen38_flash_next::PromptLookup lookup_;
