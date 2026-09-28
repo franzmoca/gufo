@@ -8,7 +8,8 @@ Image input uses the BF16 vision sidecar from the same repository
 (`mmproj-BF16.gguf`, found beside the model or passed with `--mmproj`); see
 [VISION.md](VISION.md). `--image-tokens` sets the soft tokens per image: 70,
 140, 280 (default), 560 or 1120; larger budgets keep more detail at a higher
-prefill cost. Fine-tunes and QAT (Q4_0) checkpoints are rejected at load.
+prefill cost. The QAT (Q4_0) checkpoint has its own card:
+[Gemma 4 31B QAT](../gemma-4-31b-qat/README.md).
 
 [Benchmarks](BENCHMARKS.md) · [Quality](QUALITY.md) · [Experiments](EXPERIMENTS.md)
 

@@ -402,3 +402,16 @@ Each milestone is a testable state with Conventional Commits on `feat/gemma`. M4
   MTP drafter on prose and temperature-1 role-play (1.9–2.2 vs 2.3–2.7) and
   only wins on copy-heavy code, where prompt lookup already covers most of
   the gain; not pursued (EXPERIMENTS.md).
+
+**2026-09-28 — QAT (Q4_0) checkpoint.**
+
+- `unsloth/gemma-4-31B-it-qat-GGUF` loads: every projection, the tied head and
+  the QAT drafter are Q4_0. Q4_0 decodes through the shared sub-16 kernels
+  (verification, one-row twins, WMMA prefill) and a Q4_0 split-K GEMV for
+  AR-only decode and the drafter head. Card:
+  [Gemma 4 31B QAT](../gemma-4-31b-qat/README.md).
+- Decode KL vs the oracle 1.3e-7, prefill 0.0011 (llama.cpp 0.0010), 16K vs
+  llama.cpp 0.0028. HTTP vs llama.cpp: AR +11–31% tg, +40–152% pp; prose MTP
+  +7–79%. Sampled MTP ties or trails at 0–4K: the confidence floor proposes
+  2.4 drafts per cycle against llama.cpp's 3.9, so fewer are accepted per
+  cycle despite a 9–11% cheaper cycle.
