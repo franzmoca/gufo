@@ -27,13 +27,24 @@ namespace {
 
 /// Limits recorded when the runtime was introduced (2026-09-26); they are
 /// never loosened. Observed: decode mean KL 2.4e-7, prefill mean KL 0.0084.
-constexpr double kDecodeMeanKl = 1e-5;
-constexpr double kPrefillMeanKl = 0.015;
-/// Bulk prefill vs exact rows over a realistic conversation that wraps the
-/// sliding ring (fixtures/long_conversation.txt). Set 2026-09-27 at about
-/// twice the values observed under rounding-only kernel changes
-/// (0.056-0.076); a broken window, ring or tile gives values above 1.
-constexpr double kLongPrefillMeanKl = 0.15;
+struct Limits {
+  double decode;
+  double prefill;
+  /// Bulk prefill vs exact rows over a realistic conversation that wraps
+  /// the sliding ring (fixtures/long_conversation.txt).
+  double long_prefill;
+};
+/// Dense targets. The long-prefill limit was set 2026-09-27 at about twice
+/// the values observed under rounding-only kernel changes (0.056-0.076); a
+/// broken window, ring or tile gives values above 1.
+constexpr Limits kDense{1e-5, 0.015, 0.15};
+/// Mixture-of-experts targets (26B-A4B, recorded 2026-09-28). Top-8 routing
+/// is discrete: exact FP32 decodes that differ only in reduction order flip
+/// near-tied expert choices and land between mean KL 1.3e-6 and 2.7e-5
+/// (single positions up to 3e-4), so decode gets 1e-4. Prefill runs binary16
+/// activations (observed 3.2e-5 to 4.0e-5); the conversation, whose exact
+/// rows move with the same flips, 0.016 to 0.029.
+constexpr Limits kExperts{1e-4, 1e-3, 0.06};
 
 struct Stats {
   double mean_kl{0.0};
@@ -226,11 +237,12 @@ int main() {
               << c.rows << '\n'
               << "prefill: mean KL " << p.mean_kl << ", max " << p.max_kl
               << ", top-1 " << p.top1 << "/" << p.rows << '\n';
-    Require(d.mean_kl < kDecodeMeanKl && d.top1 == d.rows,
+    const Limits& limits = model->config().HasExperts() ? kExperts : kDense;
+    Require(d.mean_kl < limits.decode && d.top1 == d.rows,
             "decode diverges from the reference");
-    Require(c.mean_kl < kDecodeMeanKl && c.top1 == c.rows,
+    Require(c.mean_kl < limits.decode && c.top1 == c.rows,
             "small-batch rows diverge from the reference");
-    Require(p.mean_kl < kPrefillMeanKl, "prefill exceeds its KL envelope");
+    Require(p.mean_kl < limits.prefill, "prefill exceeds its KL envelope");
 
     // Extending a synced prompt matches evaluating the tokens one by one.
     const std::size_t split = tokens.size() - 4;
@@ -248,7 +260,7 @@ int main() {
     };
     const Stats ext =
         Compare(as_vector(a->Logits()), as_vector(b->Logits()), vocab);
-    Require(ext.top1 == 1 && ext.mean_kl < kDecodeMeanKl,
+    Require(ext.top1 == 1 && ext.mean_kl < limits.decode,
             "prefix extension diverges from token-by-token evaluation");
     // Rewinding to a shorter prompt reuses the prefix and matches a fresh sync.
     Require(b->Sync(head, &error), error);
@@ -256,7 +268,7 @@ int main() {
     Require(fresh && fresh->Sync(head, &error), error);
     const Stats rw =
         Compare(as_vector(fresh->Logits()), as_vector(b->Logits()), vocab);
-    Require(rw.top1 == 1 && rw.mean_kl < kPrefillMeanKl,
+    Require(rw.top1 == 1 && rw.mean_kl < limits.prefill,
             "rewound session diverges from a fresh one");
 
     // A snapshot taken after the ring wrapped restores into a fresh session
@@ -319,7 +331,7 @@ int main() {
       std::cout << "long prefill vs exact rows (" << lp.rows
                 << " tokens): mean KL " << lp.mean_kl << ", max " << lp.max_kl
                 << ", top-1 " << lp.top1 << "/" << lp.rows << '\n';
-      Require(lp.mean_kl < kLongPrefillMeanKl,
+      Require(lp.mean_kl < limits.long_prefill,
               "long prefill exceeds its KL envelope");
     }
     // Reported only: the repeated snapshot prompt is ill-conditioned (many

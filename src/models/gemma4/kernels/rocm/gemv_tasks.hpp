@@ -100,6 +100,35 @@ __device__ __forceinline__ void DecodeQ45K(const std::uint8_t* block, int t,
   Dequant16(q, 4, qh, 2 * p + 1, 1, d * sc1, -(dmin * m1), w + 16);
 }
 
+/// Q4_K/Q5_K sub-block pair p (64 values, one header load): w[i] belongs to
+/// activation 64 p + i -- the low nibbles of qs bytes [32 p, +32) are
+/// sub-block 2 p, the high nibbles sub-block 2 p + 1.
+template<bool kFiveBit>
+__device__ __forceinline__ void DecodeQ45KPair(const std::uint8_t* block, int p,
+                                               float (&w)[64]) {
+  const uint4 header = *reinterpret_cast<const uint4*>(block);
+  const float d = HalfBits(header.x);
+  const float dmin = HalfBits(header.x >> 16);
+  float sc0, m0, sc1, m1;
+  ScaleMin(header.y, header.z, header.w, 2 * p, &sc0, &m0);
+  ScaleMin(header.y, header.z, header.w, 2 * p + 1, &sc1, &m1);
+  const int qs = kFiveBit ? 48 : 16;
+#pragma unroll
+  for (int h = 0; h < 2; ++h) {
+    const uint4 raw_q =
+        *reinterpret_cast<const uint4*>(block + qs + 32 * p + 16 * h);
+    const auto* q = reinterpret_cast<const std::uint8_t*>(&raw_q);
+    uint4 raw_h{};
+    const std::uint8_t* qh = nullptr;
+    if constexpr (kFiveBit) {
+      raw_h = *reinterpret_cast<const uint4*>(block + 16 + 16 * h);
+      qh = reinterpret_cast<const std::uint8_t*>(&raw_h);
+    }
+    Dequant16(q, 0, qh, 2 * p, 1, d * sc0, -(dmin * m0), w + 16 * h);
+    Dequant16(q, 4, qh, 2 * p + 1, 1, d * sc1, -(dmin * m1), w + 32 + 16 * h);
+  }
+}
+
 /// Activation offset of task t's first 16 values in a Q4_K/Q5_K
 /// super-block; the other 16 follow 32 values later.
 __device__ __forceinline__ int OffsetQ45K(int t) {

@@ -157,21 +157,49 @@ __global__ void __launch_bounds__(kThreads)
 }
 
 /// Elements of a row each thread keeps in registers across the passes of the
-/// fused residual norms: element i of thread t is t + i * kThreads, the order
-/// of every strided loop here.
-constexpr std::uint32_t kRowRegisters = 24;
+/// fused residual norms: element i of thread t is t + i * kBlock, the order
+/// of every strided loop here. Rows of up to kRowElements values.
+constexpr std::uint32_t kRowElements = 6144;
+template<int kBlock>
+constexpr std::uint32_t RowRegisters() {
+  return kRowElements / kBlock;
+}
+/// Residual norms of decode and verification rows (one row per block) run
+/// 1024 threads; prefill rows keep 256-thread blocks.
+constexpr int kWideNormThreads = 1024;
+
+/// BlockSum over a kBlock-thread block.
+template<int kBlock>
+__device__ inline float BlockSumOf(float v, float* scratch) {
+  constexpr int kBlockWaves = kBlock / kWave;
+  v = WaveSum(v);
+  const int lane = threadIdx.x % kWave;
+  const int wave = threadIdx.x / kWave;
+  __syncthreads();
+  if (lane == 0) {
+    scratch[wave] = v;
+  }
+  __syncthreads();
+  float total = 0.0F;
+#pragma unroll
+  for (int w = 0; w < kBlockWaves; ++w) {
+    total += scratch[w];
+  }
+  return total;
+}
 
 /// h = x * r * next_norm for this block's row (thread t holds elements
-/// t + 256 j), or, with `q8`, those values quantized into the prefill
+/// t + kBlock j), or, with `q8`, those values quantized into the prefill
 /// activation: each 32-element block lies in one wave.
-__device__ inline void StoreNormedRow(const float (&xv)[kRowRegisters], float r,
-                                      const float* next_norm, float* h,
+template<int kBlock>
+__device__ inline void StoreNormedRow(const float (&xv)[RowRegisters<kBlock>()],
+                                      float r, const float* next_norm, float* h,
                                       void* q8, std::uint32_t rows,
                                       std::uint32_t dim) {
   const std::size_t base = static_cast<std::size_t>(blockIdx.x) * dim;
 #pragma unroll
-  for (std::uint32_t j = 0; j < kRowRegisters; ++j) {
-    const std::uint32_t i = threadIdx.x + j * kThreads;
+  for (std::uint32_t j = 0; j < RowRegisters<kBlock>(); ++j) {
+    const std::uint32_t i = threadIdx.x + j * kBlock;
     const float v = i < dim ? xv[j] * r * next_norm[i] : 0.0F;
     if (q8 == nullptr) {
       if (i < dim) {
@@ -184,75 +212,90 @@ __device__ inline void StoreNormedRow(const float (&xv)[kRowRegisters], float r,
 }
 
 /// Zero quantized blocks for a padding row of the last 16-row Q8_1 tile.
+template<int kBlock>
 __device__ inline void QuantizeRowTail(void* q8, std::uint32_t rows,
                                        std::uint32_t dim) {
   for (std::uint32_t i = threadIdx.x; i - threadIdx.x % kWave < dim;
-       i += kThreads) {
+       i += kBlock) {
     QuantizeQ8Lane(q8, rows, dim / 32, blockIdx.x, i / 32, 0.0F);
   }
 }
 
-__global__ void __launch_bounds__(kThreads)
+template<int kBlock>
+__global__ void __launch_bounds__(kBlock)
     PostAttentionNormKernel(const float* o, const float* post_norm, float* x,
                             const float* next_norm, float* h, std::uint32_t dim,
-                            float eps, void* q8, std::uint32_t rows) {
-  __shared__ float scratch[kWaves];
+                            float eps, void* q8, std::uint32_t rows,
+                            const float* second_norm, float* h2) {
+  constexpr std::uint32_t kRegs = RowRegisters<kBlock>();
+  __shared__ float scratch[kBlock / kWave];
   const std::size_t base = static_cast<std::size_t>(blockIdx.x) * dim;
   if (blockIdx.x >= rows) {
-    QuantizeRowTail(q8, rows, dim);
+    QuantizeRowTail<kBlock>(q8, rows, dim);
     return;
   }
-  float ov[kRowRegisters];
-  float xv[kRowRegisters];
+  float ov[kRegs];
+  float xv[kRegs];
   float ss = 0.0F;
 #pragma unroll
-  for (std::uint32_t j = 0; j < kRowRegisters; ++j) {
-    const std::uint32_t i = threadIdx.x + j * kThreads;
+  for (std::uint32_t j = 0; j < kRegs; ++j) {
+    const std::uint32_t i = threadIdx.x + j * kBlock;
     ov[j] = i < dim ? o[base + i] : 0.0F;
     xv[j] = i < dim ? x[base + i] : 0.0F;
     ss += ov[j] * ov[j];
   }
-  const float r = RmsScale(BlockSum(ss, scratch), dim, eps);
+  const float r = RmsScale(BlockSumOf<kBlock>(ss, scratch), dim, eps);
   float ss2 = 0.0F;
 #pragma unroll
-  for (std::uint32_t j = 0; j < kRowRegisters; ++j) {
-    const std::uint32_t i = threadIdx.x + j * kThreads;
+  for (std::uint32_t j = 0; j < kRegs; ++j) {
+    const std::uint32_t i = threadIdx.x + j * kBlock;
     if (i < dim) {
       xv[j] = xv[j] + ov[j] * r * post_norm[i];
       x[base + i] = xv[j];
       ss2 += xv[j] * xv[j];
     }
   }
-  const float r2 = RmsScale(BlockSum(ss2, scratch), dim, eps);
-  StoreNormedRow(xv, r2, next_norm, h, q8, rows, dim);
+  const float r2 = RmsScale(BlockSumOf<kBlock>(ss2, scratch), dim, eps);
+  StoreNormedRow<kBlock>(xv, r2, next_norm, h, q8, rows, dim);
+  if (h2 != nullptr) {
+#pragma unroll
+    for (std::uint32_t j = 0; j < kRegs; ++j) {
+      const std::uint32_t i = threadIdx.x + j * kBlock;
+      if (i < dim) {
+        h2[base + i] = xv[j] * r2 * second_norm[i];
+      }
+    }
+  }
 }
 
-__global__ void __launch_bounds__(kThreads)
+template<int kBlock>
+__global__ void __launch_bounds__(kBlock)
     PostFeedForwardNormKernel(const float* f, const float* post_norm,
                               float scale, float* x, const float* next_norm,
                               float* h, std::uint32_t dim, float eps, void* q8,
                               std::uint32_t rows) {
-  __shared__ float scratch[kWaves];
+  constexpr std::uint32_t kRegs = RowRegisters<kBlock>();
+  __shared__ float scratch[kBlock / kWave];
   const std::size_t base = static_cast<std::size_t>(blockIdx.x) * dim;
   if (blockIdx.x >= rows) {
-    QuantizeRowTail(q8, rows, dim);
+    QuantizeRowTail<kBlock>(q8, rows, dim);
     return;
   }
-  float fv[kRowRegisters];
-  float xv[kRowRegisters];
+  float fv[kRegs];
+  float xv[kRegs];
   float ss = 0.0F;
 #pragma unroll
-  for (std::uint32_t j = 0; j < kRowRegisters; ++j) {
-    const std::uint32_t i = threadIdx.x + j * kThreads;
+  for (std::uint32_t j = 0; j < kRegs; ++j) {
+    const std::uint32_t i = threadIdx.x + j * kBlock;
     fv[j] = i < dim ? f[base + i] : 0.0F;
     xv[j] = i < dim ? x[base + i] : 0.0F;
     ss += fv[j] * fv[j];
   }
-  const float r = RmsScale(BlockSum(ss, scratch), dim, eps);
+  const float r = RmsScale(BlockSumOf<kBlock>(ss, scratch), dim, eps);
   float ss2 = 0.0F;
 #pragma unroll
-  for (std::uint32_t j = 0; j < kRowRegisters; ++j) {
-    const std::uint32_t i = threadIdx.x + j * kThreads;
+  for (std::uint32_t j = 0; j < kRegs; ++j) {
+    const std::uint32_t i = threadIdx.x + j * kBlock;
     if (i < dim) {
       xv[j] = (xv[j] + fv[j] * r * post_norm[i]) * scale;
       x[base + i] = xv[j];
@@ -262,8 +305,8 @@ __global__ void __launch_bounds__(kThreads)
   if (next_norm == nullptr) {
     return;
   }
-  const float r2 = RmsScale(BlockSum(ss2, scratch), dim, eps);
-  StoreNormedRow(xv, r2, next_norm, h, q8, rows, dim);
+  const float r2 = RmsScale(BlockSumOf<kBlock>(ss2, scratch), dim, eps);
+  StoreNormedRow<kBlock>(xv, r2, next_norm, h, q8, rows, dim);
 }
 
 // ---------------------------------------------------------------------------
@@ -413,9 +456,14 @@ __global__ void __launch_bounds__(kThreads) QkvPostKernel(QkvPostArgs a) {
     }
   };
   float v[kWaves][K];
+  const std::size_t q_row = a.row_stride != 0 ? a.row_stride : a.heads * D;
+  const std::size_t kv_row = a.row_stride != 0 ? a.row_stride : a.kv_heads * D;
   if (head < a.heads) {
-    float* q = a.q + (static_cast<std::size_t>(row) * a.heads + head) * D;
+    float* q = a.q + row * q_row + std::size_t{head} * D;
     load(q, v);
+    if (a.q_out != nullptr) {
+      q = a.q_out + (static_cast<std::size_t>(row) * a.heads + head) * D;
+    }
     norm_rope(v, a.q_norm, true);
 #pragma unroll
     for (int w = 0; w < kWaves; ++w) {
@@ -432,7 +480,7 @@ __global__ void __launch_bounds__(kThreads) QkvPostKernel(QkvPostArgs a) {
     return;
   }
   const std::uint32_t kvh = head - a.heads;
-  const std::size_t in = (static_cast<std::size_t>(row) * a.kv_heads + kvh) * D;
+  const std::size_t in = row * kv_row + std::size_t{kvh} * D;
   const std::uint32_t slot = a.ring != 0 ? position % a.ring : position;
   const std::size_t cache =
       (static_cast<std::size_t>(slot) * a.kv_heads + kvh) * D;
@@ -1400,25 +1448,37 @@ std::size_t AttentionPartialFloats(std::uint32_t rows, std::uint32_t heads,
 void PostAttentionNorm(const float* o, const float* post_norm, float* x,
                        const float* next_norm, float* h, std::uint32_t rows,
                        std::uint32_t dim, float eps, hipStream_t stream,
-                       void* q8) {
-  if (dim > kRowRegisters * kThreads) {
+                       void* q8, const float* second_norm, float* h2) {
+  if (dim > kRowElements) {
     throw std::invalid_argument("PostAttentionNorm row is too wide");
   }
-  PostAttentionNormKernel<<<q8 != nullptr ? Q8Rows(rows) : rows, kThreads, 0,
-                            stream>>>(o, post_norm, x, next_norm, h, dim, eps,
-                                      q8, rows);
+  if (q8 == nullptr && rows <= kSplitRows) {
+    PostAttentionNormKernel<kWideNormThreads>
+        <<<rows, kWideNormThreads, 0, stream>>>(
+            o, post_norm, x, next_norm, h, dim, eps, q8, rows, second_norm, h2);
+    return;
+  }
+  PostAttentionNormKernel<kThreads>
+      <<<q8 != nullptr ? Q8Rows(rows) : rows, kThreads, 0, stream>>>(
+          o, post_norm, x, next_norm, h, dim, eps, q8, rows, second_norm, h2);
 }
 
 void PostFeedForwardNorm(const float* f, const float* post_norm, float scale,
                          float* x, const float* next_norm, float* h,
                          std::uint32_t rows, std::uint32_t dim, float eps,
                          hipStream_t stream, void* q8) {
-  if (dim > kRowRegisters * kThreads) {
+  if (dim > kRowElements) {
     throw std::invalid_argument("PostFeedForwardNorm row is too wide");
   }
-  PostFeedForwardNormKernel<<<q8 != nullptr ? Q8Rows(rows) : rows, kThreads, 0,
-                              stream>>>(f, post_norm, scale, x, next_norm, h,
-                                        dim, eps, q8, rows);
+  if (q8 == nullptr && rows <= kSplitRows) {
+    PostFeedForwardNormKernel<kWideNormThreads>
+        <<<rows, kWideNormThreads, 0, stream>>>(
+            f, post_norm, scale, x, next_norm, h, dim, eps, q8, rows);
+    return;
+  }
+  PostFeedForwardNormKernel<kThreads>
+      <<<q8 != nullptr ? Q8Rows(rows) : rows, kThreads, 0, stream>>>(
+          f, post_norm, scale, x, next_norm, h, dim, eps, q8, rows);
 }
 
 void GeGluQuantize(const float* gate, const float* up, void* q8,

@@ -238,15 +238,15 @@ struct Traits;
 template<>
 struct Traits<ExpertFormat::kQ4_K> {
   static constexpr int kBytes = 144;
-  static constexpr int kTasks = 8;
-  static constexpr int kValues = 32;
+  static constexpr int kTasks = 4;
+  static constexpr int kValues = 64;
   static constexpr bool kBlockwise = false;
 };
 template<>
 struct Traits<ExpertFormat::kQ5_K> {
   static constexpr int kBytes = 176;
-  static constexpr int kTasks = 8;
-  static constexpr int kValues = 32;
+  static constexpr int kTasks = 4;
+  static constexpr int kValues = 64;
   static constexpr bool kBlockwise = false;
 };
 template<>
@@ -308,21 +308,21 @@ __device__ __forceinline__ bool Decode(const std::uint8_t* row,
       DecodeQ6K(p, t, w);
       *offset = unit * 256 + OffsetQ6K(t);
     } else {
-      DecodeQ45K<F == ExpertFormat::kQ5_K>(p, t, w);
-      *offset = unit * 256 + OffsetQ45K(t);
+      DecodeQ45KPair<F == ExpertFormat::kQ5_K>(p, t, w);
+      *offset = unit * 256 + 64 * t;
     }
   }
   return true;
 }
 
 /// acc += w . x for one decoded task: 16-value runs at x, x + 32, ... for
-/// the K-quants (the super-block interleave) and x, x + 16 for a block.
+/// Q6_K (the super-block interleave), contiguous for the others.
 template<ExpertFormat F>
 __device__ __forceinline__ float Contract(float acc,
                                           const float (&w)[Traits<F>::kValues],
                                           const float* x) {
   constexpr int kRuns = Traits<F>::kValues / 16;
-  constexpr int kStride = Traits<F>::kBlockwise ? 16 : 32;
+  constexpr int kStride = F == ExpertFormat::kQ6_K ? 32 : 16;
 #pragma unroll
   for (int r = 0; r < kRuns; ++r) {
     acc = Accumulate<16>(acc, w + 16 * r, x + kStride * r);
@@ -437,8 +437,9 @@ void LaunchRouted(const void* w, const std::int32_t* groups,
                   hipStream_t stream) {
   constexpr int kRowsPerWave = kWave / Traits<F>::kTasks;
   const auto* weights = static_cast<const std::uint8_t*>(w);
-  // Short reductions leave split slices idle; each wave then takes whole
-  // rows.
+  // Measured with cold experts on gfx1151: short reductions (the 704-wide
+  // down projection) run whole rows per wave; the 2816-wide gate/up splits
+  // its 11 super-blocks over four waves (eight leave most slices one).
   if (k < 2048) {
     constexpr int kRows = kRowsPerWave * kWaves;
     RoutedGemvKernel<F, 1>
@@ -446,43 +447,59 @@ void LaunchRouted(const void* w, const std::int32_t* groups,
             weights, groups, x, x_div, y, m, k);
     return;
   }
-  RoutedGemvKernel<F, kWaves>
-      <<<dim3((m + kRowsPerWave - 1) / kRowsPerWave, max_groups), kThreads, 0,
-         stream>>>(weights, groups, x, x_div, y, m, k);
+  constexpr int kSplit = 4;
+  constexpr int kRows = kRowsPerWave * (kWaves / kSplit);
+  RoutedGemvKernel<F, kSplit>
+      <<<dim3((m + kRows - 1) / kRows, max_groups), kThreads, 0, stream>>>(
+          weights, groups, x, x_div, y, m, k);
 }
 
 // ---------------------------------------------------------------------------
-// Mixture combine
+// Feed-forward residual
 // ---------------------------------------------------------------------------
 
-constexpr std::uint32_t kCombineRegisters = 24;
+constexpr int kFinishThreads = 1024;
+constexpr std::uint32_t kFinishRegisters = 6;  // hidden <= 6144
 
-__global__ void __launch_bounds__(kThreads)
-    MoeCombineKernel(float* __restrict__ dense,
-                     const float* __restrict__ experts,
-                     const float* __restrict__ weights,
-                     const float* __restrict__ norm1,
-                     const float* __restrict__ norm2, std::uint32_t hidden,
-                     std::uint32_t used, float eps) {
-  __shared__ float scratch[kWaves];
-  const std::uint32_t r = blockIdx.x;
-  float* d = dense + std::size_t{r} * hidden;
-  const float* e = experts + std::size_t{r} * used * hidden;
-  const float* wr = weights + std::size_t{r} * used;
-  float dv[kCombineRegisters];
-  float mv[kCombineRegisters];
+/// Sum over the block in wave order; every thread receives it.
+template<int kBlock>
+__device__ inline float WideBlockSum(float v, float* scratch) {
+  constexpr int kBlockWaves = kBlock / kWave;
+  v = WaveSum(v);
+  __syncthreads();
+  if (threadIdx.x % kWave == 0) {
+    scratch[threadIdx.x / kWave] = v;
+  }
+  __syncthreads();
+  float total = 0.0F;
+#pragma unroll
+  for (int w = 0; w < kBlockWaves; ++w) {
+    total += scratch[w];
+  }
+  return total;
+}
+
+__global__ void __launch_bounds__(kFinishThreads)
+    MoeFinishKernel(MoeFinishArgs a) {
+  __shared__ float scratch[kFinishThreads / kWave];
+  const std::size_t base = std::size_t{blockIdx.x} * a.hidden;
+  const float* e = a.experts + base * a.used;
+  const float* wr = a.weights + std::size_t{blockIdx.x} * a.used;
+  const float n = static_cast<float>(a.hidden);
+  float dv[kFinishRegisters];
+  float mv[kFinishRegisters];
   float ss_d = 0.0F;
   float ss_m = 0.0F;
 #pragma unroll
-  for (std::uint32_t j = 0; j < kCombineRegisters; ++j) {
-    const std::uint32_t i = threadIdx.x + j * kThreads;
+  for (std::uint32_t j = 0; j < kFinishRegisters; ++j) {
+    const std::uint32_t i = threadIdx.x + j * kFinishThreads;
     dv[j] = 0.0F;
     mv[j] = 0.0F;
-    if (i < hidden) {
-      dv[j] = d[i];
+    if (i < a.hidden) {
+      dv[j] = a.dense[base + i];
       float sum = 0.0F;
-      for (std::uint32_t s = 0; s < used; ++s) {
-        sum = __builtin_fmaf(wr[s], e[std::size_t{s} * hidden + i], sum);
+      for (std::uint32_t s = 0; s < a.used; ++s) {
+        sum = __builtin_fmaf(wr[s], e[std::size_t{s} * a.hidden + i], sum);
       }
       mv[j] = sum;
       ss_d = __builtin_fmaf(dv[j], dv[j], ss_d);
@@ -490,14 +507,40 @@ __global__ void __launch_bounds__(kThreads)
     }
   }
   const float rd =
-      1.0F / sqrtf(BlockSum(ss_d, scratch) / static_cast<float>(hidden) + eps);
+      1.0F / sqrtf(WideBlockSum<kFinishThreads>(ss_d, scratch) / n + a.eps);
   const float rm =
-      1.0F / sqrtf(BlockSum(ss_m, scratch) / static_cast<float>(hidden) + eps);
+      1.0F / sqrtf(WideBlockSum<kFinishThreads>(ss_m, scratch) / n + a.eps);
+  float ss_f = 0.0F;
 #pragma unroll
-  for (std::uint32_t j = 0; j < kCombineRegisters; ++j) {
-    const std::uint32_t i = threadIdx.x + j * kThreads;
-    if (i < hidden) {
-      d[i] = dv[j] * rd * norm1[i] + mv[j] * rm * norm2[i];
+  for (std::uint32_t j = 0; j < kFinishRegisters; ++j) {
+    const std::uint32_t i = threadIdx.x + j * kFinishThreads;
+    if (i < a.hidden) {
+      dv[j] = dv[j] * rd * a.norm1[i] + mv[j] * rm * a.norm2[i];
+      ss_f = __builtin_fmaf(dv[j], dv[j], ss_f);
+    }
+  }
+  const float rf =
+      1.0F / sqrtf(WideBlockSum<kFinishThreads>(ss_f, scratch) / n + a.eps);
+  float ss_x = 0.0F;
+#pragma unroll
+  for (std::uint32_t j = 0; j < kFinishRegisters; ++j) {
+    const std::uint32_t i = threadIdx.x + j * kFinishThreads;
+    if (i < a.hidden) {
+      mv[j] = (a.x[base + i] + dv[j] * rf * a.post_norm[i]) * a.scale;
+      a.x[base + i] = mv[j];
+      ss_x = __builtin_fmaf(mv[j], mv[j], ss_x);
+    }
+  }
+  if (a.next_norm == nullptr) {
+    return;
+  }
+  const float rx =
+      1.0F / sqrtf(WideBlockSum<kFinishThreads>(ss_x, scratch) / n + a.eps);
+#pragma unroll
+  for (std::uint32_t j = 0; j < kFinishRegisters; ++j) {
+    const std::uint32_t i = threadIdx.x + j * kFinishThreads;
+    if (i < a.hidden) {
+      a.h[base + i] = mv[j] * rx * a.next_norm[i];
     }
   }
 }
@@ -566,12 +609,8 @@ bool LaunchRoutedGemv(ExpertFormat format, const void* w,
   return false;
 }
 
-void MoeCombine(float* dense, const float* experts, const float* weights,
-                const float* norm1, const float* norm2, std::uint32_t rows,
-                std::uint32_t hidden, std::uint32_t used, float eps,
-                hipStream_t stream) {
-  MoeCombineKernel<<<rows, kThreads, 0, stream>>>(
-      dense, experts, weights, norm1, norm2, hidden, used, eps);
+void MoeFinish(const MoeFinishArgs& args, hipStream_t stream) {
+  MoeFinishKernel<<<args.rows, kFinishThreads, 0, stream>>>(args);
 }
 
 }  // namespace gufo::models::gemma4::rocm

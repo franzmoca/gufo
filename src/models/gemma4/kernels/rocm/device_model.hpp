@@ -31,6 +31,12 @@ struct DeviceLayer {
       attn_output, post_attn_norm, ffn_norm, ffn_gate, ffn_up, ffn_down,
       post_ffn_norm;
   float output_scale{1.0F};
+  /// attn_q, attn_k (and attn_v) stored back to back when they share a
+  /// format: one projection whose rows are [q | k | v], with the separate
+  /// tensors above as views into it. Empty otherwise.
+  DeviceTensor attn_qkv;
+  /// ffn_gate and ffn_up back to back ([gate | up] rows), likewise.
+  DeviceTensor ffn_gate_up;
   // Routed experts (see LayerWeights); empty on dense models.
   DeviceTensor router, router_scale, pre_ffn_norm_2, post_ffn_norm_1,
       post_ffn_norm_2, gate_up_exps, down_exps, down_exps_scale;

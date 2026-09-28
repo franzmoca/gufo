@@ -66,13 +66,28 @@ void MoeRoute(const MoeRouteArgs& args, hipStream_t stream);
                                     std::uint32_t m, std::uint32_t k,
                                     hipStream_t stream);
 
-/// dense[r] = rms(dense[r]) * norm1 + rms(sum_j weights[r][j] *
-/// experts[r * used + j]) * norm2: the layer's feed-forward output from the
-/// dense MLP and the expert mixture, summed over j in order.
-void MoeCombine(float* dense, const float* experts, const float* weights,
-                const float* norm1, const float* norm2, std::uint32_t rows,
-                std::uint32_t hidden, std::uint32_t used, float eps,
-                hipStream_t stream);
+/// The feed-forward residual of an expert layer, per row r:
+///   f = rms(dense[r]) * norm1 + rms(sum_j weights[r][j] *
+///       experts[r * used + j]) * norm2   (summed over j in order),
+///   x[r] = (x[r] + rms(f) * post_norm) * scale,
+///   h[r] = rms(x[r]) * next_norm (skipped when next_norm is null).
+struct MoeFinishArgs {
+  const float* dense;    ///< Dense MLP output, [rows][hidden]
+  const float* experts;  ///< Expert outputs, [rows * used][hidden]
+  const float* weights;  ///< [rows][used]
+  const float* norm1;
+  const float* norm2;
+  const float* post_norm;
+  float scale;
+  float* x;
+  const float* next_norm;
+  float* h;
+  std::uint32_t rows;
+  std::uint32_t hidden;
+  std::uint32_t used;
+  float eps;
+};
+void MoeFinish(const MoeFinishArgs& args, hipStream_t stream);
 
 }  // namespace gufo::models::gemma4::rocm
 

@@ -153,12 +153,14 @@ private:
   /// rows on models whose prefill runs with binary16 activations
   /// (half_prefill_). Returns null at small-batch widths.
   const void* Quantize(const float* x, std::uint32_t rows, std::uint32_t cols);
-  /// Routed expert mixture of layer `l` for the n rows of the attention
-  /// residual x_, added to the dense MLP output in o_ (MoeCombine).
-  void Experts(const DeviceLayer& l, std::uint32_t n);
+  /// Routed experts of layer `l` for the n rows of the attention residual
+  /// x_ and their expert input moe_h_: routing weights in moe_weights_,
+  /// every slot's output in moe_out_ (mixed by MoeFinish).
+  void Experts(const DeviceLayer& l, std::uint32_t n, hipStream_t stream);
   /// Prefill route of Experts: binary16 expert GEMMs over rows compacted
   /// by expert. Returns false when a weight format lacks that route.
-  bool PrefillExperts(const DeviceLayer& l, std::uint32_t n);
+  bool PrefillExperts(const DeviceLayer& l, std::uint32_t n,
+                      hipStream_t stream);
   [[nodiscard]] bool DerivedKeys(std::uint32_t layer) const;
   /// Marks `att` as a derived-key layer.
   void DeriveKeys(AttentionArgs& att, std::uint32_t layer) const;
@@ -171,6 +173,10 @@ private:
   std::uint32_t ring_;
   std::vector<std::uint32_t> key_widths_;
   hipStream_t stream_{nullptr};
+  /// Experts beside the dense MLP at grouped widths (MoE models).
+  hipStream_t expert_stream_{nullptr};
+  hipEvent_t expert_fork_{nullptr};
+  hipEvent_t expert_join_{nullptr};
   void* scratch_{nullptr};
   std::int32_t* tokens_{nullptr};
   std::uint32_t* logit_index_{nullptr};
@@ -186,6 +192,7 @@ private:
   float* o_{nullptr};
   float* gate_{nullptr};
   float* up_{nullptr};
+  float* act_{nullptr};  ///< GeGLU rows of a fused gate/up projection
   float* hsel_{nullptr};
   float* logits_{nullptr};
   float* partials_{nullptr};
@@ -194,6 +201,7 @@ private:
   bool half_prefill_{false};
   void* x_half_{nullptr};
   // Routed expert scratch (present on mixture-of-experts models).
+  float* moe_h_{nullptr};  ///< Expert input rows
   float* moe_logits_{nullptr};
   std::int32_t* moe_ids_{nullptr};
   float* moe_weights_{nullptr};

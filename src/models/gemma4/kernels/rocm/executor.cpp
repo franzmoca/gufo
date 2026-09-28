@@ -28,10 +28,10 @@ std::size_t AlignUp(std::size_t n) {
 
 struct Layout {
   std::size_t tokens, logit_index, key_ends, x, h, q, k, v, attn, o, gate, up,
-      hsel, logits, partials, q8;
-  std::size_t x_half, moe_logits, moe_ids, moe_weights, moe_groups, moe_gu,
-      moe_act, moe_out, moe_counts, moe_bounds, moe_cursors, moe_rows_token,
-      moe_rows_slot, moe_tiles;
+      hsel, logits, partials, q8, act;
+  std::size_t x_half, moe_h, moe_logits, moe_ids, moe_weights, moe_groups,
+      moe_gu, moe_act, moe_out, moe_counts, moe_bounds, moe_cursors,
+      moe_rows_token, moe_rows_slot, moe_tiles;
   std::size_t draft_tokens, draft_concat, draft_x, draft_h, draft_q, draft_attn,
       draft_o, draft_gate, draft_up, draft_logits, draft_next, draft_candidates,
       draft_candidate_scratch;
@@ -76,12 +76,15 @@ Layout Plan(const Config& c, const Config* draft, std::uint32_t vocab,
   l.x = take(std::size_t{rows} * c.hidden_size * f);
   l.h = take(std::size_t{rows} * c.hidden_size * f);
   l.q = take(std::size_t{rows} * MaxQDim(c) * f);
-  l.k = take(std::size_t{rows} * MaxKvDim(c) * f);
-  l.v = take(std::size_t{rows} * MaxKvDim(c) * f);
+  // K and V rows, or the [q | k | v] rows of a fused projection.
+  l.k = take(std::size_t{rows} * (MaxQDim(c) + 2 * MaxKvDim(c)) * f);
+  l.v = l.k + std::size_t{rows} * MaxKvDim(c) * f;
   l.attn = take(std::size_t{rows} * MaxQDim(c) * f);
   l.o = take(std::size_t{rows} * c.hidden_size * f);
-  l.gate = take(std::size_t{rows} * c.ffn_size * f);
-  l.up = take(std::size_t{rows} * c.ffn_size * f);
+  // Gate then up rows, or the [gate | up] rows of a fused projection.
+  l.gate = take(std::size_t{rows} * 2 * c.ffn_size * f);
+  l.up = l.gate + std::size_t{rows} * c.ffn_size * f;
+  l.act = take(std::size_t{rows} * c.ffn_size * f);
   l.hsel = take(std::size_t{logit_rows} * c.hidden_size * f);
   l.logits = take(std::size_t{logit_rows} * vocab * f);
   l.partials = take(partial_floats * f);
@@ -97,6 +100,7 @@ Layout Plan(const Config& c, const Config* draft, std::uint32_t vocab,
         std::size_t{std::min(rows, kMaxGroupSlots)} * c.experts_used;
     const std::size_t width = c.expert_ffn_size;
     l.x_half = take(std::size_t{q8_rows} * max_cols * 2);
+    l.moe_h = take(std::size_t{rows} * c.hidden_size * f);
     l.moe_logits = take(std::size_t{rows} * c.num_experts * f);
     l.moe_ids = take(slots * sizeof(std::int32_t));
     l.moe_weights = take(slots * f);
@@ -200,7 +204,21 @@ Executor::Executor(const DeviceModel& model, std::uint32_t max_rows,
       Plan(model.config(), model.has_draft() ? &model.draft().config : nullptr,
            model.vocab_size(), model.max_cols(), max_rows, max_logit_rows,
            max_context);
+  if (const Config& c = model.config();
+      c.HasExperts() &&
+      (c.hidden_size % 128 != 0 || c.hidden_size > kMaxRouterHidden ||
+       c.num_experts % 8 != 0)) {
+    throw std::invalid_argument(
+        "gemma4 expert routing needs a hidden width that is a multiple of 128 "
+        "up to " +
+        std::to_string(kMaxRouterHidden) + " and experts in groups of 8");
+  }
   HIP_CHECK(hipStreamCreateWithFlags(&stream_, hipStreamNonBlocking));
+  if (model.config().HasExperts()) {
+    HIP_CHECK(hipStreamCreateWithFlags(&expert_stream_, hipStreamNonBlocking));
+    HIP_CHECK(hipEventCreateWithFlags(&expert_fork_, hipEventDisableTiming));
+    HIP_CHECK(hipEventCreateWithFlags(&expert_join_, hipEventDisableTiming));
+  }
   HIP_CHECK(hipMalloc(&scratch_, l.total));
   auto* base = static_cast<std::uint8_t*>(scratch_);
   tokens_ = reinterpret_cast<std::int32_t*>(base + l.tokens);
@@ -215,6 +233,7 @@ Executor::Executor(const DeviceModel& model, std::uint32_t max_rows,
   o_ = reinterpret_cast<float*>(base + l.o);
   gate_ = reinterpret_cast<float*>(base + l.gate);
   up_ = reinterpret_cast<float*>(base + l.up);
+  act_ = reinterpret_cast<float*>(base + l.act);
   hsel_ = reinterpret_cast<float*>(base + l.hsel);
   logits_ = reinterpret_cast<float*>(base + l.logits);
   partials_ = reinterpret_cast<float*>(base + l.partials);
@@ -223,6 +242,7 @@ Executor::Executor(const DeviceModel& model, std::uint32_t max_rows,
     const Config& c = model.config();
     half_prefill_ = true;
     x_half_ = base + l.x_half;
+    moe_h_ = reinterpret_cast<float*>(base + l.moe_h);
     moe_logits_ = reinterpret_cast<float*>(base + l.moe_logits);
     moe_ids_ = reinterpret_cast<std::int32_t*>(base + l.moe_ids);
     moe_weights_ = reinterpret_cast<float*>(base + l.moe_weights);
@@ -275,6 +295,15 @@ Executor::~Executor() {
   }
   if (scratch_ != nullptr) {
     hip::LogCleanupError(hipFree(scratch_));
+  }
+  if (expert_fork_ != nullptr) {
+    hip::LogCleanupError(hipEventDestroy(expert_fork_));
+  }
+  if (expert_join_ != nullptr) {
+    hip::LogCleanupError(hipEventDestroy(expert_join_));
+  }
+  if (expert_stream_ != nullptr) {
+    hip::LogCleanupError(hipStreamDestroy(expert_stream_));
   }
   if (stream_ != nullptr) {
     hip::LogCleanupError(hipStreamDestroy(stream_));
@@ -508,20 +537,37 @@ void Executor::Forward(std::span<const Segment> segments,
     // Layer l > 0 of a prefill reads the Q8_1 rows the previous layer's
     // post-FFN norm wrote.
     const void* hq = prefill && l > 0 ? q8_ : Quantize(h_, n, d);
-    Project(L.attn_q, h_, hq, n, q_);
-    Project(L.attn_k, h_, hq, n, k_);
-    const float* v_source = k_;
-    if (!L.attn_v.empty()) {
-      Project(L.attn_v, h_, hq, n, v_);
-      v_source = v_;
+    // A fused projection leaves [q | k | v] rows in k_; QkvPost reads them
+    // strided and writes packed queries to q_.
+    const std::uint32_t qkv_stride = L.attn_qkv.empty() ? 0 : L.attn_qkv.rows;
+    float* q_source = q_;
+    float* k_source = k_;
+    float* v_source = k_;
+    if (qkv_stride != 0) {
+      Project(L.attn_qkv, h_, hq, n, k_);
+      q_source = k_;
+      k_source = k_ + c.QDim(l);
+      v_source = L.attn_v.empty() ? k_source : k_source + c.KvDim(l);
+    } else {
+      Project(L.attn_q, h_, hq, n, q_);
+      Project(L.attn_k, h_, hq, n, k_);
+      if (!L.attn_v.empty()) {
+        Project(L.attn_v, h_, hq, n, v_);
+        v_source = v_;
+      }
     }
+    const std::size_t q_row = qkv_stride != 0 ? qkv_stride : c.QDim(l);
+    const std::size_t kv_row = qkv_stride != 0 ? qkv_stride : c.KvDim(l);
     std::uint32_t row0 = 0;
     for (const Segment& seg : segments) {
       KvCache& cache = *seg.cache;
       QkvPostArgs post{};
-      post.q = q_ + std::size_t{row0} * c.QDim(l);
-      post.k = k_ + std::size_t{row0} * c.KvDim(l);
-      post.v = v_source + std::size_t{row0} * c.KvDim(l);
+      post.q = q_source + row0 * q_row;
+      post.k = k_source + row0 * kv_row;
+      post.v = v_source + row0 * kv_row;
+      post.row_stride = qkv_stride;
+      post.q_out =
+          qkv_stride != 0 ? q_ + std::size_t{row0} * c.QDim(l) : nullptr;
       post.q_norm = L.attn_q_norm.f32();
       post.k_norm = L.attn_k_norm.f32();
       post.theta_scale =
@@ -561,30 +607,74 @@ void Executor::Forward(std::span<const Segment> segments,
     }
 
     Project(L.attn_output, attn_, Quantize(attn_, n, c.QDim(l)), n, o_);
+    // Expert layers also normalize the attention residual for the experts.
+    const bool moe = !L.gate_up_exps.empty();
     PostAttentionNorm(o_, L.post_attn_norm.f32(), x_, L.ffn_norm.f32(), h_, n,
-                      d, eps, stream_, prefill ? q8_ : nullptr);
+                      d, eps, stream_, prefill ? q8_ : nullptr,
+                      moe ? L.pre_ffn_norm_2.f32() : nullptr,
+                      moe ? moe_h_ : nullptr);
     const void* fq = prefill ? q8_ : Quantize(h_, n, d);
-    Project(L.ffn_gate, h_, fq, n, gate_);
-    Project(L.ffn_up, h_, fq, n, up_);
+    // At grouped widths the experts run beside the dense MLP on their own
+    // stream: routing is latency bound, the projections bandwidth bound.
+    const bool concurrent = moe && n <= kMaxGroupSlots;
+    if (concurrent) {
+      HIP_CHECK(hipEventRecord(expert_fork_, stream_));
+      HIP_CHECK(hipStreamWaitEvent(expert_stream_, expert_fork_, 0));
+      Experts(L, n, expert_stream_);
+      HIP_CHECK(hipEventRecord(expert_join_, expert_stream_));
+    }
     const void* gq = nullptr;
-    if (prefill) {
-      GeGluQuantize(gate_, up_, q8_, n, c.ffn_size, stream_);
-      gq = q8_;
+    const float* down_in = gate_;
+    if (!L.ffn_gate_up.empty() && !prefill) {
+      // One projection writes [gate | up] rows.
+      Project(L.ffn_gate_up, h_, fq, n, gate_);
+      GeGluPacked(gate_, act_, n, c.ffn_size, stream_);
+      down_in = act_;
+      gq = Quantize(act_, n, c.ffn_size);
     } else {
-      GeGlu(gate_, up_, gate_, std::size_t{n} * c.ffn_size, stream_);
-      gq = Quantize(gate_, n, c.ffn_size);
+      Project(L.ffn_gate, h_, fq, n, gate_);
+      Project(L.ffn_up, h_, fq, n, up_);
+      if (prefill) {
+        GeGluQuantize(gate_, up_, q8_, n, c.ffn_size, stream_);
+        gq = q8_;
+      } else {
+        GeGlu(gate_, up_, gate_, std::size_t{n} * c.ffn_size, stream_);
+        gq = Quantize(gate_, n, c.ffn_size);
+      }
     }
-    Project(L.ffn_down, gate_, gq, n, o_);
-    if (!L.gate_up_exps.empty()) {
-      Experts(L, n);
-    }
+    Project(L.ffn_down, down_in, gq, n, o_);
     const bool last = l + 1 == c.num_layers;
     const float* next =
         !last ? layers[l + 1].attn_norm.f32() : model_.output_norm().f32();
     // The output-normed rows of the last layer feed the vocabulary head and
     // the drafter in FP32.
-    PostFeedForwardNorm(o_, L.post_ffn_norm.f32(), L.output_scale, x_, next, h_,
-                        n, d, eps, stream_, prefill && !last ? q8_ : nullptr);
+    if (moe) {
+      if (concurrent) {
+        HIP_CHECK(hipStreamWaitEvent(stream_, expert_join_, 0));
+      } else {
+        Experts(L, n, stream_);
+      }
+      MoeFinishArgs finish{};
+      finish.dense = o_;
+      finish.experts = moe_out_;
+      finish.weights = moe_weights_;
+      finish.norm1 = L.post_ffn_norm_1.f32();
+      finish.norm2 = L.post_ffn_norm_2.f32();
+      finish.post_norm = L.post_ffn_norm.f32();
+      finish.scale = L.output_scale;
+      finish.x = x_;
+      finish.next_norm = next;
+      finish.h = h_;
+      finish.rows = n;
+      finish.hidden = d;
+      finish.used = c.experts_used;
+      finish.eps = eps;
+      MoeFinish(finish, stream_);
+    } else {
+      PostFeedForwardNorm(o_, L.post_ffn_norm.f32(), L.output_scale, x_, next,
+                          h_, n, d, eps, stream_,
+                          prefill && !last ? q8_ : nullptr);
+    }
     if (tap_sink_) {
       tap_sink_(l, x_, n, stream_);
     }
@@ -647,7 +737,8 @@ constexpr std::uint32_t kRoutedTileRows = 48;
 
 }  // namespace
 
-void Executor::Experts(const DeviceLayer& l, std::uint32_t n) {
+void Executor::Experts(const DeviceLayer& l, std::uint32_t n,
+                       hipStream_t stream) {
   const Config& c = model_.config();
   const std::uint32_t d = c.hidden_size;
   const std::uint32_t used = c.experts_used;
@@ -655,7 +746,7 @@ void Executor::Experts(const DeviceLayer& l, std::uint32_t n) {
   const bool grouped = n <= kMaxGroupSlots;
   if (!grouped) {
     HIP_CHECK(hipMemsetAsync(moe_counts_, 0,
-                             c.num_experts * sizeof(std::uint32_t), stream_));
+                             c.num_experts * sizeof(std::uint32_t), stream));
   }
   MoeRouteArgs route{};
   route.x = x_;
@@ -672,10 +763,8 @@ void Executor::Experts(const DeviceLayer& l, std::uint32_t n) {
   route.experts = c.num_experts;
   route.used = used;
   route.eps = c.rms_eps;
-  MoeRoute(route, stream_);
-  // Expert input; the dense MLP has consumed h_.
-  RmsNorm(x_, l.pre_ffn_norm_2.f32(), h_, n, d, c.rms_eps, stream_);
-  if (grouped || !PrefillExperts(l, n)) {
+  MoeRoute(route, stream);
+  if (grouped || !PrefillExperts(l, n, stream)) {
     // Grouped FP32 projections; a prefill whose formats lack the binary16
     // route runs them over 16-row pieces.
     const auto gate_up = ExpertFormatOf(l.gate_up_exps.type);
@@ -690,30 +779,29 @@ void Executor::Experts(const DeviceLayer& l, std::uint32_t n) {
         route.counts = nullptr;
         route.groups = moe_groups_;
         route.rows = rows;
-        MoeRoute(route, stream_);
+        MoeRoute(route, stream);
       }
       const std::uint32_t max_groups = std::min(c.num_experts, rows * used);
       auto* gu = static_cast<float*>(moe_gu_);
       auto* act = static_cast<float*>(moe_act_);
       if (!gate_up || !down ||
           !LaunchRoutedGemv(*gate_up, l.gate_up_exps.data, moe_groups_,
-                            max_groups, h_ + std::size_t{r0} * d, used, gu,
-                            2 * width, d, stream_)) {
+                            max_groups, moe_h_ + std::size_t{r0} * d, used, gu,
+                            2 * width, d, stream)) {
         throw std::runtime_error("gemma4 expert gate/up format unsupported");
       }
-      GeGluPacked(gu, act, rows * used, width, stream_);
+      GeGluPacked(gu, act, rows * used, width, stream);
       if (!LaunchRoutedGemv(*down, l.down_exps.data, moe_groups_, max_groups,
                             act, 1, moe_out_ + std::size_t{r0} * used * d, d,
-                            width, stream_)) {
+                            width, stream)) {
         throw std::runtime_error("gemma4 expert down format unsupported");
       }
     }
   }
-  MoeCombine(o_, moe_out_, moe_weights_, l.post_ffn_norm_1.f32(),
-             l.post_ffn_norm_2.f32(), n, d, used, c.rms_eps, stream_);
 }
 
-bool Executor::PrefillExperts(const DeviceLayer& l, std::uint32_t n) {
+bool Executor::PrefillExperts(const DeviceLayer& l, std::uint32_t n,
+                              hipStream_t stream) {
   namespace fn = qwen38_flash_next::rocm;
   const Config& c = model_.config();
   const std::uint32_t d = c.hidden_size;
@@ -727,8 +815,8 @@ bool Executor::PrefillExperts(const DeviceLayer& l, std::uint32_t n) {
   // The tile map needs the per-expert counts on the host.
   HIP_CHECK(hipMemcpyAsync(moe_counts_host_, moe_counts_,
                            c.num_experts * sizeof(std::uint32_t),
-                           hipMemcpyDeviceToHost, stream_));
-  HIP_CHECK(hipStreamSynchronize(stream_));
+                           hipMemcpyDeviceToHost, stream));
+  HIP_CHECK(hipStreamSynchronize(stream));
   std::uint32_t tiles = 0;
   for (std::uint32_t e = 0; e < c.num_experts; ++e) {
     const std::uint32_t padded = (moe_counts_host_[e] + 15U) / 16U * 16U;
@@ -738,24 +826,24 @@ bool Executor::PrefillExperts(const DeviceLayer& l, std::uint32_t n) {
   }
   HIP_CHECK(hipMemcpyAsync(moe_tiles_, moe_tiles_host_,
                            tiles * sizeof(std::int32_t), hipMemcpyHostToDevice,
-                           stream_));
+                           stream));
   fn::RoutedCompact(moe_ids_, moe_counts_, moe_bounds_, moe_cursors_,
                     moe_rows_token_, moe_rows_slot_, n, used, c.num_experts,
-                    stream_);
-  fn::NarrowActivations(h_, x_half_, false, std::size_t{n} * d, stream_);
+                    stream);
+  fn::NarrowActivations(moe_h_, x_half_, false, std::size_t{n} * d, stream);
   auto* gu = static_cast<__half*>(moe_gu_);
   auto* act = static_cast<__half*>(moe_act_);
   if (!fn::RoutedF16Gemm(
           l.gate_up_exps.data, *gate_up, static_cast<const __half*>(x_half_),
           moe_tiles_, tiles, kRoutedTileRows, moe_bounds_, moe_rows_token_,
-          moe_rows_slot_, nullptr, nullptr, gu, 2 * width, d, stream_)) {
+          moe_rows_slot_, nullptr, nullptr, gu, 2 * width, d, stream)) {
     return false;
   }
-  GeGluPackedHalf(gu, act, n * used, width, stream_);
+  GeGluPackedHalf(gu, act, n * used, width, stream);
   return fn::RoutedF16Gemm(l.down_exps.data, *down, act, moe_tiles_, tiles,
                            kRoutedTileRows, moe_bounds_, moe_rows_slot_,
                            moe_rows_slot_, nullptr, moe_out_, nullptr, d, width,
-                           stream_);
+                           stream);
 }
 
 void Executor::CommitHidden(KvCache& cache, std::uint32_t row) {

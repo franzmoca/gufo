@@ -334,94 +334,137 @@ void CheckProjection(const Format& f, std::uint32_t m, std::uint32_t k,
     }
   }
 
-  // Cold weights: rotate copies past the 32 MiB MALL.
-  const std::size_t bytes = w.size();
-  const std::size_t copies = std::max<std::size_t>(2, (512u << 20) / bytes);
-  std::vector<std::uint8_t*> rot;
-  for (std::size_t c = 0; c < copies; ++c) {
-    rot.push_back(Device(w.data(), w.size()));
-  }
+  // Cold weights as in decode: a full 128-expert tensor, fresh random
+  // experts every launch, so the 32 MiB MALL holds none of them.
+  const std::size_t expert_bytes = std::size_t{m} * row_bytes;
+  const auto full = RandomMatrix(f, std::size_t{kExperts} * m, k, rng);
+  auto* dfull = Device(full.data(), full.size());
+  constexpr int kIters = 48;
   const auto time = [&](std::uint32_t rows) {
-    std::vector<std::int32_t> sub(ids.begin(), ids.begin() + rows * kUsed);
-    // Decode picks distinct experts; spread them over the stored ones.
-    if (rows == 1) {
-      for (std::uint32_t j = 0; j < kUsed; ++j) {
-        sub[j] = static_cast<std::int32_t>(j * (max_expert / kUsed));
+    std::vector<std::vector<std::int32_t>> tables;
+    std::vector<std::int32_t*> device_tables;
+    for (int i = 0; i < kIters + 3; ++i) {
+      std::vector<std::int32_t> sub(rows * kUsed);
+      for (std::uint32_t r = 0; r < rows; ++r) {
+        std::vector<int> all(kExperts);
+        std::iota(all.begin(), all.end(), 0);
+        std::shuffle(all.begin(), all.end(), rng);
+        std::copy_n(all.begin(), kUsed, sub.begin() + r * kUsed);
       }
+      const auto table = Groups(sub);
+      device_tables.push_back(Device(table.data(), table.size()));
     }
-    const auto table = Groups(sub);
-    HIP_CHECK(
-        hipMemcpy(dg, table.data(), table.size() * 4, hipMemcpyHostToDevice));
-    const auto launch = [&](std::size_t i) {
-      (void)g4k::LaunchRoutedGemv(f.format, rot[i % copies], dg, rows * kUsed,
-                                  dx, x_div, dy, m, k, nullptr);
+    const auto launch = [&](int i) {
+      (void)g4k::LaunchRoutedGemv(f.format, dfull, device_tables[i],
+                                  std::min(kExperts, rows * kUsed), dx, x_div,
+                                  dy, m, k, nullptr);
     };
     for (int i = 0; i < 3; ++i) {
-      launch(i);
+      launch(kIters + i);
     }
     HIP_CHECK(hipDeviceSynchronize());
     const auto t0 = std::chrono::steady_clock::now();
-    constexpr int kIters = 40;
     for (int i = 0; i < kIters; ++i) {
       launch(i);
     }
     HIP_CHECK(hipDeviceSynchronize());
-    return std::chrono::duration<double>(std::chrono::steady_clock::now() - t0)
-               .count() /
-           kIters * 1e6;
+    const double us =
+        std::chrono::duration<double>(std::chrono::steady_clock::now() - t0)
+            .count() /
+        kIters * 1e6;
+    for (auto* t : device_tables) {
+      HIP_CHECK(hipFree(t));
+    }
+    return us;
   };
   const double one = time(1);
   const double five = time(5);
-  const double expert_mb = static_cast<double>(m) * row_bytes / 1e6;
   std::cout << name << ": 8 experts " << one << " us ("
-            << 8 * expert_mb / one * 1e3 << " GB/s); 5 rows " << five
+            << 8 * expert_bytes / one / 1e3 << " GB/s); 5 rows " << five
             << " us\n";
-  for (auto* p : rot) {
-    HIP_CHECK(hipFree(p));
-  }
+  HIP_CHECK(hipFree(dfull));
   HIP_CHECK(hipFree(dw));
   HIP_CHECK(hipFree(dx));
   HIP_CHECK(hipFree(dy));
   HIP_CHECK(hipFree(dg));
 }
 
-void CheckCombine(std::mt19937& rng) {
+void CheckFinish(std::mt19937& rng) {
   constexpr std::uint32_t kRows = 5;
   const auto dense = Normal(kRows * kHidden, 2.0F, rng);
   const auto experts = Normal(kRows * kUsed * kHidden, 1.0F, rng);
   const auto weights = Normal(kRows * kUsed, 0.3F, rng);
+  const auto x = Normal(kRows * kHidden, 5.0F, rng);
   const auto n1 = Normal(kHidden, 1.0F, rng);
   const auto n2 = Normal(kHidden, 1.0F, rng);
+  const auto post = Normal(kHidden, 1.0F, rng);
+  const auto next = Normal(kHidden, 1.0F, rng);
+  constexpr float kScale = 0.25F;
   float* dd = Device(dense.data(), dense.size());
   float* de = Device(experts.data(), experts.size());
   float* dw = Device(weights.data(), weights.size());
+  float* dx = Device(x.data(), x.size());
   float* d1 = Device(n1.data(), n1.size());
   float* d2 = Device(n2.data(), n2.size());
-  g4k::MoeCombine(dd, de, dw, d1, d2, kRows, kHidden, kUsed, kEps, nullptr);
-  const auto got = Host(dd, dense.size());
+  float* dp = Device(post.data(), post.size());
+  float* dn = Device(next.data(), next.size());
+  float* dh = nullptr;
+  HIP_CHECK(hipMalloc(&dh, x.size() * sizeof(float)));
+  g4k::MoeFinishArgs a{};
+  a.dense = dd;
+  a.experts = de;
+  a.weights = dw;
+  a.norm1 = d1;
+  a.norm2 = d2;
+  a.post_norm = dp;
+  a.scale = kScale;
+  a.x = dx;
+  a.next_norm = dn;
+  a.h = dh;
+  a.rows = kRows;
+  a.hidden = kHidden;
+  a.used = kUsed;
+  a.eps = kEps;
+  g4k::MoeFinish(a, nullptr);
+  const auto got_x = Host(dx, x.size());
+  const auto got_h = Host(dh, x.size());
+  const auto rms = [](const std::vector<double>& v) {
+    double s = 0.0;
+    for (double e : v) {
+      s += e * e;
+    }
+    return 1.0 / std::sqrt(s / static_cast<double>(v.size()) + kEps);
+  };
   double worst = 0.0;
   for (std::uint32_t r = 0; r < kRows; ++r) {
-    std::vector<double> mix(kHidden, 0.0);
-    double sd = 0.0, sm = 0.0;
+    std::vector<double> d(kHidden), mix(kHidden, 0.0), f(kHidden), xr(kHidden);
     for (std::uint32_t i = 0; i < kHidden; ++i) {
+      d[i] = dense[r * kHidden + i];
       for (std::uint32_t j = 0; j < kUsed; ++j) {
         mix[i] += double{weights[r * kUsed + j]} *
                   experts[(std::size_t{r} * kUsed + j) * kHidden + i];
       }
-      sd += double{dense[r * kHidden + i]} * dense[r * kHidden + i];
-      sm += mix[i] * mix[i];
     }
-    const double rd = 1.0 / std::sqrt(sd / kHidden + kEps);
-    const double rm = 1.0 / std::sqrt(sm / kHidden + kEps);
+    const double rd = rms(d), rm = rms(mix);
     for (std::uint32_t i = 0; i < kHidden; ++i) {
-      const double want =
-          dense[r * kHidden + i] * rd * n1[i] + mix[i] * rm * n2[i];
-      worst = std::max(worst, std::fabs(got[r * kHidden + i] - want) /
-                                  (std::fabs(want) + 1e-3));
+      f[i] = d[i] * rd * n1[i] + mix[i] * rm * n2[i];
+    }
+    const double rf = rms(f);
+    for (std::uint32_t i = 0; i < kHidden; ++i) {
+      xr[i] = (x[r * kHidden + i] + f[i] * rf * post[i]) * kScale;
+    }
+    const double rx = rms(xr);
+    for (std::uint32_t i = 0; i < kHidden; ++i) {
+      const double want_h = xr[i] * rx * next[i];
+      worst = std::max({worst,
+                        std::fabs(got_x[r * kHidden + i] - xr[i]) /
+                            (std::fabs(xr[i]) + 1e-2),
+                        std::fabs(got_h[r * kHidden + i] - want_h) /
+                            (std::fabs(want_h) + 1e-2)});
     }
   }
-  Require(worst < 1e-4, "combine error " + std::to_string(worst));
-  for (float* p : {dd, de, dw, d1, d2}) {
+  Require(worst < 1e-4, "feed-forward residual error " + std::to_string(worst));
+  for (float* p : {dd, de, dw, dx, d1, d2, dp, dn, dh}) {
     HIP_CHECK(hipFree(p));
   }
 }
@@ -437,7 +480,7 @@ int main() {
   return gemma4_test::Run([] {
     std::mt19937 rng(26);
     CheckRouting(rng);
-    CheckCombine(rng);
+    CheckFinish(rng);
     const Format q4k{
         g4k::ExpertFormat::kQ4_K, GgmlType::kQ4_K, 256, 144, {0, 2}, "Q4_K"};
     const Format q5k{

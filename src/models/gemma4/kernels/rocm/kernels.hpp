@@ -49,6 +49,12 @@ struct QkvPostArgs {
   std::uint32_t ring;
   float eps;
   std::uint32_t rotated_pairs;
+  /// Floats between consecutive rows of q, k and v when they are slices of
+  /// one fused projection's rows; 0 means packed rows of their own widths.
+  std::uint32_t row_stride;
+  /// Packed destination of the processed Q ([rows][heads * head_dim]); null
+  /// rewrites q in place.
+  float* q_out;
 };
 void QkvPost(const QkvPostArgs& args, hipStream_t stream);
 
@@ -115,11 +121,13 @@ void Attention(const AttentionArgs& args, hipStream_t stream);
 /// x[r] += rms(o[r]) * post_norm; h[r] = rms(x[r]) * next_norm.
 /// With `q8`, h is written instead as the tiled Q8_1 prefill activation of
 /// hip::LaunchQuantizeActivationQ8_1FromFp32 (same layout and rounding; a
-/// block scale may differ by one ulp).
+/// block scale may differ by one ulp). With `h2`, also
+/// h2[r] = rms(x[r]) * second_norm (the expert input of a MoE layer).
 void PostAttentionNorm(const float* o, const float* post_norm, float* x,
                        const float* next_norm, float* h, std::uint32_t rows,
                        std::uint32_t dim, float eps, hipStream_t stream,
-                       void* q8 = nullptr);
+                       void* q8 = nullptr, const float* second_norm = nullptr,
+                       float* h2 = nullptr);
 
 /// x[r] = (x[r] + rms(f[r]) * post_norm) * scale;
 /// h[r] = rms(x[r]) * next_norm (next_norm null skips h); with `q8`, h is

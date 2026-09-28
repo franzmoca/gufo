@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <initializer_list>
 
 #include "src/core/hip/weight_upload.hpp"
 #include "src/models/gemma4/kernels/rocm/gemv.hpp"
@@ -81,19 +82,79 @@ struct Uploader {
     return ptr;
   }
 
+  /// Uploads `parts` (same format and width) into one allocation, rows
+  /// back to back; `views` receive each part. Returns the whole tensor, or
+  /// an empty one (nothing uploaded) when the parts differ.
+  DeviceTensor Fuse(std::initializer_list<const TensorRef*> parts,
+                    std::initializer_list<DeviceTensor*> views) {
+    DeviceTensor d;
+    const TensorRef& first = **parts.begin();
+    std::size_t size = 0;
+    std::uint64_t rows = 0;
+    for (const TensorRef* t : parts) {
+      if (t->empty() || t->type != first.type || t->cols != first.cols ||
+          t->experts != 1 || t->type == core::GgmlType::kF32) {
+        return d;
+      }
+      size += t->SizeBytes();
+      rows += t->rows;
+    }
+    if (!ok) {
+      return d;
+    }
+    auto* ptr = static_cast<std::uint8_t*>(
+        Allocate(size, std::string(first.name) + " (fused)"));
+    if (ptr == nullptr) {
+      return d;
+    }
+    auto view = views.begin();
+    std::size_t at = 0;
+    for (const TensorRef* t : parts) {
+      if (!stager.Copy(shard_base + t->shard, t->file_offset, t->SizeBytes(),
+                       ptr + at, error)) {
+        Fail("upload failed for " + std::string(t->name));
+        return d;
+      }
+      DeviceTensor& v = **view++;
+      v.data = ptr + at;
+      v.type = t->type;
+      v.cols = static_cast<std::uint32_t>(t->cols);
+      v.rows = static_cast<std::uint32_t>(t->rows);
+      at += t->SizeBytes();
+    }
+    max_cols = std::max<std::size_t>(max_cols, first.cols);
+    d.data = ptr;
+    d.type = first.type;
+    d.cols = static_cast<std::uint32_t>(first.cols);
+    d.rows = static_cast<std::uint32_t>(rows);
+    return d;
+  }
+
   DeviceLayer Layer(const LayerWeights& l) {
     DeviceLayer d;
     d.attn_norm = Copy(l.attn_norm);
-    d.attn_q = Copy(l.attn_q);
-    d.attn_k = Copy(l.attn_k);
-    d.attn_v = Copy(l.attn_v);
+    // Fused projections share one launch in decode and one GEMM in prefill.
+    if (!l.attn_k.empty()) {
+      d.attn_qkv = l.attn_v.empty()
+                       ? Fuse({&l.attn_q, &l.attn_k}, {&d.attn_q, &d.attn_k})
+                       : Fuse({&l.attn_q, &l.attn_k, &l.attn_v},
+                              {&d.attn_q, &d.attn_k, &d.attn_v});
+    }
+    if (d.attn_qkv.empty()) {
+      d.attn_q = Copy(l.attn_q);
+      d.attn_k = Copy(l.attn_k);
+      d.attn_v = Copy(l.attn_v);
+    }
     d.attn_q_norm = Copy(l.attn_q_norm);
     d.attn_k_norm = Copy(l.attn_k_norm);
     d.attn_output = Copy(l.attn_output);
     d.post_attn_norm = Copy(l.post_attn_norm);
     d.ffn_norm = Copy(l.ffn_norm);
-    d.ffn_gate = Copy(l.ffn_gate);
-    d.ffn_up = Copy(l.ffn_up);
+    d.ffn_gate_up = Fuse({&l.ffn_gate, &l.ffn_up}, {&d.ffn_gate, &d.ffn_up});
+    if (d.ffn_gate_up.empty()) {
+      d.ffn_gate = Copy(l.ffn_gate);
+      d.ffn_up = Copy(l.ffn_up);
+    }
     d.ffn_down = Copy(l.ffn_down);
     d.post_ffn_norm = Copy(l.post_ffn_norm);
     d.output_scale = l.output_scale;
