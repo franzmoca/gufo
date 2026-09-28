@@ -1699,11 +1699,14 @@ bool LaunchKQuantSmallBatchDoubleStage(core::GgmlType type, const void* w,
                                        const float* fp32_x, float* y,
                                        std::size_t batch, std::size_t m,
                                        std::size_t k, hipStream_t stream) {
-  if (batch < 2 || batch > 8 || m == 0 || k == 0 ||
+  if (batch < 2 || batch > 16 || m == 0 || k == 0 ||
       (type != core::GgmlType::kQ4_K && type != core::GgmlType::kQ5_K &&
        type != core::GgmlType::kQ6_K) ||
-      !FitsSmallBatch32BitIndices(batch, m, k,
-                                  quant::QuantizedRowBytes(type, k))) {
+      m > std::numeric_limits<std::uint32_t>::max() / batch ||
+      k > std::numeric_limits<std::uint32_t>::max() / batch ||
+      m > std::numeric_limits<std::uint32_t>::max() /
+              quant::QuantizedRowBytes(type, k)) {
+    // 32-bit device indexing, as FitsSmallBatch32BitIndices checks up to 8.
     return false;
   }
   constexpr std::uint32_t kWaves = 16;
@@ -1711,9 +1714,11 @@ bool LaunchKQuantSmallBatchDoubleStage(core::GgmlType type, const void* w,
   const dim3 grid(static_cast<unsigned>((m + kWaves * kRows - 1) /
                                         (kWaves * kRows)));
   const auto launch = [&]<core::GgmlType Type, std::size_t Batch>() {
-    // Seven and eight rows are faster with the looser occupancy hint.
+    // Seven and eight rows are faster with the looser occupancy hint; past
+    // eight, one activation tile per stage keeps the rows in shared memory.
     constexpr std::uint32_t kMinWaves = Batch >= 7 ? 8 : 12;
-    SmallBatchKQuantExactFp32GEMMKernel<kWaves, Batch, kRows, Type, 2,
+    constexpr std::size_t kTiles = Batch > 8 ? 1 : 2;
+    SmallBatchKQuantExactFp32GEMMKernel<kWaves, Batch, kRows, Type, kTiles,
                                         kMinWaves, 1, true>
         <<<grid, kWaves * 32, 0, stream>>>(w, fp32_x, y, m, k);
   };
@@ -1737,8 +1742,32 @@ bool LaunchKQuantSmallBatchDoubleStage(core::GgmlType type, const void* w,
       case 7:
         launch.template operator()<Type, 7>();
         break;
-      default:
+      case 8:
         launch.template operator()<Type, 8>();
+        break;
+      case 9:
+        launch.template operator()<Type, 9>();
+        break;
+      case 10:
+        launch.template operator()<Type, 10>();
+        break;
+      case 11:
+        launch.template operator()<Type, 11>();
+        break;
+      case 12:
+        launch.template operator()<Type, 12>();
+        break;
+      case 13:
+        launch.template operator()<Type, 13>();
+        break;
+      case 14:
+        launch.template operator()<Type, 14>();
+        break;
+      case 15:
+        launch.template operator()<Type, 15>();
+        break;
+      default:
+        launch.template operator()<Type, 16>();
         break;
     }
   };

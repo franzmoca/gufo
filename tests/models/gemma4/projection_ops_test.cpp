@@ -98,7 +98,7 @@ void CheckShape(const Format& f, std::size_t m, std::size_t k,
 
   // Every verification width reproduces the decode rows bit for bit.
   std::vector<float> batch(kRows * m);
-  for (std::size_t width : {2, 3, 5, 8, 9, 16}) {
+  for (std::size_t width = 2; width <= 16; ++width) {
     HIP_CHECK(hipMemset(dy, 0xFF, width * m * sizeof(float)));
     gufo::hip::LaunchBatchedQuantGEMMFp32(f.type, dw, dx, dy, width, m, k,
                                           nullptr);
@@ -109,7 +109,7 @@ void CheckShape(const Format& f, std::size_t m, std::size_t k,
             name + ": width " + std::to_string(width) +
                 " differs from decode GEMV");
     // The double-stage configuration verification uses for Gemma shapes.
-    if (width <= 8) {
+    {
       HIP_CHECK(hipMemset(dy, 0xFF, width * m * sizeof(float)));
       if (gufo::hip::LaunchKQuantSmallBatchDoubleStage(f.type, dw, dx, dy,
                                                        width, m, k, nullptr)) {

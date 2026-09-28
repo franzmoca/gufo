@@ -201,7 +201,8 @@ void LaunchBatchedQuantGEMMFp32(core::GgmlType type, const void* w,
                                 hipStream_t stream = nullptr);
 
 /// The K-quant (Q4_K/Q5_K/Q6_K) small-batch kernel with 16 waves, three rows
-/// per wave and two activation tiles per stage, for 2..8 rows. Like every
+/// per wave and two activation tiles per stage for 2..8 rows (one past
+/// eight, up to 16). Like every
 /// exact small-batch configuration each row equals LaunchGEMV bit for bit;
 /// this one suits long K and shapes outside the Qwen-tuned dispatch. Returns
 /// false without launching for other types, widths or index ranges.
