@@ -117,6 +117,19 @@ void CheckShape(const Format& f, std::size_t m, std::size_t k,
     Require(std::memcmp(batch.data(), gemv.data(), width * m * 4) == 0,
             name + ": width " + std::to_string(width) +
                 " differs from decode GEMV");
+    // Q8_0 past eight rows in one weight pass.
+    if (f.type == GgmlType::kQ8_0 && width > 8) {
+      HIP_CHECK(hipMemset(dy, 0xFF, width * m * sizeof(float)));
+      Require(
+          gufo::hip::LaunchQ8_0SmallBatchWide(dw, dx, dy, width, m, k, nullptr),
+          name + ": wide Q8_0 small batch rejected");
+      HIP_CHECK(hipDeviceSynchronize());
+      HIP_CHECK(
+          hipMemcpy(batch.data(), dy, width * m * 4, hipMemcpyDeviceToHost));
+      Require(std::memcmp(batch.data(), gemv.data(), width * m * 4) == 0,
+              name + ": wide Q8_0 width " + std::to_string(width) +
+                  " differs from decode GEMV");
+    }
     // The double-stage configuration verification uses for Gemma shapes.
     {
       HIP_CHECK(hipMemset(dy, 0xFF, width * m * sizeof(float)));

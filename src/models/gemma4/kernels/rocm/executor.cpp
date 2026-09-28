@@ -418,6 +418,12 @@ void Executor::Project(const DeviceTensor& w, const float* x, const void* xq,
                                                w.rows, w.cols, stream_)) {
       return;
     }
+    // Q8_0 past eight rows reads its weights once instead of per eight rows.
+    if (w.type == core::GgmlType::kQ8_0 &&
+        hip::LaunchQ8_0SmallBatchWide(w.data, x, y, rows, w.rows, w.cols,
+                                      stream_)) {
+      return;
+    }
     hip::LaunchBatchedQuantGEMMFp32(w.type, w.data, x, y, rows, w.rows, w.cols,
                                     stream_);
     return;

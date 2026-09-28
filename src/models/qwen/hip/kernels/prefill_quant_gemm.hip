@@ -1799,6 +1799,50 @@ bool LaunchKQuantSmallBatchDoubleStage(core::GgmlType type, const void* w,
   return true;
 }
 
+bool LaunchQ8_0SmallBatchWide(const void* w, const float* fp32_x, float* y,
+                              std::size_t batch, std::size_t m, std::size_t k,
+                              hipStream_t stream) {
+  if (m == 0 || k == 0 || batch < 9 || batch > 16) {
+    return false;
+  }
+  // The row groups of LaunchBatchedQuantGEMMFp32's exact-width route.
+  const auto launch = [&]<std::size_t Batch>() {
+    constexpr std::size_t rows = Batch == 11 || Batch == 13 || Batch == 14 ? 4
+                                 : Batch == 12                             ? 2
+                                                                           : 3;
+    SmallBatchQ8_0ExactFp32VecGEMMKernel<16, Batch, rows, true, true>
+        <<<(m + 16 * rows - 1) / (16 * rows), 512, 0, stream>>>(w, fp32_x, y,
+                                                                m, k);
+  };
+  switch (batch) {
+    case 9:
+      launch.template operator()<9>();
+      break;
+    case 10:
+      launch.template operator()<10>();
+      break;
+    case 11:
+      launch.template operator()<11>();
+      break;
+    case 12:
+      launch.template operator()<12>();
+      break;
+    case 13:
+      launch.template operator()<13>();
+      break;
+    case 14:
+      launch.template operator()<14>();
+      break;
+    case 15:
+      launch.template operator()<15>();
+      break;
+    default:
+      launch.template operator()<16>();
+      break;
+  }
+  return true;
+}
+
 void LaunchBatchedQuantGEMMFp32(core::GgmlType type, const void* w,
                                 const float* fp32_x, float* y,
                                 std::size_t batch, std::size_t m, std::size_t k,
