@@ -192,3 +192,13 @@ constraint vocabulary. Downloaded and verified the BF16 sidecar.
     ending inside an image all match fresh sessions inside the prefill
     envelope.
 - `gemma4.attention_ops` covers image rows across the window, ring wrap and the split path.
+
+**2026-09-28 — V4 serving and CLI.**
+- `gufo serve llm` and `gufo prompt`/`chat` load `mmproj-BF16.gguf` beside the model, or the one passed with `--mmproj`.
+- `Gemma4TextRunner`:
+  - Prepares image prompts with per-image cache prefixes.
+  - Encodes each image at most once per request state.
+  - Never ends a prefill step inside an image.
+- Measured over HTTP (OpenAI `image_url` data URLs):
+  - The 624×960 chart photo: first turn 285 prompt tokens in 5.5 s (cold, including sidecar upload). The follow-up reuses 278 cached tokens (1.35 s) and answers "24 photographs" correctly.
+  - The Gufo logo: "a pixel art illustration of an owl", brown with orange eyes.

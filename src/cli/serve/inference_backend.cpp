@@ -12,6 +12,7 @@
 #include <iomanip>
 #include <iostream>
 #include <limits>
+#include <map>
 #include <mutex>
 #include <optional>
 #include <span>
@@ -36,6 +37,10 @@
 #include "src/models/deepseek_v4_flash/engine.hpp"
 #include "src/models/gemma4/chat_template.hpp"
 #include "src/models/gemma4/engine.hpp"
+#include "src/models/gemma4/vision/prompt.hpp"
+#if defined(ENGINE_ENABLE_HIP)
+#include "src/models/gemma4/vision/encoder.hpp"
+#endif
 #include "src/models/qwen/hip/detail/attention_policy.hpp"
 #include "src/models/qwen/hip/dflash.hpp"
 #include "src/models/qwen/hip/executor.hpp"
@@ -2913,8 +2918,35 @@ public:
   }
   [[nodiscard]] Gemma4Session& session() const { return *session_; }
 
+  /// The current request's images; their embeddings are encoded on first use.
+  void SetImages(std::shared_ptr<const models::gemma4::vision::Prompt> prompt) {
+    if (prompt != images_) {
+      images_ = std::move(prompt);
+      embeddings_.clear();
+    }
+  }
+  [[nodiscard]] const models::gemma4::vision::Prompt* images() const {
+    return images_.get();
+  }
+  const float* Embedding(models::gemma4::vision::Encoder& encoder,
+                         std::size_t index) {
+    auto& embedding = embeddings_[index];
+    if (!embedding) {
+      embedding = encoder.Encode(images_->images.at(index).pixels);
+    }
+    return embedding->data();
+  }
+
 private:
   std::unique_ptr<Gemma4Session> session_;
+  std::shared_ptr<const models::gemma4::vision::Prompt> images_;
+  std::map<std::size_t,
+           std::shared_ptr<const models::gemma4::vision::Encoder::Embedding>>
+      embeddings_;
+};
+
+struct Gemma4ImageContext final : TextPromptContext {
+  std::shared_ptr<const models::gemma4::vision::Prompt> prompt;
 };
 
 class Gemma4TextRunnerSnapshot final : public TextRunnerSnapshot {
@@ -2957,8 +2989,11 @@ public:
   Gemma4TextRunner(std::shared_ptr<Gemma4Model> model,
                    std::uint32_t max_context, std::uint32_t ring,
                    std::string artifact_fingerprint = {},
-                   std::string mtp_fingerprint = {})
-      : model_(std::move(model)), max_context_(max_context) {
+                   std::string mtp_fingerprint = {},
+                   std::shared_ptr<models::gemma4::vision::Encoder> vision = {})
+      : model_(std::move(model)),
+        vision_(std::move(vision)),
+        max_context_(max_context) {
     if (!artifact_fingerprint.empty()) {
       persistence_ = TextRunnerPersistenceDescriptor{
           .compatibility_identity = Gemma4CompatibilityIdentity(
@@ -3035,6 +3070,10 @@ public:
 
   [[nodiscard]] std::optional<TextPreparedPrompt> PreparePrompt(
       const ChatRequest& request) const override {
+    if (std::ranges::any_of(request.messages,
+                            [](const auto& m) { return !m.images.empty(); })) {
+      return PrepareImagePrompt(request);
+    }
     std::string error;
     const auto rendered = models::gemma4::ChatTemplate::Render(
         request.messages, Tools(request), ChatOptions(request), &error);
@@ -3057,6 +3096,44 @@ public:
       }
     }
     return prepared;
+  }
+
+  [[nodiscard]] TextPreparedPrompt PrepareImagePrompt(
+      const ChatRequest& request) const {
+    if (!vision_) {
+      throw std::invalid_argument(
+          "image input requires a matching --mmproj BF16 sidecar");
+    }
+    auto prompt = std::make_shared<const models::gemma4::vision::Prompt>(
+        models::gemma4::vision::Prepare(model_->tokenizer(), request.messages,
+                                        Tools(request), ChatOptions(request),
+                                        vision_->identity(), max_context_));
+    auto context = std::make_shared<Gemma4ImageContext>();
+    context->cache_identity = prompt->cache_identity;
+    for (const auto& image : prompt->images) {
+      context->cache_prefixes.push_back(
+          {image.span.offset,
+           {image.prefix_identity.begin(), image.prefix_identity.end()}});
+    }
+    context->prompt = prompt;
+    return {{prompt->tokens.begin(), prompt->tokens.end()},
+            std::move(context),
+            prompt->stable_prefix_tokens};
+  }
+
+  void SetPromptContext(
+      TextRunnerState& state,
+      std::shared_ptr<const TextPromptContext> context) const override {
+    std::shared_ptr<const models::gemma4::vision::Prompt> prompt;
+    if (context) {
+      const auto* image =
+          dynamic_cast<const Gemma4ImageContext*>(context.get());
+      if (image == nullptr) {
+        throw std::invalid_argument("invalid Gemma 4 prompt context");
+      }
+      prompt = image->prompt;
+    }
+    RequireGemma4State(state).SetImages(std::move(prompt));
   }
 
   [[nodiscard]] TextGenerationBackend::InitialOutputState InitialOutputState(
@@ -3108,19 +3185,46 @@ public:
   [[nodiscard]] TextPrefillStep Prefill(
       TextRunnerState& state, std::span<const TextRunnerToken> prompt,
       std::size_t offset, std::size_t max_input_tokens) const override {
-    auto& session = RequireGemma4State(state).session();
+    auto& gemma = RequireGemma4State(state);
+    auto& session = gemma.session();
     if (offset != session.Position() || offset >= prompt.size()) {
       throw std::logic_error("Gemma 4 prefill offset does not match state");
     }
-    const std::size_t consumed =
-        std::min(max_input_tokens, prompt.size() - offset);
+    std::size_t end =
+        offset + std::min(max_input_tokens, prompt.size() - offset);
+    // A step never ends inside an image or before its closing token: it
+    // stops before the image, or takes the whole image when it starts here.
+    std::vector<models::gemma4::ImageSpan> spans;
+    const auto* images = gemma.images();
+    if (images != nullptr) {
+      for (const auto& image : images->images) {
+        const std::size_t first = image.span.offset;
+        const std::size_t last = first + image.span.rows;  // closing token
+        if (end > first && end <= last) {
+          end = first > offset ? first : last + 1;
+        }
+      }
+      for (const auto& image : images->images) {
+        if (std::size_t{image.span.offset} + image.span.rows < end) {
+          spans.push_back(
+              {image.span.offset, image.span.rows, image.prefix_identity});
+        }
+      }
+    }
+    const std::size_t consumed = end - offset;
     std::vector<std::int32_t> prefix;
-    prefix.reserve(offset + consumed);
-    for (const auto token : prompt.first(offset + consumed)) {
+    prefix.reserve(end);
+    for (const auto token : prompt.first(end)) {
       prefix.push_back(Gemma4EngineToken(token));
     }
+    const auto embed = [&](std::size_t index) {
+      if (!vision_) {
+        throw std::invalid_argument("Gemma 4 image input has no encoder");
+      }
+      return gemma.Embedding(*vision_, index);
+    };
     std::string error;
-    if (!session.Sync(prefix, &error)) {
+    if (!session.Sync(prefix, spans, embed, &error)) {
       session.Reset();
       throw std::runtime_error("Gemma 4 prefill failed: " + error);
     }
@@ -3382,6 +3486,7 @@ private:
   }
 
   std::shared_ptr<Gemma4Model> model_;
+  std::shared_ptr<models::gemma4::vision::Encoder> vision_;
   std::uint32_t max_context_;
   std::optional<TextRunnerPersistenceDescriptor> persistence_;
 };
@@ -3572,10 +3677,6 @@ bool InferenceBackend::load(const std::string& model_path, std::string* error,
                 std::move(resolved_disk_cache_config));
   }
   if (reader->GetMetadataString("general.architecture") == "gemma4") {
-    if (!vision_model_path.empty()) {
-      SetError(error, "Gemma 4 runs text-only; --mmproj is not supported");
-      return false;
-    }
     const bool mtp = speculative_config.backend == TextSpeculativeBackend::kMtp;
     if (speculative_config.backend != TextSpeculativeBackend::kDisabled &&
         !mtp) {
@@ -3605,6 +3706,14 @@ bool InferenceBackend::load(const std::string& model_path, std::string* error,
       SetError(error, "Failed to create Gemma 4 model: " + load_error);
       return false;
     }
+    std::shared_ptr<models::gemma4::vision::Encoder> vision;
+    try {
+      vision = models::gemma4::vision::Encoder::Open(
+          model_path, vision_model_path, model->config().hidden_size);
+    } catch (const std::exception& e) {
+      SetError(error, std::string("Gemma 4 vision sidecar: ") + e.what());
+      return false;
+    }
     if (DiskCacheEnabled(resolved_disk_cache_config) &&
         resolved_disk_cache_config.model_artifact_fingerprint.empty() &&
         !FingerprintArtifact(
@@ -3622,7 +3731,7 @@ bool InferenceBackend::load(const std::string& model_path, std::string* error,
     }
     return load(std::move(model), error, max_context, session_count,
                 prefill_policy, scheduler_policy, speculative_config,
-                std::move(resolved_disk_cache_config));
+                std::move(resolved_disk_cache_config), std::move(vision));
   }
   if (reader->GetMetadataString("general.architecture") == "qwen4exp") {
     if (speculative_config.backend != TextSpeculativeBackend::kDisabled &&
@@ -4042,13 +4151,13 @@ bool InferenceBackend::load(
 #endif
 
 #if defined(ENGINE_ENABLE_HIP)
-bool InferenceBackend::load(std::shared_ptr<models::gemma4::Model> model,
-                            std::string* error, std::uint32_t max_context,
-                            std::size_t session_count,
-                            TextPrefillPolicy prefill_policy,
-                            TextSchedulerPolicy scheduler_policy,
-                            TextSpeculativeConfig speculative_config,
-                            TextDiskCacheConfig disk_cache_config) {
+bool InferenceBackend::load(
+    std::shared_ptr<models::gemma4::Model> model, std::string* error,
+    std::uint32_t max_context, std::size_t session_count,
+    TextPrefillPolicy prefill_policy, TextSchedulerPolicy scheduler_policy,
+    TextSpeculativeConfig speculative_config,
+    TextDiskCacheConfig disk_cache_config,
+    std::shared_ptr<models::gemma4::vision::Encoder> vision) {
   if (model == nullptr) {
     SetError(error, "Gemma 4 model must not be null");
     return false;
@@ -4080,7 +4189,7 @@ bool InferenceBackend::load(std::shared_ptr<models::gemma4::Model> model,
     auto runner = std::make_shared<Gemma4TextRunner>(
         std::move(model), max_context, ring,
         disk_cache_config.model_artifact_fingerprint,
-        disk_cache_config.draft_model_artifact_fingerprint);
+        disk_cache_config.draft_model_artifact_fingerprint, std::move(vision));
     new_state->model_id = runner->Descriptor().model_id;
     new_state->max_context = max_context;
     std::optional<TextRunnerDiskCacheOptions> runner_disk_cache;

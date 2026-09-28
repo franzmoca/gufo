@@ -59,7 +59,8 @@ static void RegisterImageOptions(ArgParser& parser, PromptOptions& opt) {
                  "Prefix image inputs with Picture N: in the chat template",
                  "Prompt", &opt.add_vision_id);
   parser.AddOption("", "--mmproj", "PATH",
-                   "Qwen BF16 vision sidecar (auto-discovered beside model)",
+                   "BF16 vision sidecar for Qwen3.8 or Gemma 4 "
+                   "(auto-discovered beside model)",
                    "Model", &opt.vision_model_path);
   parser.AddCustomOption(
       "", "--image", "PATH",

@@ -172,7 +172,8 @@ and newly processed tokens separately; resuming from the checkpoint processes
 the short suffix. System instructions, tool definitions and image identities
 must match the retained prefix.
 
-Qwen image identity is checked only for images consumed before each checkpoint.
+Qwen and Gemma 4 image identity is checked only for images consumed before
+each checkpoint.
 Appending an image reuses the preceding text/image state in RAM or on disk;
 changing, removing or moving an earlier image invalidates checkpoints after it.
 New images get a checkpoint before assistant framing so later turns do not

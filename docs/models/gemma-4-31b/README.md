@@ -4,7 +4,10 @@ Dense Gemma 4 text model on gfx1151: 60 layers, five sliding-window (1024)
 layers per global layer, tied embedding and a final logit softcap.
 Supported target: `unsloth/gemma-4-31B-it-GGUF`, **UD-Q4_K_XL** (single file),
 with the optional `gemma4-assistant` MTP drafter from the same repository.
-Text only; vision, fine-tunes and QAT (Q4_0) checkpoints are rejected at load.
+Image input uses the BF16 vision sidecar from the same repository
+(`mmproj-BF16.gguf`, found beside the model or passed with `--mmproj`); see
+[VISION.md](VISION.md). Fine-tunes and QAT (Q4_0) checkpoints are rejected at
+load.
 
 [Benchmarks](BENCHMARKS.md) · [Quality](QUALITY.md) · [Experiments](EXPERIMENTS.md)
 
@@ -14,11 +17,13 @@ Text only; vision, fine-tunes and QAT (Q4_0) checkpoints are rejected at load.
 nix develop -c hf download unsloth/gemma-4-31B-it-GGUF \
   --revision c1ac76e99d5513b141e8adde7288b85c3f9c32ec \
   --include gemma-4-31B-it-UD-Q4_K_XL.gguf MTP/mtp-gemma-4-31B-it-Q8_0.gguf \
+  mmproj-BF16.gguf \
   --local-dir models/gemma-4-31b
 nix build
 MODEL=models/gemma-4-31b/gemma-4-31B-it-UD-Q4_K_XL.gguf
 MTP=models/gemma-4-31b/MTP/mtp-gemma-4-31B-it-Q8_0.gguf
 ./result/bin/gufo chat --model "$MODEL"
+./result/bin/gufo prompt --model "$MODEL" --image photo.jpg -p "Describe it."
 ./result/bin/gufo serve llm --model "$MODEL" --speculative mtp \
   --mtp-model "$MTP" --context 131072
 ```

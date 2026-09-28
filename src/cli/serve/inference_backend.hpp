@@ -24,6 +24,9 @@ class Model;
 
 namespace gufo::models::gemma4 {
 class Model;
+namespace vision {
+class Encoder;
+}  // namespace vision
 }  // namespace gufo::models::gemma4
 
 namespace gufo::models::qwen38_flash_next {
@@ -117,12 +120,14 @@ public:
 
   /// Installs a previously loaded Gemma 4 model with request-owned sessions
   /// and host/disk continuation snapshots.
+  /// `vision`, when set, accepts image input.
   bool load(std::shared_ptr<models::gemma4::Model> model, std::string* error,
             std::uint32_t max_context = 0, std::size_t session_count = 1,
             TextPrefillPolicy prefill_policy = {},
             TextSchedulerPolicy scheduler_policy = {},
             TextSpeculativeConfig speculative_config = {},
-            TextDiskCacheConfig disk_cache_config = {});
+            TextDiskCacheConfig disk_cache_config = {},
+            std::shared_ptr<models::gemma4::vision::Encoder> vision = {});
 #endif
 
   /// Stable model identifier used in API responses.
