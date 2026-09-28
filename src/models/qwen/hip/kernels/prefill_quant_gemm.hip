@@ -1404,6 +1404,10 @@ void LaunchKQuantSmallBatchByType(core::GgmlType type, const void* w,
       LaunchKQuantSmallBatchTyped<RowsPerWave, core::GgmlType::kQ3_K>(
           w, fp32_x, y, batch, m, k, grid, block, stream);
       return;
+    case core::GgmlType::kQ4_0:
+      LaunchKQuantSmallBatchTyped<RowsPerWave, core::GgmlType::kQ4_0>(
+          w, fp32_x, y, batch, m, k, grid, block, stream);
+      return;
     case core::GgmlType::kIQ4_NL:
       LaunchKQuantSmallBatchTyped<RowsPerWave, core::GgmlType::kIQ4_NL>(
           w, fp32_x, y, batch, m, k, grid, block, stream);
@@ -1479,6 +1483,10 @@ void LaunchKQuantWmmaGEMM(core::GgmlType type, const void* w,
       return;
     case core::GgmlType::kQ3_K:
       LaunchKQuantWmmaGEMMTyped<core::GgmlType::kQ3_K>(w, q8_1_x, y, batch, m,
+                                                       k, stream);
+      return;
+    case core::GgmlType::kQ4_0:
+      LaunchKQuantWmmaGEMMTyped<core::GgmlType::kQ4_0>(w, q8_1_x, y, batch, m,
                                                        k, stream);
       return;
     case core::GgmlType::kIQ4_NL:
@@ -1701,7 +1709,7 @@ bool LaunchKQuantSmallBatchDoubleStage(core::GgmlType type, const void* w,
                                        std::size_t k, hipStream_t stream) {
   if (batch < 2 || batch > 16 || m == 0 || k == 0 ||
       (type != core::GgmlType::kQ4_K && type != core::GgmlType::kQ5_K &&
-       type != core::GgmlType::kQ6_K) ||
+       type != core::GgmlType::kQ6_K && type != core::GgmlType::kQ4_0) ||
       m > std::numeric_limits<std::uint32_t>::max() / batch ||
       k > std::numeric_limits<std::uint32_t>::max() / batch ||
       m > std::numeric_limits<std::uint32_t>::max() /
@@ -1777,6 +1785,9 @@ bool LaunchKQuantSmallBatchDoubleStage(core::GgmlType type, const void* w,
       break;
     case core::GgmlType::kQ5_K:
       typed.template operator()<core::GgmlType::kQ5_K>();
+      break;
+    case core::GgmlType::kQ4_0:
+      typed.template operator()<core::GgmlType::kQ4_0>();
       break;
     default:
       typed.template operator()<core::GgmlType::kQ6_K>();

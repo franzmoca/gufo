@@ -260,7 +260,7 @@ void CheckWeights() {
   wrong["blk.1.attn_q.weight"] = Q8(64, 256);
   rejects(wrong, "wrong Q width accepted");
   wrong = tensors;
-  wrong["blk.0.ffn_up.weight"].type = GgmlType::kQ4_0;
+  wrong["blk.0.ffn_up.weight"].type = GgmlType::kQ4_1;
   rejects(wrong, "unsupported projection format accepted");
   wrong = tensors;
   wrong["rope_freqs.weight"] = F32(64, -1.0F);

@@ -158,6 +158,7 @@ namespace detail {
     case core::GgmlType::kQ5_K:
     case core::GgmlType::kQ6_K:
     case core::GgmlType::kQ3_K:
+    case core::GgmlType::kQ4_0:
     case core::GgmlType::kIQ4_NL:
     case core::GgmlType::kIQ4_XS:
     case core::GgmlType::kIQ3_S:
@@ -200,12 +201,12 @@ void LaunchBatchedQuantGEMMFp32(core::GgmlType type, const void* w,
                                 std::size_t batch, std::size_t m, std::size_t k,
                                 hipStream_t stream = nullptr);
 
-/// The K-quant (Q4_K/Q5_K/Q6_K) small-batch kernel with 16 waves, three rows
-/// per wave and two activation tiles per stage for 2..8 rows (one past
-/// eight, up to 16). Like every
-/// exact small-batch configuration each row equals LaunchGEMV bit for bit;
-/// this one suits long K and shapes outside the Qwen-tuned dispatch. Returns
-/// false without launching for other types, widths or index ranges.
+/// The K-quant (Q4_K/Q5_K/Q6_K) and Q4_0 small-batch kernel with 16 waves,
+/// three rows per wave and two activation tiles per stage for 2..8 rows (one
+/// past eight, up to 16). Like every exact small-batch configuration each row
+/// equals LaunchGEMV bit for bit; this one suits long K and shapes outside the
+/// Qwen-tuned dispatch. Returns false without launching for other types, widths
+/// or index ranges.
 [[nodiscard]] bool LaunchKQuantSmallBatchDoubleStage(
     core::GgmlType type, const void* w, const float* fp32_x, float* y,
     std::size_t batch, std::size_t m, std::size_t k,

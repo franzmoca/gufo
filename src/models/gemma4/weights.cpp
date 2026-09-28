@@ -27,6 +27,8 @@ struct Format {
       return {1, 2};
     case GgmlType::kQ8_0:
       return {32, 34};
+    case GgmlType::kQ4_0:
+      return {32, 18};
     case GgmlType::kQ4_K:
       return {256, 144};
     case GgmlType::kQ5_K:
@@ -41,12 +43,13 @@ struct Format {
 /// Projection formats with decode GEMV, batched verification and prefill
 /// GEMM kernels.
 constexpr std::initializer_list<GgmlType> kProjection = {
-    GgmlType::kQ8_0, GgmlType::kQ4_K, GgmlType::kQ5_K, GgmlType::kQ6_K};
+    GgmlType::kQ8_0, GgmlType::kQ4_0, GgmlType::kQ4_K, GgmlType::kQ5_K,
+    GgmlType::kQ6_K};
 /// Embedding rows are decoded one token at a time; the tied LM head also
 /// needs a GEMV, which every listed format has.
 constexpr std::initializer_list<GgmlType> kEmbedding = {
-    GgmlType::kBF16, GgmlType::kQ8_0, GgmlType::kQ4_K, GgmlType::kQ5_K,
-    GgmlType::kQ6_K};
+    GgmlType::kBF16, GgmlType::kQ8_0, GgmlType::kQ4_0,
+    GgmlType::kQ4_K, GgmlType::kQ5_K, GgmlType::kQ6_K};
 constexpr std::initializer_list<GgmlType> kVector = {GgmlType::kF32};
 
 struct Binder {

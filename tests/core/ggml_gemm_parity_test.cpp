@@ -238,6 +238,34 @@ int main() {
         c.name);
   }
 
+  // (2b) Q4_0: value = d * (q - 8), low nibbles first, high nibbles second.
+  {
+    gufo::quant::block_q4_0 b{};
+    b.d = 0x3800;  // fp16(0.5)
+    for (int i = 0; i < 16; ++i)
+      b.qs[i] = static_cast<std::uint8_t>(i | ((15 - i) << 4));
+    const auto x = RandomFloats(rng, 32);
+    std::vector<float> dst(32);
+    gufo::quant::Dequantize(gufo::core::GgmlType::kQ4_0, &b, dst.data(), 32);
+    bool deq_ok = true;
+    for (int i = 0; i < 16; ++i) {
+      deq_ok = deq_ok && dst[i] == 0.5F * static_cast<float>(i - 8) &&
+               dst[i + 16] == 0.5F * static_cast<float>(7 - i);
+    }
+    float want = 0.0F;
+    for (int i = 0; i < 16; ++i) {
+      want += dst[i] * x[i];
+      want += dst[i + 16] * x[i + 16];
+    }
+    const float dot = gufo::quant::Dot(gufo::core::GgmlType::kQ4_0, &b, x, 32);
+    if (!deq_ok || !SameBits(dot, want) ||
+        gufo::quant::QuantizedRowBytes(gufo::core::GgmlType::kQ4_0, 64) != 36) {
+      std::printf("Q4_0: FAIL (deq=%d dot=%d)\n", deq_ok, SameBits(dot, want));
+      return 1;
+    }
+    std::printf("Q4_0: PASS\n");
+  }
+
   // (3) F32 / F16 / BF16.
   {
     const std::size_t k = 64;
@@ -306,7 +334,8 @@ int main() {
   // (4) IsSupported boundaries.
   if (!gufo::quant::IsSupported(gufo::core::GgmlType::kF32) ||
       !gufo::quant::IsSupported(gufo::core::GgmlType::kQ8_K) ||
-      gufo::quant::IsSupported(gufo::core::GgmlType::kQ4_0) ||
+      !gufo::quant::IsSupported(gufo::core::GgmlType::kQ4_0) ||
+      gufo::quant::IsSupported(gufo::core::GgmlType::kQ4_1) ||
       gufo::quant::IsSupported(static_cast<gufo::core::GgmlType>(65535))) {
     std::printf("IsSupported: FAIL\n");
     return 1;
