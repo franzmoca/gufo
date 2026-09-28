@@ -27,6 +27,11 @@ endforeach()
 add_executable(gemma4_reference_probe EXCLUDE_FROM_ALL reference_probe.cpp)
 target_link_libraries(gemma4_reference_probe PRIVATE gufo_gemma4_reference)
 set_source_files_properties(reference_probe.cpp PROPERTIES COMPILE_OPTIONS "-O2")
+add_executable(gemma4_vision_probe EXCLUDE_FROM_ALL vision_probe.cpp)
+target_link_libraries(gemma4_vision_probe PRIVATE gufo_gemma4_reference)
+if (ENGINE_ENABLE_HIP)
+  target_compile_definitions(gemma4_vision_probe PRIVATE GUFO_GEMMA4_VISION_GPU)
+endif()
 
 if (ENGINE_ENABLE_HIP)
   foreach(name IN ITEMS attention_ops kernel_ops projection_ops)
@@ -41,6 +46,15 @@ if (ENGINE_ENABLE_HIP)
   add_test(NAME gemma4.target COMMAND gemma4_target_test)
   set_tests_properties(gemma4.target PROPERTIES
     LABELS "gemma4;hip;gpu;gfx1151;quality;external-model;slow"
+    SKIP_RETURN_CODE 77 RESOURCE_LOCK gemma4)
+  add_executable(gemma4_vision_encoder_test vision_encoder_test.cpp)
+  target_link_libraries(gemma4_vision_encoder_test PRIVATE
+    gufo_gemma4_reference)
+  set_source_files_properties(vision_encoder_test.cpp PROPERTIES
+    COMPILE_OPTIONS "-O2")
+  add_test(NAME gemma4.vision_encoder COMMAND gemma4_vision_encoder_test)
+  set_tests_properties(gemma4.vision_encoder PROPERTIES
+    LABELS "gemma4;hip;gpu;gfx1151;vision;external-model"
     SKIP_RETURN_CODE 77 RESOURCE_LOCK gemma4)
   add_custom_target(gemma4_model_tests DEPENDS gemma4_target_test)
   add_executable(gemma4_gpu_probe EXCLUDE_FROM_ALL gpu_probe.cpp)

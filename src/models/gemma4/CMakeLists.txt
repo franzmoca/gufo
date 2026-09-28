@@ -6,6 +6,7 @@ add_library(gufo_gemma4 STATIC
   tokenizer.cpp
   tool_syntax.cpp
   vision/prompt.cpp
+  vision/weights.cpp
   weights.cpp)
 
 target_include_directories(gufo_gemma4 PUBLIC ${PROJECT_SOURCE_DIR})
@@ -19,10 +20,12 @@ if (ENGINE_ENABLE_HIP)
     ${GEMMA4_ROCM_DIR}/gemv.hip.cpp
     ${GEMMA4_ROCM_DIR}/device_model.cpp
     ${GEMMA4_ROCM_DIR}/executor.cpp
+    vision/encoder.hip
     engine.cpp)
   set_source_files_properties(${GEMMA4_ROCM_DIR}/kernels.hip.cpp
     ${GEMMA4_ROCM_DIR}/attention_wmma.hip.cpp
-    ${GEMMA4_ROCM_DIR}/gemv.hip.cpp PROPERTIES LANGUAGE HIP)
+    ${GEMMA4_ROCM_DIR}/gemv.hip.cpp
+    vision/encoder.hip PROPERTIES LANGUAGE HIP)
   # Projections must round identically at every width (verification equals
   # decode), so they are compiled with strict floating-point semantics.
   set_source_files_properties(${GEMMA4_ROCM_DIR}/gemv.hip.cpp PROPERTIES
@@ -34,8 +37,10 @@ if (ENGINE_ENABLE_HIP)
     gufo_qwen38_flash_next)
 endif()
 
-add_library(gufo_gemma4_reference STATIC EXCLUDE_FROM_ALL reference.cpp)
+add_library(gufo_gemma4_reference STATIC EXCLUDE_FROM_ALL reference.cpp
+  vision/reference.cpp)
 target_link_libraries(gufo_gemma4_reference PUBLIC gufo_gemma4)
 # The reference decodes every weight on the fly; unoptimized it is unusable
 # even as an oracle, so it keeps -O2 in every configuration.
-set_source_files_properties(reference.cpp PROPERTIES COMPILE_OPTIONS "-O2")
+set_source_files_properties(reference.cpp vision/reference.cpp PROPERTIES
+  COMPILE_OPTIONS "-O2")

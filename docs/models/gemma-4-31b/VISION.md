@@ -79,6 +79,10 @@ No tensor has a bias, and this checkpoint has no clamp scalars
 - **Code placement:** the Gemma encoder lives in `src/models/gemma4/vision/`. It
   shares the BF16 hipBLASLt GEMM and image decoding, but not the Qwen ViT: that
   graph differs in norms, positions, attention and the merger.
+- **Activation:** tanh GELU, as transformers configures the vision MLP
+  (`gelu_pytorch_tanh`). llama.cpp's converter writes no `clip.use_gelu` for
+  `gemma4v`, so stock llama.cpp runs GELU-quick. llama.cpp is compared through
+  a copy of the sidecar with `clip.use_gelu = true`.
 - **Oracle:** the CPU FP32 encoder reference and llama.cpp. llama.cpp is fed
   images already resized to 48-multiples within its token range, so both see
   identical pixels. Text quality is checked with teacher-forced logits on image
@@ -129,3 +133,35 @@ No tensor has a bias, and this checkpoint has no clamp scalars
 **2026-09-28 — Plan.** Merged `origin/main` (JSON Schema output) into
 `feat/gemma`. Structured output stays Qwen-only: Gemma does not build a
 constraint vocabulary. Downloaded and verified the BF16 sidecar.
+
+**2026-09-28 — V1 and V2.**
+- Prompt builder:
+  - The template renders `<|image|>` per image part. jinja2 goldens cover image-only, interleaved and multi-turn cases.
+  - Sizing reproduces transformers on 12 edge cases.
+  - Prompts expand to `<|image>` + N×258880 + `<image|>` with per-image prefix identities.
+- Encoder:
+  - `vision::Reference` is the scalar FP64-accumulating oracle. `vision::Encoder` is the HIP version: FP32 patch GEMM, BF16 hipBLASLt projections, FP32 residual, tiled GEMM attention.
+- Measured on a 144×96 synthetic image (6 rows):
+
+  | Comparison | Embedding rel RMS |
+  |---|---:|
+  | Reference vs llama.cpp (`use_gelu`) | 1.4% |
+  | Reference vs stock llama.cpp (GELU-quick) | 7.1% |
+  | Reference vs GPU | 2.1% |
+
+  - The GPU patch stage matches to 5e-7. Layer errors stay near 3e-4 until
+    layer 20 and then grow through the last layers, as with BF16 activations.
+- Measured on a 624×960 photo (260 rows, 2,340 patches):
+
+  | Comparison | Rel RMS | Worst row cosine |
+  |---|---:|---:|
+  | GPU vs reference | 1.6% | — |
+  | llama.cpp (`use_gelu`) vs reference | 5.9% | 0.81 |
+
+  - GPU encode takes 402 ms (unoptimized).
+- Tools:
+  - `tools/gemma4/llama_vision.cpp`: llama.cpp embeddings and stage dumps; teacher-forced image-prompt logits.
+  - `tests/models/gemma4/vision_probe.cpp`: prepare, reference and GPU comparison.
+  - `tools/gemma4/compare_stages.py`.
+- `gemma4.vision_encoder` gates the GPU encoder against the reference
+  (`GUFO_GEMMA4_MMPROJ`).
