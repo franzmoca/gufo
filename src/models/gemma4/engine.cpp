@@ -119,6 +119,11 @@ std::shared_ptr<Model> Model::Load(const std::string& model_path,
                           std::to_string(rocm::kMaxDraftTokens));
       return nullptr;
     }
+    if (options.min_draft_tokens == 0 ||
+        options.min_draft_tokens > options.draft_tokens) {
+      Fail(error_msg, "gemma4 minimum draft tokens must be 1..draft tokens");
+      return nullptr;
+    }
     std::unique_ptr<core::GgufReader> draft_reader =
         core::GgufReader::OpenFile(options.mtp_model_path, &error);
     if (!draft_reader) {
@@ -303,6 +308,11 @@ bool Session::Sync(std::span<const TokenId> prompt,
     Reset();
     return Fail(error_msg, "prompt is empty");
   }
+  if (model_->options_.draft_calibration == DraftCalibrationScope::kRequest) {
+    for (auto& calibration : calibration_) {
+      calibration.Reset();
+    }
+  }
   if (prompt.size() > cache_->max_context) {
     return Fail(error_msg, "prompt exceeds the session context");
   }
@@ -410,14 +420,13 @@ bool Session::EvaluateAll(std::span<const TokenId> tokens,
 
 namespace {
 
-// Draft-length control: a chain continues while the drafter's estimate that
+// The confidence policy: a chain continues while the drafter's estimate that
 // every draft so far is accepted (the product of its confidences) stays at
 // or above a floor; the draft that falls below it is not verified. Greedy
 // chains use the drafter's top-1 share of its top-64 candidates, sampled
-// chains the probability of the sampled proposal, capped at four drafts
-// because temperature-1 acceptance does not pay for longer ones. Fitted on
-// instrumented prose, repetitive and sampled runs from 0 to 64K (see
-// docs/models/gemma-4-31b/EXPERIMENTS.md).
+// chains the probability of the sampled proposal, capped at four drafts.
+// Fitted on the UD-Q4_K_XL drafter (docs/models/gemma-4-31b/EXPERIMENTS.md);
+// the calibrated policy (draft_policy.hpp) replaces these constants.
 constexpr float kGreedyChainFloor = 0.5F;
 constexpr float kSampledChainFloor = 0.3F;
 constexpr std::uint32_t kSampledDraftCap = 4;
@@ -481,6 +490,14 @@ bool Session::DecodeStep(std::size_t max_tokens,
   return true;
 }
 
+DraftCalibration& Session::Calibration(bool sampled) {
+  auto& tables =
+      model_->options_.draft_calibration == DraftCalibrationScope::kRequest
+          ? calibration_
+          : model_->calibration_;
+  return tables[sampled ? 1 : 0];
+}
+
 bool Session::BeginCycle(Cycle& cycle, std::uint32_t draft_limit,
                          std::string* error_msg) {
   auto& sampler = *cycle.sampler;
@@ -522,11 +539,15 @@ bool Session::BeginCycle(Cycle& cycle, std::uint32_t draft_limit,
   // verified by p/q rejection with residual correction; greedy decoding
   // keeps argmax drafts accepted when the target's own choice agrees.
   cycle.sampled = steps > 0 && sampler.config().uses_random_sampling();
-  // Prompt lookup may fill every slot; MTP drafts stop earlier when sampled.
+  // Prompt lookup may fill every slot; the policy may stop MTP drafts
+  // earlier.
   const std::uint32_t max_drafts = steps;
-  if (cycle.sampled) {
+  const ModelOptions& options = model_->options_;
+  const DraftPolicy policy = options.draft_policy;
+  if (cycle.sampled && policy == DraftPolicy::kConfidence) {
     steps = std::min(steps, kSampledDraftCap);
   }
+  cycle.signals.clear();
   if (steps == 0) {
     return true;
   }
@@ -554,6 +575,32 @@ bool Session::BeginCycle(Cycle& cycle, std::uint32_t draft_limit,
       return count != 0;
     };
     float chain = 1.0F;
+    const DraftCosts costs = DraftCostsAt(position);
+    CalibratedChain calibrated(Calibration(cycle.sampled), costs,
+                               options.min_draft_tokens, steps);
+    // Whether the draft just proposed ends the chain unverified. `kept`
+    // drafts precede it; `confidence` feeds the confidence policy's chain.
+    const auto stop = [&](std::size_t kept, float confidence,
+                          const qwen38_flash_next::MtpCandidateLogits& c) {
+      switch (policy) {
+        case DraftPolicy::kCalibrated: {
+          const float signal = DraftSignal(c);
+          if (!calibrated.Include(signal)) {
+            return true;
+          }
+          cycle.signals.push_back(signal);
+          return false;
+        }
+        case DraftPolicy::kConfidence:
+          chain *= confidence;
+          return kept >= options.min_draft_tokens &&
+                 chain <
+                     (cycle.sampled ? kSampledChainFloor : kGreedyChainFloor);
+        case DraftPolicy::kFixed:
+          break;
+      }
+      return false;
+    };
     if (cycle.sampled) {
       // A cycle-local proposal stream; target draws keep the sampler's.
       std::uint64_t draft_rng =
@@ -564,8 +611,7 @@ bool Session::BeginCycle(Cycle& cycle, std::uint32_t draft_limit,
           [&](const qwen38_flash_next::MtpCandidateLogits& candidates) {
             auto proposal = qwen38_flash_next::SampleMtpProposal(
                 candidates, draft_sampler, &draft_rng);
-            chain *= proposal.probability;
-            if (!proposals.empty() && chain < kSampledChainFloor) {
+            if (stop(proposals.size(), proposal.probability, candidates)) {
               (void)copy();
               return rocm::DraftProposal{};
             }
@@ -591,8 +637,7 @@ bool Session::BeginCycle(Cycle& cycle, std::uint32_t draft_limit,
       executor.DraftChain(
           *cache_, pending, position, steps, &drafts,
           [&](const qwen38_flash_next::MtpCandidateLogits& candidates) {
-            chain *= TopShare(candidates);
-            if (context.size() > 1 && chain < kGreedyChainFloor) {
+            if (stop(context.size() - 1, TopShare(candidates), candidates)) {
               (void)copy();
               return rocm::DraftProposal{};
             }
@@ -628,9 +673,10 @@ void Session::FinishCycle(Cycle& cycle, std::span<const float> logits,
   const std::size_t vocab = model_->VocabSize();
   std::size_t row = 0;
   std::uint64_t accepted = 0;
+  bool agrees = false;
   for (;; ++row) {
     const auto row_logits = logits.subspan(row * vocab, vocab);
-    bool agrees = false;
+    agrees = false;
     if (cycle.sampled && row + 1 < rows.size()) {
       const auto verified = qwen38_flash_next::VerifyMtpProposal(
           row_logits, cycle.proposals[row], sampler);
@@ -659,6 +705,17 @@ void Session::FinishCycle(Cycle& cycle, std::span<const float> logits,
   // Copies trail the MTP drafts.
   const std::size_t mtp = rows.size() - 1 - cycle.copied;
   stats_.copied += cycle.copied;
+  // The calibrated policy learns from every draft verification judged: the
+  // accepted ones and the one that ended the chain (copies trail the MTP
+  // drafts and carry no signal).
+  if (!cycle.signals.empty()) {
+    DraftCalibration& calibration = Calibration(cycle.sampled);
+    const std::size_t judged =
+        std::min(row + (row + 1 < rows.size() ? 1 : 0), cycle.signals.size());
+    for (std::size_t j = 0; j < judged; ++j) {
+      calibration.Observe(cycle.signals[j], j < row || agrees);
+    }
+  }
   stats_.copied_accepted += accepted > mtp ? accepted - mtp : 0;
 }
 

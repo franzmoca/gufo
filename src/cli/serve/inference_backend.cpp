@@ -3701,22 +3701,30 @@ bool InferenceBackend::load(const std::string& model_path, std::string* error,
       return false;
     }
     if (mtp && (speculative_config.draft_model_path.empty() ||
-                speculative_config.max_draft_tokens == 0 ||
-                speculative_config.min_draft_tokens != 1)) {
+                speculative_config.max_draft_tokens == 0)) {
       SetError(error,
-               "Gemma 4 MTP requires --mtp-model, a positive draft limit and "
-               "--min-draft-tokens 1");
+               "Gemma 4 MTP requires --mtp-model and a positive draft limit");
       return false;
     }
-    auto model = models::gemma4::Model::Load(
-        model_path,
-        models::gemma4::ModelOptions{
-            .max_context = max_context,
-            .mtp_model_path =
-                mtp ? speculative_config.draft_model_path : std::string{},
-            .draft_tokens = speculative_config.max_draft_tokens,
-        },
-        &load_error);
+    models::gemma4::ModelOptions gemma_options{
+        .max_context = max_context,
+        .mtp_model_path =
+            mtp ? speculative_config.draft_model_path : std::string{},
+        .draft_tokens = speculative_config.max_draft_tokens,
+        .min_draft_tokens = speculative_config.min_draft_tokens,
+    };
+    try {
+      gemma_options.draft_policy =
+          models::gemma4::ParseDraftPolicy(speculative_config.mtp_draft_policy);
+      gemma_options.draft_calibration =
+          models::gemma4::ParseDraftCalibrationScope(
+              speculative_config.mtp_draft_calibration);
+    } catch (const std::invalid_argument& e) {
+      SetError(error, e.what());
+      return false;
+    }
+    auto model =
+        models::gemma4::Model::Load(model_path, gemma_options, &load_error);
     if (model == nullptr) {
       SetError(error, "Failed to create Gemma 4 model: " + load_error);
       return false;
@@ -3765,10 +3773,12 @@ bool InferenceBackend::load(const std::string& model_path, std::string* error,
     }
     if (speculative_config.backend == TextSpeculativeBackend::kMtp &&
         (speculative_config.max_draft_tokens == 0 ||
-         speculative_config.min_draft_tokens != 1)) {
+         speculative_config.min_draft_tokens != 1 ||
+         !speculative_config.mtp_draft_policy.empty() ||
+         !speculative_config.mtp_draft_calibration.empty())) {
       SetError(error,
-               "Flash-Next MTP requires a positive draft limit and "
-               "--min-draft-tokens 1");
+               "Flash-Next MTP requires a positive draft limit, "
+               "--min-draft-tokens 1 and no --draft-policy");
       return false;
     }
     // The compiled Qwen3.8 chat template renders through the artifact's

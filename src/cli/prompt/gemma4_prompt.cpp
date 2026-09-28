@@ -3,6 +3,7 @@
 #include <iostream>
 #include <map>
 #include <memory>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -44,13 +45,20 @@ std::shared_ptr<g4::Model> LoadModel(
     std::cerr << "--speculative mtp requires --mtp-model\n";
     return nullptr;
   }
+  g4::ModelOptions options{.max_context = kDefaultContext,
+                           .mtp_model_path = mtp ? opt.mtp_model_path : "",
+                           .draft_tokens = opt.draft_tokens,
+                           .min_draft_tokens = opt.min_draft_tokens};
+  try {
+    options.draft_policy = g4::ParseDraftPolicy(opt.draft_policy);
+    options.draft_calibration =
+        g4::ParseDraftCalibrationScope(opt.draft_calibration);
+  } catch (const std::invalid_argument& e) {
+    std::cerr << e.what() << '\n';
+    return nullptr;
+  }
   std::string error;
-  auto model = g4::Model::Load(
-      opt.model_path,
-      g4::ModelOptions{.max_context = kDefaultContext,
-                       .mtp_model_path = mtp ? opt.mtp_model_path : "",
-                       .draft_tokens = opt.draft_tokens},
-      &error);
+  auto model = g4::Model::Load(opt.model_path, options, &error);
   if (model == nullptr) {
     std::cerr << "Error loading Gemma 4 model: " << error << '\n';
     std::cerr << "[Model Load]: " << SecondsSince(start) << " s (failed)\n";

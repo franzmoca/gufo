@@ -15,6 +15,7 @@
 
 #include "src/core/sampling.hpp"
 #include "src/models/gemma4/config.hpp"
+#include "src/models/gemma4/draft_policy.hpp"
 #include "src/models/gemma4/tokenizer.hpp"
 #include "src/models/qwen38_flash_next/mtp_sampling.hpp"
 #include "src/models/qwen38_flash_next/prompt_lookup.hpp"
@@ -45,6 +46,12 @@ struct ModelOptions {
   std::string mtp_model_path;
   /// Draft tokens per cycle (at most rocm::kMaxDraftTokens).
   std::uint32_t draft_tokens = 4;
+  /// How many of them a cycle verifies.
+  DraftPolicy draft_policy = DraftPolicy::kCalibrated;
+  /// Drafts every cycle verifies before a policy may stop the chain.
+  std::uint32_t min_draft_tokens = 1;
+  /// Where the calibrated policy learns.
+  DraftCalibrationScope draft_calibration = DraftCalibrationScope::kShared;
 };
 
 class Session;
@@ -129,6 +136,9 @@ public:
   [[nodiscard]] std::uint32_t DraftTokens() const noexcept {
     return options_.draft_tokens;
   }
+  [[nodiscard]] const ModelOptions& options() const noexcept {
+    return options_;
+  }
 
 private:
   Model();
@@ -142,6 +152,9 @@ private:
   std::unique_ptr<rocm::DeviceModel> device_;
   std::unique_ptr<rocm::Executor> executor_;
   std::mutex mutex_;
+  /// Calibrated-policy tables shared by every session ([greedy, sampled]);
+  /// guarded by mutex_.
+  std::array<DraftCalibration, 2> calibration_;
 
   friend class Session;
 };
@@ -270,6 +283,8 @@ private:
     bool sampled{false};
     std::vector<qwen38_flash_next::MtpProposal> proposals;
     std::size_t copied{0};
+    /// Calibrated policy: the signal of each verified MTP draft.
+    std::vector<float> signals;
   };
   bool BeginCycle(Cycle& cycle, std::uint32_t draft_limit,
                   std::string* error_msg);
@@ -289,6 +304,10 @@ private:
   /// cache's frontier hidden.
   std::optional<TokenId> pending_;
   SpeculativeStats stats_;
+  /// Calibrated-policy tables of a request-scoped session ([greedy,
+  /// sampled]), reset by Sync.
+  std::array<DraftCalibration, 2> calibration_;
+  [[nodiscard]] DraftCalibration& Calibration(bool sampled);
 
   friend class Model;
 };

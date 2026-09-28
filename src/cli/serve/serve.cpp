@@ -449,6 +449,7 @@ void PrintServeHelp(std::string_view program_name,
     std::string speculative_backend;
     std::string dflash_model_path;
     std::string draft_policy;
+    std::string draft_calibration;
     std::string dspark_model_path;
     std::string mtp_model_path;
     std::string vision_model_path;
@@ -523,8 +524,14 @@ void PrintServeHelp(std::string_view program_name,
                      &dflash_model_path);
     parser.AddOption(
         "", "--draft-policy", "POLICY",
-        "DFlash2 block length: fixed or adaptive (default: adaptive)",
+        "Draft length: DFlash2 fixed or adaptive (default: adaptive); Gemma 4 "
+        "MTP calibrated, confidence or fixed (default: calibrated)",
         "Speculative", &draft_policy);
+    parser.AddOption(
+        "", "--draft-calibration", "SCOPE",
+        "Gemma 4 calibrated drafting: shared (learned across requests) or "
+        "request (reset per request; exact seeded replay) (default: shared)",
+        "Speculative", &draft_calibration);
     parser.AddOption("", "--dspark-model", "PATH",
                      "Path to DeepSeek V4 Flash DSpark support GGUF file",
                      "Speculative", &dspark_model_path);
@@ -908,6 +915,7 @@ int RunServe(std::span<const char* const> args) {
     std::string speculative_backend;
     std::string dflash_model_path;
     std::string draft_policy;
+    std::string draft_calibration;
     std::string dspark_model_path;
     std::string mtp_model_path;
     std::string vision_model_path;
@@ -974,8 +982,14 @@ int RunServe(std::span<const char* const> args) {
                          &dflash_model_path);
     llm_parser.AddOption(
         "", "--draft-policy", "POLICY",
-        "DFlash2 block length: fixed or adaptive (default: adaptive)",
+        "Draft length: DFlash2 fixed or adaptive (default: adaptive); Gemma 4 "
+        "MTP calibrated, confidence or fixed (default: calibrated)",
         "Speculative", &draft_policy);
+    llm_parser.AddOption(
+        "", "--draft-calibration", "SCOPE",
+        "Gemma 4 calibrated drafting: shared (learned across requests) or "
+        "request (reset per request; exact seeded replay) (default: shared)",
+        "Speculative", &draft_calibration);
     llm_parser.AddOption("", "--dspark-model", "PATH",
                          "Path to DeepSeek V4 Flash DSpark support GGUF file",
                          "Speculative", &dspark_model_path);
@@ -1098,11 +1112,23 @@ int RunServe(std::span<const char* const> args) {
       return 2;
     }
     try {
-      if (!draft_policy.empty() &&
-          speculative_config.backend != server::TextSpeculativeBackend::kDFlash)
-        throw std::invalid_argument("--draft-policy requires DFlash2");
-      speculative_config.dflash_policy =
-          speculative::ParseDFlashDraftPolicy(draft_policy);
+      const bool mtp =
+          speculative_config.backend == server::TextSpeculativeBackend::kMtp;
+      if ((!draft_policy.empty() && !mtp &&
+           speculative_config.backend !=
+               server::TextSpeculativeBackend::kDFlash) ||
+          (!draft_calibration.empty() && !mtp))
+        throw std::invalid_argument(
+            "--draft-policy requires DFlash2 or MTP; --draft-calibration "
+            "requires MTP");
+      if (mtp) {
+        // The MTP model validates its own policy names at load.
+        speculative_config.mtp_draft_policy = draft_policy;
+        speculative_config.mtp_draft_calibration = draft_calibration;
+      } else {
+        speculative_config.dflash_policy =
+            speculative::ParseDFlashDraftPolicy(draft_policy);
+      }
     } catch (const std::invalid_argument& exception) {
       std::cerr << "Error: " << exception.what() << '\n';
       return 2;

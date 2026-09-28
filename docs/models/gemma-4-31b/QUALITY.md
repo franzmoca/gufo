@@ -34,10 +34,14 @@ logits under the request's sampler (q) and accepts it with probability
 min(1, p/q) against the target's filtered distribution p, drawing a rejected
 position from the residual max(0, p − q); emitted tokens follow the target
 distribution exactly (the rule is shared with Flash-Next and unit-tested
-there). A seed replays the same tokens (`gemma4.target`), but they consume
-different random draws than an AR run with the same seed. How many drafts a
-cycle proposes depends only on the drafter's confidences, never on timings,
-so neither greedy equality nor seeded replay depends on it. Prompt-lookup
+there). How many drafts a cycle verifies depends on the drafter's outputs,
+earlier verification outcomes and a fixed cost table, never on timings, so
+greedy equality holds under every `--draft-policy`. With `--draft-calibration
+request`, a seed replays the same tokens (`gemma4.target`), though they consume
+different random draws than an AR run with the same seed; with the default
+shared calibration, what earlier requests taught the policy changes later
+draft counts, so a repeated seed draws a different, equally distributed
+sample. Prompt-lookup
 copies are verified like drafts (sampled: as point-mass proposals under the
 same rule); `gemma4.target` checks greedy equality and seeded replay on a
 prompt that copies a paragraph, with accepted copies.

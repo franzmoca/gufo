@@ -31,9 +31,23 @@ MTP=models/gemma-4-31b/MTP/mtp-gemma-4-31B-it-Q8_0.gguf
 ```
 
 Omit the speculative options for autoregressive decoding. `-d`/`--draft-tokens`
-caps the drafts per cycle (1–7, default 7); each cycle stops drafting once the
-drafter's confidence that all its drafts will be accepted falls below a floor;
-sampled chains use at most four. When the recent context repeats an earlier
+caps the drafts per cycle (1–7, default 7), and `--draft-policy` decides how
+many a cycle verifies:
+
+- `calibrated` (default): a draft is verified while its estimated probability
+  of acceptance is worth one more verification row and drafter step at the
+  current context depth. The estimate maps the drafter's entropy through a
+  table learned from earlier verifications; the costs are fixed gfx1151
+  measurements.
+- `confidence`: drafting stops when the product of the drafter's raw
+  confidences falls below a fixed floor (0.5 greedy; 0.3 sampled, at most four
+  drafts); the previous default, tuned on the UD-Q4_K_XL drafter.
+- `fixed`: always draft up to `--draft-tokens`.
+
+`--min-draft-tokens` drafts that many before a policy may stop. The calibrated
+policy learns across requests by default; `--draft-calibration request`
+restarts it with every request, so a seeded sampled request replays exactly.
+When the recent context repeats an earlier
 passage of at least 12 tokens (a rewritten file, a quoted log), the tokens that
 followed it fill the remaining draft slots and are verified like drafts (prompt
 lookup, shared with gufo-org/gufo#295). `--sessions N` serves up to N concurrent requests; up to eight

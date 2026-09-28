@@ -198,8 +198,14 @@ void RegisterBenchOptions(ArgParser& parser, BenchOptions& opt,
                    &opt.dflash_model_path);
   parser.AddOption(
       "", "--draft-policy", "POLICY",
-      "DFlash2 block length: fixed or adaptive (default: adaptive)",
+      "Draft length: DFlash2 fixed or adaptive (default: adaptive); Gemma 4 "
+      "MTP calibrated, confidence or fixed (default: calibrated)",
       "Speculative", &opt.draft_policy);
+  parser.AddOption(
+      "", "--draft-calibration", "SCOPE",
+      "Gemma 4 calibrated drafting: shared (learned across requests) or "
+      "request (reset per request; exact seeded replay) (default: shared)",
+      "Speculative", &opt.draft_calibration);
   parser.AddOption("", "--dspark-model", "PATH",
                    "DeepSeek V4 Flash DSpark support GGUF", "Speculative",
                    &opt.dspark_model_path);
@@ -916,8 +922,10 @@ int RunQwen38FlashNextBenchmark(
                  "benchmark for concurrent requests\n";
     return 1;
   }
-  if (mtp && options.min_draft_tokens != 1) {
-    std::cerr << "Error: Flash-Next MTP requires --min-draft-tokens 1\n";
+  if (mtp && (options.min_draft_tokens != 1 || !options.draft_policy.empty() ||
+              !options.draft_calibration.empty())) {
+    std::cerr << "Error: Flash-Next MTP requires --min-draft-tokens 1 and no "
+                 "--draft-policy\n";
     return 1;
   }
   if (required_context > std::numeric_limits<std::uint32_t>::max()) {
@@ -1213,11 +1221,15 @@ std::optional<BenchOptions> ParseBenchOptions(std::span<const char* const> args,
       *error_msg = error.what();
     return std::nullopt;
   }
-  if (!opt.draft_policy.empty() &&
-      ((opt.draft_policy != "fixed" && opt.draft_policy != "adaptive") ||
-       opt.speculative_backend != "dflash2")) {
+  // MTP models validate their own policy names.
+  if ((!opt.draft_policy.empty() && opt.speculative_backend != "mtp" &&
+       (opt.speculative_backend != "dflash2" ||
+        (opt.draft_policy != "fixed" && opt.draft_policy != "adaptive"))) ||
+      (!opt.draft_calibration.empty() && opt.speculative_backend != "mtp")) {
     if (error_msg != nullptr)
-      *error_msg = "--draft-policy requires DFlash2 and fixed or adaptive";
+      *error_msg =
+          "--draft-policy requires DFlash2 (fixed or adaptive) or MTP; "
+          "--draft-calibration requires MTP";
     return std::nullopt;
   }
   if (opt.min_draft_tokens != 1 && opt.speculative_backend == "dflash2") {
@@ -1264,14 +1276,21 @@ int RunGemma4Benchmark(const BenchOptions& options,
     std::cerr << "Error: Gemma 4 benchmark context is out of range\n";
     return 1;
   }
+  g4::ModelOptions model_options{
+      .max_context = static_cast<std::uint32_t>(required_context),
+      .mtp_model_path = mtp ? options.mtp_model_path : "",
+      .draft_tokens = options.draft_tokens,
+      .min_draft_tokens = options.min_draft_tokens};
+  try {
+    model_options.draft_policy = g4::ParseDraftPolicy(options.draft_policy);
+    model_options.draft_calibration =
+        g4::ParseDraftCalibrationScope(options.draft_calibration);
+  } catch (const std::invalid_argument& e) {
+    std::cerr << "Error: " << e.what() << '\n';
+    return 1;
+  }
   std::string error;
-  auto model = g4::Model::Load(
-      options.model_path,
-      g4::ModelOptions{
-          .max_context = static_cast<std::uint32_t>(required_context),
-          .mtp_model_path = mtp ? options.mtp_model_path : "",
-          .draft_tokens = options.draft_tokens},
-      &error);
+  auto model = g4::Model::Load(options.model_path, model_options, &error);
   if (model == nullptr) {
     std::cerr << "Error creating Gemma 4 model: " << error << '\n';
     PrintModelLoadTime(model_load_start, false);

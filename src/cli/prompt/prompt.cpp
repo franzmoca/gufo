@@ -162,8 +162,14 @@ static void RegisterTextOptions(ArgParser& parser, PromptOptions& opt,
                    &opt.dflash_model_path);
   parser.AddOption(
       "", "--draft-policy", "POLICY",
-      "DFlash2 block length: fixed or adaptive (default: adaptive)",
+      "Draft length: DFlash2 fixed or adaptive (default: adaptive); Gemma 4 "
+      "MTP calibrated, confidence or fixed (default: calibrated)",
       "Speculative", &opt.draft_policy);
+  parser.AddOption(
+      "", "--draft-calibration", "SCOPE",
+      "Gemma 4 calibrated drafting: shared (learned across requests) or "
+      "request (reset per request; exact seeded replay) (default: shared)",
+      "Speculative", &opt.draft_calibration);
   parser.AddOption("", "--dspark-model", "PATH",
                    "Path to the DeepSeek V4 Flash DSpark support GGUF file",
                    "Speculative", &opt.dspark_model_path);
@@ -637,9 +643,11 @@ std::shared_ptr<models::qwen38_flash_next::Model> LoadFlashNextModel(
   std::string error;
   if (opt.force_cpu ||
       (!opt.speculative_backend.empty() && opt.speculative_backend != "mtp") ||
-      (opt.speculative_backend == "mtp" && opt.min_draft_tokens != 1)) {
+      (opt.speculative_backend == "mtp" &&
+       (opt.min_draft_tokens != 1 || !opt.draft_policy.empty() ||
+        !opt.draft_calibration.empty()))) {
     std::cerr << "Flash-Next requires ROCm and supports MTP with "
-                 "--min-draft-tokens 1\n";
+                 "--min-draft-tokens 1 and no --draft-policy\n";
     return nullptr;
   }
   if (opt.use_chat_template &&
@@ -889,11 +897,15 @@ static std::optional<PromptOptions> ParseTextOptions(
     }
     return std::nullopt;
   }
-  if (!opt.draft_policy.empty() &&
-      ((opt.draft_policy != "fixed" && opt.draft_policy != "adaptive") ||
-       opt.speculative_backend != "dflash2")) {
+  // MTP models validate their own policy names.
+  if ((!opt.draft_policy.empty() && backend != "mtp" &&
+       (backend != "dflash2" ||
+        (opt.draft_policy != "fixed" && opt.draft_policy != "adaptive"))) ||
+      (!opt.draft_calibration.empty() && backend != "mtp")) {
     if (error_msg != nullptr)
-      *error_msg = "--draft-policy requires DFlash2 and fixed or adaptive";
+      *error_msg =
+          "--draft-policy requires DFlash2 (fixed or adaptive) or MTP; "
+          "--draft-calibration requires MTP";
     return std::nullopt;
   }
   if (opt.min_draft_tokens != 1 && backend == "dflash2") {

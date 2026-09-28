@@ -53,6 +53,10 @@ struct TextSpeculativeConfig {
   std::uint32_t min_draft_tokens{1};
   speculative::DFlashDraftPolicy dflash_policy{
       speculative::DFlashDraftPolicy::kAdaptive};
+  /// MTP draft-length policy and calibration scope names (Gemma 4); empty
+  /// selects the model's defaults.
+  std::string mtp_draft_policy;
+  std::string mtp_draft_calibration;
 };
 
 struct TextDiskCacheConfig {

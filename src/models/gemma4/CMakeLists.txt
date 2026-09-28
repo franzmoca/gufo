@@ -3,6 +3,7 @@
 add_library(gufo_gemma4 STATIC
   chat_template.cpp
   config.cpp
+  draft_policy.cpp
   tokenizer.cpp
   tool_syntax.cpp
   vision/prompt.cpp

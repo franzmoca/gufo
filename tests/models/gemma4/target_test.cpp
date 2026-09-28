@@ -343,6 +343,10 @@ int main() {
     model.reset();
     options.mtp_model_path = draft;
     options.draft_tokens = 4;
+    // Seeded sampled replay is exact when the calibrated policy restarts its
+    // calibration with every request; the shared default learns across
+    // requests, which changes later draft counts and so their random draws.
+    options.draft_calibration = g4::DraftCalibrationScope::kRequest;
     auto mtp = g4::Model::Load(path, options, &error);
     Require(mtp != nullptr, error);
     // With a drafter, verification rows round exactly like decode...
