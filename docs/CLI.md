@@ -95,7 +95,7 @@ seed. Speed depends on acceptance and verification cost.
 
 - `speculative` — `dflash2` for Qwen3.8-27B, `dspark` for DeepSeek V4 Flash,
   `mtp` for models with a supported MTP head or drafter (Flash-Next, Gemma 4
-  31B), or `off`. HTTP serving supports `dflash2`, `dspark`, and Flash-Next
+  31B and 26B-A4B), or `off`. HTTP serving supports `dflash2`, `dspark`, and Flash-Next
   and Gemma 4 `mtp`.
 - `dflashModel` — path to the DFlash2 companion draft.
 - `dsparkModel` — path to the DSpark support GGUF.

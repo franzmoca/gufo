@@ -144,7 +144,7 @@ correction; greedy verification follows target argmax. Draft and verification
 work can batch across ready requests. See the
 [Flash-Next benchmark and quality contract](models/qwen3.8-flash-next/BENCHMARKS.md).
 
-Gemma 4 31B decodes up to eight sessions in one forward. Its snapshots hold
+Gemma 4 31B and 26B-A4B decode up to eight sessions in one forward. Its snapshots hold
 every global-layer row plus the live sliding-window rows, so RAM and
 `--cache-disk` reuse work as above; a changed history re-prefills from the
 latest retained checkpoint before the change. With `--speculative mtp`, the
