@@ -13,14 +13,29 @@ namespace {
 // measured 2026-09-28 by timing drafter chains and verification forwards at
 // each depth. Only cost ratios steer the decision.
 constexpr std::array<std::uint32_t, 5> kDepths = {0, 4096, 16384, 32768, 65536};
+using VerifyTable = std::array<std::array<float, 8>, 5>;
 constexpr std::array<float, 5> kDraftStepMs = {1.95F, 2.05F, 2.40F, 2.82F,
                                                3.66F};
-constexpr std::array<std::array<float, 8>, 5> kVerifyMs = {{
+constexpr VerifyTable kVerifyMs = {{
     {90.6F, 90.6F, 92.7F, 94.3F, 97.4F, 101.4F, 106.6F, 115.1F},
     {92.7F, 93.2F, 95.3F, 96.9F, 100.7F, 105.2F, 109.5F, 119.2F},
     {96.0F, 97.5F, 99.8F, 102.1F, 107.2F, 113.4F, 121.1F, 131.5F},
     {100.2F, 103.8F, 106.4F, 109.5F, 116.2F, 123.5F, 133.1F, 144.8F},
     {108.7F, 117.0F, 120.8F, 124.9F, 134.9F, 144.7F, 159.1F, 173.6F},
+}};
+
+// The 26B-A4B (UD-Q4_K_XL target, Unsloth Q8_0 drafter), measured
+// 2026-09-28 the same way: every verified row adds the experts it routes
+// to, so verification grows several times faster per row than on the dense
+// family.
+constexpr std::array<float, 5> kExpertDraftStepMs = {1.81F, 2.03F, 2.25F, 2.51F,
+                                                     3.04F};
+constexpr VerifyTable kExpertVerifyMs = {{
+    {18.3F, 20.0F, 22.9F, 24.8F, 26.8F, 28.4F, 29.9F, 30.7F},
+    {19.7F, 22.7F, 25.3F, 27.0F, 28.6F, 30.6F, 32.1F, 33.5F},
+    {20.7F, 23.8F, 25.7F, 27.0F, 29.2F, 31.4F, 33.3F, 34.7F},
+    {21.7F, 25.2F, 27.1F, 28.7F, 31.1F, 33.4F, 35.7F, 37.2F},
+    {23.5F, 27.9F, 31.3F, 33.2F, 36.3F, 39.2F, 42.7F, 45.1F},
 }};
 
 }  // namespace
@@ -88,7 +103,9 @@ float DraftSignal(
   return static_cast<float>(std::clamp(signal, 0.0, 1.0));
 }
 
-DraftCosts DraftCostsAt(std::uint32_t context) noexcept {
+DraftCosts DraftCostsAt(std::uint32_t context, bool experts) noexcept {
+  const auto& draft_step = experts ? kExpertDraftStepMs : kDraftStepMs;
+  const auto& verify = experts ? kExpertVerifyMs : kVerifyMs;
   // Linear between measured depths; past the deepest one, the last
   // interval's slope continues.
   std::size_t hi = 1;
@@ -102,12 +119,12 @@ DraftCosts DraftCostsAt(std::uint32_t context) noexcept {
     return std::max(a, a + t * (b - a));
   };
   DraftCosts costs;
-  const float step = lerp(kDraftStepMs[lo], kDraftStepMs[hi]);
+  const float step = lerp(draft_step[lo], draft_step[hi]);
   for (std::size_t n = 0; n < costs.draft.size(); ++n) {
     costs.draft[n] = step * static_cast<float>(n);
   }
   for (std::size_t r = 1; r <= kVerifyMs[0].size(); ++r) {
-    costs.verify[r] = lerp(kVerifyMs[lo][r - 1], kVerifyMs[hi][r - 1]);
+    costs.verify[r] = lerp(verify[lo][r - 1], verify[hi][r - 1]);
   }
   // Rows past eight (never verified per session today) keep the last slope.
   const std::size_t last = kVerifyMs[0].size();

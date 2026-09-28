@@ -48,12 +48,14 @@ enum class DraftCalibrationScope : std::uint8_t {
     const qwen38_flash_next::MtpCandidateLogits& candidates) noexcept;
 
 /// gfx1151 costs of one cycle in milliseconds at a context depth:
-/// `draft[n]` for n drafter steps and `verify[r]` for r verified rows.
+/// `draft[n]` for n drafter steps and `verify[r]` for r verified rows, for
+/// the dense 31B family or the mixture-of-experts 26B-A4B (`experts`).
 struct DraftCosts {
   std::array<float, 9> draft{};
   std::array<float, 10> verify{};
 };
-[[nodiscard]] DraftCosts DraftCostsAt(std::uint32_t context) noexcept;
+[[nodiscard]] DraftCosts DraftCostsAt(std::uint32_t context,
+                                      bool experts = false) noexcept;
 
 /// Signal to acceptance probability, learned from verification: accepted
 /// drafts and the first rejected one. Each bin starts at its midpoint with

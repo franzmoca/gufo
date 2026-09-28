@@ -575,7 +575,8 @@ bool Session::BeginCycle(Cycle& cycle, std::uint32_t draft_limit,
       return count != 0;
     };
     float chain = 1.0F;
-    const DraftCosts costs = DraftCostsAt(position);
+    const DraftCosts costs =
+        DraftCostsAt(position, model_->config().HasExperts());
     CalibratedChain calibrated(Calibration(cycle.sampled), costs,
                                options.min_draft_tokens, steps);
     // Whether the draft just proposed ends the chain unverified. `kept`
