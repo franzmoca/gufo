@@ -4,6 +4,7 @@
 //
 //   gemma4_vision_generate_probe --model GGUF --mmproj GGUF --image FILE
 //       [--question TEXT] [--tokens N] [--out-dir DIR] [--continuation I32]
+//       [--image-tokens N] [--embeddings G4VE]
 // --continuation teacher-forces a previous run's tokens.i32 instead of
 // generating (its prompt must match). --embeddings replaces the first
 // image's encoder output with a G4VE file (e.g. vision::Reference's).
@@ -43,6 +44,7 @@ void Run(int argc, char** argv) {
       embeddings_path;
   std::string question = "Describe this image in detail.";
   std::size_t count = 64;
+  std::uint32_t image_tokens = vision::kDefaultSoftTokens;
   for (int i = 1; i + 1 < argc; i += 2) {
     const std::string arg = argv[i];
     if (arg == "--model")
@@ -61,6 +63,8 @@ void Run(int argc, char** argv) {
       continuation = argv[i + 1];
     else if (arg == "--embeddings")
       embeddings_path = argv[i + 1];
+    else if (arg == "--image-tokens")
+      image_tokens = static_cast<std::uint32_t>(std::stoul(argv[i + 1]));
     else
       throw std::runtime_error("unknown option " + arg);
   }
@@ -79,8 +83,9 @@ void Run(int argc, char** argv) {
   messages[0].images.push_back(
       {0, std::make_shared<const std::vector<std::uint8_t>>(
               gufo::core::ReadImageFile(image_path))});
-  const auto prompt = vision::Prepare(model->tokenizer(), messages, {}, {},
-                                      encoder.identity(), options.max_context);
+  const auto prompt =
+      vision::Prepare(model->tokenizer(), messages, {}, {}, encoder.identity(),
+                      options.max_context, image_tokens);
   std::vector<std::shared_ptr<const vision::Encoder::Embedding>> embeddings;
   std::vector<g4::ImageSpan> spans;
   for (const auto& image : prompt.images) {

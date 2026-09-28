@@ -87,7 +87,8 @@ public:
             TextSchedulerPolicy scheduler_policy = {},
             const TextSpeculativeConfig& speculative_config = {},
             const TextDiskCacheConfig& disk_cache_config = {},
-            const std::string& vision_model_path = {});
+            const std::string& vision_model_path = {},
+            std::uint32_t image_tokens = 0);
 
 #if defined(ENGINE_ENABLE_HIP)
   /// Installs a previously loaded model without duplicating mapped weights.
@@ -120,14 +121,16 @@ public:
 
   /// Installs a previously loaded Gemma 4 model with request-owned sessions
   /// and host/disk continuation snapshots.
-  /// `vision`, when set, accepts image input.
+  /// `vision`, when set, accepts image input of `image_tokens` soft tokens
+  /// per image (0: the processor default).
   bool load(std::shared_ptr<models::gemma4::Model> model, std::string* error,
             std::uint32_t max_context = 0, std::size_t session_count = 1,
             TextPrefillPolicy prefill_policy = {},
             TextSchedulerPolicy scheduler_policy = {},
             TextSpeculativeConfig speculative_config = {},
             TextDiskCacheConfig disk_cache_config = {},
-            std::shared_ptr<models::gemma4::vision::Encoder> vision = {});
+            std::shared_ptr<models::gemma4::vision::Encoder> vision = {},
+            std::uint32_t image_tokens = 0);
 #endif
 
   /// Stable model identifier used in API responses.

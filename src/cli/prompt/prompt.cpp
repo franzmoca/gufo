@@ -62,6 +62,10 @@ static void RegisterImageOptions(ArgParser& parser, PromptOptions& opt) {
                    "BF16 vision sidecar for Qwen3.8 or Gemma 4 "
                    "(auto-discovered beside model)",
                    "Model", &opt.vision_model_path);
+  parser.AddOption("", "--image-tokens", "N",
+                   "Gemma 4 soft tokens per image: 70, 140, 280, 560 or 1120 "
+                   "(default: 280)",
+                   "Prompt", &opt.image_tokens);
   parser.AddCustomOption(
       "", "--image", "PATH",
       "PNG/JPEG attached before text in the first user turn; repeat for "
@@ -995,6 +999,10 @@ int RunPrompt(std::span<const char* const> args) {
   if (IsGemma4(*reader)) {
     return RunGemma4Prompt(opt, model_load_start);
   }
+  if (opt.image_tokens != 0) {
+    std::cerr << "--image-tokens applies to Gemma 4 models\n";
+    return 2;
+  }
   if (IsDeepSeekV4Flash(*reader)) {
     if (!opt.image_paths.empty() || !opt.vision_model_path.empty()) {
       std::cerr << "DeepSeek does not support image input\n";
@@ -1211,6 +1219,10 @@ int RunChat(std::span<const char* const> args) {
 #if defined(ENGINE_ENABLE_HIP)
   if (IsGemma4(*reader)) {
     return RunGemma4Chat(opt, model_load_start);
+  }
+  if (opt.image_tokens != 0) {
+    std::cerr << "--image-tokens applies to Gemma 4 models\n";
+    return 2;
   }
   if (IsDeepSeekV4Flash(*reader)) {
     if (!opt.image_paths.empty() || !opt.vision_model_path.empty()) {

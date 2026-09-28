@@ -20,6 +20,18 @@ inline constexpr std::uint32_t kPoolSize = 3;
 inline constexpr std::uint32_t kSideMultiple = kPatchSize * kPoolSize;
 /// Gemma4ImageProcessor's default `max_soft_tokens`.
 inline constexpr std::uint32_t kDefaultSoftTokens = 280;
+/// The soft-token budgets the checkpoint supports (model card, "variable
+/// image resolution"): more tokens keep more detail at a higher cost.
+inline constexpr std::array<std::uint32_t, 5> kSoftTokenBudgets = {70, 140, 280,
+                                                                   560, 1120};
+[[nodiscard]] constexpr bool IsSoftTokenBudget(std::uint32_t tokens) {
+  for (const auto budget : kSoftTokenBudgets) {
+    if (budget == tokens) {
+      return true;
+    }
+  }
+  return false;
+}
 
 struct ImageSize {
   std::uint32_t width{0};

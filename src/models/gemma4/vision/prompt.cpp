@@ -93,6 +93,10 @@ Prompt Prepare(const Tokenizer& tokenizer,
                std::span<const tokenization::ChatTool> tools,
                const ChatOptions& options, std::string_view encoder_identity,
                std::uint32_t max_context, std::uint32_t soft_tokens) {
+  if (!IsSoftTokenBudget(soft_tokens)) {
+    throw std::invalid_argument(
+        "Gemma 4 image budget must be 70, 140, 280, 560 or 1120 tokens");
+  }
   const bool has_images = std::ranges::any_of(
       messages, [](const auto& m) { return !m.images.empty(); });
   if (has_images && encoder_identity.empty()) {

@@ -30,6 +30,11 @@ std::shared_ptr<g4::Model> LoadModel(
     std::cerr << "Gemma 4 is supported only by the ROCm backend\n";
     return nullptr;
   }
+  if (opt.image_tokens != 0 &&
+      !g4::vision::IsSoftTokenBudget(opt.image_tokens)) {
+    std::cerr << "--image-tokens must be 70, 140, 280, 560 or 1120\n";
+    return nullptr;
+  }
   const bool mtp = opt.speculative_backend == "mtp";
   if (!opt.speculative_backend.empty() && !mtp) {
     std::cerr << "Gemma 4 supports only --speculative mtp\n";
@@ -86,12 +91,15 @@ struct Prompt {
   std::shared_ptr<const g4::vision::Prompt> vision;
 };
 
-Prompt RenderPrompt(const g4::Model& model, g4::vision::Encoder* encoder,
+Prompt RenderPrompt(const PromptOptions& opt, const g4::Model& model,
+                    g4::vision::Encoder* encoder,
                     std::span<const tokenization::ChatMessage> history,
                     const g4::ChatOptions& options) {
   auto vision = std::make_shared<const g4::vision::Prompt>(g4::vision::Prepare(
       model.tokenizer(), history, {}, options,
-      encoder != nullptr ? encoder->identity() : "", model.MaxContext()));
+      encoder != nullptr ? encoder->identity() : "", model.MaxContext(),
+      opt.image_tokens != 0 ? opt.image_tokens
+                            : g4::vision::kDefaultSoftTokens));
   Prompt prompt{vision->tokens, {}, vision};
   for (const auto& image : vision->images) {
     prompt.spans.push_back(
@@ -214,7 +222,7 @@ int RunGemma4Prompt(const PromptOptions& opt,
       messages.emplace_back(tokenization::ChatRole::kUser, opt.prompt_text);
       AttachImages(opt, messages.back());
       prompt =
-          RenderPrompt(*model, encoder.get(), messages,
+          RenderPrompt(opt, *model, encoder.get(), messages,
                        g4::ResolveChatOptions(PromptReasoningOptions(opt)));
     } else if (!opt.image_paths.empty()) {
       throw std::invalid_argument("--image requires chat framing");
@@ -275,7 +283,7 @@ int RunGemma4Chat(const PromptOptions& opt,
     }
     Prompt prompt;
     try {
-      prompt = RenderPrompt(*model, encoder.get(), history, chat_options);
+      prompt = RenderPrompt(opt, *model, encoder.get(), history, chat_options);
     } catch (const std::exception& e) {
       std::cerr << "Gemma 4 chat template failed: " << e.what() << '\n';
       return 1;

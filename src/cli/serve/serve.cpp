@@ -452,6 +452,7 @@ void PrintServeHelp(std::string_view program_name,
     std::string dspark_model_path;
     std::string mtp_model_path;
     std::string vision_model_path;
+    std::uint32_t image_tokens = 0;
     std::size_t draft_tokens = 7;
     std::size_t min_draft_tokens = 1;
     std::size_t prefill_chunk_tokens =
@@ -481,6 +482,10 @@ void PrintServeHelp(std::string_view program_name,
                      "BF16 vision sidecar for Qwen3.8 or Gemma 4 "
                      "(auto-discovered beside model)",
                      "Model", &vision_model_path);
+    parser.AddOption("", "--image-tokens", "N",
+                     "Gemma 4 soft tokens per image: 70, 140, 280, 560 or "
+                     "1120 (default: 280)",
+                     "Model", &image_tokens);
     parser.AddOption("", "--served-model-name", "ID",
                      "Model identifier exposed by the OpenAI API", "Model",
                      &served_model_name);
@@ -906,6 +911,7 @@ int RunServe(std::span<const char* const> args) {
     std::string dspark_model_path;
     std::string mtp_model_path;
     std::string vision_model_path;
+    std::uint32_t image_tokens = 0;
     std::size_t draft_tokens = 7;
     std::size_t min_draft_tokens = 1;
     std::size_t prefill_chunk_tokens =
@@ -933,6 +939,10 @@ int RunServe(std::span<const char* const> args) {
                          "BF16 vision sidecar for Qwen3.8 or Gemma 4 "
                          "(auto-discovered beside model)",
                          "Model", &vision_model_path);
+    llm_parser.AddOption("", "--image-tokens", "N",
+                         "Gemma 4 soft tokens per image: 70, 140, 280, 560 or "
+                         "1120 (default: 280)",
+                         "Model", &image_tokens);
     llm_parser.AddOption("", "--served-model-name", "ID",
                          "Model identifier exposed by the OpenAI API", "Model",
                          &served_model_name);
@@ -1146,7 +1156,7 @@ int RunServe(std::span<const char* const> args) {
                            .staging_capacity_bytes = cache_disk_staging_bytes,
                            .model_artifact_fingerprint = {},
                        },
-                       vision_model_path)) {
+                       vision_model_path, image_tokens)) {
       std::cerr << "Error loading model '" << model << "': " << err << "\n";
       return 1;
     }

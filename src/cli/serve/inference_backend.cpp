@@ -2986,13 +2986,15 @@ const Gemma4TextRunnerState& RequireGemma4State(const TextRunnerState& state) {
 
 class Gemma4TextRunner final : public TextModelRunner {
 public:
-  Gemma4TextRunner(std::shared_ptr<Gemma4Model> model,
-                   std::uint32_t max_context, std::uint32_t ring,
-                   std::string artifact_fingerprint = {},
-                   std::string mtp_fingerprint = {},
-                   std::shared_ptr<models::gemma4::vision::Encoder> vision = {})
+  Gemma4TextRunner(
+      std::shared_ptr<Gemma4Model> model, std::uint32_t max_context,
+      std::uint32_t ring, std::string artifact_fingerprint = {},
+      std::string mtp_fingerprint = {},
+      std::shared_ptr<models::gemma4::vision::Encoder> vision = {},
+      std::uint32_t image_tokens = models::gemma4::vision::kDefaultSoftTokens)
       : model_(std::move(model)),
         vision_(std::move(vision)),
+        image_tokens_(image_tokens),
         max_context_(max_context) {
     if (!artifact_fingerprint.empty()) {
       persistence_ = TextRunnerPersistenceDescriptor{
@@ -3107,7 +3109,8 @@ public:
     auto prompt = std::make_shared<const models::gemma4::vision::Prompt>(
         models::gemma4::vision::Prepare(model_->tokenizer(), request.messages,
                                         Tools(request), ChatOptions(request),
-                                        vision_->identity(), max_context_));
+                                        vision_->identity(), max_context_,
+                                        image_tokens_));
     auto context = std::make_shared<Gemma4ImageContext>();
     context->cache_identity = prompt->cache_identity;
     for (const auto& image : prompt->images) {
@@ -3487,6 +3490,7 @@ private:
 
   std::shared_ptr<Gemma4Model> model_;
   std::shared_ptr<models::gemma4::vision::Encoder> vision_;
+  std::uint32_t image_tokens_;
   std::uint32_t max_context_;
   std::optional<TextRunnerPersistenceDescriptor> persistence_;
 };
@@ -3597,7 +3601,8 @@ bool InferenceBackend::load(const std::string& model_path, std::string* error,
                             TextSchedulerPolicy scheduler_policy,
                             const TextSpeculativeConfig& speculative_config,
                             const TextDiskCacheConfig& disk_cache_config,
-                            const std::string& vision_model_path) {
+                            const std::string& vision_model_path,
+                            std::uint32_t image_tokens) {
 #if defined(ENGINE_ENABLE_HIP)
   TextDiskCacheConfig resolved_disk_cache_config = disk_cache_config;
   std::string load_error;
@@ -3607,6 +3612,16 @@ bool InferenceBackend::load(const std::string& model_path, std::string* error,
     return false;
   }
   const std::shared_ptr<const core::GgufReader> reader(std::move(reader_owner));
+  if (image_tokens != 0 &&
+      reader->GetMetadataString("general.architecture") != "gemma4") {
+    SetError(error, "--image-tokens applies to Gemma 4 models");
+    return false;
+  }
+  if (image_tokens != 0 &&
+      !models::gemma4::vision::IsSoftTokenBudget(image_tokens)) {
+    SetError(error, "--image-tokens must be 70, 140, 280, 560 or 1120");
+    return false;
+  }
   if (max_context == 0) {
     const auto architecture =
         reader->GetMetadataString("general.architecture").value_or("");
@@ -3731,7 +3746,8 @@ bool InferenceBackend::load(const std::string& model_path, std::string* error,
     }
     return load(std::move(model), error, max_context, session_count,
                 prefill_policy, scheduler_policy, speculative_config,
-                std::move(resolved_disk_cache_config), std::move(vision));
+                std::move(resolved_disk_cache_config), std::move(vision),
+                image_tokens);
   }
   if (reader->GetMetadataString("general.architecture") == "qwen4exp") {
     if (speculative_config.backend != TextSpeculativeBackend::kDisabled &&
@@ -3843,6 +3859,7 @@ bool InferenceBackend::load(const std::string& model_path, std::string* error,
   (void)speculative_config;
   (void)disk_cache_config;
   (void)vision_model_path;
+  (void)image_tokens;
   SetError(error, "HTTP inference requires the HIP backend");
   return false;
 #endif
@@ -4157,9 +4174,16 @@ bool InferenceBackend::load(
     TextPrefillPolicy prefill_policy, TextSchedulerPolicy scheduler_policy,
     TextSpeculativeConfig speculative_config,
     TextDiskCacheConfig disk_cache_config,
-    std::shared_ptr<models::gemma4::vision::Encoder> vision) {
+    std::shared_ptr<models::gemma4::vision::Encoder> vision,
+    std::uint32_t image_tokens) {
   if (model == nullptr) {
     SetError(error, "Gemma 4 model must not be null");
+    return false;
+  }
+  if (image_tokens == 0)
+    image_tokens = models::gemma4::vision::kDefaultSoftTokens;
+  if (!models::gemma4::vision::IsSoftTokenBudget(image_tokens)) {
+    SetError(error, "--image-tokens must be 70, 140, 280, 560 or 1120");
     return false;
   }
   if (max_context == 0)
@@ -4189,7 +4213,8 @@ bool InferenceBackend::load(
     auto runner = std::make_shared<Gemma4TextRunner>(
         std::move(model), max_context, ring,
         disk_cache_config.model_artifact_fingerprint,
-        disk_cache_config.draft_model_artifact_fingerprint, std::move(vision));
+        disk_cache_config.draft_model_artifact_fingerprint, std::move(vision),
+        image_tokens);
     new_state->model_id = runner->Descriptor().model_id;
     new_state->max_context = max_context;
     std::optional<TextRunnerDiskCacheOptions> runner_disk_cache;

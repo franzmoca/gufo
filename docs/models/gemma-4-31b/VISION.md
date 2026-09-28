@@ -71,9 +71,10 @@ No tensor has a bias, and this checkpoint has no clamp scalars
 
 ## Decisions
 
-- **Budget:** follow the HF processor, filling a 280-token budget up or down.
-  llama.cpp can spend up to 4× more tokens on large images; a budget option is
-  deferred until a request needs it.
+- **Budget:** follow the HF processor, filling the budget up or down.
+  `--image-tokens` (serve, prompt, chat) selects one of the checkpoint's
+  budgets (70, 140, 280, 560, 1120; default 280, the processor's). The budget
+  is part of every image identity, so cached prefixes never mix budgets.
 - **Resampler:** move Qwen's PIL-exact fixed-point bicubic resampler to
   `src/core/image` so both models share it. Qwen output stays bit-identical.
 - **Code placement:** the Gemma encoder lives in `src/models/gemma4/vision/`. It

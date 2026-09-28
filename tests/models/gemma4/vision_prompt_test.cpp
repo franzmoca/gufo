@@ -159,6 +159,21 @@ void CheckPrompt() {
   }
   Require(rejected, "image beyond the context accepted");
 
+  // The largest budget keeps more detail; others are rejected.
+  const auto large =
+      vision::Prepare(*tokenizer, messages, {}, {}, "encoder", 4096, 1120);
+  Require(large.images[0].span.rows == 1089 &&
+              large.images[0].pixels.width == 1584 &&
+              large.cache_identity != prompt.cache_identity,
+          "a 1120-token budget must give 33x33 soft tokens");
+  rejected = false;
+  try {
+    (void)vision::Prepare(*tokenizer, messages, {}, {}, "encoder", 4096, 100);
+  } catch (const std::invalid_argument&) {
+    rejected = true;
+  }
+  Require(rejected, "unsupported image budget accepted");
+
   const auto text = vision::Prepare(
       *tokenizer, std::vector<ChatMessage>{{ChatRole::kUser, "ab"}}, {}, {}, "",
       4096);
