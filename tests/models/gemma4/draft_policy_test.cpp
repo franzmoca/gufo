@@ -148,6 +148,50 @@ void CheckChain() {
   }
 }
 
+/// In a batch the other sessions' rows make each extra row dearer and their
+/// tokens raise the rate a draft must match: a chain that goes on alone stops
+/// beside seven sessions on the expert model's costs.
+void CheckBatch() {
+  const g4::DraftCosts costs = g4::DraftCostsAt(0, true);
+  // Every signal accepted three times in five.
+  g4::DraftCalibration likely;
+  for (int i = 0; i < 10000; ++i) {
+    likely.Observe(0.9F, i % 5 < 3);
+  }
+  g4::CalibratedChain alone(likely, costs, 1, 7);
+  Require(alone.Include(0.9F) && alone.Include(0.9F),
+          "a likely chain stopped alone");
+  Require(std::fabs(alone.Expected() - (1.0F + 0.6F + 0.36F)) < 1e-2F &&
+              std::fabs(alone.DraftMs() - costs.draft[2]) < 1e-5F,
+          "chain expectation and drafter time");
+  // Beside three sessions (a C4 batch) the second draft no longer pays.
+  g4::CalibratedChain batched(likely, costs, 1, 7,
+                              g4::DraftBatch{.rows = 3, .expected = 3.0F});
+  Require(batched.Include(0.9F), "a likely first draft was dropped");
+  Require(!batched.Include(0.9F), "a batched chain ignored its peers");
+  // Beside seven sessions a doubtful first draft is not verified at all.
+  g4::DraftCalibration doubtful;
+  for (int i = 0; i < 10000; ++i) {
+    doubtful.Observe(0.9F, i % 10 == 0);
+  }
+  g4::CalibratedChain lone(doubtful, costs, 1, 7);
+  Require(lone.Include(0.9F), "a lone cycle skipped its first draft");
+  g4::CalibratedChain crowded(doubtful, costs, 1, 7,
+                              g4::DraftBatch{.rows = 7, .expected = 7.0F});
+  Require(!crowded.Include(0.9F), "a doubtful batched draft was verified");
+  // Beside ten rows even a certain draft cannot pay for its row; beside one
+  // it can, and a lone cycle always drafts.
+  Require(!g4::CalibratedChain(doubtful, costs, 1, 1,
+                               g4::DraftBatch{.rows = 10, .expected = 10.0F})
+               .FirstDraftCanPay(),
+          "an unpayable draft would run the drafter");
+  Require(g4::CalibratedChain(doubtful, costs, 1, 7,
+                              g4::DraftBatch{.rows = 1, .expected = 1.0F})
+                  .FirstDraftCanPay() &&
+              lone.FirstDraftCanPay(),
+          "a payable draft was skipped");
+}
+
 }  // namespace
 
 int main() {
@@ -157,5 +201,6 @@ int main() {
     CheckCalibration();
     CheckCosts();
     CheckChain();
+    CheckBatch();
   });
 }

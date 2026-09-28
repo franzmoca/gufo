@@ -52,7 +52,8 @@ enum class DraftCalibrationScope : std::uint8_t {
 /// the dense 31B family or the mixture-of-experts 26B-A4B (`experts`).
 struct DraftCosts {
   std::array<float, 9> draft{};
-  std::array<float, 10> verify{};
+  /// Up to kSplitRows rows plus the next one a decision looks at.
+  std::array<float, 18> verify{};
 };
 [[nodiscard]] DraftCosts DraftCostsAt(std::uint32_t context,
                                       bool experts = false) noexcept;
@@ -76,24 +77,48 @@ private:
   std::array<float, kBins> seen_{};
 };
 
+/// The rest of a batched verification forward as one session sees it: the
+/// other sessions' verification rows, the tokens their cycles are expected
+/// to emit and their drafter time. Empty for a lone session.
+struct DraftBatch {
+  std::uint32_t rows{0};
+  float expected{0.0F};
+  float draft_ms{0.0F};
+};
+
 /// One cycle's calibrated decisions. A draft is verified while the extra
 /// tokens it is expected to add per millisecond of extra work (its survival
 /// over one more verification row and drafter step) at least match the
-/// cycle's current rate; the first `min_drafts` are always verified.
+/// cycle's current rate; a lone cycle always verifies its first
+/// `min_drafts` (at least one). In a batch the cycle is the whole forward:
+/// the other sessions' rows price the extra row and their tokens and
+/// drafter time set the rate, and a session may verify no draft at all.
 class CalibratedChain {
 public:
   CalibratedChain(const DraftCalibration& calibration, const DraftCosts& costs,
-                  std::uint32_t min_drafts, std::uint32_t cap) noexcept;
+                  std::uint32_t min_drafts, std::uint32_t cap,
+                  DraftBatch others = {}) noexcept;
 
   /// Decides the next draft from its signal.
   [[nodiscard]] bool Include(float signal) noexcept;
+  /// Whether a first draft certain to be accepted would pay for its drafter
+  /// step and row; when not, the cycle need not draft at all.
+  [[nodiscard]] bool FirstDraftCanPay() const noexcept;
+  /// Tokens this session's cycle is expected to emit so far.
+  [[nodiscard]] float Expected() const noexcept { return expected_; }
+  /// Drafter time of the steps decided so far (a stop still ran its step).
+  [[nodiscard]] float DraftMs() const noexcept { return costs_.draft[steps_]; }
 
 private:
+  [[nodiscard]] float Verify(std::uint32_t rows) const noexcept;
+
   const DraftCalibration& calibration_;
   const DraftCosts& costs_;
   std::uint32_t min_drafts_;
   std::uint32_t cap_;
+  DraftBatch others_;
   std::uint32_t kept_{0};
+  std::uint32_t steps_{0};
   float survival_{1.0F};
   float expected_{1.0F};  ///< the target's own token is always emitted
 };

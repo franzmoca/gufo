@@ -13,10 +13,9 @@ namespace {
 // measured 2026-09-28 by timing drafter chains and verification forwards at
 // each depth. Only cost ratios steer the decision.
 constexpr std::array<std::uint32_t, 5> kDepths = {0, 4096, 16384, 32768, 65536};
-using VerifyTable = std::array<std::array<float, 8>, 5>;
 constexpr std::array<float, 5> kDraftStepMs = {1.95F, 2.05F, 2.40F, 2.82F,
                                                3.66F};
-constexpr VerifyTable kVerifyMs = {{
+constexpr std::array<std::array<float, 8>, 5> kVerifyMs = {{
     {90.6F, 90.6F, 92.7F, 94.3F, 97.4F, 101.4F, 106.6F, 115.1F},
     {92.7F, 93.2F, 95.3F, 96.9F, 100.7F, 105.2F, 109.5F, 119.2F},
     {96.0F, 97.5F, 99.8F, 102.1F, 107.2F, 113.4F, 121.1F, 131.5F},
@@ -25,17 +24,22 @@ constexpr VerifyTable kVerifyMs = {{
 }};
 
 // The 26B-A4B (UD-Q4_K_XL target, Unsloth Q8_0 drafter), measured
-// 2026-09-28 the same way: every verified row adds the experts it routes
-// to, so verification grows several times faster per row than on the dense
-// family.
+// 2026-09-28 the same way up to the 16 rows a batched forward verifies:
+// every verified row adds the experts it routes to, so verification grows
+// several times faster per row than on the dense family.
 constexpr std::array<float, 5> kExpertDraftStepMs = {1.81F, 2.03F, 2.25F, 2.51F,
                                                      3.04F};
-constexpr VerifyTable kExpertVerifyMs = {{
-    {18.3F, 20.0F, 22.9F, 24.8F, 26.8F, 28.4F, 29.9F, 30.7F},
-    {19.7F, 22.7F, 25.3F, 27.0F, 28.6F, 30.6F, 32.1F, 33.5F},
-    {20.7F, 23.8F, 25.7F, 27.0F, 29.2F, 31.4F, 33.3F, 34.7F},
-    {21.7F, 25.2F, 27.1F, 28.7F, 31.1F, 33.4F, 35.7F, 37.2F},
-    {23.5F, 27.9F, 31.3F, 33.2F, 36.3F, 39.2F, 42.7F, 45.1F},
+constexpr std::array<std::array<float, 16>, 5> kExpertVerifyMs = {{
+    {18.3F, 20.0F, 22.9F, 24.8F, 26.7F, 28.5F, 29.9F, 30.7F, 31.9F, 33.2F,
+     35.5F, 38.7F, 40.3F, 42.3F, 42.1F, 43.5F},
+    {19.7F, 22.7F, 25.3F, 27.1F, 28.7F, 30.6F, 32.1F, 33.5F, 34.8F, 36.0F,
+     38.7F, 42.2F, 44.1F, 46.3F, 46.0F, 47.3F},
+    {20.7F, 23.8F, 25.6F, 27.0F, 29.1F, 31.4F, 33.3F, 34.6F, 36.6F, 37.9F,
+     40.9F, 44.6F, 46.6F, 49.0F, 49.2F, 50.9F},
+    {21.7F, 25.3F, 27.1F, 28.7F, 31.1F, 33.4F, 35.7F, 37.1F, 40.6F, 42.0F,
+     45.7F, 50.8F, 53.6F, 56.5F, 57.0F, 59.0F},
+    {23.5F, 28.0F, 31.2F, 33.2F, 36.3F, 39.2F, 42.8F, 45.0F, 50.9F, 53.0F,
+     57.2F, 62.0F, 65.1F, 68.2F, 69.3F, 71.8F},
 }};
 
 }  // namespace
@@ -103,11 +107,15 @@ float DraftSignal(
   return static_cast<float>(std::clamp(signal, 0.0, 1.0));
 }
 
-DraftCosts DraftCostsAt(std::uint32_t context, bool experts) noexcept {
-  const auto& draft_step = experts ? kExpertDraftStepMs : kDraftStepMs;
-  const auto& verify = experts ? kExpertVerifyMs : kVerifyMs;
-  // Linear between measured depths; past the deepest one, the last
-  // interval's slope continues.
+namespace {
+
+/// Costs from one table: linear between measured depths, past the deepest
+/// one the last interval's slope continues; rows past the table keep its
+/// last row step.
+template<std::size_t kRows>
+DraftCosts Interpolate(
+    std::uint32_t context, const std::array<float, 5>& draft_step,
+    const std::array<std::array<float, kRows>, 5>& verify) noexcept {
   std::size_t hi = 1;
   while (hi + 1 < kDepths.size() && context > kDepths[hi]) {
     ++hi;
@@ -123,17 +131,22 @@ DraftCosts DraftCostsAt(std::uint32_t context, bool experts) noexcept {
   for (std::size_t n = 0; n < costs.draft.size(); ++n) {
     costs.draft[n] = step * static_cast<float>(n);
   }
-  for (std::size_t r = 1; r <= kVerifyMs[0].size(); ++r) {
+  for (std::size_t r = 1; r <= kRows && r < costs.verify.size(); ++r) {
     costs.verify[r] = lerp(verify[lo][r - 1], verify[hi][r - 1]);
   }
-  // Rows past eight (never verified per session today) keep the last slope.
-  const std::size_t last = kVerifyMs[0].size();
-  for (std::size_t r = last + 1; r < costs.verify.size(); ++r) {
+  for (std::size_t r = kRows + 1; r < costs.verify.size(); ++r) {
     costs.verify[r] =
-        costs.verify[r - 1] + (costs.verify[last] - costs.verify[last - 1]);
+        costs.verify[r - 1] + (costs.verify[kRows] - costs.verify[kRows - 1]);
   }
   costs.verify[0] = costs.verify[1];
   return costs;
+}
+
+}  // namespace
+
+DraftCosts DraftCostsAt(std::uint32_t context, bool experts) noexcept {
+  return experts ? Interpolate(context, kExpertDraftStepMs, kExpertVerifyMs)
+                 : Interpolate(context, kDraftStepMs, kVerifyMs);
 }
 
 std::size_t DraftCalibration::Bin(float signal) noexcept {
@@ -162,26 +175,48 @@ void DraftCalibration::Reset() noexcept {
 
 CalibratedChain::CalibratedChain(const DraftCalibration& calibration,
                                  const DraftCosts& costs,
-                                 std::uint32_t min_drafts,
-                                 std::uint32_t cap) noexcept
+                                 std::uint32_t min_drafts, std::uint32_t cap,
+                                 DraftBatch others) noexcept
     : calibration_(calibration),
       costs_(costs),
-      min_drafts_(std::max(1U, min_drafts)),
-      cap_(std::min<std::uint32_t>(cap, costs.draft.size() - 1)) {}
+      // Beside other sessions even the first draft must pay for its row.
+      min_drafts_(others.rows > 0 ? 0U : std::max(1U, min_drafts)),
+      cap_(std::min<std::uint32_t>(cap, costs.draft.size() - 1)),
+      others_(others) {}
+
+float CalibratedChain::Verify(std::uint32_t rows) const noexcept {
+  return costs_.verify[std::min<std::size_t>(others_.rows + rows,
+                                             costs_.verify.size() - 1)];
+}
+
+bool CalibratedChain::FirstDraftCanPay() const noexcept {
+  if (min_drafts_ > 0 || cap_ == 0) {
+    return cap_ > 0;
+  }
+  // Include's rule for the first draft with survival one, against a cycle
+  // that runs no drafter step.
+  const float without = others_.draft_ms + Verify(1);
+  const float with = others_.draft_ms + costs_.draft[1] + Verify(2);
+  return without >= (others_.expected + expected_) * (with - without);
+}
 
 bool CalibratedChain::Include(float signal) noexcept {
   const std::uint32_t index = kept_;  // drafter steps so far: index + 1
   if (index >= cap_) {
     return false;
   }
+  steps_ = index + 1;
   const float survival = survival_ * calibration_.Estimate(signal);
   if (index >= min_drafts_) {
     // Stopping here verifies `index` drafts after one more drafter step than
     // needed; verifying this one adds a row, and going on adds a step.
-    const float current = costs_.draft[index + 1] + costs_.verify[index + 1];
-    const float next =
-        costs_.draft[std::min(index + 2, cap_)] + costs_.verify[index + 2];
-    if (survival * current < expected_ * (next - current)) {
+    const float current =
+        others_.draft_ms + costs_.draft[index + 1] + Verify(index + 1);
+    const float next = others_.draft_ms +
+                       costs_.draft[std::min(index + 2, cap_)] +
+                       Verify(index + 2);
+    if (survival * current <
+        (others_.expected + expected_) * (next - current)) {
       return false;
     }
   }

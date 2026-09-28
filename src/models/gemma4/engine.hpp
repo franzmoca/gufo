@@ -285,9 +285,14 @@ private:
     std::size_t copied{0};
     /// Calibrated policy: the signal of each verified MTP draft.
     std::vector<float> signals;
+    /// Calibrated policy: tokens the cycle is expected to emit and its
+    /// drafter time, for the sessions after it in a batch.
+    float expected{1.0F};
+    float draft_ms{0.0F};
   };
+  /// `others` describes the rest of a batched forward (DecodeBatch).
   bool BeginCycle(Cycle& cycle, std::uint32_t draft_limit,
-                  std::string* error_msg);
+                  std::string* error_msg, const DraftBatch& others = {});
   void FinishCycle(Cycle& cycle, std::span<const float> logits,
                    std::uint32_t first_hidden_row);
 

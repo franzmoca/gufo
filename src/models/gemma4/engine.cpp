@@ -499,7 +499,7 @@ DraftCalibration& Session::Calibration(bool sampled) {
 }
 
 bool Session::BeginCycle(Cycle& cycle, std::uint32_t draft_limit,
-                         std::string* error_msg) {
+                         std::string* error_msg, const DraftBatch& others) {
   auto& sampler = *cycle.sampler;
   auto* result = cycle.result;
   result->tokens.clear();
@@ -578,7 +578,12 @@ bool Session::BeginCycle(Cycle& cycle, std::uint32_t draft_limit,
     const DraftCosts costs =
         DraftCostsAt(position, model_->config().HasExperts());
     CalibratedChain calibrated(Calibration(cycle.sampled), costs,
-                               options.min_draft_tokens, steps);
+                               options.min_draft_tokens, steps, others);
+    if (policy == DraftPolicy::kCalibrated && !calibrated.FirstDraftCanPay()) {
+      // Beside other sessions not even a certain draft would pay: verify
+      // the pending token alone without running the drafter.
+      return true;
+    }
     // Whether the draft just proposed ends the chain unverified. `kept`
     // drafts precede it; `confidence` feeds the confidence policy's chain.
     const auto stop = [&](std::size_t kept, float confidence,
@@ -650,6 +655,10 @@ bool Session::BeginCycle(Cycle& cycle, std::uint32_t draft_limit,
     cycle.rows.insert(cycle.rows.end(), drafts.begin(), drafts.end());
     cycle.rows.insert(cycle.rows.end(), copies.begin(), copies.end());
     cycle.copied = copies.size();
+    if (policy == DraftPolicy::kCalibrated) {
+      cycle.expected = calibrated.Expected();
+      cycle.draft_ms = calibrated.DraftMs();
+    }
   } catch (const std::exception& e) {
     Reset();
     return Fail(error_msg, e.what());
@@ -736,7 +745,16 @@ bool Session::DecodeBatch(std::span<BatchDecode> decodes) {
   std::vector<std::int32_t> tokens;
   std::vector<std::size_t> active;
   bool ok = true;
+  // The calibrated policy prices each session's drafts against the whole
+  // forward: sessions already drafted with their rows, expected tokens and
+  // drafter time, the ones still to come with their pending row.
+  DraftBatch decided;
   for (std::size_t i = 0; i < decodes.size(); ++i) {
+    const auto later = static_cast<std::uint32_t>(decodes.size() - 1 - i);
+    const DraftBatch others{
+        .rows = decided.rows + later,
+        .expected = decided.expected + static_cast<float>(later),
+        .draft_ms = decided.draft_ms};
     auto& d = decodes[i];
     if (d.session->model_.get() != &model) {
       throw std::invalid_argument("gemma4 batch mixes models");
@@ -745,13 +763,16 @@ bool Session::DecodeBatch(std::span<BatchDecode> decodes) {
                       .sampler = d.sampler,
                       .result = d.result,
                       .stop_at_eos = d.stop_at_eos};
-    if (!d.session->BeginCycle(cycles[i], draft_limit, &d.error)) {
+    if (!d.session->BeginCycle(cycles[i], draft_limit, &d.error, others)) {
       ok = false;
       continue;
     }
     if (cycles[i].done) {
       continue;
     }
+    decided.rows += static_cast<std::uint32_t>(cycles[i].rows.size());
+    decided.expected += cycles[i].expected;
+    decided.draft_ms += cycles[i].draft_ms;
     segments.push_back({d.session->cache_.get(), cycles[i].position,
                         static_cast<std::uint32_t>(cycles[i].rows.size())});
     tokens.insert(tokens.end(), cycles[i].rows.begin(), cycles[i].rows.end());
