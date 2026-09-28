@@ -271,6 +271,8 @@ namespace {
 
 std::optional<GemvFormat> GemvFormatOf(core::GgmlType type) {
   switch (type) {
+    case core::GgmlType::kQ4_0:
+      return GemvFormat::kQ4_0;
     case core::GgmlType::kQ4_K:
       return GemvFormat::kQ4_K;
     case core::GgmlType::kQ5_K:
@@ -294,8 +296,12 @@ void Executor::Project(const DeviceTensor& w, const float* x, const void* xq,
   if (rows > 1) {
     // Gemma's K-quant shapes lie outside the Qwen-tuned dispatch; the
     // double-stage configuration is faster on them (the vocabulary head keeps
-    // the default). Both round like the one-row twins below.
-    if (w.rows < 65536 &&
+    // the default). Q4_0 keeps the default up to eight rows and takes the
+    // double stage past that, where the default splits the rows into two
+    // passes. All of them round like the one-row twins below.
+    const bool double_stage =
+        w.type == core::GgmlType::kQ4_0 ? rows > 8 : w.rows < 65536;
+    if (double_stage &&
         hip::LaunchKQuantSmallBatchDoubleStage(w.type, w.data, x, y, rows,
                                                w.rows, w.cols, stream_)) {
       return;
@@ -307,8 +313,9 @@ void Executor::Project(const DeviceTensor& w, const float* x, const void* xq,
   if (model_.has_draft()) {
     // Speculation verifies with the small-batch kernel, and single tokens
     // must round identically: its bit-identical one-row twins, whichever is
-    // faster for the shape (measured with cold weights).
-    if (w.rows <= 4096) {
+    // faster for the shape (measured with cold weights; for Q4_0 the
+    // small-batch twin at every shape).
+    if (w.rows <= 4096 && w.type != core::GgmlType::kQ4_0) {
       hip::LaunchGEMV(w.data, w.type, x, y, w.rows, w.cols, stream_);
     } else {
       hip::LaunchBatchedQuantGEMMFp32(w.type, w.data, x, y, 1, w.rows, w.cols,
@@ -316,7 +323,8 @@ void Executor::Project(const DeviceTensor& w, const float* x, const void* xq,
     }
     return;
   }
-  // Autoregressive decode: the Gemma GEMV serves every K-quant projection.
+  // Autoregressive decode: the Gemma GEMV serves every K-quant and Q4_0
+  // projection.
   if (const auto format = GemvFormatOf(w.type);
       format &&
       LaunchKQuantGemv(*format, w.data, x, y, w.rows, w.cols, stream_)) {

@@ -324,7 +324,12 @@ int main() {
          {208},
          "Q6_K"},
         {GgmlType::kQ8_0, std::nullopt, 32, 34, {0}, "Q8_0"},
-        {GgmlType::kQ4_0, std::nullopt, 32, 18, {0}, "Q4_0"},
+        {GgmlType::kQ4_0,
+         gufo::models::gemma4::rocm::GemvFormat::kQ4_0,
+         32,
+         18,
+         {0},
+         "Q4_0"},
     };
     // (M, K) of every target projection, plus the drafter's widths.
     const std::pair<std::size_t, std::size_t> shapes[] = {

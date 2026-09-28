@@ -1,4 +1,4 @@
-// Autoregressive decode projections for Gemma 4's K-quant weights.
+// Autoregressive decode projections for Gemma 4's K-quant and Q4_0 weights.
 //
 // y[m] = sum_k x[k] * W[m][k]; the weights stay in their GGUF blocks and the
 // activations stay FP32. A lane's unit of work is one 16-byte vector of
@@ -150,8 +150,44 @@ __device__ __forceinline__ float TaskQ6K(const std::uint8_t* block, int t,
   return Accumulate<16>(acc, w + 48, xv + 96);
 }
 
+// Q4_0: eight 32-value blocks form a 256-value, 144-byte group, and task t
+// is block t: values 32 t + i (low nibbles) and 32 t + 16 + i (high) with
+// (q - 8) d = d q - 8 d. Blocks are 18 bytes, so only every other block is
+// word aligned; each lane loads the five words enclosing its block and
+// selects the payload with byte alignment.
+__device__ __forceinline__ float TaskQ40(const std::uint8_t* group, int t,
+                                         const float* x, float acc) {
+  const std::uint8_t* block = group + 18 * t;
+  const bool odd = (t & 1) != 0;
+  const auto* words =
+      reinterpret_cast<const std::uint32_t*>(block - (odd ? 2 : 0));
+  std::uint32_t r[5];
+#pragma unroll
+  for (int i = 0; i < 5; ++i) {
+    r[i] = words[i];
+  }
+  const float d = HalfBits(odd ? r[0] >> 16 : r[0]);
+  std::uint32_t qs[4];
+#pragma unroll
+  for (int i = 0; i < 4; ++i) {
+    qs[i] = odd ? r[i + 1] : __builtin_amdgcn_alignbyte(r[i + 1], r[i], 2);
+  }
+  const auto* q = reinterpret_cast<const std::uint8_t*>(qs);
+  float w[32];
+  Dequant16(q, 0, nullptr, 0, 0, d, -8.0F * d, w);
+  Dequant16(q, 4, nullptr, 0, 0, d, -8.0F * d, w + 16);
+  const float* xv = x + 32 * t;
+  acc = Accumulate<16>(acc, w, xv);
+  return Accumulate<16>(acc, w + 16, xv + 16);
+}
+
 template<GemvFormat F>
 struct FormatTraits;
+template<>
+struct FormatTraits<GemvFormat::kQ4_0> {
+  static constexpr int kBlockBytes = 144;
+  static constexpr int kTasks = 8;
+};
 template<>
 struct FormatTraits<GemvFormat::kQ4_K> {
   static constexpr int kBlockBytes = 144;
@@ -171,7 +207,9 @@ struct FormatTraits<GemvFormat::kQ6_K> {
 template<GemvFormat F>
 __device__ __forceinline__ float Task(const std::uint8_t* block, int t,
                                       const float* x, float acc) {
-  if constexpr (F == GemvFormat::kQ4_K) {
+  if constexpr (F == GemvFormat::kQ4_0) {
+    return TaskQ40(block, t, x, acc);
+  } else if constexpr (F == GemvFormat::kQ4_K) {
     return TaskQ45K<false>(block, t, x, acc);
   } else if constexpr (F == GemvFormat::kQ5_K) {
     return TaskQ45K<true>(block, t, x, acc);
@@ -464,6 +502,9 @@ bool LaunchKQuantGemv(GemvFormat format, const void* w, const float* x,
     return false;
   }
   switch (format) {
+    case GemvFormat::kQ4_0:
+      Launch<GemvFormat::kQ4_0>(w, x, y, m, k, stream);
+      return true;
     case GemvFormat::kQ4_K:
       Launch<GemvFormat::kQ4_K>(w, x, y, m, k, stream);
       return true;
