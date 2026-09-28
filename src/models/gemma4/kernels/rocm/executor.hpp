@@ -145,11 +145,20 @@ public:
   [[nodiscard]] const DeviceModel& model() const noexcept { return model_; }
 
 private:
-  /// y[rows][w.rows] = x[rows][w.cols] * W^T; `xq` is the Q8_1 encoding of
-  /// x when rows exceed the small-batch limit.
+  /// y[rows][w.rows] = x[rows][w.cols] * W^T; `xq` is x staged for the
+  /// prefill GEMMs when rows exceed the small-batch limit (Quantize).
   void Project(const DeviceTensor& w, const float* x, const void* xq,
                std::uint32_t rows, float* y);
+  /// Stages x for the prefill GEMMs: the tiled Q8_1 encoding, or binary16
+  /// rows on models whose prefill runs with binary16 activations
+  /// (half_prefill_). Returns null at small-batch widths.
   const void* Quantize(const float* x, std::uint32_t rows, std::uint32_t cols);
+  /// Routed expert mixture of layer `l` for the n rows of the attention
+  /// residual x_, added to the dense MLP output in o_ (MoeCombine).
+  void Experts(const DeviceLayer& l, std::uint32_t n);
+  /// Prefill route of Experts: binary16 expert GEMMs over rows compacted
+  /// by expert. Returns false when a weight format lacks that route.
+  bool PrefillExperts(const DeviceLayer& l, std::uint32_t n);
   [[nodiscard]] bool DerivedKeys(std::uint32_t layer) const;
   /// Marks `att` as a derived-key layer.
   void DeriveKeys(AttentionArgs& att, std::uint32_t layer) const;
@@ -181,6 +190,25 @@ private:
   float* logits_{nullptr};
   float* partials_{nullptr};
   void* q8_{nullptr};
+  /// Prefill activations as binary16 (Q8_1 costs this model's accuracy).
+  bool half_prefill_{false};
+  void* x_half_{nullptr};
+  // Routed expert scratch (present on mixture-of-experts models).
+  float* moe_logits_{nullptr};
+  std::int32_t* moe_ids_{nullptr};
+  float* moe_weights_{nullptr};
+  std::int32_t* moe_groups_{nullptr};
+  void* moe_gu_{nullptr};   ///< gate/up rows: FP32, or binary16 in prefill
+  void* moe_act_{nullptr};  ///< GeGLU rows: FP32, or binary16 in prefill
+  float* moe_out_{nullptr};
+  std::uint32_t* moe_counts_{nullptr};
+  std::int32_t* moe_bounds_{nullptr};
+  std::int32_t* moe_cursors_{nullptr};
+  std::int32_t* moe_rows_token_{nullptr};
+  std::int32_t* moe_rows_slot_{nullptr};
+  std::int32_t* moe_tiles_{nullptr};
+  std::uint32_t* moe_counts_host_{nullptr};
+  std::int32_t* moe_tiles_host_{nullptr};
   // Drafter scratch (present with an MTP drafter).
   std::uint32_t* draft_tokens_{nullptr};
   float* draft_concat_{nullptr};

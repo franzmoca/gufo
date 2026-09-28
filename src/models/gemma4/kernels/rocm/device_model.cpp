@@ -64,6 +64,7 @@ struct Uploader {
     d.type = t.type;
     d.cols = static_cast<std::uint32_t>(t.cols);
     d.rows = static_cast<std::uint32_t>(t.rows);
+    d.experts = static_cast<std::uint32_t>(t.experts);
     if (t.type != core::GgmlType::kF32) {
       max_cols = std::max<std::size_t>(max_cols, t.cols);
     }
@@ -96,6 +97,14 @@ struct Uploader {
     d.ffn_down = Copy(l.ffn_down);
     d.post_ffn_norm = Copy(l.post_ffn_norm);
     d.output_scale = l.output_scale;
+    d.router = Copy(l.router);
+    d.router_scale = Copy(l.router_scale);
+    d.pre_ffn_norm_2 = Copy(l.pre_ffn_norm_2);
+    d.post_ffn_norm_1 = Copy(l.post_ffn_norm_1);
+    d.post_ffn_norm_2 = Copy(l.post_ffn_norm_2);
+    d.gate_up_exps = Copy(l.gate_up_exps);
+    d.down_exps = Copy(l.down_exps);
+    d.down_exps_scale = Copy(l.down_exps_scale);
     return d;
   }
 };

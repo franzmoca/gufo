@@ -10,15 +10,20 @@
 
 namespace gufo::models::gemma4 {
 
-/// Architecture parameters of a dense `gemma4` target or its
-/// `gemma4-assistant` MTP drafter. Every value is read from the file; the
-/// checks only bound what this runtime implements: dense text layers with
-/// interleaved sliding-window and global attention, no per-layer embeddings,
-/// no experts and no KV sharing inside the target.
+/// Architecture parameters of a `gemma4` target or its `gemma4-assistant`
+/// MTP drafter. Every value is read from the file; the checks only bound what
+/// this runtime implements: text layers with interleaved sliding-window and
+/// global attention, either dense or with routed experts beside the dense
+/// MLP in every layer (26B-A4B), no per-layer embeddings and no KV sharing
+/// inside the target.
+/// Routed experts per token and experts per layer the kernels support.
+inline constexpr std::uint32_t kMaxExpertsUsed = 8;
+inline constexpr std::uint32_t kMaxExperts = 256;
+
 struct Config {
   std::uint32_t num_layers{0};      ///< 60 for the 31B target, 4 for its draft.
   std::uint32_t hidden_size{0};     ///< 5376 (target) or 1024 (draft).
-  std::uint32_t ffn_size{0};        ///< 21504 (target) or 8192 (draft).
+  std::uint32_t ffn_size{0};        ///< Dense MLP: 21504 (31B), 2112 (26B-A4B).
   std::uint32_t context_length{0};  ///< 262144.
   float rms_eps{1e-6F};
 
@@ -35,10 +40,16 @@ struct Config {
   std::uint32_t sliding_window{0};    ///< 1024 keys, including the query.
   float final_logit_softcap{0.0F};    ///< 30; zero disables the cap.
 
+  // Mixture of experts (26B-A4B); zero experts means a dense target.
+  std::uint32_t num_experts{0};      ///< 128
+  std::uint32_t experts_used{0};     ///< 8 routed experts per token.
+  std::uint32_t expert_ffn_size{0};  ///< 704 per expert projection.
+
   // Draft (`gemma4-assistant`) only.
   std::uint32_t target_hidden_size{0};  ///< embedding_length_out, 5376.
   std::uint32_t shared_kv_layers{0};    ///< Draft layers reading target KV.
 
+  [[nodiscard]] bool HasExperts() const noexcept { return num_experts != 0; }
   [[nodiscard]] bool IsSliding(std::uint32_t layer) const noexcept {
     return sliding[layer] != 0;
   }
@@ -64,7 +75,8 @@ struct Config {
       std::uint32_t draft_layer, const Config& target) const noexcept;
 
   /// Reads a `gemma4` target. Rejects variants this runtime does not
-  /// implement (per-layer embeddings, experts, KV-shared target layers).
+  /// implement (per-layer embeddings, KV-shared target layers, more than
+  /// kMaxExpertsUsed routed experts per token).
   [[nodiscard]] static std::optional<Config> FromGguf(
       const core::GgufReader& reader, std::string* error_msg = nullptr);
 

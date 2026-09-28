@@ -35,7 +35,7 @@ if (ENGINE_ENABLE_HIP)
 endif()
 
 if (ENGINE_ENABLE_HIP)
-  foreach(name IN ITEMS attention_ops kernel_ops projection_ops)
+  foreach(name IN ITEMS attention_ops kernel_ops moe_ops projection_ops)
     add_gemma4_test(${name} gufo_gemma4 "hip;gpu;gfx1151")
   endforeach()
   add_executable(gemma4_target_test EXCLUDE_FROM_ALL target_test.cpp)

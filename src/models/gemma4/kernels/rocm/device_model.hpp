@@ -18,6 +18,7 @@ struct DeviceTensor {
   core::GgmlType type{core::GgmlType::kF32};
   std::uint32_t cols{0};
   std::uint32_t rows{0};
+  std::uint32_t experts{1};  ///< Stacked [rows][cols] expert matrices.
 
   [[nodiscard]] bool empty() const noexcept { return data == nullptr; }
   [[nodiscard]] const float* f32() const noexcept {
@@ -30,6 +31,9 @@ struct DeviceLayer {
       attn_output, post_attn_norm, ffn_norm, ffn_gate, ffn_up, ffn_down,
       post_ffn_norm;
   float output_scale{1.0F};
+  // Routed experts (see LayerWeights); empty on dense models.
+  DeviceTensor router, router_scale, pre_ffn_norm_2, post_ffn_norm_1,
+      post_ffn_norm_2, gate_up_exps, down_exps, down_exps_scale;
 };
 
 struct DeviceDraft {

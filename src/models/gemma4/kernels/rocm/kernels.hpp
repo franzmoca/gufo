@@ -138,6 +138,15 @@ void GeGlu(const float* gate, const float* up, float* out, std::size_t count,
 void GeGluQuantize(const float* gate, const float* up, void* q8,
                    std::uint32_t rows, std::uint32_t cols, hipStream_t stream);
 
+/// out[s][i] = gelu_tanh(gu[s][i]) * gu[s][width + i] over [slots][2 * width]
+/// fused gate/up rows (routed experts), rounding like GeGlu.
+void GeGluPacked(const float* gu, float* out, std::uint32_t slots,
+                 std::uint32_t width, hipStream_t stream);
+/// GeGluPacked over binary16 rows (the prefill expert route); results
+/// saturate at the binary16 range.
+void GeGluPackedHalf(const void* gu, void* out, std::uint32_t slots,
+                     std::uint32_t width, hipStream_t stream);
+
 /// y = x * scale, elementwise (y may alias x).
 void Scale(const float* x, float scale, float* y, std::size_t count,
            hipStream_t stream);

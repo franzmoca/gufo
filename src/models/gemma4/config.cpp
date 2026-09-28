@@ -239,9 +239,28 @@ std::optional<Config> Config::FromGguf(const core::GgufReader& gguf,
   if (r.U32("attention.shared_kv_layers", false, 0) != 0) {
     r.Fail("gemma4 targets with shared KV layers are not supported");
   }
-  if (r.U32("expert_count", false, 0) != 0 ||
-      gguf.FindTensor("blk.0.ffn_gate_inp.weight") != nullptr) {
-    r.Fail("gemma4 mixture-of-experts targets are not supported");
+  c.num_experts = r.U32("expert_count", false, 0);
+  if (r.ok && c.num_experts != 0) {
+    c.experts_used = r.U32("expert_used_count");
+    const auto widths = r.PerLayer("expert_feed_forward_length", c.num_layers);
+    if (r.ok) {
+      c.expert_ffn_size = widths[0];
+      for (auto v : widths) {
+        if (v != c.expert_ffn_size) {
+          r.Fail("per-layer expert widths are not supported");
+          break;
+        }
+      }
+    }
+    if (r.ok &&
+        (c.experts_used == 0 || c.experts_used > c.num_experts ||
+         c.experts_used > kMaxExpertsUsed || c.num_experts > kMaxExperts)) {
+      r.Fail("gemma4 expert routing must use 1.." +
+             std::to_string(kMaxExpertsUsed) + " of at most " +
+             std::to_string(kMaxExperts) + " experts");
+    }
+  } else if (r.ok && gguf.FindTensor("blk.0.ffn_gate_inp.weight") != nullptr) {
+    r.Fail("gemma4 expert tensors without gemma4.expert_count");
   }
   if (r.ok && c.final_logit_softcap < 0.0F) {
     r.Fail("gemma4 final logit softcap must not be negative");

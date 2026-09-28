@@ -1,5 +1,6 @@
-# Gemma 4 dense text model package (gemma4 target, gemma4-assistant MTP
-# drafter). The scalar oracle is built only by explicit validation targets.
+# Gemma 4 text model package (dense and mixture-of-experts gemma4 targets,
+# gemma4-assistant MTP drafter). The scalar oracle is built only by explicit
+# validation targets.
 add_library(gufo_gemma4 STATIC
   chat_template.cpp
   config.cpp
@@ -19,6 +20,7 @@ if (ENGINE_ENABLE_HIP)
     ${GEMMA4_ROCM_DIR}/kernels.hip.cpp
     ${GEMMA4_ROCM_DIR}/attention_wmma.hip.cpp
     ${GEMMA4_ROCM_DIR}/gemv.hip.cpp
+    ${GEMMA4_ROCM_DIR}/moe.hip.cpp
     ${GEMMA4_ROCM_DIR}/device_model.cpp
     ${GEMMA4_ROCM_DIR}/executor.cpp
     vision/encoder.hip
@@ -26,10 +28,12 @@ if (ENGINE_ENABLE_HIP)
   set_source_files_properties(${GEMMA4_ROCM_DIR}/kernels.hip.cpp
     ${GEMMA4_ROCM_DIR}/attention_wmma.hip.cpp
     ${GEMMA4_ROCM_DIR}/gemv.hip.cpp
+    ${GEMMA4_ROCM_DIR}/moe.hip.cpp
     vision/encoder.hip PROPERTIES LANGUAGE HIP)
   # Projections must round identically at every width (verification equals
   # decode), so they are compiled with strict floating-point semantics.
-  set_source_files_properties(${GEMMA4_ROCM_DIR}/gemv.hip.cpp PROPERTIES
+  set_source_files_properties(${GEMMA4_ROCM_DIR}/gemv.hip.cpp
+    ${GEMMA4_ROCM_DIR}/moe.hip.cpp PROPERTIES
     COMPILE_OPTIONS "-fno-fast-math;-ffp-contract=off")
   target_compile_options(gufo_gemma4 PRIVATE
     $<$<COMPILE_LANGUAGE:HIP>:-O3;-ffast-math;-fno-finite-math-only;-Wno-unused-command-line-argument>)

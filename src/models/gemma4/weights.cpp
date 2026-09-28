@@ -29,6 +29,8 @@ struct Format {
       return {32, 34};
     case GgmlType::kQ4_0:
       return {32, 18};
+    case GgmlType::kQ5_1:
+      return {32, 24};
     case GgmlType::kQ4_K:
       return {256, 144};
     case GgmlType::kQ5_K:
@@ -51,6 +53,13 @@ constexpr std::initializer_list<GgmlType> kEmbedding = {
     GgmlType::kBF16, GgmlType::kQ8_0, GgmlType::kQ4_0,
     GgmlType::kQ4_K, GgmlType::kQ5_K, GgmlType::kQ6_K};
 constexpr std::initializer_list<GgmlType> kVector = {GgmlType::kF32};
+/// Routed expert formats with decode, verification and prefill kernels: the
+/// fused gate/up projection reduces over the hidden width, the down
+/// projection over the (not 256-aligned) expert width.
+constexpr std::initializer_list<GgmlType> kExpertGateUp = {
+    GgmlType::kQ4_K, GgmlType::kQ5_K, GgmlType::kQ6_K, GgmlType::kQ8_0};
+constexpr std::initializer_list<GgmlType> kExpertDown = {GgmlType::kQ5_1,
+                                                         GgmlType::kQ8_0};
 
 struct Binder {
   const core::GgufReader& reader;
@@ -64,9 +73,11 @@ struct Binder {
     ok = false;
   }
 
-  /// Binds `name` with the exact shape and one of the accepted formats.
+  /// Binds `name` with the exact shape and one of the accepted formats;
+  /// `experts` > 1 expects a stack of that many [cols, rows] matrices.
   TensorRef Get(const std::string& name, std::uint64_t cols, std::uint64_t rows,
-                std::initializer_list<GgmlType> types, bool required = true) {
+                std::initializer_list<GgmlType> types, bool required = true,
+                std::uint64_t experts = 1) {
     TensorRef t;
     const auto* info = reader.FindTensor(name);
     if (info == nullptr) {
@@ -78,10 +89,13 @@ struct Binder {
     const auto& d = info->dimensions;
     const std::uint64_t got_cols = d.size() > 0 ? d[0] : 1;
     const std::uint64_t got_rows = d.size() > 1 ? d[1] : 1;
-    if (got_cols != cols || got_rows != rows || d.size() > 2) {
+    const std::uint64_t got_experts = d.size() > 2 ? d[2] : 1;
+    if (got_cols != cols || got_rows != rows || got_experts != experts ||
+        d.size() > 3) {
       Fail("tensor " + name + " has shape [" + std::to_string(got_cols) + ", " +
-           std::to_string(got_rows) + "], expected [" + std::to_string(cols) +
-           ", " + std::to_string(rows) + "]");
+           std::to_string(got_rows) + ", " + std::to_string(got_experts) +
+           "], expected [" + std::to_string(cols) + ", " +
+           std::to_string(rows) + ", " + std::to_string(experts) + "]");
       return t;
     }
     bool type_ok = false;
@@ -98,6 +112,7 @@ struct Binder {
     t.type = info->type;
     t.cols = cols;
     t.rows = rows;
+    t.experts = experts;
     t.name = info->name;
     // Locate the shard so disk readers can address the payload directly and
     // a payload running past its shard is caught here, not as a fault later.
@@ -183,7 +198,36 @@ struct Binder {
     if (reader.FindTensor(p + "layer_output_scale.weight") != nullptr) {
       w.output_scale = Scalar(p + "layer_output_scale.weight");
     }
+    if (c.HasExperts()) {
+      Experts(c, p, &w);
+    } else if (reader.FindTensor(p + "ffn_gate_inp.weight") != nullptr) {
+      Fail("layer " + std::to_string(l) + " carries experts in a dense model");
+    }
     return w;
+  }
+
+  /// The router and the routed experts of an expert layer. Only the fused
+  /// gate/up layout is supported.
+  void Experts(const Config& c, const std::string& p, LayerWeights* w) {
+    const std::uint64_t hidden = c.hidden_size;
+    const std::uint64_t experts = c.num_experts;
+    const std::uint64_t width = c.expert_ffn_size;
+    w->router = Get(p + "ffn_gate_inp.weight", hidden, experts, kVector);
+    w->router_scale = Get(p + "ffn_gate_inp.scale", hidden, 1, kVector);
+    w->pre_ffn_norm_2 = Get(p + "pre_ffw_norm_2.weight", hidden, 1, kVector);
+    w->post_ffn_norm_1 = Get(p + "post_ffw_norm_1.weight", hidden, 1, kVector);
+    w->post_ffn_norm_2 = Get(p + "post_ffw_norm_2.weight", hidden, 1, kVector);
+    if (ok && reader.FindTensor(p + "ffn_gate_up_exps.weight") == nullptr) {
+      Fail("tensor " + p +
+           "ffn_gate_up_exps.weight is missing; separate gate and up "
+           "experts are not supported");
+      return;
+    }
+    w->gate_up_exps = Get(p + "ffn_gate_up_exps.weight", hidden, 2 * width,
+                          kExpertGateUp, true, experts);
+    w->down_exps = Get(p + "ffn_down_exps.weight", width, hidden, kExpertDown,
+                       true, experts);
+    w->down_exps_scale = Get(p + "ffn_down_exps.scale", experts, 1, kVector);
   }
 };
 

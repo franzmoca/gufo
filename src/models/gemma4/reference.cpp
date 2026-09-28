@@ -177,6 +177,73 @@ void Reference::Attention(std::uint32_t layer, const float* q, std::size_t rows,
   }
 }
 
+void Reference::Experts(const LayerWeights& w, const float* x, std::size_t rows,
+                        float* out) const {
+  const Config& c = weights_.config;
+  const std::size_t d = c.hidden_size;
+  const std::size_t experts = c.num_experts;
+  const std::size_t width = c.expert_ffn_size;
+  const float eps = c.rms_eps;
+  // Router input: rms(x) / sqrt(hidden) * scale, then F32 logits.
+  std::vector<float> routed(rows * d);
+  const float* scale = Vec(w.router_scale);
+  const float inv_root = 1.0F / std::sqrt(static_cast<float>(d));
+  for (std::size_t r = 0; r < rows; ++r) {
+    RmsNorm(x + r * d, nullptr, d, eps, &routed[r * d]);
+    for (std::size_t i = 0; i < d; ++i) {
+      routed[r * d + i] = routed[r * d + i] * inv_root * scale[i];
+    }
+  }
+  std::vector<float> logits(rows * experts);
+  MatMul(w.router, routed.data(), rows, logits.data());
+  // Expert input.
+  std::vector<float> h(rows * d);
+  for (std::size_t r = 0; r < rows; ++r) {
+    RmsNorm(x + r * d, Vec(w.pre_ffn_norm_2), d, eps, &h[r * d]);
+  }
+  const float* expert_scale = Vec(w.down_exps_scale);
+  const auto slice = [](const TensorRef& t, std::size_t e) {
+    TensorRef s = t;
+    s.experts = 1;
+    s.data =
+        static_cast<const std::uint8_t*>(t.data) + e * t.RowBytes() * t.rows;
+    return s;
+  };
+  std::fill(out, out + rows * d, 0.0F);
+  std::vector<float> gate_up(2 * width);
+  std::vector<float> act(width);
+  std::vector<float> down(d);
+  for (std::size_t r = 0; r < rows; ++r) {
+    // Softmax over every expert, the top experts_used by probability (ties
+    // to the lower index), renormalized over the chosen ones.
+    const float* l = &logits[r * experts];
+    std::vector<std::size_t> order(experts);
+    for (std::size_t e = 0; e < experts; ++e) {
+      order[e] = e;
+    }
+    std::stable_sort(order.begin(), order.end(),
+                     [&](std::size_t a, std::size_t b) { return l[a] > l[b]; });
+    const double top = l[order[0]];
+    double total = 0.0;
+    for (std::size_t j = 0; j < c.experts_used; ++j) {
+      total += std::exp(static_cast<double>(l[order[j]]) - top);
+    }
+    for (std::size_t j = 0; j < c.experts_used; ++j) {
+      const std::size_t e = order[j];
+      const double weight =
+          std::exp(static_cast<double>(l[e]) - top) / total * expert_scale[e];
+      MatMul(slice(w.gate_up_exps, e), &h[r * d], 1, gate_up.data());
+      for (std::size_t i = 0; i < width; ++i) {
+        act[i] = static_cast<float>(GeluTanh(gate_up[i]) * gate_up[width + i]);
+      }
+      MatMul(slice(w.down_exps, e), act.data(), 1, down.data());
+      for (std::size_t i = 0; i < d; ++i) {
+        out[r * d + i] = static_cast<float>(out[r * d + i] + weight * down[i]);
+      }
+    }
+  }
+}
+
 void Reference::Forward(std::span<const TokenId> tokens,
                         std::vector<float>* logits,
                         std::vector<float>* hidden) {
@@ -273,6 +340,19 @@ void Reference::Forward(std::span<const TokenId> tokens,
     }
     std::vector<float> f(n * d);
     MatMul(w.ffn_down, gate.data(), n, f.data());
+    if (c.HasExperts()) {
+      // The dense MLP and the routed experts both read the attention
+      // residual x; their separately normed outputs add up to f.
+      std::vector<float> moe(n * d);
+      Experts(w, x.data(), n, moe.data());
+      for (std::size_t r = 0; r < n; ++r) {
+        RmsNorm(&f[r * d], Vec(w.post_ffn_norm_1), d, eps, &f[r * d]);
+        RmsNorm(&moe[r * d], Vec(w.post_ffn_norm_2), d, eps, &moe[r * d]);
+        for (std::size_t i = 0; i < d; ++i) {
+          f[r * d + i] += moe[r * d + i];
+        }
+      }
+    }
     for (std::size_t r = 0; r < n; ++r) {
       RmsNorm(&f[r * d], Vec(w.post_ffn_norm), d, eps, &f[r * d]);
       for (std::size_t i = 0; i < d; ++i) {

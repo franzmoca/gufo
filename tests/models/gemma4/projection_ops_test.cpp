@@ -350,6 +350,15 @@ int main() {
         CheckShape(f, m, k, rng);
       }
     }
+    // The 26B-A4B keeps attention, the dense MLP and the tied head in Q8_0
+    // in every Unsloth quant; its drafter reads 1024-wide rows.
+    const std::pair<std::size_t, std::size_t> moe_shapes[] = {
+        {4096, 2816}, {2048, 2816}, {8192, 2816}, {1024, 2816},
+        {2816, 4096}, {2816, 8192}, {2112, 2816}, {2816, 2112},
+        {1024, 5632}, {2816, 1024}, {4096, 1024}, {1024, 4096}};
+    for (const auto& [m, k] : moe_shapes) {
+      CheckShape(formats[3], m, k, rng);
+    }
     CheckRepack(rng);
   });
 }

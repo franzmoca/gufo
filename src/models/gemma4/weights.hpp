@@ -14,12 +14,14 @@
 namespace gufo::models::gemma4 {
 
 /// Non-owning view of one GGUF tensor. `cols` (ne[0]) is the contiguous
-/// reduction dimension and `rows` (ne[1]) the output dimension.
+/// reduction dimension, `rows` (ne[1]) the output dimension and `experts`
+/// (ne[2]) the number of stacked expert matrices.
 struct TensorRef {
   const void* data{nullptr};
   core::GgmlType type{core::GgmlType::kF32};
   std::uint64_t cols{0};
   std::uint64_t rows{1};
+  std::uint64_t experts{1};
   std::uint64_t file_offset{0};  ///< Byte offset inside the owning shard.
   std::uint32_t shard{0};        ///< Mapped region index in the reader.
   std::string_view name;
@@ -28,7 +30,7 @@ struct TensorRef {
   /// Encoded bytes of one row (`cols` elements) in this format.
   [[nodiscard]] std::size_t RowBytes() const noexcept;
   [[nodiscard]] std::size_t SizeBytes() const noexcept {
-    return RowBytes() * rows;
+    return RowBytes() * rows * experts;
   }
 };
 
@@ -47,6 +49,18 @@ struct LayerWeights {
   TensorRef ffn_down;        ///< [ffn -> hidden]
   TensorRef post_ffn_norm;   ///< [hidden]
   float output_scale{1.0F};  ///< layer_output_scale, applied to the residual.
+
+  // Routed experts (26B-A4B), run beside the dense MLP above; empty on dense
+  // targets and drafts.
+  TensorRef router;           ///< ffn_gate_inp, F32 [hidden -> experts]
+  TensorRef router_scale;     ///< ffn_gate_inp.scale, F32 [hidden]
+  TensorRef pre_ffn_norm_2;   ///< Expert input norm, [hidden]
+  TensorRef post_ffn_norm_1;  ///< Dense MLP output norm, [hidden]
+  TensorRef post_ffn_norm_2;  ///< Expert mixture output norm, [hidden]
+  /// [experts][2 * expert_ffn][hidden]: the gate rows, then the up rows.
+  TensorRef gate_up_exps;
+  TensorRef down_exps;        ///< [experts][hidden][expert_ffn]
+  TensorRef down_exps_scale;  ///< F32 [experts], scales each expert output.
 };
 
 /// Host copy of the rope frequency divisors used by global layers. A value

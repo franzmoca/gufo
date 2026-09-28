@@ -25,6 +25,7 @@ bool IsQuantized(core::GgmlType type) noexcept {
     case core::GgmlType::kQ8_K:
     case core::GgmlType::kQ8_0:
     case core::GgmlType::kQ4_0:
+    case core::GgmlType::kQ5_1:
       return true;
     default:
       return false;
@@ -79,6 +80,9 @@ void Dequantize(core::GgmlType type, const void* src, float* dst,
     case core::GgmlType::kQ4_0:
       DequantizeQ4_0(src, dst, k);
       return;
+    case core::GgmlType::kQ5_1:
+      DequantizeQ5_1(src, dst, k);
+      return;
     default:
       assert(false && "quant::Dequantize: unsupported GgmlType");
       std::abort();
@@ -126,6 +130,8 @@ float Dot(core::GgmlType type, const void* row, std::span<const float> x,
       return DotProductQ8_0(row, x, k);
     case core::GgmlType::kQ4_0:
       return DotProductQ4_0(row, x, k);
+    case core::GgmlType::kQ5_1:
+      return DotProductQ5_1(row, x, k);
     default:
       assert(false && "quant::Dot: unsupported GgmlType");
       std::abort();

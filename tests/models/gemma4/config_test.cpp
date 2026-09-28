@@ -147,6 +147,36 @@ void CheckRejections() {
           "scalar KV head count");
 }
 
+/// The miniature with routed experts beside the dense MLP (26B-A4B).
+Metadata MoeMetadata() {
+  Metadata m = TargetMetadata();
+  m["gemma4.expert_count"] = std::uint32_t{8};
+  m["gemma4.expert_used_count"] = std::uint32_t{2};
+  m["gemma4.expert_feed_forward_length"] = std::uint32_t{32};
+  return m;
+}
+
+void CheckExpertConfig() {
+  const auto c = Parse(MoeMetadata());
+  Require(c && c->HasExperts() && c->num_experts == 8 && c->experts_used == 2 &&
+              c->expert_ffn_size == 32,
+          "expert metadata");
+  Require(!Parse(TargetMetadata())->HasExperts(), "dense target has experts");
+  const auto reject = [&](const std::string& key, gemma4_test::MetaValue value,
+                          const char* what) {
+    Metadata wrong = MoeMetadata();
+    wrong[key] = std::move(value);
+    Require(!Parse(wrong).has_value(), what);
+  };
+  reject("gemma4.expert_used_count", std::uint32_t{9},
+         "more routed experts than the kernels support");
+  reject("gemma4.expert_used_count", std::uint32_t{0}, "no routed experts");
+  reject("gemma4.expert_count", std::uint32_t{512}, "too many experts");
+  Metadata missing = MoeMetadata();
+  missing.erase("gemma4.expert_feed_forward_length");
+  Require(!Parse(missing).has_value(), "missing expert width");
+}
+
 std::vector<std::uint8_t> Zeros(std::size_t n) {
   return std::vector<std::uint8_t>(n, 0);
 }
@@ -188,6 +218,63 @@ Tensors TargetTensors(const g4::Config& c, std::uint64_t vocab) {
     t[p + "layer_output_scale.weight"] = F32(1, 0.5F + static_cast<float>(l));
   }
   return t;
+}
+
+/// Adds the router, norms and stacked experts of every layer.
+void AddExperts(const g4::Config& c, Tensors* t) {
+  for (std::uint32_t l = 0; l < c.num_layers; ++l) {
+    const std::string p = "blk." + std::to_string(l) + ".";
+    (*t)[p + "ffn_gate_inp.weight"] = {
+        {c.hidden_size, c.num_experts},
+        GgmlType::kF32,
+        Zeros(c.hidden_size * c.num_experts * 4)};
+    (*t)[p + "ffn_gate_inp.scale"] = F32(c.hidden_size);
+    (*t)[p + "pre_ffw_norm_2.weight"] = F32(c.hidden_size);
+    (*t)[p + "post_ffw_norm_1.weight"] = F32(c.hidden_size);
+    (*t)[p + "post_ffw_norm_2.weight"] = F32(c.hidden_size);
+    (*t)[p + "ffn_gate_up_exps.weight"] = {
+        {c.hidden_size, 2 * c.expert_ffn_size, c.num_experts},
+        GgmlType::kQ8_0,
+        Zeros(c.hidden_size / 32 * 34 * 2 * c.expert_ffn_size * c.num_experts)};
+    (*t)[p + "ffn_down_exps.weight"] = {
+        {c.expert_ffn_size, c.hidden_size, c.num_experts},
+        GgmlType::kQ5_1,
+        Zeros(c.expert_ffn_size / 32 * 24 * c.hidden_size * c.num_experts)};
+    (*t)[p + "ffn_down_exps.scale"] = F32(c.num_experts);
+  }
+}
+
+void CheckExpertWeights() {
+  const auto c = Parse(MoeMetadata());
+  Tensors tensors = TargetTensors(*c, 96);
+  AddExperts(*c, &tensors);
+  std::string error;
+  {
+    GgufImage image(MoeMetadata(), tensors);
+    const auto w = g4::ModelWeights::Bind(*image.reader(), &error);
+    Require(w.has_value(), "valid expert weights rejected: " + error);
+    const auto& l = w->layers[1];
+    Require(l.gate_up_exps.experts == 8 && l.gate_up_exps.rows == 64 &&
+                l.down_exps.type == GgmlType::kQ5_1 &&
+                l.down_exps.SizeBytes() == 32 / 32 * 24 * 64 * 8,
+            "stacked expert tensors");
+  }
+  const auto rejects = [&](const Tensors& wrong, const Metadata& meta,
+                           const char* what) {
+    GgufImage image(meta, wrong);
+    Require(!g4::ModelWeights::Bind(*image.reader(), &error) && !error.empty(),
+            what);
+  };
+  auto wrong = tensors;
+  wrong.erase("blk.0.ffn_gate_up_exps.weight");
+  rejects(wrong, MoeMetadata(), "separate gate/up experts accepted");
+  wrong = tensors;
+  wrong["blk.0.ffn_down_exps.weight"].dims[2] = 7;
+  rejects(wrong, MoeMetadata(), "short expert stack accepted");
+  wrong = tensors;
+  wrong["blk.1.ffn_gate_up_exps.weight"].type = GgmlType::kQ4_0;
+  rejects(wrong, MoeMetadata(), "unsupported expert format accepted");
+  rejects(tensors, TargetMetadata(), "experts in a dense model accepted");
 }
 
 void CheckWeights() {
@@ -276,6 +363,8 @@ int main() {
   return gemma4_test::Run([] {
     CheckTarget();
     CheckRejections();
+    CheckExpertConfig();
     CheckWeights();
+    CheckExpertWeights();
   });
 }

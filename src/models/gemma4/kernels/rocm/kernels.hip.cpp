@@ -1248,6 +1248,33 @@ __global__ void GeGluKernel(const float* gate, const float* up, float* out,
   }
 }
 
+/// GeGlu over fused gate/up rows ([slots][2 * width]).
+__global__ void GeGluPackedKernel(const float* gu, float* out,
+                                  std::uint32_t width, std::size_t count) {
+  const std::size_t i =
+      static_cast<std::size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+  if (i < count) {
+    const std::size_t slot = i / width;
+    const std::size_t col = i % width;
+    const float* row = gu + slot * 2 * width;
+    out[i] = GeGluValue(row[col], row[width + col]);
+  }
+}
+
+__global__ void GeGluPackedHalfKernel(const __half* gu, __half* out,
+                                      std::uint32_t width, std::size_t count) {
+  const std::size_t i =
+      static_cast<std::size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+  if (i < count) {
+    const std::size_t slot = i / width;
+    const std::size_t col = i % width;
+    const __half* row = gu + slot * 2 * width;
+    const float v =
+        GeGluValue(__half2float(row[col]), __half2float(row[width + col]));
+    out[i] = __float2half(fminf(fmaxf(v, -65504.0F), 65504.0F));
+  }
+}
+
 /// GeGluKernel's values quantized straight into the prefill activation:
 /// one wave per 32-element block of one row.
 __global__ void GeGluQuantizeKernel(const float* gate, const float* up,
@@ -1400,6 +1427,20 @@ void GeGluQuantize(const float* gate, const float* up, void* q8,
       static_cast<std::size_t>(Q8Rows(rows)) * (cols / 32);
   GeGluQuantizeKernel<<<static_cast<unsigned>((units + kWaves - 1) / kWaves),
                         kThreads, 0, stream>>>(gate, up, q8, rows, cols);
+}
+
+void GeGluPacked(const float* gu, float* out, std::uint32_t slots,
+                 std::uint32_t width, hipStream_t stream) {
+  const std::size_t count = std::size_t{slots} * width;
+  GeGluPackedKernel<<<Blocks(count), kThreads, 0, stream>>>(gu, out, width,
+                                                            count);
+}
+
+void GeGluPackedHalf(const void* gu, void* out, std::uint32_t slots,
+                     std::uint32_t width, hipStream_t stream) {
+  const std::size_t count = std::size_t{slots} * width;
+  GeGluPackedHalfKernel<<<Blocks(count), kThreads, 0, stream>>>(
+      static_cast<const __half*>(gu), static_cast<__half*>(out), width, count);
 }
 
 void GeGlu(const float* gate, const float* up, float* out, std::size_t count,

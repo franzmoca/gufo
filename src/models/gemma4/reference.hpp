@@ -10,14 +10,14 @@
 
 namespace gufo::models::gemma4 {
 
-/// Scalar reference of the Gemma 4 dense graph (llama.cpp 391fac16
+/// Scalar reference of the Gemma 4 graph (llama.cpp 391fac16
 /// `src/models/gemma4.cpp`). Weights are dequantized on the fly, every
 /// reduction accumulates in double, and every layer keeps full K/V for all
 /// positions, so it only suits short prefixes. It pins operator semantics:
 /// scaled embeddings, weighted q/k norms, the unweighted V norm and K=V on
 /// global layers, NEOX rope with per-layer bases and frequency divisors,
-/// window-masked attention with scale 1, sandwich norms, GeGLU, the layer
-/// output scale, and the final logit softcap.
+/// window-masked attention with scale 1, sandwich norms, GeGLU, routed
+/// experts (26B-A4B), the layer output scale, and the final logit softcap.
 class Reference {
 public:
   /// kFloat32 keeps K/V exact; kHalfKv rounds stored K/V through binary16,
@@ -52,6 +52,10 @@ private:
               float* out) const;
   void Attention(std::uint32_t layer, const float* q, std::size_t rows,
                  float* out) const;
+  /// Routed expert mixture of `rows` attention residual rows (26B-A4B):
+  /// router, top-k softmax weights, per-expert scale, GeGLU experts.
+  void Experts(const LayerWeights& w, const float* x, std::size_t rows,
+               float* out) const;
 
   const ModelWeights& weights_;
   Storage storage_;
