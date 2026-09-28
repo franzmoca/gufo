@@ -111,6 +111,30 @@ users.
 ![Multiple users, MTP](artifacts/charts/multi-mtp.svg)
 
 
+## Image requests
+
+Single user, AR, context 16384. Each image was resized once to a
+multiple of 48 so both servers encode identical pixels into the same soft
+tokens: Gufo at `--image-tokens 280` or `1120`, llama.cpp with its default
+70–1120 range. llama.cpp needs `-b 2048 -ub 2048` here: with the default
+512-token ubatch it aborts on 1,107-token images (non-causal image batches
+must fit one ubatch). Cold: a fresh nonce precedes the image, so nothing is
+reused; follow-up: the next user turn, reusing the image prefix. Median of
+three warmed requests, 64 output tokens, greedy
+([Gufo 280](artifacts/image-gufo-280.json), [Gufo 1120](artifacts/image-gufo-1120.json),
+[llama.cpp](artifacts/image-reference.json); `tools/gemma4/image_bench.py`).
+
+| Image | Budget | Prompt tokens | Gufo cold TTFT (s) | llama.cpp cold TTFT (s) | Gain | Gufo follow-up TTFT (s) | llama.cpp follow-up TTFT (s) | Gain | Gufo tg (tok/s) | llama.cpp tg (tok/s) | Gain |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| Chart 624×960 | 280 | 313 | 1.26 | 1.92 | +52.6% | 0.40 | 0.70 | +73.2% | 11.19 | 9.90 | +13.0% |
+| Logo 768×768 | 280 | 309 | 1.33 | 1.85 | +38.5% | 0.43 | 0.72 | +68.0% | 11.19 | 9.54 | +17.3% |
+| Chart 1296×1968 | 1120 | 1161 | 4.46 | 8.34 | +87.1% | 0.48 | 1.04 | +118.2% | 10.81 | 8.27 | +30.7% |
+| Logo 1584×1584 | 1120 | 1141 | 4.22 | 8.35 | +98.0% | 0.49 | 1.10 | +124.2% | 10.81 | 7.96 | +35.8% |
+
+Gain is llama.cpp time over Gufo time minus one (decode: Gufo over
+llama.cpp). Gufo's vision encoder takes 164 ms for 260 soft tokens and
+1,025 ms for 1,107; the rest of a cold request is ordinary prefill.
+
 ## gemma-control fork (single user)
 
 The previous production setup: halo-box/strix-llama.cpp `8c1c282ec` on Vulkan

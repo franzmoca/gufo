@@ -1,0 +1,78 @@
+[
+  {
+    "image": "chart-1296x1968.png",
+    "server": "gufo-1120",
+    "runs": [
+      {
+        "prompt_tokens": 1161,
+        "cold_ttft_s": 4.460259447994758,
+        "cold_prompt_ms": 4233.621609,
+        "decode_tok_s": 10.801532309153913,
+        "follow_ttft_s": 0.47081111899751704,
+        "follow_cached_tokens": 1154,
+        "answer": "A high-resolution digital image titled \"Test Images\" serves as a comprehensive color and image quality calibration chart. The layout is divided into three primary sections: a grid of photographic test"
+      },
+      {
+        "prompt_tokens": 1162,
+        "cold_ttft_s": 4.5222361810010625,
+        "cold_prompt_ms": 4270.558327000001,
+        "decode_tok_s": 10.809794932942307,
+        "follow_ttft_s": 0.47732572100358084,
+        "follow_cached_tokens": 1155,
+        "answer": "This image is a technical test sheet used for calibrating color, contrast, and grayscale reproduction in printing or digital imaging. It is divided into three main sections: \"Test Images,\" \"Grayscales"
+      },
+      {
+        "prompt_tokens": 1158,
+        "cold_ttft_s": 4.287370542995632,
+        "cold_prompt_ms": 4067.888898,
+        "decode_tok_s": 10.810916509433707,
+        "follow_ttft_s": 0.4774273460061522,
+        "follow_cached_tokens": 1151,
+        "answer": "A high-resolution image titled \"Test Images\" serves as a comprehensive color and image quality calibration chart. The layout is divided into three main sections: a grid of photographic test images, a "
+      }
+    ],
+    "cold_ttft_s": 4.460259447994758,
+    "cold_prompt_ms": 4233.621609,
+    "decode_tok_s": 10.809794932942307,
+    "follow_ttft_s": 0.47732572100358084,
+    "prompt_tokens": 1161
+  },
+  {
+    "image": "logo-1584x1584.png",
+    "server": "gufo-1120",
+    "runs": [
+      {
+        "prompt_tokens": 1141,
+        "cold_ttft_s": 4.21552936900116,
+        "cold_prompt_ms": 3964.033155,
+        "decode_tok_s": 10.808920880124079,
+        "follow_ttft_s": 0.4844952059938805,
+        "follow_cached_tokens": 1134,
+        "answer": "A high-detail pixel art illustration of an owl's head, centered against a textured green background.\n\n**Subject:**\nThe owl is depicted from a front-facing, symmetrical perspective. It features a rich "
+      },
+      {
+        "prompt_tokens": 1141,
+        "cold_ttft_s": 4.219233566996991,
+        "cold_prompt_ms": 3953.2074049999997,
+        "decode_tok_s": 10.807836652995285,
+        "follow_ttft_s": 0.48954965300799813,
+        "follow_cached_tokens": 1134,
+        "answer": "A high-detail pixel art illustration of an owl's head, centered against a textured green background.\n\n**Subject:**\nThe owl is depicted from a front-facing, symmetrical perspective. It features a dense"
+      },
+      {
+        "prompt_tokens": 1143,
+        "cold_ttft_s": 4.257067992002703,
+        "cold_prompt_ms": 4008.0795150000004,
+        "decode_tok_s": 10.808322709362894,
+        "follow_ttft_s": 0.49573908699676394,
+        "follow_cached_tokens": 1136,
+        "answer": "A high-detail pixel art illustration of an owl's head, centered against a textured green background.\n\n**Subject:**\nThe owl is depicted from a front-facing, symmetrical perspective. It features a rich "
+      }
+    ],
+    "cold_ttft_s": 4.219233566996991,
+    "cold_prompt_ms": 3964.033155,
+    "decode_tok_s": 10.808322709362894,
+    "follow_ttft_s": 0.48954965300799813,
+    "prompt_tokens": 1141
+  }
+]

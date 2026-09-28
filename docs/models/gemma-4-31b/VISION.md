@@ -203,3 +203,14 @@ constraint vocabulary. Downloaded and verified the BF16 sidecar.
 - Measured over HTTP (OpenAI `image_url` data URLs):
   - The 624×960 chart photo: first turn 285 prompt tokens in 5.5 s (cold, including sidecar upload). The follow-up reuses 278 cached tokens (1.35 s) and answers "24 photographs" correctly.
   - The Gufo logo: "a pixel art illustration of an owl", brown with orange eyes.
+
+**2026-09-28 — V5 performance, budgets and benchmarks.**
+- Fused WMMA attention, then one softmax update per 64 keys: encode 402 → 164 ms at 260 soft tokens and 1,025 ms at 1,107. Both steps also brought the encoder closer to the reference (EXPERIMENTS.md).
+- `--image-tokens` selects Google's budgets (70–1120) on serve, prompt and chat.
+- Against llama.cpp b11069 over HTTP:
+  - Cold image requests: 1.4–2.0× faster time to first token.
+  - Follow-up turns: 1.7–2.2× faster.
+  - Decode: 13–36% faster.
+  - Details in BENCHMARKS.md#image-requests.
+- llama.cpp aborts on 1,120-token images unless its ubatch holds the whole image.
+

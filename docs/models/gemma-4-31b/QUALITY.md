@@ -24,6 +24,9 @@ not unquantized-model or GGUF-conversion checks. Measured September 26, 2026.
 | Global-layer keys | K and V share one projection, so the cache keeps V and only the 64 rotated rope pairs of K; the other key dims are V times `k_norm`, folded into the query. Attention with these keys matches FP64 like stored keys (split ≤5e-6, WMMA ≤0.007) |
 | Kernels | Attention vs FP64 on window, ring, key-limit and 32K shapes (split ≤5e-6, WMMA ≤0.007 absolute), repeated launches bit-identical; every decode projection within 2e-6 of an FP64 dot relative to Σ\|wx\| |
 | Serving | Streaming, `reasoning_content`, Gemma tool calls and tool-result turns, multi-turn prompt reuse and disk-cache restore across a restart |
+| Vision encoder | GPU vs the scalar FP64-accumulating reference (`vision::Reference`): embedding relative RMS 1.6% at 260 soft tokens, 2.6% at 1,107 (BF16 projection inputs; the patch stage matches to 5e-7). llama.cpp's own encoder is 5.9% off at 260. `gemma4.vision_encoder` gates every stage |
+| Image prompts | Teacher-forced chart description, text model fed Gufo's encoder vs fed the reference's embeddings: mean KL 0.0021 (260 tokens) and 0.0091 (1,107; top-1 99/101). llama.cpp with `clip.use_gelu` measured the same way: 0.0149 and 0.078. Stock llama.cpp runs the tower with GELU-quick (its converter omits `clip.use_gelu`) and lands at 0.224 |
+| Image sessions | `gemma4.vision_session`: a red and a blue image behind identical tokens give different answers (KL 32); changing, rewinding, extending, snapshot-restoring and chunk-splitting image prompts all match fresh sessions |
 
 Greedy MTP drafts the drafter's argmax and keeps it while the target's own
 choice agrees. Sampled MTP samples each draft from the drafter's top-64
@@ -55,6 +58,11 @@ is a skip, not a pass. For teacher-forced comparisons with llama.cpp:
 `tools/gemma4/build_llama_logits.sh`, then `gemma4_gpu_probe --tokens T.i32
 --logits-out G.g4lg` and `llama_logits --tokens T.i32 --output L.g4lg`, and
 `python3 tools/gemma4/compare_logits.py L.g4lg G.g4lg`.
+Image prompts: `gemma4_vision_generate_probe --image FILE --out-dir D`
+(`--image-tokens`, `--continuation`, `--embeddings`) and `llama_vision
+--image D/image0.rgb W H --tokens D/tokens.i32 --logits-out L.g4lg`, whose
+`--mmproj` should be a copy of the sidecar with `clip.use_gelu = true`
+(see [VISION.md](VISION.md)); `gemma4_vision_probe` compares encoders.
 
 ## Benchmark method
 
