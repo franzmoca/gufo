@@ -3,7 +3,7 @@
 AMD Strix Halo `gfx1151`, 128 GB unified memory. Unsloth
 `gemma-4-31B-it-qat-UD-Q4_K_XL` target (every projection Q4_0) and its Q4_0
 QAT `gemma4-assistant` MTP drafter. Gufo drafts up to seven tokens under its
-confidence-based length control; llama.cpp drafts up to four. HTTP, greedy,
+confidence-based length control (`--draft-policy confidence`, the default when these tables were measured; the calibrated default is compared in [EXPERIMENTS.md](../gemma-4-31b/EXPERIMENTS.md)); llama.cpp drafts up to four. HTTP, greedy,
 thinking off. llama.cpp is the repository's pinned `b11069` (ROCm) reference.
 Positive gain favors Gufo. **TODO** means unmeasured.
 [Quality and measurement details](QUALITY.md#benchmark-method) · [Model identities](artifacts/model-identities.json)
