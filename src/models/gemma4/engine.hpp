@@ -269,6 +269,15 @@ private:
   bool Extend(std::size_t begin, std::string* error_msg,
               const ImageEmbeddings& embed = {});
 
+  /// A cycle's drafting state (engine.cpp).
+  struct CycleDraft;
+  /// The sessions of a batch drafting together: how many, and their
+  /// verification rows and expected tokens so far.
+  struct DraftShare {
+    std::uint32_t sessions{0};
+    std::uint32_t rows{0};
+    float expected{0.0F};
+  };
   /// One decode cycle: Begin emits the pending token if needed and drafts
   /// (rows = pending plus drafts), the caller verifies `rows` at `position`,
   /// and Finish accepts from those rows' logits.
@@ -289,10 +298,17 @@ private:
     /// drafter time, for the sessions after it in a batch.
     float expected{1.0F};
     float draft_ms{0.0F};
+    /// Set while a batch's drafter chains are still to run (DecodeBatch).
+    std::unique_ptr<CycleDraft> draft;
   };
-  /// `others` describes the rest of a batched forward (DecodeBatch).
+  /// `others` describes the rest of a batched forward. With `share` (a
+  /// batch drafting together) the drafting is left in `cycle.draft` for the
+  /// caller to run, then FinishDraft; alone it runs here.
   bool BeginCycle(Cycle& cycle, std::uint32_t draft_limit,
-                  std::string* error_msg, const DraftBatch& others = {});
+                  std::string* error_msg, const DraftBatch& others = {},
+                  DraftShare* share = nullptr);
+  /// Appends a finished chain's drafts and copies to the cycle's rows.
+  void FinishDraft(Cycle& cycle);
   void FinishCycle(Cycle& cycle, std::span<const float> logits,
                    std::uint32_t first_hidden_row);
 

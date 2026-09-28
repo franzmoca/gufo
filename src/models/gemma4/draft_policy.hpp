@@ -104,6 +104,8 @@ public:
   /// Whether a first draft certain to be accepted would pay for its drafter
   /// step and row; when not, the cycle need not draft at all.
   [[nodiscard]] bool FirstDraftCanPay() const noexcept;
+  /// Replaces the view of the other sessions (they draft alongside).
+  void SetOthers(const DraftBatch& others) noexcept { others_ = others; }
   /// Tokens this session's cycle is expected to emit so far.
   [[nodiscard]] float Expected() const noexcept { return expected_; }
   /// Drafter time of the steps decided so far (a stop still ran its step).

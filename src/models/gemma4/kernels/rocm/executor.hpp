@@ -126,6 +126,21 @@ public:
                   std::uint32_t steps, std::vector<std::int32_t>* drafts,
                   const DraftProposer& propose);
 
+  /// One session's chain in DraftChains.
+  struct DraftJob {
+    KvCache* cache;
+    std::int32_t token;
+    std::uint32_t position;
+    std::uint32_t steps;
+    DraftProposer propose;
+    std::vector<std::int32_t>* drafts;
+  };
+  /// DraftChain for up to kMaxDraftSessions sessions at once: every step is
+  /// one drafter forward over all chains still running (each attending its
+  /// own session's KV) and one host wait, then each job's proposer decides
+  /// its row, in job order.
+  void DraftChains(std::span<DraftJob> jobs);
+
   /// Receives, after each layer of every Forward, that layer's residual rows
   /// ([count][hidden] on the device, ready once `stream` reaches this point):
   /// the target features a DFlash drafter reads. Unset in serving.
@@ -221,6 +236,7 @@ private:
   std::int32_t* moe_tiles_host_{nullptr};
   // Drafter scratch (present with an MTP drafter).
   std::uint32_t* draft_tokens_{nullptr};
+  float* draft_embed_{nullptr};
   float* draft_concat_{nullptr};
   float* draft_x_{nullptr};
   float* draft_h_{nullptr};
@@ -239,6 +255,8 @@ private:
 /// Longest draft chain one cycle may request; verification then carries
 /// kMaxDraftTokens + 1 rows, within the batch-invariant projection width.
 inline constexpr std::uint32_t kMaxDraftTokens = 7;
+/// Sessions whose drafter chains share one forward per step.
+inline constexpr std::uint32_t kMaxDraftSessions = 8;
 
 /// Ring slots for sliding layers given the largest forward.
 [[nodiscard]] std::uint32_t RingSlots(const Config& config,

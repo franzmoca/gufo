@@ -32,9 +32,9 @@ struct Layout {
   std::size_t x_half, moe_h, moe_logits, moe_ids, moe_weights, moe_groups,
       moe_gu, moe_act, moe_out, moe_counts, moe_bounds, moe_cursors,
       moe_rows_token, moe_rows_slot, moe_tiles;
-  std::size_t draft_tokens, draft_concat, draft_x, draft_h, draft_q, draft_attn,
-      draft_o, draft_gate, draft_up, draft_logits, draft_next, draft_candidates,
-      draft_candidate_scratch;
+  std::size_t draft_tokens, draft_embed, draft_concat, draft_x, draft_h,
+      draft_q, draft_attn, draft_o, draft_gate, draft_up, draft_logits,
+      draft_next, draft_candidates, draft_candidate_scratch;
   std::size_t total;
 };
 
@@ -120,22 +120,25 @@ Layout Plan(const Config& c, const Config* draft, std::uint32_t vocab,
     l.moe_tiles = take((slots / 16 + c.num_experts) * sizeof(std::int32_t));
   }
   if (draft != nullptr) {
-    l.draft_tokens = take((kMaxDraftTokens + 1) * sizeof(std::uint32_t));
-    l.draft_concat = take(2 * std::size_t{draft->target_hidden_size} * f);
-    l.draft_x = take(std::size_t{draft->hidden_size} * f);
-    l.draft_h = take(std::size_t{draft->hidden_size} * f);
-    l.draft_q = take(std::size_t{MaxQDim(*draft)} * f);
-    l.draft_attn = take(std::size_t{MaxQDim(*draft)} * f);
-    l.draft_o = take(std::size_t{draft->hidden_size} * f);
-    l.draft_gate = take(std::size_t{draft->ffn_size} * f);
-    l.draft_up = take(std::size_t{draft->ffn_size} * f);
-    l.draft_logits = take(std::size_t{vocab} * f);
-    l.draft_next = take(std::size_t{draft->target_hidden_size} * f);
+    // One row per session drafting in the same step.
+    const std::size_t n = kMaxDraftSessions;
+    l.draft_tokens = take(n * sizeof(std::uint32_t));
+    l.draft_embed = take(n * draft->target_hidden_size * f);
+    l.draft_concat = take(n * 2 * draft->target_hidden_size * f);
+    l.draft_x = take(n * draft->hidden_size * f);
+    l.draft_h = take(n * draft->hidden_size * f);
+    l.draft_q = take(n * MaxQDim(*draft) * f);
+    l.draft_attn = take(n * MaxQDim(*draft) * f);
+    l.draft_o = take(n * draft->hidden_size * f);
+    l.draft_gate = take(n * draft->ffn_size * f);
+    l.draft_up = take(n * draft->ffn_size * f);
+    l.draft_logits = take(n * vocab * f);
+    l.draft_next = take(n * draft->target_hidden_size * f);
     // Top-64 proposal candidates for sampled drafting: ids, then scores.
     const std::size_t candidate_ids =
         qwen38_flash_next::rocm::MtpCandidateWorkspaceSize(vocab);
-    l.draft_candidates = take(candidate_ids * sizeof(std::uint32_t));
-    l.draft_candidate_scratch = take(candidate_ids * sizeof(std::uint32_t));
+    l.draft_candidates = take(n * candidate_ids * sizeof(std::uint32_t));
+    l.draft_candidate_scratch = take(n * candidate_ids * sizeof(std::uint32_t));
   }
   l.total = at;
   return l;
@@ -268,6 +271,7 @@ Executor::Executor(const DeviceModel& model, std::uint32_t max_rows,
   }
   if (model.has_draft()) {
     draft_tokens_ = reinterpret_cast<std::uint32_t*>(base + l.draft_tokens);
+    draft_embed_ = reinterpret_cast<float*>(base + l.draft_embed);
     draft_concat_ = reinterpret_cast<float*>(base + l.draft_concat);
     draft_x_ = reinterpret_cast<float*>(base + l.draft_x);
     draft_h_ = reinterpret_cast<float*>(base + l.draft_h);
@@ -282,8 +286,9 @@ Executor::Executor(const DeviceModel& model, std::uint32_t max_rows,
         reinterpret_cast<std::uint32_t*>(base + l.draft_candidates);
     draft_candidate_scratch_ =
         reinterpret_cast<std::uint32_t*>(base + l.draft_candidate_scratch);
-    HIP_CHECK(hipHostMalloc(&draft_candidates_host_,
-                            sizeof(qwen38_flash_next::MtpCandidateLogits)));
+    HIP_CHECK(hipHostMalloc(
+        &draft_candidates_host_,
+        kMaxDraftSessions * sizeof(qwen38_flash_next::MtpCandidateLogits)));
   }
 }
 
@@ -892,117 +897,184 @@ void Executor::DraftChain(KvCache& cache, std::int32_t token,
                           std::uint32_t position, std::uint32_t steps,
                           std::vector<std::int32_t>* drafts,
                           const DraftProposer& propose) {
-  if (!model_.has_draft() || steps == 0 || steps > kMaxDraftTokens ||
-      !propose) {
+  DraftJob job{&cache, token, position, steps, propose, drafts};
+  DraftChains(std::span<DraftJob>(&job, 1));
+}
+
+void Executor::DraftChains(std::span<DraftJob> jobs) {
+  const auto n = static_cast<std::uint32_t>(jobs.size());
+  std::uint32_t max_steps = 0;
+  for (const DraftJob& job : jobs) {
+    if (job.steps > kMaxDraftTokens || !job.propose || job.drafts == nullptr) {
+      throw std::invalid_argument("gemma4 draft chain exceeds its capacity");
+    }
+    max_steps = std::max(max_steps, job.steps);
+  }
+  if (!model_.has_draft() || n == 0 || n > kMaxDraftSessions) {
     throw std::invalid_argument("gemma4 draft chain exceeds its capacity");
   }
   const Config& tc = model_.config();
   const DeviceDraft& dm = model_.draft();
   const Config& c = dm.config;
   const std::size_t target_hidden = tc.hidden_size;
+  const std::size_t hidden = c.hidden_size;
   const float eps = c.rms_eps;
   const float embed_scale = std::sqrt(static_cast<float>(target_hidden));
-  HIP_CHECK(hipMemcpyAsync(draft_tokens_, &token, sizeof(token),
-                           hipMemcpyHostToDevice, stream_));
-  drafts->clear();
-  drafts->reserve(steps);
-  for (std::uint32_t step = 0; step < steps; ++step) {
+  const std::uint32_t vocab = model_.vocab_size();
+  using qwen38_flash_next::kMtpCandidates;
+  using qwen38_flash_next::MtpCandidateLogits;
+  const std::size_t candidate_ids =
+      qwen38_flash_next::rocm::MtpCandidateWorkspaceSize(vocab);
+  // Row j drafts for job j every step; rows whose chain ended keep being
+  // projected (the batched projections cost the same) but are not attended,
+  // ranked or proposed.
+  std::vector<std::uint8_t> active(n);
+  std::vector<std::int32_t> tokens(n);
+  for (std::uint32_t j = 0; j < n; ++j) {
+    jobs[j].drafts->clear();
+    jobs[j].drafts->reserve(jobs[j].steps);
+    active[j] = jobs[j].steps > 0 ? 1 : 0;
+    tokens[j] = jobs[j].token;
+  }
+  HIP_CHECK(hipMemcpyAsync(draft_tokens_, tokens.data(),
+                           n * sizeof(std::int32_t), hipMemcpyHostToDevice,
+                           stream_));
+  for (std::uint32_t step = 0; step < max_steps; ++step) {
+    if (std::find(active.begin(), active.end(), 1) == active.end()) {
+      break;
+    }
     // [scaled target embedding of the token ; target-width hidden state]
-    hip::LaunchBatchedEmbeddingLookup(
-        model_.token_embd().data, model_.token_embd().type,
-        draft_tokens_ + step, draft_concat_, 1, target_hidden, stream_);
-    Scale(draft_concat_, embed_scale, draft_concat_, target_hidden, stream_);
-    HIP_CHECK(hipMemcpyAsync(
-        draft_concat_ + target_hidden, step == 0 ? cache.hidden : draft_next_,
-        target_hidden * sizeof(float), hipMemcpyDeviceToDevice, stream_));
-    Project(dm.pre_projection, draft_concat_, nullptr, 1, draft_x_);
-    RmsNorm(draft_x_, dm.layers[0].attn_norm.f32(), draft_h_, 1, c.hidden_size,
-            eps, stream_);
+    hip::LaunchBatchedEmbeddingLookup(model_.token_embd().data,
+                                      model_.token_embd().type, draft_tokens_,
+                                      draft_embed_, n, target_hidden, stream_);
+    Scale(draft_embed_, embed_scale, draft_embed_, n * target_hidden, stream_);
+    const std::size_t row_bytes = target_hidden * sizeof(float);
+    HIP_CHECK(hipMemcpy2DAsync(draft_concat_, 2 * row_bytes, draft_embed_,
+                               row_bytes, row_bytes, n, hipMemcpyDeviceToDevice,
+                               stream_));
+    if (step == 0) {
+      for (std::uint32_t j = 0; j < n; ++j) {
+        HIP_CHECK(hipMemcpyAsync(draft_concat_ + (2 * j + 1) * target_hidden,
+                                 jobs[j].cache->hidden, row_bytes,
+                                 hipMemcpyDeviceToDevice, stream_));
+      }
+    } else {
+      HIP_CHECK(hipMemcpy2DAsync(draft_concat_ + target_hidden, 2 * row_bytes,
+                                 draft_next_, row_bytes, row_bytes, n,
+                                 hipMemcpyDeviceToDevice, stream_));
+    }
+    Project(dm.pre_projection, draft_concat_, nullptr, n, draft_x_);
+    RmsNorm(draft_x_, dm.layers[0].attn_norm.f32(), draft_h_, n, hidden, eps,
+            stream_);
     for (std::uint32_t l = 0; l < c.num_layers; ++l) {
       const DeviceLayer& L = dm.layers[l];
       const bool sliding = c.IsSliding(l);
       const std::uint32_t dim = c.HeadDim(l);
+      const std::uint32_t q_dim = c.QDim(l);
       const std::uint32_t source = c.SharedKvSource(l, tc);
-      Project(L.attn_q, draft_h_, nullptr, 1, draft_q_);
-      QueryPost(draft_q_, L.attn_q_norm.f32(),
-                std::pow(c.RopeTheta(l), -2.0F / static_cast<float>(dim)),
-                sliding ? nullptr : dm.rope_factors, 1, c.num_heads, dim,
-                position, true, eps, model_.layers()[source].attn_k_norm.f32(),
-                DerivedKeys(source) ? model_.global_rope_pairs() : 0, stream_);
-      AttentionArgs att{};
-      att.q = draft_q_;
-      att.k_cache = cache.k[source];
-      att.v_cache = cache.v[source];
-      att.out = draft_attn_;
-      att.partials = partials_;
-      att.rows = 1;
-      att.heads = c.num_heads;
-      att.kv_heads = c.kv_heads[l];
-      att.head_dim = dim;
-      att.first_position = position;
-      att.shared_position = true;
-      att.key_limit = position;  // committed keys only
-      att.window = sliding ? c.sliding_window : 0;
-      att.ring = sliding ? cache.ring : 0;
-      DeriveKeys(att, source);
-      Attention(att, stream_);
-      Project(L.attn_output, draft_attn_, nullptr, 1, draft_o_);
+      Project(L.attn_q, draft_h_, nullptr, n, draft_q_);
+      for (std::uint32_t j = 0; j < n; ++j) {
+        if (active[j] == 0) {
+          continue;
+        }
+        KvCache& cache = *jobs[j].cache;
+        const std::uint32_t position = jobs[j].position;
+        float* q = draft_q_ + std::size_t{j} * q_dim;
+        QueryPost(
+            q, L.attn_q_norm.f32(),
+            std::pow(c.RopeTheta(l), -2.0F / static_cast<float>(dim)),
+            sliding ? nullptr : dm.rope_factors, 1, c.num_heads, dim, position,
+            true, eps, model_.layers()[source].attn_k_norm.f32(),
+            DerivedKeys(source) ? model_.global_rope_pairs() : 0, stream_);
+        AttentionArgs att{};
+        att.q = q;
+        att.k_cache = cache.k[source];
+        att.v_cache = cache.v[source];
+        att.out = draft_attn_ + std::size_t{j} * q_dim;
+        att.partials = partials_;
+        att.rows = 1;
+        att.heads = c.num_heads;
+        att.kv_heads = c.kv_heads[l];
+        att.head_dim = dim;
+        att.first_position = position;
+        att.shared_position = true;
+        att.key_limit = position;  // committed keys only
+        att.window = sliding ? c.sliding_window : 0;
+        att.ring = sliding ? cache.ring : 0;
+        DeriveKeys(att, source);
+        Attention(att, stream_);
+      }
+      Project(L.attn_output, draft_attn_, nullptr, n, draft_o_);
       PostAttentionNorm(draft_o_, L.post_attn_norm.f32(), draft_x_,
-                        L.ffn_norm.f32(), draft_h_, 1, c.hidden_size, eps,
-                        stream_);
-      Project(L.ffn_gate, draft_h_, nullptr, 1, draft_gate_);
-      Project(L.ffn_up, draft_h_, nullptr, 1, draft_up_);
-      GeGlu(draft_gate_, draft_up_, draft_gate_, c.ffn_size, stream_);
-      Project(L.ffn_down, draft_gate_, nullptr, 1, draft_o_);
+                        L.ffn_norm.f32(), draft_h_, n, hidden, eps, stream_);
+      Project(L.ffn_gate, draft_h_, nullptr, n, draft_gate_);
+      Project(L.ffn_up, draft_h_, nullptr, n, draft_up_);
+      GeGlu(draft_gate_, draft_up_, draft_gate_, std::size_t{n} * c.ffn_size,
+            stream_);
+      Project(L.ffn_down, draft_gate_, nullptr, n, draft_o_);
       const float* next = l + 1 < c.num_layers
                               ? dm.layers[l + 1].attn_norm.f32()
                               : dm.output_norm.f32();
       PostFeedForwardNorm(draft_o_, L.post_ffn_norm.f32(), L.output_scale,
-                          draft_x_, next, draft_h_, 1, c.hidden_size, eps,
-                          stream_);
+                          draft_x_, next, draft_h_, n, hidden, eps, stream_);
     }
     // draft_h_ is the output-normalized state: vocabulary head and the
     // projection back to the target width for the next step. Proposals have
     // no decode twin to match, so the fastest one-row kernel reads the head
     // (repacked as Q4_K at load).
     if (const auto format = GemvFormatOf(dm.token_embd.type);
-        !format ||
+        n != 1 || !format ||
         !LaunchKQuantGemv(*format, dm.token_embd.data, draft_h_, draft_logits_,
                           dm.token_embd.rows, dm.token_embd.cols, stream_)) {
-      Project(dm.token_embd, draft_h_, nullptr, 1, draft_logits_);
+      Project(dm.token_embd, draft_h_, nullptr, n, draft_logits_);
     }
-    // The host picks each proposal (and where the chain ends) from the
-    // top-64 candidates; the next step embeds it.
-    using qwen38_flash_next::kMtpCandidates;
-    using qwen38_flash_next::MtpCandidateLogits;
-    const std::uint32_t vocab = model_.vocab_size();
-    qwen38_flash_next::rocm::MtpTopCandidates(
-        draft_logits_, draft_candidates_, draft_candidate_scratch_,
-        reinterpret_cast<float*>(draft_candidates_ + kMtpCandidates), vocab,
-        stream_);
-    auto& host = *draft_candidates_host_;
-    host.size = std::min<std::size_t>(vocab, kMtpCandidates);
+    // The host picks each proposal (and where each chain ends) from its
+    // row's top-64 candidates; the next step embeds them. One download and
+    // one wait serve every row.
+    const std::size_t count = std::min<std::size_t>(vocab, kMtpCandidates);
     static_assert(offsetof(MtpCandidateLogits, logits) ==
                   kMtpCandidates * sizeof(std::uint32_t));
-    HIP_CHECK(hipMemcpyAsync(
-        &host, draft_candidates_,
-        offsetof(MtpCandidateLogits, logits) + host.size * sizeof(float),
-        hipMemcpyDeviceToHost, stream_));
+    for (std::uint32_t j = 0; j < n; ++j) {
+      if (active[j] == 0) {
+        continue;
+      }
+      std::uint32_t* ids = draft_candidates_ + j * candidate_ids;
+      qwen38_flash_next::rocm::MtpTopCandidates(
+          draft_logits_ + std::size_t{j} * vocab, ids,
+          draft_candidate_scratch_ + j * candidate_ids,
+          reinterpret_cast<float*>(ids + kMtpCandidates), vocab, stream_);
+      HIP_CHECK(hipMemcpyAsync(
+          &draft_candidates_host_[j], ids,
+          offsetof(MtpCandidateLogits, logits) + count * sizeof(float),
+          hipMemcpyDeviceToHost, stream_));
+    }
     HIP_CHECK(hipStreamSynchronize(stream_));
-    const DraftProposal proposal = propose(host);
-    if (!proposal.token) {
+    bool any = false;
+    for (std::uint32_t j = 0; j < n; ++j) {
+      if (active[j] == 0) {
+        continue;
+      }
+      auto& host = draft_candidates_host_[j];
+      host.size = count;
+      const DraftProposal proposal = jobs[j].propose(host);
+      active[j] = 0;
+      if (!proposal.token) {
+        continue;
+      }
+      jobs[j].drafts->push_back(*proposal.token);
+      tokens[j] = *proposal.token;
+      if (!proposal.last && step + 1 < jobs[j].steps) {
+        active[j] = 1;
+        any = true;
+      }
+    }
+    if (!any) {
       break;
     }
-    drafts->push_back(*proposal.token);
-    if (proposal.last) {
-      break;
-    }
-    HIP_CHECK(hipMemcpyAsync(draft_tokens_ + step + 1, &drafts->back(),
-                             sizeof(std::int32_t), hipMemcpyHostToDevice,
+    HIP_CHECK(hipMemcpyAsync(draft_tokens_, tokens.data(),
+                             n * sizeof(std::int32_t), hipMemcpyHostToDevice,
                              stream_));
-    if (step + 1 < steps) {
-      Project(dm.post_projection, draft_h_, nullptr, 1, draft_next_);
-    }
+    Project(dm.post_projection, draft_h_, nullptr, n, draft_next_);
   }
 }
 

@@ -459,6 +459,140 @@ std::int32_t TopToken(const qwen38_flash_next::MtpCandidateLogits& candidates) {
 
 }  // namespace
 
+/// One cycle's drafting: the length policy, sampled proposals and
+/// prompt-lookup copies, asked for one proposal per drafter step.
+struct Session::CycleDraft {
+  CycleDraft(Session& owner, Cycle& owner_cycle, std::uint32_t chain_steps,
+             std::uint32_t slots, const DraftBatch& others,
+             DraftShare* batch_share)
+      : session(owner),
+        cycle(owner_cycle),
+        policy(owner.model_->options_.draft_policy),
+        min_drafts(owner.model_->options_.min_draft_tokens),
+        steps(chain_steps),
+        max_drafts(slots),
+        costs(SharedCosts(owner, owner_cycle, batch_share)),
+        calibrated(owner.Calibration(owner_cycle.sampled), costs, min_drafts,
+                   chain_steps, others),
+        share(batch_share),
+        context{*owner.pending_} {
+    session.lookup_.Extend(session.tokens_);
+    if (cycle.sampled) {
+      // A cycle-local proposal stream; target draws keep the sampler's.
+      draft_rng = sampling::NextRandom(cycle.sampler->mutable_rng_state());
+      draft_sampler = *cycle.sampler;
+    }
+  }
+
+  /// Drafter steps shared by the sessions of a batch cost each a share.
+  static DraftCosts SharedCosts(const Session& owner, const Cycle& c,
+                                const DraftShare* batch_share) {
+    DraftCosts costs =
+        DraftCostsAt(c.position, owner.model_->config().HasExperts());
+    if (batch_share != nullptr && batch_share->sessions > 1) {
+      for (float& ms : costs.draft) {
+        ms /= static_cast<float>(batch_share->sessions);
+      }
+    }
+    return costs;
+  }
+
+  [[nodiscard]] bool Worthwhile() const {
+    return policy != DraftPolicy::kCalibrated || calibrated.FirstDraftCanPay();
+  }
+
+  /// Fills the remaining slots with the tokens that followed an earlier
+  /// occurrence of the context (at least 12 tokens); they end the chain.
+  bool Copy() {
+    const auto match = session.lookup_.Find(session.tokens_, context);
+    const std::size_t room = max_drafts - (context.size() - 1);
+    if (match.length == 0 || room == 0) {
+      return false;
+    }
+    const std::size_t count =
+        std::min(room, session.tokens_.size() - match.start);
+    copies.assign(
+        session.tokens_.begin() + static_cast<std::ptrdiff_t>(match.start),
+        session.tokens_.begin() +
+            static_cast<std::ptrdiff_t>(match.start + count));
+    return count != 0;
+  }
+
+  /// Whether the draft just proposed ends the chain unverified. `kept`
+  /// drafts precede it; `confidence` feeds the confidence policy's chain.
+  bool Stop(std::size_t kept, float confidence,
+            const qwen38_flash_next::MtpCandidateLogits& c) {
+    switch (policy) {
+      case DraftPolicy::kCalibrated: {
+        const float signal = DraftSignal(c);
+        const float before = calibrated.Expected();
+        if (share != nullptr) {
+          // The other sessions as they stand now.
+          const auto own_rows = static_cast<std::uint32_t>(kept + 1);
+          calibrated.SetOthers({.rows = share->rows - own_rows,
+                                .expected = share->expected - before});
+        }
+        if (!calibrated.Include(signal)) {
+          return true;
+        }
+        if (share != nullptr) {
+          share->rows += 1;
+          share->expected += calibrated.Expected() - before;
+        }
+        cycle.signals.push_back(signal);
+        return false;
+      }
+      case DraftPolicy::kConfidence:
+        chain *= confidence;
+        return kept >= min_drafts &&
+               chain < (cycle.sampled ? kSampledChainFloor : kGreedyChainFloor);
+      case DraftPolicy::kFixed:
+        break;
+    }
+    return false;
+  }
+
+  rocm::DraftProposal Propose(const qwen38_flash_next::MtpCandidateLogits& c) {
+    if (cycle.sampled) {
+      auto proposal =
+          qwen38_flash_next::SampleMtpProposal(c, draft_sampler, &draft_rng);
+      if (Stop(cycle.proposals.size(), proposal.probability, c)) {
+        (void)Copy();
+        return rocm::DraftProposal{};
+      }
+      draft_sampler.Accept(proposal.token);
+      cycle.proposals.push_back(proposal);
+      context.push_back(static_cast<std::int32_t>(proposal.token));
+      return rocm::DraftProposal{
+          .token = static_cast<std::int32_t>(proposal.token), .last = Copy()};
+    }
+    if (Stop(context.size() - 1, TopShare(c), c)) {
+      (void)Copy();
+      return rocm::DraftProposal{};
+    }
+    const std::int32_t token = TopToken(c);
+    context.push_back(token);
+    return rocm::DraftProposal{.token = token, .last = Copy()};
+  }
+
+  Session& session;
+  Cycle& cycle;
+  DraftPolicy policy;
+  std::uint32_t min_drafts;
+  std::uint32_t steps;  ///< drafter steps the chain may run
+  std::uint32_t max_drafts;
+  DraftCosts costs;
+  CalibratedChain calibrated;
+  DraftShare* share;
+  float chain{1.0F};
+  /// The context the next token continues: pending plus kept drafts.
+  std::vector<std::int32_t> context;
+  std::vector<std::int32_t> copies;
+  std::vector<std::int32_t> drafts;
+  sampling::SamplerState draft_sampler{sampling::SamplingConfig{}, {}};
+  std::uint64_t draft_rng{0};
+};
+
 bool Session::DecodeStep(std::size_t max_tokens,
                          sampling::SamplerState& sampler, DecodeResult* result,
                          std::string* error_msg, bool stop_at_eos) {
@@ -499,7 +633,8 @@ DraftCalibration& Session::Calibration(bool sampled) {
 }
 
 bool Session::BeginCycle(Cycle& cycle, std::uint32_t draft_limit,
-                         std::string* error_msg, const DraftBatch& others) {
+                         std::string* error_msg, const DraftBatch& others,
+                         DraftShare* share) {
   auto& sampler = *cycle.sampler;
   auto* result = cycle.result;
   result->tokens.clear();
@@ -551,119 +686,55 @@ bool Session::BeginCycle(Cycle& cycle, std::uint32_t draft_limit,
   if (steps == 0) {
     return true;
   }
-  auto& executor = *model_->executor_;
-  auto& proposals = cycle.proposals;
   try {
-    std::vector<std::int32_t> drafts;
-    // The context the next token continues: pending plus kept drafts.
-    std::vector<std::int32_t> context{pending};
-    std::vector<std::int32_t> copies;
-    lookup_.Extend(tokens_);
-    // Prompt lookup: when the context repeats an earlier passage of at
-    // least 12 tokens, the tokens that followed it fill the remaining
-    // slots (verified like any draft) and end the MTP chain.
-    const auto copy = [&] {
-      const auto match = lookup_.Find(tokens_, context);
-      const std::size_t room = max_drafts - (context.size() - 1);
-      if (match.length == 0 || room == 0) {
-        return false;
-      }
-      const std::size_t count = std::min(room, tokens_.size() - match.start);
-      copies.assign(
-          tokens_.begin() + static_cast<std::ptrdiff_t>(match.start),
-          tokens_.begin() + static_cast<std::ptrdiff_t>(match.start + count));
-      return count != 0;
-    };
-    float chain = 1.0F;
-    const DraftCosts costs =
-        DraftCostsAt(position, model_->config().HasExperts());
-    CalibratedChain calibrated(Calibration(cycle.sampled), costs,
-                               options.min_draft_tokens, steps, others);
-    if (policy == DraftPolicy::kCalibrated && !calibrated.FirstDraftCanPay()) {
+    cycle.draft = std::make_unique<CycleDraft>(*this, cycle, steps, max_drafts,
+                                               others, share);
+    if (!cycle.draft->Worthwhile()) {
       // Beside other sessions not even a certain draft would pay: verify
       // the pending token alone without running the drafter.
+      cycle.draft.reset();
       return true;
     }
-    // Whether the draft just proposed ends the chain unverified. `kept`
-    // drafts precede it; `confidence` feeds the confidence policy's chain.
-    const auto stop = [&](std::size_t kept, float confidence,
-                          const qwen38_flash_next::MtpCandidateLogits& c) {
-      switch (policy) {
-        case DraftPolicy::kCalibrated: {
-          const float signal = DraftSignal(c);
-          if (!calibrated.Include(signal)) {
-            return true;
-          }
-          cycle.signals.push_back(signal);
-          return false;
-        }
-        case DraftPolicy::kConfidence:
-          chain *= confidence;
-          return kept >= options.min_draft_tokens &&
-                 chain <
-                     (cycle.sampled ? kSampledChainFloor : kGreedyChainFloor);
-        case DraftPolicy::kFixed:
-          break;
-      }
-      return false;
-    };
-    if (cycle.sampled) {
-      // A cycle-local proposal stream; target draws keep the sampler's.
-      std::uint64_t draft_rng =
-          sampling::NextRandom(sampler.mutable_rng_state());
-      sampling::SamplerState draft_sampler = sampler;
-      executor.DraftChain(
-          *cache_, pending, position, steps, &drafts,
-          [&](const qwen38_flash_next::MtpCandidateLogits& candidates) {
-            auto proposal = qwen38_flash_next::SampleMtpProposal(
-                candidates, draft_sampler, &draft_rng);
-            if (stop(proposals.size(), proposal.probability, candidates)) {
-              (void)copy();
-              return rocm::DraftProposal{};
-            }
-            draft_sampler.Accept(proposal.token);
-            proposals.push_back(proposal);
-            context.push_back(static_cast<std::int32_t>(proposal.token));
-            return rocm::DraftProposal{
-                .token = static_cast<std::int32_t>(proposal.token),
-                .last = copy()};
+    if (share == nullptr) {
+      CycleDraft& draft = *cycle.draft;
+      model_->executor_->DraftChain(
+          *cache_, pending, position, steps, &draft.drafts,
+          [&draft](const qwen38_flash_next::MtpCandidateLogits& c) {
+            return draft.Propose(c);
           });
-      // A copied token is a point-mass proposal: accepted with the
-      // target's probability, a rejection resampling without it.
-      for (const std::int32_t token : copies) {
-        qwen38_flash_next::MtpProposal proposal;
-        proposal.ids[0] = static_cast<sampling::TokenId>(token);
-        proposal.probabilities[0] = 1.0F;
-        proposal.size = 1;
-        proposal.token = proposal.ids[0];
-        proposal.probability = 1.0F;
-        proposals.push_back(proposal);
-      }
-    } else {
-      executor.DraftChain(
-          *cache_, pending, position, steps, &drafts,
-          [&](const qwen38_flash_next::MtpCandidateLogits& candidates) {
-            if (stop(context.size() - 1, TopShare(candidates), candidates)) {
-              (void)copy();
-              return rocm::DraftProposal{};
-            }
-            const std::int32_t token = TopToken(candidates);
-            context.push_back(token);
-            return rocm::DraftProposal{.token = token, .last = copy()};
-          });
-    }
-    cycle.rows.insert(cycle.rows.end(), drafts.begin(), drafts.end());
-    cycle.rows.insert(cycle.rows.end(), copies.begin(), copies.end());
-    cycle.copied = copies.size();
-    if (policy == DraftPolicy::kCalibrated) {
-      cycle.expected = calibrated.Expected();
-      cycle.draft_ms = calibrated.DraftMs();
+      FinishDraft(cycle);
     }
   } catch (const std::exception& e) {
+    cycle.draft.reset();
     Reset();
     return Fail(error_msg, e.what());
   }
   return true;
+}
+
+void Session::FinishDraft(Cycle& cycle) {
+  CycleDraft& draft = *cycle.draft;
+  if (cycle.sampled) {
+    // A copied token is a point-mass proposal: accepted with the target's
+    // probability, a rejection resampling without it.
+    for (const std::int32_t token : draft.copies) {
+      qwen38_flash_next::MtpProposal proposal;
+      proposal.ids[0] = static_cast<sampling::TokenId>(token);
+      proposal.probabilities[0] = 1.0F;
+      proposal.size = 1;
+      proposal.token = proposal.ids[0];
+      proposal.probability = 1.0F;
+      cycle.proposals.push_back(proposal);
+    }
+  }
+  cycle.rows.insert(cycle.rows.end(), draft.drafts.begin(), draft.drafts.end());
+  cycle.rows.insert(cycle.rows.end(), draft.copies.begin(), draft.copies.end());
+  cycle.copied = draft.copies.size();
+  if (draft.policy == DraftPolicy::kCalibrated) {
+    cycle.expected = draft.calibrated.Expected();
+    cycle.draft_ms = draft.calibrated.DraftMs();
+  }
+  cycle.draft.reset();
 }
 
 void Session::FinishCycle(Cycle& cycle, std::span<const float> logits,
@@ -745,16 +816,19 @@ bool Session::DecodeBatch(std::span<BatchDecode> decodes) {
   std::vector<std::int32_t> tokens;
   std::vector<std::size_t> active;
   bool ok = true;
-  // The calibrated policy prices each session's drafts against the whole
-  // forward: sessions already drafted with their rows, expected tokens and
-  // drafter time, the ones still to come with their pending row.
-  DraftBatch decided;
+  // The sessions draft together, one drafter forward per step; the
+  // calibrated policy prices each session's drafts against the whole
+  // forward as it stands (every session starts with its pending row) and
+  // charges each a share of the drafter steps.
+  const auto sessions = static_cast<std::uint32_t>(decodes.size());
+  DraftShare share{.sessions = sessions,
+                   .rows = sessions,
+                   .expected = static_cast<float>(sessions)};
+  const DraftBatch others{.rows = sessions - 1,
+                          .expected = static_cast<float>(sessions - 1)};
+  std::vector<rocm::Executor::DraftJob> jobs;
+  std::vector<std::size_t> drafting;
   for (std::size_t i = 0; i < decodes.size(); ++i) {
-    const auto later = static_cast<std::uint32_t>(decodes.size() - 1 - i);
-    const DraftBatch others{
-        .rows = decided.rows + later,
-        .expected = decided.expected + static_cast<float>(later),
-        .draft_ms = decided.draft_ms};
     auto& d = decodes[i];
     if (d.session->model_.get() != &model) {
       throw std::invalid_argument("gemma4 batch mixes models");
@@ -763,17 +837,45 @@ bool Session::DecodeBatch(std::span<BatchDecode> decodes) {
                       .sampler = d.sampler,
                       .result = d.result,
                       .stop_at_eos = d.stop_at_eos};
-    if (!d.session->BeginCycle(cycles[i], draft_limit, &d.error, others)) {
+    if (!d.session->BeginCycle(cycles[i], draft_limit, &d.error, others,
+                               sessions > 1 ? &share : nullptr)) {
       ok = false;
       continue;
     }
-    if (cycles[i].done) {
+    if (cycles[i].draft) {
+      CycleDraft& draft = *cycles[i].draft;
+      jobs.push_back({d.session->cache_.get(), cycles[i].rows.front(),
+                      cycles[i].position, draft.steps,
+                      [&draft](const qwen38_flash_next::MtpCandidateLogits& c) {
+                        return draft.Propose(c);
+                      },
+                      &draft.drafts});
+      drafting.push_back(i);
+    }
+  }
+  if (!jobs.empty()) {
+    try {
+      model.executor_->DraftChains(jobs);
+    } catch (const std::exception& e) {
+      for (const std::size_t i : drafting) {
+        cycles[i].draft.reset();
+        decodes[i].session->Reset();
+        decodes[i].error = e.what();
+        cycles[i].done = true;
+      }
+      ok = false;
+    }
+    for (const std::size_t i : drafting) {
+      if (cycles[i].draft) {
+        decodes[i].session->FinishDraft(cycles[i]);
+      }
+    }
+  }
+  for (std::size_t i = 0; i < decodes.size(); ++i) {
+    if (cycles[i].done || !decodes[i].error.empty()) {
       continue;
     }
-    decided.rows += static_cast<std::uint32_t>(cycles[i].rows.size());
-    decided.expected += cycles[i].expected;
-    decided.draft_ms += cycles[i].draft_ms;
-    segments.push_back({d.session->cache_.get(), cycles[i].position,
+    segments.push_back({decodes[i].session->cache_.get(), cycles[i].position,
                         static_cast<std::uint32_t>(cycles[i].rows.size())});
     tokens.insert(tokens.end(), cycles[i].rows.begin(), cycles[i].rows.end());
     active.push_back(i);
