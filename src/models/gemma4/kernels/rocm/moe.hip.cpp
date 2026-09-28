@@ -5,6 +5,7 @@
 // in, so verification rows equal single-token decode bit for bit.
 #include "src/models/gemma4/kernels/rocm/moe.hpp"
 
+#include <hip/hip_fp16.h>
 #include <hip/hip_runtime.h>
 
 #include <algorithm>
@@ -56,11 +57,18 @@ constexpr int kRouterVec = kMaxRouterHidden / (4 * kWave);
 /// One wave per expert holds router[e] * router_scale in registers (float4
 /// i of lane l covers elements 4 (l + 32 i) ..) and dots it with each row of
 /// the block's row group.
+__global__ void ScaleRouterKernel(float* router, const float* scale,
+                                  std::uint32_t hidden, std::size_t count) {
+  const std::size_t i = std::size_t{blockIdx.x} * blockDim.x + threadIdx.x;
+  if (i < count) {
+    router[i] = router[i] * scale[i % hidden];
+  }
+}
+
 __global__ void __launch_bounds__(kThreads)
     RouterKernel(const float* __restrict__ x, const float* __restrict__ router,
-                 const float* __restrict__ scale, float* __restrict__ logits,
-                 std::uint32_t rows, std::uint32_t hidden,
-                 std::uint32_t experts, float eps) {
+                 float* __restrict__ logits, std::uint32_t rows,
+                 std::uint32_t hidden, std::uint32_t experts, float eps) {
   const int lane = threadIdx.x % kWave;
   const std::uint32_t e = blockIdx.y * kWaves + threadIdx.x / kWave;
   if (e >= experts) {
@@ -70,13 +78,10 @@ __global__ void __launch_bounds__(kThreads)
   float4 w[kRouterVec];
   const auto* wr =
       reinterpret_cast<const float4*>(router + std::size_t{e} * hidden);
-  const auto* sr = reinterpret_cast<const float4*>(scale);
 #pragma unroll
   for (std::uint32_t i = 0; i < kRouterVec; ++i) {
     if (i < vecs) {
-      const float4 a = wr[lane + kWave * i];
-      const float4 b = sr[lane + kWave * i];
-      w[i] = make_float4(a.x * b.x, a.y * b.y, a.z * b.z, a.w * b.w);
+      w[i] = wr[lane + kWave * i];
     }
   }
   const float inv_root = 1.0F / sqrtf(static_cast<float>(hidden));
@@ -120,17 +125,32 @@ __global__ void __launch_bounds__(kThreads)
                const float* __restrict__ expert_scale,
                std::int32_t* __restrict__ ids, float* __restrict__ weights,
                std::uint32_t* __restrict__ counts, std::uint32_t rows,
-               std::uint32_t experts, std::uint32_t used) {
+               std::uint32_t experts, std::uint32_t used,
+               const float* __restrict__ x, std::uint32_t hidden, float eps) {
   const int lane = threadIdx.x % kWave;
   const std::uint32_t r = blockIdx.x * kWaves + threadIdx.x / kWave;
   if (r >= rows) {
     return;
   }
+  // With `x` the logits are raw dot products, scaled here by the row's
+  // rms(x) / sqrt(hidden) as RouterKernel scales them.
+  float row_scale = 1.0F;
+  if (x != nullptr) {
+    const float* xr = x + std::size_t{r} * hidden;
+    float ss = 0.0F;
+    for (std::uint32_t i = lane; i < hidden; i += kWave) {
+      ss = __builtin_fmaf(xr[i], xr[i], ss);
+    }
+    ss = WaveSum(ss);
+    row_scale = 1.0F / sqrtf(ss / static_cast<float>(hidden) + eps) *
+                (1.0F / sqrtf(static_cast<float>(hidden)));
+  }
   float v[kMaxExpertsPerLane];
 #pragma unroll
   for (int i = 0; i < kMaxExpertsPerLane; ++i) {
     const std::uint32_t e = lane + kWave * i;
-    v[i] = e < experts ? logits[std::size_t{r} * experts + e] : -INFINITY;
+    v[i] = e < experts ? logits[std::size_t{r} * experts + e] * row_scale
+                       : -INFINITY;
   }
   float chosen[8];
   int chosen_id[8];
@@ -458,8 +478,8 @@ void LaunchRouted(const void* w, const std::int32_t* groups,
 // Feed-forward residual
 // ---------------------------------------------------------------------------
 
-constexpr int kFinishThreads = 1024;
-constexpr std::uint32_t kFinishRegisters = 6;  // hidden <= 6144
+/// Widest row MoeFinish holds in registers.
+constexpr std::uint32_t kFinishElements = 6144;
 
 /// Sum over the block in wave order; every thread receives it.
 template<int kBlock>
@@ -479,8 +499,10 @@ __device__ inline float WideBlockSum(float v, float* scratch) {
   return total;
 }
 
+template<int kFinishThreads>
 __global__ void __launch_bounds__(kFinishThreads)
     MoeFinishKernel(MoeFinishArgs a) {
+  constexpr std::uint32_t kFinishRegisters = kFinishElements / kFinishThreads;
   __shared__ float scratch[kFinishThreads / kWave];
   const std::size_t base = std::size_t{blockIdx.x} * a.hidden;
   const float* e = a.experts + base * a.used;
@@ -548,13 +570,15 @@ __global__ void __launch_bounds__(kFinishThreads)
 }  // namespace
 
 void MoeRoute(const MoeRouteArgs& a, hipStream_t stream) {
-  RouterKernel<<<dim3((a.rows + kRouterRows - 1) / kRouterRows,
-                      (a.experts + kWaves - 1) / kWaves),
-                 kThreads, 0, stream>>>(a.x, a.router, a.router_scale, a.logits,
-                                        a.rows, a.hidden, a.experts, a.eps);
+  if (!a.raw_logits) {
+    RouterKernel<<<dim3((a.rows + kRouterRows - 1) / kRouterRows,
+                        (a.experts + kWaves - 1) / kWaves),
+                   kThreads, 0, stream>>>(a.x, a.router, a.logits, a.rows,
+                                          a.hidden, a.experts, a.eps);
+  }
   TopKKernel<<<(a.rows + kWaves - 1) / kWaves, kThreads, 0, stream>>>(
       a.logits, a.expert_scale, a.ids, a.weights, a.counts, a.rows, a.experts,
-      a.used);
+      a.used, a.raw_logits ? a.x : nullptr, a.hidden, a.eps);
   if (a.groups != nullptr) {
     GroupsKernel<<<1, kThreads, 0, stream>>>(a.ids, a.groups, a.rows * a.used,
                                              a.experts);
@@ -610,7 +634,16 @@ bool LaunchRoutedGemv(ExpertFormat format, const void* w,
 }
 
 void MoeFinish(const MoeFinishArgs& args, hipStream_t stream) {
-  MoeFinishKernel<<<args.rows, kFinishThreads, 0, stream>>>(args);
+  // One row per 1024-thread block keeps six values per thread in registers
+  // (narrower blocks spill the row).
+  MoeFinishKernel<1024><<<args.rows, 1024, 0, stream>>>(args);
+}
+
+void ScaleRouter(float* router, const float* scale, std::uint32_t experts,
+                 std::uint32_t hidden, hipStream_t stream) {
+  const std::size_t count = std::size_t{experts} * hidden;
+  ScaleRouterKernel<<<(count + kThreads - 1) / kThreads, kThreads, 0, stream>>>(
+      router, scale, hidden, count);
 }
 
 }  // namespace gufo::models::gemma4::rocm

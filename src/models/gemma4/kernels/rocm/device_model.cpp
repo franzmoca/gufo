@@ -8,6 +8,7 @@
 
 #include "src/core/hip/weight_upload.hpp"
 #include "src/models/gemma4/kernels/rocm/gemv.hpp"
+#include "src/models/gemma4/kernels/rocm/moe.hpp"
 
 namespace gufo::models::gemma4::rocm {
 namespace {
@@ -255,6 +256,13 @@ std::unique_ptr<DeviceModel> DeviceModel::Upload(
     }
     return nullptr;
   }
+  // Routing reads the router with its input scale folded in.
+  for (DeviceLayer& l : m->layers_) {
+    if (!l.router.empty()) {
+      ScaleRouter(static_cast<float*>(l.router.data), l.router_scale.f32(),
+                  l.router.rows, l.router.cols, nullptr);
+    }
+  }
   if (m->has_draft_) {
     // The drafter's vocabulary head only proposes tokens; verification
     // decides every emitted one. Read as Q4_K it moves half the bytes per
@@ -281,6 +289,12 @@ std::unique_ptr<DeviceModel> DeviceModel::Upload(
       head.data = q4;
       head.type = core::GgmlType::kQ4_K;
     }
+  }
+  if (hipDeviceSynchronize() != hipSuccess) {
+    if (error_msg != nullptr) {
+      *error_msg = "router scaling failed";
+    }
+    return nullptr;
   }
   return m;
 }

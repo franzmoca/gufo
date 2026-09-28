@@ -25,8 +25,14 @@ inline constexpr std::uint32_t kGroupInts = 2 + kMaxGroupSlots;
 /// Router widths the routing kernel holds in registers.
 inline constexpr std::uint32_t kMaxRouterHidden = 3072;
 
+/// router[e][i] *= scale[i]: the router with ffn_gate_inp.scale folded in,
+/// once at load (the product the routing kernel formed per launch).
+void ScaleRouter(float* router, const float* scale, std::uint32_t experts,
+                 std::uint32_t hidden, hipStream_t stream);
+
 /// Expert routing of `rows` attention residual rows x ([rows][hidden]):
-///   logits[r][e] = router[e] . (rms(x[r]) / sqrt(hidden) * router_scale),
+///   logits[r][e] = router[e] . x[r] * rms(x[r]) / sqrt(hidden)
+/// with the scale-folded router (ScaleRouter),
 /// the `used` largest logits (ties to the lower expert) in descending order
 /// in ids[r][j], and weights[r][j] = softmax over the chosen logits times
 /// expert_scale[ids[r][j]]. Every row's arithmetic is independent of the
@@ -34,14 +40,16 @@ inline constexpr std::uint32_t kMaxRouterHidden = 3072;
 /// accumulates assignments per expert; `groups` (rows <= kMaxGroupSlots)
 /// receives the group table the routed GEMV reads: every selected expert in
 /// increasing order with its slots (r * used + j) in increasing order.
+/// With `raw_logits` the caller has already written router[e] . x[r] to
+/// `logits` (a prefill GEMM); only the per-row scale and the selection run.
 struct MoeRouteArgs {
   const float* x;
-  const float* router;        ///< F32 [experts][hidden]
-  const float* router_scale;  ///< [hidden]
+  const float* router;        ///< F32 [experts][hidden], scale folded in
   const float* expert_scale;  ///< [experts]
-  float* logits;              ///< scratch, [rows][experts]
-  std::int32_t* ids;          ///< [rows][used]
-  float* weights;             ///< [rows][used]
+  float* logits;              ///< [rows][experts]
+  bool raw_logits;
+  std::int32_t* ids;  ///< [rows][used]
+  float* weights;     ///< [rows][used]
   std::uint32_t* counts;
   std::int32_t* groups;
   std::uint32_t rows;

@@ -2,6 +2,7 @@
 #define GUFO_MODELS_GEMMA4_KERNELS_ROCM_EXECUTOR_HPP_
 
 #include <hip/hip_runtime.h>
+#include <hipblas/hipblas.h>
 
 #include <cstddef>
 #include <cstdint>
@@ -177,6 +178,7 @@ private:
   hipStream_t expert_stream_{nullptr};
   hipEvent_t expert_fork_{nullptr};
   hipEvent_t expert_join_{nullptr};
+  hipblasHandle_t blas_{nullptr};  ///< Prefill router logits
   void* scratch_{nullptr};
   std::int32_t* tokens_{nullptr};
   std::uint32_t* logit_index_{nullptr};

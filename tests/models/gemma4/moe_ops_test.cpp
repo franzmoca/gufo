@@ -104,8 +104,8 @@ struct Routing {
 };
 
 /// Routes `rows` rows on the device (with the group table).
-Routing Route(const float* dx, const float* router, const float* scale,
-              const float* expert_scale, std::uint32_t rows) {
+Routing Route(const float* dx, const float* router, const float* expert_scale,
+              std::uint32_t rows) {
   float* logits = nullptr;
   std::int32_t* ids = nullptr;
   float* weights = nullptr;
@@ -118,7 +118,6 @@ Routing Route(const float* dx, const float* router, const float* scale,
   g4k::MoeRouteArgs a{};
   a.x = dx;
   a.router = router;
-  a.router_scale = scale;
   a.expert_scale = expert_scale;
   a.logits = logits;
   a.ids = ids;
@@ -156,9 +155,10 @@ void CheckRouting(std::mt19937& rng) {
   const auto x = Normal(std::size_t{kRows} * kHidden, 3.0F, rng);
   float* d_router = Device(router.data(), router.size());
   float* d_scale = Device(scale.data(), scale.size());
+  g4k::ScaleRouter(d_router, d_scale, kExperts, kHidden, nullptr);
   float* d_es = Device(expert_scale.data(), expert_scale.size());
   float* d_x = Device(x.data(), x.size());
-  const Routing all = Route(d_x, d_router, d_scale, d_es, kRows);
+  const Routing all = Route(d_x, d_router, d_es, kRows);
 
   // FP64 reference routing.
   for (std::uint32_t r = 0; r < kRows; ++r) {
@@ -216,7 +216,7 @@ void CheckRouting(std::mt19937& rng) {
   // Batch invariance: each row routed alone gives identical bits.
   for (std::uint32_t r = 0; r < kRows; r += 5) {
     const Routing one =
-        Route(d_x + std::size_t{r} * kHidden, d_router, d_scale, d_es, 1);
+        Route(d_x + std::size_t{r} * kHidden, d_router, d_es, 1);
     Require(std::memcmp(one.logits.data(), &all.logits[r * kExperts],
                         kExperts * 4) == 0 &&
                 std::memcmp(one.weights.data(), &all.weights[r * kUsed],
@@ -224,6 +224,48 @@ void CheckRouting(std::mt19937& rng) {
                 std::equal(one.ids.begin(), one.ids.end(),
                            all.ids.begin() + r * kUsed),
             "routing depends on the batch");
+  }
+  // The prefill form: raw dot products from a GEMM, scaled and selected.
+  {
+    std::vector<float> raw(std::size_t{kRows} * kExperts);
+    for (std::uint32_t r = 0; r < kRows; ++r) {
+      for (std::uint32_t e = 0; e < kExperts; ++e) {
+        double dot = 0.0;
+        for (std::uint32_t i = 0; i < kHidden; ++i) {
+          dot += double{router[std::size_t{e} * kHidden + i]} * scale[i] *
+                 x[std::size_t{r} * kHidden + i];
+        }
+        raw[std::size_t{r} * kExperts + e] = static_cast<float>(dot);
+      }
+    }
+    float* d_raw = Device(raw.data(), raw.size());
+    std::int32_t* ids = nullptr;
+    float* weights = nullptr;
+    HIP_CHECK(hipMalloc(&ids, kRows * kUsed * sizeof(std::int32_t)));
+    HIP_CHECK(hipMalloc(&weights, kRows * kUsed * sizeof(float)));
+    g4k::MoeRouteArgs a{};
+    a.x = d_x;
+    a.expert_scale = d_es;
+    a.logits = d_raw;
+    a.raw_logits = true;
+    a.ids = ids;
+    a.weights = weights;
+    a.rows = kRows;
+    a.hidden = kHidden;
+    a.experts = kExperts;
+    a.used = kUsed;
+    a.eps = kEps;
+    g4k::MoeRoute(a, nullptr);
+    Require(Host(ids, kRows * kUsed) == all.ids,
+            "raw-logit routing selects other experts");
+    const auto w = Host(weights, kRows * kUsed);
+    for (std::size_t i = 0; i < w.size(); ++i) {
+      Require(std::fabs(w[i] - all.weights[i]) < 1e-5,
+              "raw-logit mixture weights");
+    }
+    HIP_CHECK(hipFree(d_raw));
+    HIP_CHECK(hipFree(ids));
+    HIP_CHECK(hipFree(weights));
   }
   std::cout << "routing: " << all.groups[0] << " expert groups for " << kRows
             << " rows\n";

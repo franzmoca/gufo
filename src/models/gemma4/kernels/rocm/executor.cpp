@@ -218,6 +218,10 @@ Executor::Executor(const DeviceModel& model, std::uint32_t max_rows,
     HIP_CHECK(hipStreamCreateWithFlags(&expert_stream_, hipStreamNonBlocking));
     HIP_CHECK(hipEventCreateWithFlags(&expert_fork_, hipEventDisableTiming));
     HIP_CHECK(hipEventCreateWithFlags(&expert_join_, hipEventDisableTiming));
+    if (hipblasCreate(&blas_) != HIPBLAS_STATUS_SUCCESS ||
+        hipblasSetStream(blas_, stream_) != HIPBLAS_STATUS_SUCCESS) {
+      throw std::runtime_error("hipblasCreate failed");
+    }
   }
   HIP_CHECK(hipMalloc(&scratch_, l.total));
   auto* base = static_cast<std::uint8_t*>(scratch_);
@@ -295,6 +299,9 @@ Executor::~Executor() {
   }
   if (scratch_ != nullptr) {
     hip::LogCleanupError(hipFree(scratch_));
+  }
+  if (blas_ != nullptr) {
+    (void)hipblasDestroy(blas_);
   }
   if (expert_fork_ != nullptr) {
     hip::LogCleanupError(hipEventDestroy(expert_fork_));
@@ -751,7 +758,6 @@ void Executor::Experts(const DeviceLayer& l, std::uint32_t n,
   MoeRouteArgs route{};
   route.x = x_;
   route.router = l.router.f32();
-  route.router_scale = l.router_scale.f32();
   route.expert_scale = l.down_exps_scale.f32();
   route.logits = moe_logits_;
   route.ids = moe_ids_;
@@ -763,7 +769,21 @@ void Executor::Experts(const DeviceLayer& l, std::uint32_t n,
   route.experts = c.num_experts;
   route.used = used;
   route.eps = c.rms_eps;
+  if (!grouped) {
+    // Prefill logits as one GEMM: logits[r][e] = router[e] . x[r].
+    const float alpha = 1.0F;
+    const float beta = 0.0F;
+    if (hipblasSgemm(
+            blas_, HIPBLAS_OP_T, HIPBLAS_OP_N, static_cast<int>(c.num_experts),
+            static_cast<int>(n), static_cast<int>(d), &alpha, l.router.f32(),
+            static_cast<int>(d), x_, static_cast<int>(d), &beta, moe_logits_,
+            static_cast<int>(c.num_experts)) != HIPBLAS_STATUS_SUCCESS) {
+      throw std::runtime_error("gemma4 router GEMM failed");
+    }
+    route.raw_logits = true;
+  }
   MoeRoute(route, stream);
+  route.raw_logits = false;
   if (grouped || !PrefillExperts(l, n, stream)) {
     // Grouped FP32 projections; a prefill whose formats lack the binary16
     // route runs them over 16-row pieces.
