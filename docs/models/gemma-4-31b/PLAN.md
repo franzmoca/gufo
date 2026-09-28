@@ -398,3 +398,7 @@ Each milestone is a testable state with Conventional Commits on `feat/gemma`. M4
   by 11–34%; multi-user MTP leads at C1–C2 on repetitive text but trails
   llama.cpp by 4–19% on prose from C2 (verification stops at 16 exact rows,
   drafting is per session).
+- DFlash (z-lab's Gemma 4 drafter) accepts fewer tokens per cycle than the
+  MTP drafter on prose and temperature-1 role-play (1.9–2.2 vs 2.3–2.7) and
+  only wins on copy-heavy code, where prompt lookup already covers most of
+  the gain; not pursued (EXPERIMENTS.md).

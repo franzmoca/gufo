@@ -113,6 +113,13 @@ public:
                   std::uint32_t steps, std::vector<std::int32_t>* drafts,
                   const DraftProposer& propose);
 
+  /// Receives, after each layer of every Forward, that layer's residual rows
+  /// ([count][hidden] on the device, ready once `stream` reaches this point):
+  /// the target features a DFlash drafter reads. Unset in serving.
+  using TapSink = std::function<void(std::uint32_t layer, const float* rows,
+                                     std::uint32_t count, hipStream_t stream)>;
+  void SetTapSink(TapSink sink) { tap_sink_ = std::move(sink); }
+
   /// Copies the logits of the last Forward to the host, [rows][vocab].
   void CopyLogits(std::size_t rows, std::vector<float>* out) const;
   /// Post-norm hidden rows of the last Forward, [tokens][hidden].
@@ -138,6 +145,7 @@ private:
   const DeviceModel& model_;
   std::uint32_t max_rows_;
   std::uint32_t max_logit_rows_;
+  TapSink tap_sink_;
   std::uint32_t max_context_;
   std::uint32_t ring_;
   std::vector<std::uint32_t> key_widths_;

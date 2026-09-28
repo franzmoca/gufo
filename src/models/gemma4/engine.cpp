@@ -8,6 +8,7 @@
 #include <cstring>
 #include <exception>
 #include <optional>
+#include <stdexcept>
 #include <utility>
 
 #include "src/core/gguf_reader.hpp"
@@ -53,6 +54,22 @@ bool Fail(std::string* error_msg, std::string message) {
 }  // namespace
 
 Model::Model() = default;
+
+void Model::SetTapSink(LayerTapSink sink) {
+  std::lock_guard lock(mutex_);
+  if (!sink) {
+    executor_->SetTapSink({});
+    return;
+  }
+  executor_->SetTapSink(
+      [sink = std::move(sink)](std::uint32_t layer, const float* rows,
+                               std::uint32_t count, hipStream_t stream) {
+        if (hipStreamSynchronize(stream) != hipSuccess) {
+          throw std::runtime_error("gemma4 layer tap synchronization failed");
+        }
+        sink(layer, rows, count);
+      });
+}
 Model::~Model() = default;
 
 std::shared_ptr<Model> Model::Load(const std::string& model_path,

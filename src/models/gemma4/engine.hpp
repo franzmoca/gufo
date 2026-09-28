@@ -3,6 +3,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -106,6 +107,12 @@ public:
   [[nodiscard]] bool HasMtp() const noexcept {
     return draft_weights_ != nullptr;
   }
+  /// After each layer of every forward, `rows` points at that layer's
+  /// residual rows on the device ([count][hidden], complete when called):
+  /// the target features a DFlash drafter reads. For tools; unset in serving.
+  using LayerTapSink = std::function<void(
+      std::uint32_t layer, const float* rows, std::uint32_t count)>;
+  void SetTapSink(LayerTapSink sink);
   [[nodiscard]] std::uint32_t DraftTokens() const noexcept {
     return options_.draft_tokens;
   }

@@ -454,6 +454,9 @@ void Executor::Forward(std::span<const Segment> segments,
     // the drafter in FP32.
     PostFeedForwardNorm(o_, L.post_ffn_norm.f32(), L.output_scale, x_, next, h_,
                         n, d, eps, stream_, prefill && !last ? q8_ : nullptr);
+    if (tap_sink_) {
+      tap_sink_(l, x_, n, stream_);
+    }
   }
 
   const auto m = static_cast<std::uint32_t>(logit_rows.size());
