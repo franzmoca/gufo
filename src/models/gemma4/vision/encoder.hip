@@ -27,6 +27,14 @@ constexpr unsigned kQkv = 3 * kHidden;
 constexpr unsigned kGateUp = 2 * kFfn;
 /// Rotary pairs per axis: each half of a head rotates as NEOX pairs.
 constexpr unsigned kRopePairs = kHeadDim / 4;
+/// Attention operands pad each head to whole 16-wide WMMA steps and each
+/// key sequence to whole 16-key tiles, with zeros.
+constexpr unsigned kPaddedDim = 80;
+constexpr unsigned kDimSteps = kPaddedDim / 16;
+constexpr unsigned kAttentionWaves = 4;
+
+using Half16 = __attribute__((__vector_size__(16 * sizeof(_Float16)))) _Float16;
+using Float8 = __attribute__((__vector_size__(8 * sizeof(float)))) float;
 
 void Check(hipError_t error) {
   if (error != hipSuccess)
@@ -76,20 +84,6 @@ __device__ float BlockSum(float value, float* shared) {
   for (unsigned stride = kThreads / 2; stride > 0; stride /= 2) {
     if (threadIdx.x < stride)
       shared[threadIdx.x] += shared[threadIdx.x + stride];
-    __syncthreads();
-  }
-  const float total = shared[0];
-  __syncthreads();
-  return total;
-}
-
-__device__ float BlockMax(float value, float* shared) {
-  shared[threadIdx.x] = value;
-  __syncthreads();
-  for (unsigned stride = kThreads / 2; stride > 0; stride /= 2) {
-    if (threadIdx.x < stride)
-      shared[threadIdx.x] =
-          fmaxf(shared[threadIdx.x], shared[threadIdx.x + stride]);
     __syncthreads();
   }
   const float total = shared[0];
@@ -155,87 +149,168 @@ __global__ void PostNormAdd(float* hidden, const float* o,
     hidden[base + j] += o[base + j] * scale * weight[j];
 }
 
-/// One block (kHeadDim threads used) per token and head: RMS-normalizes Q
-/// and K with their weights and V without, rotates Q and K, and writes all
-/// three head-major ([head][count][72]) as BF16. `cos`/`sin` hold
-/// [position][kRopePairs] for the patch column (first half of the head) and
-/// row (second half).
-__global__ void QkvPost(const float* qkv, const float* q_norm,
-                        const float* k_norm, const float* cos,
-                        const float* sin, Bf16* q, Bf16* k, Bf16* v,
-                        unsigned count, unsigned columns) {
-  __shared__ float shared[kThreads];
-  __shared__ float values[kHeadDim];
+/// One block of three waves per token and head; wave 0, 1, 2 handles Q, K,
+/// V. Each is RMS-normalized over the head (Q and K with their weights, V
+/// without); Q and K are rotated. Q and K are written as binary16
+/// [head][padded count][80], V transposed as [head][80][padded count], the
+/// layouts FusedAttention reads. `cos`/`sin` hold [position][kRopePairs] for
+/// the patch column (first half of the head) and row (second half).
+__global__ void __launch_bounds__(96)
+    QkvPost(const float* qkv, const float* q_norm, const float* k_norm,
+            const float* cos, const float* sin, _Float16* q, _Float16* k,
+            _Float16* vt, unsigned columns, unsigned padded) {
+  __shared__ float values[3][kHeadDim];
   const unsigned token = blockIdx.x / kHeads;
   const unsigned head = blockIdx.x % kHeads;
-  const unsigned d = threadIdx.x;
-  const bool active = d < kHeadDim;
-  const std::size_t out = (std::size_t{head} * count + token) * kHeadDim + d;
-  for (unsigned part = 0; part < 3; ++part) {
-    const float value =
-        active ? qkv[std::size_t{token} * kQkv + part * kHidden +
-                     head * kHeadDim + d]
-               : 0.0F;
-    const float scale =
-        rsqrtf(BlockSum(value * value, shared) / kHeadDim + kEps);
-    const float* weight = part == 0 ? q_norm : part == 1 ? k_norm : nullptr;
-    const float normed =
-        active ? value * scale * (weight != nullptr ? weight[d] : 1.0F) : 0.0F;
+  const unsigned part = threadIdx.x / 32;
+  const unsigned lane = threadIdx.x % 32;
+  const float* in = qkv + std::size_t{token} * kQkv + part * kHidden +
+                    head * kHeadDim;
+  float x[3];
+  float sum = 0;
+#pragma unroll
+  for (unsigned j = 0; j < 3; ++j) {
+    const unsigned d = lane + 32 * j;
+    x[j] = d < kHeadDim ? in[d] : 0.0F;
+    sum += x[j] * x[j];
+  }
+#pragma unroll
+  for (unsigned offset = 16; offset > 0; offset /= 2)
+    sum += __shfl_xor(sum, offset, 32);
+  const float scale = rsqrtf(sum / kHeadDim + kEps);
+  const float* weight = part == 0 ? q_norm : part == 1 ? k_norm : nullptr;
+#pragma unroll
+  for (unsigned j = 0; j < 3; ++j) {
+    const unsigned d = lane + 32 * j;
+    if (d < kHeadDim)
+      values[part][d] =
+          x[j] * scale * (weight != nullptr ? weight[d] : 1.0F);
+  }
+  __syncthreads();
+#pragma unroll
+  for (unsigned j = 0; j < 3; ++j) {
+    const unsigned d = lane + 32 * j;
+    if (d >= kHeadDim)
+      continue;
     if (part == 2) {
-      if (active)
-        v[out] = Bf16(normed);
+      vt[(std::size_t{head} * kPaddedDim + d) * padded + token] =
+          static_cast<_Float16>(values[2][d]);
       continue;
     }
-    if (active)
-      values[d] = normed;
+    const unsigned half = d / (kHeadDim / 2);
+    const unsigned i = d % (kHeadDim / 2);
+    const unsigned pair = i % kRopePairs;
+    const unsigned position = half == 0 ? token % columns : token / columns;
+    const float c = cos[position * kRopePairs + pair];
+    const float s = sin[position * kRopePairs + pair];
+    const unsigned first = half * (kHeadDim / 2) + pair;
+    const float a = values[part][first];
+    const float b = values[part][first + kRopePairs];
+    const float rotated = i < kRopePairs ? a * c - b * s : b * c + a * s;
+    (part == 0 ? q : k)[(std::size_t{head} * padded + token) * kPaddedDim +
+                        d] = static_cast<_Float16>(rotated);
+  }
+}
+
+__device__ __forceinline__ Float8 Wmma(Half16 a, Half16 b, Float8 c) {
+  return __builtin_amdgcn_wmma_f32_16x16x16_f16_w32(a, b, c);
+}
+
+__device__ __forceinline__ Half16 LoadHalf16(const _Float16* p) {
+  union {
+    Half16 h;
+    uint4 u[2];
+  } value;
+  value.u[0] = *reinterpret_cast<const uint4*>(p);
+  value.u[1] = *reinterpret_cast<const uint4*>(p + 8);
+  return value.h;
+}
+
+/// Bidirectional scale-1 attention with an online softmax. Each wave owns 16
+/// queries of one head and walks 16-key tiles: binary16 Q K^T on the matrix
+/// cores, FP32 softmax state, binary16 probabilities times V accumulated in
+/// FP32. Fragment layout (wave32 v_wmma_f32_16x16x16_f16): A holds row L%16
+/// and 16 contiguous k, B column L%16 and 16 contiguous k, and accumulator
+/// element i is row 2i + L/16, column L%16. Writes token-major BF16 rows.
+__global__ void __launch_bounds__(32 * kAttentionWaves)
+    FusedAttention(const _Float16* q, const _Float16* k, const _Float16* vt,
+                   Bf16* out, unsigned count, unsigned padded) {
+  __shared__ __align__(16) _Float16 p_lds[kAttentionWaves][16][24];
+  const unsigned lane = threadIdx.x % 32;
+  const unsigned wave = threadIdx.x / 32;
+  const unsigned head = blockIdx.y;
+  const unsigned q0 = (blockIdx.x * kAttentionWaves + wave) * 16;
+  const unsigned row = lane % 16;
+  const unsigned half = lane / 16;
+  const _Float16* qh = q + std::size_t{head} * padded * kPaddedDim;
+  const _Float16* kh = k + std::size_t{head} * padded * kPaddedDim;
+  const _Float16* vh = vt + std::size_t{head} * kPaddedDim * padded;
+  // Waves past the last query still walk the keys: the block synchronizes.
+  const unsigned q_row = min(q0 + row, padded - 1);
+  Half16 query[kDimSteps];
+#pragma unroll
+  for (unsigned s = 0; s < kDimSteps; ++s)
+    query[s] = LoadHalf16(qh + std::size_t{q_row} * kPaddedDim + s * 16);
+  Float8 acc[kDimSteps] = {};
+  float m[8], l[8];
+#pragma unroll
+  for (unsigned i = 0; i < 8; ++i) {
+    m[i] = -INFINITY;
+    l[i] = 0.0F;
+  }
+  for (unsigned key0 = 0; key0 < count; key0 += 16) {
+    Float8 score = {};
+#pragma unroll
+    for (unsigned s = 0; s < kDimSteps; ++s) {
+      score = Wmma(query[s],
+                   LoadHalf16(kh + std::size_t{key0 + row} * kPaddedDim +
+                              s * 16),
+                   score);
+    }
+    const bool valid = key0 + row < count;
+#pragma unroll
+    for (unsigned i = 0; i < 8; ++i) {
+      const float x = valid ? score[i] : -INFINITY;
+      float maximum = x;
+#pragma unroll
+      for (unsigned offset = 8; offset > 0; offset /= 2)
+        maximum = fmaxf(maximum, __shfl_xor(maximum, offset, 32));
+      const float next = fmaxf(m[i], maximum);
+      const float alpha = __expf(m[i] - next);
+      const float p = valid ? __expf(x - next) : 0.0F;
+      float sum = p;
+#pragma unroll
+      for (unsigned offset = 8; offset > 0; offset /= 2)
+        sum += __shfl_xor(sum, offset, 32);
+      l[i] = l[i] * alpha + sum;
+      m[i] = next;
+#pragma unroll
+      for (unsigned c = 0; c < kDimSteps; ++c)
+        acc[c][i] *= alpha;
+      p_lds[wave][2 * i + half][row] = static_cast<_Float16>(p);
+    }
     __syncthreads();
-    if (active) {
-      const unsigned half = d / (kHeadDim / 2);
-      const unsigned j = d % (kHeadDim / 2);
-      const unsigned pair = j % kRopePairs;
-      const unsigned position = half == 0 ? token % columns : token / columns;
-      const float c = cos[position * kRopePairs + pair];
-      const float s = sin[position * kRopePairs + pair];
-      const unsigned first = half * (kHeadDim / 2) + pair;
-      const float a = values[first];
-      const float b = values[first + kRopePairs];
-      const float rotated = j < kRopePairs ? a * c - b * s : b * c + a * s;
-      (part == 0 ? q : k)[out] = Bf16(rotated);
+    const Half16 probabilities = LoadHalf16(&p_lds[wave][row][0]);
+#pragma unroll
+    for (unsigned c = 0; c < kDimSteps; ++c) {
+      acc[c] = Wmma(probabilities,
+                    LoadHalf16(vh + std::size_t{c * 16 + row} * padded + key0),
+                    acc[c]);
     }
     __syncthreads();
   }
-}
-
-/// Row softmax of attention scores (scale 1.0) into BF16 probabilities.
-__global__ void Softmax(const float* scores, Bf16* probabilities,
-                        unsigned length) {
-  __shared__ float shared[kThreads];
-  const float* row = scores + std::size_t{blockIdx.x} * length;
-  float maximum = -INFINITY;
-  for (unsigned i = threadIdx.x; i < length; i += kThreads)
-    maximum = fmaxf(maximum, row[i]);
-  maximum = BlockMax(maximum, shared);
-  float sum = 0;
-  for (unsigned i = threadIdx.x; i < length; i += kThreads)
-    sum += expf(row[i] - maximum);
-  const float inverse = 1.0F / BlockSum(sum, shared);
-  for (unsigned i = threadIdx.x; i < length; i += kThreads) {
-    probabilities[std::size_t{blockIdx.x} * length + i] =
-        Bf16(expf(row[i] - maximum) * inverse);
+#pragma unroll
+  for (unsigned c = 0; c < kDimSteps; ++c) {
+    const unsigned d = c * 16 + row;
+#pragma unroll
+    for (unsigned i = 0; i < 8; ++i) {
+      const unsigned token = q0 + 2 * i + half;
+      if (token < count && d < kHeadDim) {
+        out[std::size_t{token} * kHidden + head * kHeadDim + d] =
+            Bf16(acc[c][i] / l[i]);
+      }
+    }
   }
-}
-
-/// [head][rows][72] FP32 tile -> token-major BF16 rows starting at `begin`.
-__global__ void AttentionRows(const float* tile, Bf16* output, unsigned begin,
-                              unsigned rows) {
-  const unsigned i = blockIdx.x * blockDim.x + threadIdx.x;
-  if (i >= rows * kHidden)
-    return;
-  const unsigned token = i / kHidden;
-  const unsigned head = (i % kHidden) / kHeadDim;
-  const unsigned d = i % kHeadDim;
-  output[std::size_t{begin + token} * kHidden + head * kHeadDim + d] =
-      Bf16(tile[(std::size_t{head} * rows + token) * kHeadDim + d]);
 }
 
 /// gelu_tanh(gate) * up, from fused [count][gate | up] rows.
@@ -489,18 +564,19 @@ std::shared_ptr<const Encoder::Embedding> Encoder::Encode(
     }
   }
 
-  const unsigned tile = std::min(count, 128U);
+  const unsigned padded = (count + 15) / 16 * 16;
   Allocation pixels(image.pixels.size());
   Allocation rope(table.size() * sizeof(float));
   Allocation hidden(std::size_t{count} * kHidden * sizeof(float));
   Allocation work(std::size_t{count} *
                   std::max({kGateUp, kQkv, kPatchValues}) * sizeof(float));
   Allocation normed(std::size_t{count} * kFfn * sizeof(Bf16));
-  Allocation qkv(std::size_t{3} * count * kHidden * sizeof(Bf16));
+  // Q, K and transposed V; padding stays zero.
+  const std::size_t head_values = std::size_t{kHeads} * padded * kPaddedDim;
+  Allocation qkv(3 * head_values * sizeof(_Float16));
+  Check(hipMemsetAsync(qkv.data, 0, 3 * head_values * sizeof(_Float16),
+                       stream));
   Allocation attention(std::size_t{count} * kHidden * sizeof(Bf16));
-  Allocation scores(std::size_t{kHeads} * tile * count * sizeof(float));
-  Allocation probabilities(std::size_t{kHeads} * tile * count * sizeof(Bf16));
-  Allocation output_tile(std::size_t{tile} * kHidden * sizeof(float));
   Allocation pooled(std::size_t{rows} * kHidden * sizeof(float));
   Check(hipMemcpyAsync(pixels.data, image.pixels.data(), image.pixels.size(),
                        hipMemcpyHostToDevice, stream));
@@ -532,40 +608,22 @@ std::shared_ptr<const Encoder::Embedding> Encoder::Encode(
       hidden.As<float>(), I.position.As<float>(), columns, count);
   observe("patch", hidden.As<float>(), std::size_t{count} * kHidden);
 
-  auto* q = qkv.As<Bf16>();
-  auto* k = q + std::size_t{count} * kHidden;
-  auto* v = k + std::size_t{count} * kHidden;
+  auto* q = qkv.As<_Float16>();
+  auto* k = q + head_values;
+  auto* vt = k + head_values;
+  const dim3 attention_grid(
+      (padded / 16 + kAttentionWaves - 1) / kAttentionWaves, kHeads);
   for (unsigned l = 0; l < kLayers; ++l) {
     check_cancelled();
     const Impl::Layer& L = I.layers[l];
     RmsNormBf16<<<count, kThreads, 0, stream>>>(
         hidden.As<float>(), L.ln1.As<float>(), normed.As<Bf16>(), kHidden);
     I.Gemm(L.qkv, normed.As<Bf16>(), work.As<float>(), count, kQkv, kHidden);
-    QkvPost<<<count * kHeads, kThreads, 0, stream>>>(
+    QkvPost<<<count * kHeads, 96, 0, stream>>>(
         work.As<float>(), L.q_norm.As<float>(), L.k_norm.As<float>(), cos, sin,
-        q, k, v, count, columns);
-    for (unsigned begin = 0; begin < count; begin += tile) {
-      const unsigned span = std::min(tile, count - begin);
-      CheckBlas(hipblasGemmStridedBatchedEx(
-          I.blas, HIPBLAS_OP_T, HIPBLAS_OP_N, count, span, kHeadDim, &one, k,
-          HIP_R_16BF, kHeadDim, std::int64_t{count} * kHeadDim,
-          q + std::size_t{begin} * kHeadDim, HIP_R_16BF, kHeadDim,
-          std::int64_t{count} * kHeadDim, &zero, scores.data, HIP_R_32F, count,
-          std::int64_t{span} * count, kHeads, HIPBLAS_COMPUTE_32F,
-          HIPBLAS_GEMM_DEFAULT));
-      Softmax<<<kHeads * span, kThreads, 0, stream>>>(
-          scores.As<float>(), probabilities.As<Bf16>(), count);
-      CheckBlas(hipblasGemmStridedBatchedEx(
-          I.blas, HIPBLAS_OP_N, HIPBLAS_OP_N, kHeadDim, span, count, &one, v,
-          HIP_R_16BF, kHeadDim, std::int64_t{count} * kHeadDim,
-          probabilities.data, HIP_R_16BF, count, std::int64_t{span} * count,
-          &zero, output_tile.data, HIP_R_32F, kHeadDim,
-          std::int64_t{span} * kHeadDim, kHeads, HIPBLAS_COMPUTE_32F,
-          HIPBLAS_GEMM_DEFAULT));
-      AttentionRows<<<Blocks(std::size_t{span} * kHidden), kThreads, 0,
-                      stream>>>(output_tile.As<float>(), attention.As<Bf16>(),
-                                begin, span);
-    }
+        q, k, vt, columns, padded);
+    FusedAttention<<<attention_grid, 32 * kAttentionWaves, 0, stream>>>(
+        q, k, vt, attention.As<Bf16>(), count, padded);
     I.Gemm(L.out, attention.As<Bf16>(), work.As<float>(), count, kHidden,
            kHidden);
     PostNormAdd<<<count, kThreads, 0, stream>>>(

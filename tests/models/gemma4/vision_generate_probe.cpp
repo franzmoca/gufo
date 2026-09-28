@@ -3,12 +3,18 @@
 // for comparison with tools/gemma4/llama_vision.cpp on the same tokens.
 //
 //   gemma4_vision_generate_probe --model GGUF --mmproj GGUF --image FILE
-//       [--question TEXT] [--tokens N] [--out-dir DIR]
+//       [--question TEXT] [--tokens N] [--out-dir DIR] [--continuation I32]
+// --continuation teacher-forces a previous run's tokens.i32 instead of
+// generating (its prompt must match). --embeddings replaces the first
+// image's encoder output with a G4VE file (e.g. vision::Reference's).
 // DIR receives tokens.i32, image<i>.rgb (resized pixels; sizes printed) and
 // gufo.g4lg.
+#include <hip/hip_runtime.h>
+
 #include <algorithm>
 #include <chrono>
 #include <cstdint>
+#include <fstream>
 #include <iostream>
 #include <memory>
 #include <string>
@@ -33,7 +39,8 @@ std::size_t Argmax(std::span<const float> logits) {
 }
 
 void Run(int argc, char** argv) {
-  std::string model_path, mmproj, image_path, out_dir;
+  std::string model_path, mmproj, image_path, out_dir, continuation,
+      embeddings_path;
   std::string question = "Describe this image in detail.";
   std::size_t count = 64;
   for (int i = 1; i + 1 < argc; i += 2) {
@@ -50,6 +57,10 @@ void Run(int argc, char** argv) {
       count = std::stoul(argv[i + 1]);
     else if (arg == "--out-dir")
       out_dir = argv[i + 1];
+    else if (arg == "--continuation")
+      continuation = argv[i + 1];
+    else if (arg == "--embeddings")
+      embeddings_path = argv[i + 1];
     else
       throw std::runtime_error("unknown option " + arg);
   }
@@ -84,7 +95,27 @@ void Run(int argc, char** argv) {
     spans.push_back(
         {image.span.offset, image.span.rows, image.prefix_identity});
   }
-  const auto embed = [&](std::size_t i) { return embeddings.at(i)->data(); };
+  float* injected = nullptr;
+  if (!embeddings_path.empty()) {
+    std::ifstream in(embeddings_path, std::ios::binary);
+    std::uint32_t header[4] = {};
+    in.read(reinterpret_cast<char*>(header), sizeof(header));
+    Require(in && header[0] == 0x45563447U &&
+                header[2] == prompt.images[0].span.rows &&
+                header[3] == model->config().hidden_size,
+            "--embeddings does not match the first image");
+    std::vector<float> rows(std::size_t{header[2]} * header[3]);
+    in.read(reinterpret_cast<char*>(rows.data()),
+            static_cast<std::streamsize>(rows.size() * 4));
+    Require(in.good(), "truncated --embeddings");
+    Require(hipMalloc(&injected, rows.size() * 4) == hipSuccess &&
+                hipMemcpy(injected, rows.data(), rows.size() * 4,
+                          hipMemcpyHostToDevice) == hipSuccess,
+            "cannot upload --embeddings");
+  }
+  const auto embed = [&](std::size_t i) -> const float* {
+    return i == 0 && injected != nullptr ? injected : embeddings.at(i)->data();
+  };
 
   auto session = model->CreateSession(options.max_context, &error);
   Require(session != nullptr, error);
@@ -97,6 +128,19 @@ void Run(int argc, char** argv) {
             << " ms\n";
   std::vector<g4::TokenId> tokens = prompt.tokens;
   std::vector<g4::TokenId> generated;
+  if (!continuation.empty()) {
+    std::ifstream in(continuation, std::ios::binary);
+    std::vector<g4::TokenId> previous;
+    for (g4::TokenId t; in.read(reinterpret_cast<char*>(&t), sizeof(t));) {
+      previous.push_back(t);
+    }
+    Require(previous.size() > tokens.size() &&
+                std::equal(tokens.begin(), tokens.end(), previous.begin()),
+            "--continuation does not extend this prompt");
+    generated.assign(previous.begin() + tokens.size(), previous.end());
+    tokens = previous;
+    count = 0;
+  }
   for (std::size_t i = 0; i < count; ++i) {
     const auto token = static_cast<g4::TokenId>(Argmax(session->Logits()));
     if (model->IsStopToken(token)) {
