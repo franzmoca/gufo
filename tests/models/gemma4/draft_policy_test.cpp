@@ -93,7 +93,7 @@ void CheckCosts() {
   }
   // The 26B-A4B's own table: cheaper cycles whose rows cost relatively more.
   const g4::DraftCosts moe = g4::DraftCostsAt(0, true);
-  Require(moe.verify[1] == 18.3F && moe.verify[8] == 30.7F &&
+  Require(moe.verify[1] == 18.3F && moe.verify[8] == 31.8F &&
               std::fabs(moe.draft[1] - 1.81F) < 1e-4F,
           "expert-model d0 costs");
   Require(moe.verify[8] / moe.verify[1] > shallow.verify[8] / shallow.verify[1],

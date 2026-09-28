@@ -24,22 +24,23 @@ constexpr std::array<std::array<float, 8>, 5> kVerifyMs = {{
 }};
 
 // The 26B-A4B (UD-Q4_K_XL target, Unsloth Q8_0 drafter), measured
-// 2026-09-28 the same way up to the 16 rows a batched forward verifies:
+// 2026-09-29 on varied English prose (the rows' routing, and so the experts
+// they read, follows the text) up to the 16 rows a batched forward verifies:
 // every verified row adds the experts it routes to, so verification grows
 // several times faster per row than on the dense family.
 constexpr std::array<float, 5> kExpertDraftStepMs = {1.81F, 2.03F, 2.25F, 2.51F,
                                                      3.04F};
 constexpr std::array<std::array<float, 16>, 5> kExpertVerifyMs = {{
-    {18.3F, 20.0F, 22.9F, 24.8F, 26.7F, 28.5F, 29.9F, 30.7F, 31.9F, 33.2F,
-     35.5F, 38.7F, 40.3F, 42.3F, 42.1F, 43.5F},
-    {19.7F, 22.7F, 25.3F, 27.1F, 28.7F, 30.6F, 32.1F, 33.5F, 34.8F, 36.0F,
-     38.7F, 42.2F, 44.1F, 46.3F, 46.0F, 47.3F},
-    {20.7F, 23.8F, 25.6F, 27.0F, 29.1F, 31.4F, 33.3F, 34.6F, 36.6F, 37.9F,
-     40.9F, 44.6F, 46.6F, 49.0F, 49.2F, 50.9F},
-    {21.7F, 25.3F, 27.1F, 28.7F, 31.1F, 33.4F, 35.7F, 37.1F, 40.6F, 42.0F,
-     45.7F, 50.8F, 53.6F, 56.5F, 57.0F, 59.0F},
-    {23.5F, 28.0F, 31.2F, 33.2F, 36.3F, 39.2F, 42.8F, 45.0F, 50.9F, 53.0F,
-     57.2F, 62.0F, 65.1F, 68.2F, 69.3F, 71.8F},
+    {18.3F, 21.1F, 23.1F, 25.4F, 27.3F, 29.1F, 30.8F, 31.8F, 33.2F, 34.4F,
+     37.1F, 40.6F, 42.3F, 44.8F, 44.6F, 46.0F},
+    {19.8F, 22.9F, 25.8F, 28.1F, 30.0F, 32.8F, 34.9F, 36.4F, 37.8F, 39.5F,
+     42.5F, 46.0F, 48.9F, 51.1F, 51.0F, 52.6F},
+    {20.8F, 24.6F, 27.3F, 29.5F, 32.1F, 35.1F, 37.9F, 39.6F, 41.9F, 43.5F,
+     46.8F, 50.5F, 52.6F, 55.3F, 55.5F, 57.6F},
+    {21.7F, 26.7F, 29.7F, 32.0F, 34.7F, 37.5F, 40.2F, 42.3F, 45.8F, 47.6F,
+     50.9F, 55.4F, 58.0F, 61.2F, 61.5F, 63.6F},
+    {23.6F, 28.2F, 31.9F, 34.2F, 37.6F, 41.6F, 45.6F, 48.0F, 53.5F, 55.6F,
+     60.0F, 64.7F, 69.0F, 72.4F, 73.0F, 76.0F},
 }};
 
 }  // namespace
