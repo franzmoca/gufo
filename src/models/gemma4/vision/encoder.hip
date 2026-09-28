@@ -28,10 +28,12 @@ constexpr unsigned kGateUp = 2 * kFfn;
 /// Rotary pairs per axis: each half of a head rotates as NEOX pairs.
 constexpr unsigned kRopePairs = kHeadDim / 4;
 /// Attention operands pad each head to whole 16-wide WMMA steps and each
-/// key sequence to whole 16-key tiles, with zeros.
+/// key sequence to whole kKeyTile tiles, with zeros.
 constexpr unsigned kPaddedDim = 80;
 constexpr unsigned kDimSteps = kPaddedDim / 16;
 constexpr unsigned kAttentionWaves = 4;
+/// Keys per softmax update; key sequences are padded to whole tiles.
+constexpr unsigned kKeyTile = 64;
 
 using Half16 = __attribute__((__vector_size__(16 * sizeof(_Float16)))) _Float16;
 using Float8 = __attribute__((__vector_size__(8 * sizeof(float)))) float;
@@ -227,30 +229,33 @@ __device__ __forceinline__ Half16 LoadHalf16(const _Float16* p) {
 }
 
 /// Bidirectional scale-1 attention with an online softmax. Each wave owns 16
-/// queries of one head and walks 16-key tiles: binary16 Q K^T on the matrix
-/// cores, FP32 softmax state, binary16 probabilities times V accumulated in
-/// FP32. Fragment layout (wave32 v_wmma_f32_16x16x16_f16): A holds row L%16
-/// and 16 contiguous k, B column L%16 and 16 contiguous k, and accumulator
-/// element i is row 2i + L/16, column L%16. Writes token-major BF16 rows.
+/// queries of one head and walks 64-key tiles (four 16-key WMMA blocks per
+/// softmax update): binary16 Q K^T on the matrix cores, FP32 softmax state,
+/// binary16 probabilities times V accumulated in FP32. Fragment layout
+/// (wave32 v_wmma_f32_16x16x16_f16): A holds row L%16 and 16 contiguous k, B
+/// column L%16 and 16 contiguous k, and accumulator element i is row
+/// 2i + L/16, column L%16. Writes token-major BF16 rows.
 __global__ void __launch_bounds__(32 * kAttentionWaves)
     FusedAttention(const _Float16* q, const _Float16* k, const _Float16* vt,
                    Bf16* out, unsigned count, unsigned padded) {
-  __shared__ __align__(16) _Float16 p_lds[kAttentionWaves][16][24];
+  // Per-wave probability tiles: waves never exchange data.
+  __shared__ __align__(16) _Float16
+      p_lds[kAttentionWaves][16][kKeyTile + 8];
   const unsigned lane = threadIdx.x % 32;
   const unsigned wave = threadIdx.x / 32;
   const unsigned head = blockIdx.y;
   const unsigned q0 = (blockIdx.x * kAttentionWaves + wave) * 16;
+  if (q0 >= count)
+    return;
   const unsigned row = lane % 16;
   const unsigned half = lane / 16;
   const _Float16* qh = q + std::size_t{head} * padded * kPaddedDim;
   const _Float16* kh = k + std::size_t{head} * padded * kPaddedDim;
   const _Float16* vh = vt + std::size_t{head} * kPaddedDim * padded;
-  // Waves past the last query still walk the keys: the block synchronizes.
-  const unsigned q_row = min(q0 + row, padded - 1);
   Half16 query[kDimSteps];
 #pragma unroll
   for (unsigned s = 0; s < kDimSteps; ++s)
-    query[s] = LoadHalf16(qh + std::size_t{q_row} * kPaddedDim + s * 16);
+    query[s] = LoadHalf16(qh + std::size_t{q0 + row} * kPaddedDim + s * 16);
   Float8 acc[kDimSteps] = {};
   float m[8], l[8];
 #pragma unroll
@@ -258,27 +263,41 @@ __global__ void __launch_bounds__(32 * kAttentionWaves)
     m[i] = -INFINITY;
     l[i] = 0.0F;
   }
-  for (unsigned key0 = 0; key0 < count; key0 += 16) {
-    Float8 score = {};
+  constexpr unsigned kBlocks = kKeyTile / 16;
+  for (unsigned key0 = 0; key0 < count; key0 += kKeyTile) {
+    Float8 score[kBlocks] = {};
 #pragma unroll
-    for (unsigned s = 0; s < kDimSteps; ++s) {
-      score = Wmma(query[s],
-                   LoadHalf16(kh + std::size_t{key0 + row} * kPaddedDim +
-                              s * 16),
-                   score);
+    for (unsigned b = 0; b < kBlocks; ++b) {
+#pragma unroll
+      for (unsigned s = 0; s < kDimSteps; ++s) {
+        score[b] = Wmma(
+            query[s],
+            LoadHalf16(kh + std::size_t{key0 + b * 16 + row} * kPaddedDim +
+                       s * 16),
+            score[b]);
+      }
     }
-    const bool valid = key0 + row < count;
 #pragma unroll
     for (unsigned i = 0; i < 8; ++i) {
-      const float x = valid ? score[i] : -INFINITY;
-      float maximum = x;
+      float x[kBlocks];
+      float maximum = -INFINITY;
+#pragma unroll
+      for (unsigned b = 0; b < kBlocks; ++b) {
+        x[b] = key0 + b * 16 + row < count ? score[b][i] : -INFINITY;
+        maximum = fmaxf(maximum, x[b]);
+      }
 #pragma unroll
       for (unsigned offset = 8; offset > 0; offset /= 2)
         maximum = fmaxf(maximum, __shfl_xor(maximum, offset, 32));
       const float next = fmaxf(m[i], maximum);
       const float alpha = __expf(m[i] - next);
-      const float p = valid ? __expf(x - next) : 0.0F;
-      float sum = p;
+      float sum = 0.0F;
+#pragma unroll
+      for (unsigned b = 0; b < kBlocks; ++b) {
+        const float p = __expf(x[b] - next);
+        sum += p;
+        p_lds[wave][2 * i + half][b * 16 + row] = static_cast<_Float16>(p);
+      }
 #pragma unroll
       for (unsigned offset = 8; offset > 0; offset /= 2)
         sum += __shfl_xor(sum, offset, 32);
@@ -287,17 +306,26 @@ __global__ void __launch_bounds__(32 * kAttentionWaves)
 #pragma unroll
       for (unsigned c = 0; c < kDimSteps; ++c)
         acc[c][i] *= alpha;
-      p_lds[wave][2 * i + half][row] = static_cast<_Float16>(p);
     }
-    __syncthreads();
-    const Half16 probabilities = LoadHalf16(&p_lds[wave][row][0]);
+    // A wave's LDS accesses complete in order; the barriers only keep the
+    // compiler from moving them across the exchange.
+    __builtin_amdgcn_fence(__ATOMIC_RELEASE, "wavefront");
+    __builtin_amdgcn_wave_barrier();
+    __builtin_amdgcn_fence(__ATOMIC_ACQUIRE, "wavefront");
 #pragma unroll
-    for (unsigned c = 0; c < kDimSteps; ++c) {
-      acc[c] = Wmma(probabilities,
-                    LoadHalf16(vh + std::size_t{c * 16 + row} * padded + key0),
-                    acc[c]);
+    for (unsigned b = 0; b < kBlocks; ++b) {
+      const Half16 probabilities = LoadHalf16(&p_lds[wave][row][b * 16]);
+#pragma unroll
+      for (unsigned c = 0; c < kDimSteps; ++c) {
+        acc[c] = Wmma(probabilities,
+                      LoadHalf16(vh + std::size_t{c * 16 + row} * padded +
+                                 key0 + b * 16),
+                      acc[c]);
+      }
     }
-    __syncthreads();
+    __builtin_amdgcn_fence(__ATOMIC_RELEASE, "wavefront");
+    __builtin_amdgcn_wave_barrier();
+    __builtin_amdgcn_fence(__ATOMIC_ACQUIRE, "wavefront");
   }
 #pragma unroll
   for (unsigned c = 0; c < kDimSteps; ++c) {
@@ -564,7 +592,7 @@ std::shared_ptr<const Encoder::Embedding> Encoder::Encode(
     }
   }
 
-  const unsigned padded = (count + 15) / 16 * 16;
+  const unsigned padded = (count + kKeyTile - 1) / kKeyTile * kKeyTile;
   Allocation pixels(image.pixels.size());
   Allocation rope(table.size() * sizeof(float));
   Allocation hidden(std::size_t{count} * kHidden * sizeof(float));
