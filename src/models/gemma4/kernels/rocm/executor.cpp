@@ -809,7 +809,9 @@ bool Executor::PrefillExperts(const DeviceLayer& l, std::uint32_t n,
   const std::uint32_t width = c.expert_ffn_size;
   const auto gate_up = RoutedHalfType(l.gate_up_exps.type);
   const auto down = RoutedHalfType(l.down_exps.type);
-  if (!gate_up || !down || d % 256 != 0 || width % 64 != 0) {
+  // Q6_K gate/up takes the Gemma routed binary16 GEMM.
+  const bool q6_gate_up = l.gate_up_exps.type == core::GgmlType::kQ6_K;
+  if ((!gate_up && !q6_gate_up) || !down || d % 256 != 0 || width % 64 != 0) {
     return false;
   }
   // The tile map needs the per-expert counts on the host.
@@ -833,10 +835,18 @@ bool Executor::PrefillExperts(const DeviceLayer& l, std::uint32_t n,
   fn::NarrowActivations(moe_h_, x_half_, false, std::size_t{n} * d, stream);
   auto* gu = static_cast<__half*>(moe_gu_);
   auto* act = static_cast<__half*>(moe_act_);
-  if (!fn::RoutedF16Gemm(
-          l.gate_up_exps.data, *gate_up, static_cast<const __half*>(x_half_),
-          moe_tiles_, tiles, kRoutedTileRows, moe_bounds_, moe_rows_token_,
-          moe_rows_slot_, nullptr, nullptr, gu, 2 * width, d, stream)) {
+  const bool gate_up_ok =
+      q6_gate_up
+          ? LaunchRoutedHalfGemm(ExpertFormat::kQ6_K, l.gate_up_exps.data,
+                                 x_half_, moe_tiles_, tiles, kRoutedTileRows,
+                                 moe_bounds_, moe_rows_token_, moe_rows_slot_,
+                                 nullptr, gu, 2 * width, d, stream)
+          : fn::RoutedF16Gemm(l.gate_up_exps.data, *gate_up,
+                              static_cast<const __half*>(x_half_), moe_tiles_,
+                              tiles, kRoutedTileRows, moe_bounds_,
+                              moe_rows_token_, moe_rows_slot_, nullptr, nullptr,
+                              gu, 2 * width, d, stream);
+  if (!gate_up_ok) {
     return false;
   }
   GeGluPackedHalf(gu, act, n * used, width, stream);

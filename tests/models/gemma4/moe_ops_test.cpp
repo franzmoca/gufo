@@ -4,6 +4,7 @@
 // alone equals the same row inside a verification batch bit for bit, so
 // greedy speculation reproduces decode. Prints cold-weight timings of the
 // decode (one row, eight experts) and five-row verification projections.
+#include <hip/hip_fp16.h>
 #include <hip/hip_runtime.h>
 
 #include <algorithm>
@@ -20,6 +21,7 @@
 #include "src/core/hip/hip_utils.hpp"
 #include "src/core/quant/ggml_gemm.hpp"
 #include "src/models/gemma4/kernels/rocm/moe.hpp"
+#include "src/models/qwen38_flash_next/kernels/rocm/kernels.hpp"
 #include "tests/models/gemma4/check.hpp"
 
 namespace g4k = gufo::models::gemma4::rocm;
@@ -469,6 +471,91 @@ void CheckFinish(std::mt19937& rng) {
   }
 }
 
+/// The Q6_K routed prefill GEMM over binary16 rows, in the routing layout
+/// the executor builds (Flash-Next compaction, 48-row tiles), against FP64
+/// dots of the dequantized rows and the binary16 inputs.
+void CheckRoutedPrefill(const Format& f, std::mt19937& rng) {
+  namespace fn = gufo::models::qwen38_flash_next::rocm;
+  constexpr std::uint32_t kTokens = 150;
+  constexpr std::uint32_t kExpertsHere = 16;
+  constexpr std::uint32_t m = 2 * kWidth;
+  constexpr std::uint32_t k = kHidden;
+  constexpr std::uint32_t kTile = 48;
+  std::vector<std::int32_t> ids(kTokens * kUsed);
+  std::vector<std::uint32_t> counts(kExpertsHere, 0);
+  for (std::uint32_t t = 0; t < kTokens; ++t) {
+    std::vector<int> all(kExpertsHere);
+    std::iota(all.begin(), all.end(), 0);
+    std::shuffle(all.begin(), all.end(), rng);
+    for (std::uint32_t j = 0; j < kUsed; ++j) {
+      ids[t * kUsed + j] = all[j];
+      ++counts[all[j]];
+    }
+  }
+  std::vector<std::int32_t> tiles;
+  for (std::uint32_t e = 0; e < kExpertsHere; ++e) {
+    const std::uint32_t padded = (counts[e] + 15) / 16 * 16;
+    for (std::uint32_t j = 0; j * kTile < padded; ++j) {
+      tiles.push_back(static_cast<std::int32_t>(e | (j << 16)));
+    }
+  }
+  const auto w = RandomMatrix(f, std::size_t{kExpertsHere} * m, k, rng);
+  const auto x = Normal(std::size_t{kTokens} * k, 1.0F, rng);
+  std::vector<__half> xh(x.size());
+  for (std::size_t i = 0; i < x.size(); ++i) {
+    xh[i] = __float2half(x[i]);
+  }
+  const std::size_t slots = kTokens * kUsed;
+  const std::size_t compact = fn::RoutedCompactRows(slots, kExpertsHere);
+  auto* dw = Device(w.data(), w.size());
+  auto* dx = Device(xh.data(), xh.size());
+  auto* dids = Device(ids.data(), ids.size());
+  auto* dcounts = Device(counts.data(), counts.size());
+  auto* dtiles = Device(tiles.data(), tiles.size());
+  std::int32_t *bounds = nullptr, *cursors = nullptr, *rows_token = nullptr,
+               *rows_slot = nullptr;
+  float* dy = nullptr;
+  HIP_CHECK(hipMalloc(&bounds, (kExpertsHere + 1) * 4));
+  HIP_CHECK(hipMalloc(&cursors, kExpertsHere * 4));
+  HIP_CHECK(hipMalloc(&rows_token, compact * 4));
+  HIP_CHECK(hipMalloc(&rows_slot, compact * 4));
+  HIP_CHECK(hipMalloc(&dy, slots * m * sizeof(float)));
+  fn::RoutedCompact(dids, dcounts, bounds, cursors, rows_token, rows_slot,
+                    kTokens, kUsed, kExpertsHere, nullptr);
+  Require(g4k::LaunchRoutedHalfGemm(f.format, dw, dx, dtiles,
+                                    static_cast<std::uint32_t>(tiles.size()),
+                                    kTile, bounds, rows_token, rows_slot, dy,
+                                    nullptr, m, k, nullptr),
+          "routed prefill GEMM rejected Q6_K");
+  const auto got = Host(dy, slots * m);
+  const std::size_t row_bytes = k / f.block * f.bytes;
+  std::vector<float> row(k);
+  double worst = 0.0;
+  for (std::size_t s = 0; s < slots; s += 13) {
+    const std::size_t e = static_cast<std::size_t>(ids[s]);
+    for (std::uint32_t o = 0; o < m; o += 37) {
+      gufo::quant::Dequantize(f.type, w.data() + (e * m + o) * row_bytes,
+                              row.data(), k);
+      double want = 0.0, magnitude = 0.0;
+      for (std::uint32_t c = 0; c < k; ++c) {
+        const double p = double{row[c]} * __half2float(xh[(s / kUsed) * k + c]);
+        want += p;
+        magnitude += std::fabs(p);
+      }
+      worst = std::max(worst, std::fabs(got[s * m + o] - want) / magnitude);
+    }
+  }
+  std::cout << "routed prefill " << f.name << ": error " << worst << "\n";
+  Require(worst < 2e-3, "routed prefill error " + std::to_string(worst));
+  for (void* p : {static_cast<void*>(dw), static_cast<void*>(dx),
+                  static_cast<void*>(dids), static_cast<void*>(dcounts),
+                  static_cast<void*>(dtiles), static_cast<void*>(bounds),
+                  static_cast<void*>(cursors), static_cast<void*>(rows_token),
+                  static_cast<void*>(rows_slot), static_cast<void*>(dy)}) {
+    HIP_CHECK(hipFree(p));
+  }
+}
+
 }  // namespace
 
 int main() {
@@ -499,5 +586,6 @@ int main() {
     for (const Format& f : {q51, q80}) {
       CheckProjection(f, kHidden, kWidth, 1, rng);
     }
+    CheckRoutedPrefill(q6k, rng);
   });
 }

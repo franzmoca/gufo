@@ -21,6 +21,7 @@ if (ENGINE_ENABLE_HIP)
     ${GEMMA4_ROCM_DIR}/attention_wmma.hip.cpp
     ${GEMMA4_ROCM_DIR}/gemv.hip.cpp
     ${GEMMA4_ROCM_DIR}/moe.hip.cpp
+    ${GEMMA4_ROCM_DIR}/moe_prefill.hip.cpp
     ${GEMMA4_ROCM_DIR}/device_model.cpp
     ${GEMMA4_ROCM_DIR}/executor.cpp
     vision/encoder.hip
@@ -29,6 +30,7 @@ if (ENGINE_ENABLE_HIP)
     ${GEMMA4_ROCM_DIR}/attention_wmma.hip.cpp
     ${GEMMA4_ROCM_DIR}/gemv.hip.cpp
     ${GEMMA4_ROCM_DIR}/moe.hip.cpp
+    ${GEMMA4_ROCM_DIR}/moe_prefill.hip.cpp
     vision/encoder.hip PROPERTIES LANGUAGE HIP)
   # Projections must round identically at every width (verification equals
   # decode), so they are compiled with strict floating-point semantics.

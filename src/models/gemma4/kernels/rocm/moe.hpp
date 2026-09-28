@@ -66,6 +66,19 @@ void MoeRoute(const MoeRouteArgs& args, hipStream_t stream);
                                     std::uint32_t m, std::uint32_t k,
                                     hipStream_t stream);
 
+/// Routed prefill projection over binary16 activation rows `x` ([rows][k])
+/// in Flash-Next's routing layout (RoutedCompact buckets and a tile map of
+/// expert | tile << 16 entries built for `tile_rows` bucket rows per tile):
+/// row rows_out[i] of `out` (FP32) or `out_half` (binary16, saturated)
+/// receives W[expert] x[rows_in[i]]. Covers the formats the Flash-Next
+/// routed GEMM lacks (Q6_K, 48-row tiles); returns false for others.
+[[nodiscard]] bool LaunchRoutedHalfGemm(
+    ExpertFormat format, const void* w, const void* x,
+    const std::int32_t* tiles, std::uint32_t n_tiles, std::uint32_t tile_rows,
+    const std::int32_t* pad_bounds, const std::int32_t* rows_in,
+    const std::int32_t* rows_out, float* out, void* out_half, std::uint32_t m,
+    std::uint32_t k, hipStream_t stream);
+
 /// The feed-forward residual of an expert layer, per row r:
 ///   f = rms(dense[r]) * norm1 + rms(sum_j weights[r][j] *
 ///       experts[r * used + j]) * norm2   (summed over j in order),
