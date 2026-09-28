@@ -96,8 +96,17 @@ void CheckShape(const Format& f, std::size_t m, std::size_t k,
   HIP_CHECK(hipDeviceSynchronize());
   HIP_CHECK(hipMemcpy(gemv.data(), dy, gemv.size() * 4, hipMemcpyDeviceToHost));
 
-  // Every verification width reproduces the decode rows bit for bit.
+  // Every verification width reproduces the decode rows bit for bit,
+  // including the double-stage pass at one row (drafter-mode decode).
   std::vector<float> batch(kRows * m);
+  HIP_CHECK(hipMemset(dy, 0xFF, m * sizeof(float)));
+  if (gufo::hip::LaunchKQuantSmallBatchDoubleStage(f.type, dw, dx, dy, 1, m, k,
+                                                   nullptr)) {
+    HIP_CHECK(hipDeviceSynchronize());
+    HIP_CHECK(hipMemcpy(batch.data(), dy, m * 4, hipMemcpyDeviceToHost));
+    Require(std::memcmp(batch.data(), gemv.data(), m * 4) == 0,
+            name + ": one-row double stage differs from decode GEMV");
+  }
   for (std::size_t width = 2; width <= 16; ++width) {
     HIP_CHECK(hipMemset(dy, 0xFF, width * m * sizeof(float)));
     gufo::hip::LaunchBatchedQuantGEMMFp32(f.type, dw, dx, dy, width, m, k,

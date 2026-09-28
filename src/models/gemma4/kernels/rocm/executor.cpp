@@ -313,8 +313,16 @@ void Executor::Project(const DeviceTensor& w, const float* x, const void* xq,
   if (model_.has_draft()) {
     // Speculation verifies with the small-batch kernel, and single tokens
     // must round identically: its bit-identical one-row twins, whichever is
-    // faster for the shape (measured with cold weights; for Q4_0 the
-    // small-batch twin at every shape).
+    // faster for the shape (measured with cold weights): the double-stage
+    // pass for Q4_K and for Q5_K past 4096 outputs, the small-batch twin for
+    // Q4_0 at every shape.
+    const bool double_stage =
+        w.type == core::GgmlType::kQ4_K ||
+        (w.type == core::GgmlType::kQ5_K && w.rows > 4096);
+    if (double_stage && hip::LaunchKQuantSmallBatchDoubleStage(
+                            w.type, w.data, x, y, 1, w.rows, w.cols, stream_)) {
+      return;
+    }
     if (w.rows <= 4096 && w.type != core::GgmlType::kQ4_0) {
       hip::LaunchGEMV(w.data, w.type, x, y, w.rows, w.cols, stream_);
     } else {

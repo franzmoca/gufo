@@ -1707,7 +1707,7 @@ bool LaunchKQuantSmallBatchDoubleStage(core::GgmlType type, const void* w,
                                        const float* fp32_x, float* y,
                                        std::size_t batch, std::size_t m,
                                        std::size_t k, hipStream_t stream) {
-  if (batch < 2 || batch > 16 || m == 0 || k == 0 ||
+  if (batch < 1 || batch > 16 || m == 0 || k == 0 ||
       (type != core::GgmlType::kQ4_K && type != core::GgmlType::kQ5_K &&
        type != core::GgmlType::kQ6_K && type != core::GgmlType::kQ4_0) ||
       m > std::numeric_limits<std::uint32_t>::max() / batch ||
@@ -1732,6 +1732,9 @@ bool LaunchKQuantSmallBatchDoubleStage(core::GgmlType type, const void* w,
   };
   const auto typed = [&]<core::GgmlType Type>() {
     switch (batch) {
+      case 1:
+        launch.template operator()<Type, 1>();
+        break;
       case 2:
         launch.template operator()<Type, 2>();
         break;
