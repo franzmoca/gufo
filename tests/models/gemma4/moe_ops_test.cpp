@@ -20,6 +20,7 @@
 
 #include "src/core/hip/hip_utils.hpp"
 #include "src/core/quant/ggml_gemm.hpp"
+#include "src/models/gemma4/kernels/rocm/kernels.hpp"
 #include "src/models/gemma4/kernels/rocm/moe.hpp"
 #include "src/models/qwen38_flash_next/kernels/rocm/kernels.hpp"
 #include "tests/models/gemma4/check.hpp"
@@ -647,6 +648,38 @@ void CheckRoutedPrefill(const Format& f, std::uint32_t m, std::uint32_t k,
                                     nullptr, m, k, nullptr),
           "routed prefill GEMM rejected " + std::string(f.name));
   const auto got = Host(dy, slots * m);
+  // K-quant gate/up with GeGLU in the epilogue: the bytes the separate
+  // binary16 pass makes of the binary16 [gate | up] rows.
+  if (f.format != g4k::ExpertFormat::kQ5_1 &&
+      f.format != g4k::ExpertFormat::kQ8_0) {
+    const std::uint32_t width = m / 2;
+    __half* gu = nullptr;
+    __half* want = nullptr;
+    __half* fused = nullptr;
+    HIP_CHECK(hipMalloc(&gu, slots * m * 2));
+    HIP_CHECK(hipMalloc(&want, slots * width * 2));
+    HIP_CHECK(hipMalloc(&fused, slots * width * 2));
+    const auto n_tiles = static_cast<std::uint32_t>(tiles.size());
+    Require(g4k::LaunchRoutedHalfGemm(f.format, dw, dx, dtiles, n_tiles, kTile,
+                                      bounds, rows_token, rows_slot, nullptr,
+                                      gu, m, k, nullptr),
+            "binary16 routed prefill rejected");
+    g4k::GeGluPackedHalf(gu, want, static_cast<std::uint32_t>(slots), width,
+                         nullptr);
+    Require(g4k::LaunchRoutedHalfGemm(f.format, dw, dx, dtiles, n_tiles, kTile,
+                                      bounds, rows_token, rows_slot, nullptr,
+                                      fused, m, k, nullptr, true),
+            "fused GeGLU routed prefill rejected");
+    const auto a = Host(want, slots * width);
+    const auto b = Host(fused, slots * width);
+    Require(
+        std::memcmp(a.data(), b.data(), a.size() * 2) == 0,
+        std::string(f.name) + ": fused GeGLU differs from the separate pass");
+    for (void* p : {static_cast<void*>(gu), static_cast<void*>(want),
+                    static_cast<void*>(fused)}) {
+      HIP_CHECK(hipFree(p));
+    }
+  }
   if (f.format != g4k::ExpertFormat::kQ6_K) {
     // Flash-Next's widest tile per format: 48 rows (K-quants), 64 (Q5_1,
     // Q8_0).

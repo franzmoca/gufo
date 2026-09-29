@@ -170,7 +170,25 @@ __device__ __forceinline__ void DecodeQ6K(const uint4 (&ql)[4],
   }
 }
 
-template<ExpertFormat F, int kTileTokens>
+/// gelu_tanh(x) * u, the expression (and fast-math build) of the Gemma
+/// elementwise kernels' GeGluValue.
+__device__ __attribute__((noinline)) float GeGluValue(float x, float u) {
+  constexpr float kSqrt2OverPi = 0.79788456080286535587989211986876F;
+  constexpr float kCoefA = 0.044715F;
+  const float g =
+      0.5F * x * (1.0F + tanhf(kSqrt2OverPi * x * (1.0F + kCoefA * x * x)));
+  return g * u;
+}
+
+__device__ __forceinline__ __half SaturatedHalf(float v) {
+  return __float2half(fminf(fmaxf(v, -65504.0F), 65504.0F));
+}
+
+/// kGeGlu: W holds fused [gate | up] rows; a block's first four waves take
+/// 64 gate rows and the last four the matching up rows (m / 2 further), and
+/// the block writes GeGLU of the binary16-rounded pair, as the separate
+/// GeGluPackedHalf pass would, into `out_half` rows of width m / 2.
+template<ExpertFormat F, int kTileTokens, bool kGeGlu = false>
 __global__ void __launch_bounds__(kThreads)
     RoutedHalfKQuantKernel(const std::uint8_t* __restrict__ w,
                            const __half* __restrict__ x,
@@ -215,8 +233,21 @@ __global__ void __launch_bounds__(kThreads)
   // Q4_K: qs 0-31 | qs 32-63.
   const int f_row = tid >> 1;
   const int f_part = tid & 1;
-  const std::uint32_t f_global = blockIdx.x * kRowsPerBlock + f_row;
-  const bool f_live = f_global < m;
+  const std::uint32_t half_m = m / 2;
+  // Block row l's matrix row: kGeGlu, gate rows then their up rows.
+  const auto matrix_row = [&](int l) -> std::uint32_t {
+    if constexpr (kGeGlu) {
+      return (l >= kRowsPerBlock / 2 ? half_m : 0U) +
+             blockIdx.x * (kRowsPerBlock / 2) + l % (kRowsPerBlock / 2);
+    } else {
+      return blockIdx.x * kRowsPerBlock + l;
+    }
+  };
+  const std::uint32_t f_global = matrix_row(f_row);
+  const bool f_live =
+      kGeGlu ? blockIdx.x * (kRowsPerBlock / 2) + f_row % (kRowsPerBlock / 2) <
+                   half_m
+             : f_global < m;
   const std::uint8_t* f_ptr =
       w + (std::size_t{static_cast<std::uint32_t>(expert)} * m +
            (f_live ? f_global : m - 1)) *
@@ -391,6 +422,54 @@ __global__ void __launch_bounds__(kThreads)
       }
     }
     __syncthreads();
+  }
+  if constexpr (kGeGlu) {
+    // Up waves hand their binary16 rows to the gate waves through LDS (the
+    // stages are free now); lane layouts match wave for wave.
+    auto* s_up = reinterpret_cast<__half*>(s_act);
+    static_assert(4 * kTokTiles * 8 * kWave * 2 <=
+                  static_cast<int>(sizeof(s_act)));
+    if (wave >= 4) {
+#pragma unroll
+      for (int j = 0; j < kTokTiles; ++j) {
+#pragma unroll
+        for (int i = 0; i < 8; ++i) {
+          s_up[(((wave - 4) * kTokTiles + j) * 8 + i) * kWave + lane] =
+              SaturatedHalf(acc[j][i]);
+        }
+      }
+    }
+    __syncthreads();
+    if (wave >= 4) {
+      return;
+    }
+#pragma unroll
+    for (int j = 0; j < kTokTiles; ++j) {
+      const int t = t_local + j * 16 + sub;
+      if (t >= bucket_rows) {
+        continue;
+      }
+      const std::int32_t dst = rows_out[bucket_begin + t];
+      if (dst < 0) {
+        continue;
+      }
+      const std::size_t base =
+          std::size_t{static_cast<std::uint32_t>(dst)} * half_m;
+#pragma unroll
+      for (int i = 0; i < 8; ++i) {
+        const std::uint32_t r =
+            blockIdx.x * (kRowsPerBlock / 2) +
+            static_cast<std::uint32_t>(wave * 16 + 2 * i + half);
+        if (r < half_m) {
+          const __half up =
+              s_up[((wave * kTokTiles + j) * 8 + i) * kWave + lane];
+          const float v = GeGluValue(__half2float(SaturatedHalf(acc[j][i])),
+                                     __half2float(up));
+          out_half[base + r] = SaturatedHalf(v);
+        }
+      }
+    }
+    return;
   }
 #pragma unroll
   for (int j = 0; j < kTokTiles; ++j) {
@@ -754,32 +833,57 @@ bool LaunchRoutedHalfGemm(ExpertFormat format, const void* w, const void* x,
                           const std::int32_t* rows_in,
                           const std::int32_t* rows_out, float* out,
                           void* out_half, std::uint32_t m, std::uint32_t k,
-                          hipStream_t stream) {
+                          hipStream_t stream, bool geglu) {
   if (tile_rows != 96 || n_tiles == 0 ||
       (out == nullptr) == (out_half == nullptr) ||
       (format != ExpertFormat::kQ5_1 && format != ExpertFormat::kQ8_0 &&
        k % 256 != 0)) {
     return false;
   }
+  if (geglu &&
+      (out_half == nullptr || m % 2 != 0 || format == ExpertFormat::kQ5_1 ||
+       format == ExpertFormat::kQ8_0)) {
+    return false;
+  }
   const dim3 grid((m + kRowsPerBlock - 1) / kRowsPerBlock, n_tiles);
+  const dim3 geglu_grid((m / 2 + kRowsPerBlock / 2 - 1) / (kRowsPerBlock / 2),
+                        n_tiles);
   const auto* wb = static_cast<const std::uint8_t*>(w);
   const auto* xh = static_cast<const __half*>(x);
   auto* oh = static_cast<__half*>(out_half);
   switch (format) {
     case ExpertFormat::kQ4_K:
-      RoutedHalfKQuantKernel<ExpertFormat::kQ4_K, 96>
-          <<<grid, kThreads, 0, stream>>>(wb, xh, tiles, pad_bounds, rows_in,
-                                          rows_out, out, oh, m, k);
+      if (geglu) {
+        RoutedHalfKQuantKernel<ExpertFormat::kQ4_K, 96, true>
+            <<<geglu_grid, kThreads, 0, stream>>>(
+                wb, xh, tiles, pad_bounds, rows_in, rows_out, out, oh, m, k);
+      } else {
+        RoutedHalfKQuantKernel<ExpertFormat::kQ4_K, 96>
+            <<<grid, kThreads, 0, stream>>>(wb, xh, tiles, pad_bounds, rows_in,
+                                            rows_out, out, oh, m, k);
+      }
       return true;
     case ExpertFormat::kQ5_K:
-      RoutedHalfKQuantKernel<ExpertFormat::kQ5_K, 96>
-          <<<grid, kThreads, 0, stream>>>(wb, xh, tiles, pad_bounds, rows_in,
-                                          rows_out, out, oh, m, k);
+      if (geglu) {
+        RoutedHalfKQuantKernel<ExpertFormat::kQ5_K, 96, true>
+            <<<geglu_grid, kThreads, 0, stream>>>(
+                wb, xh, tiles, pad_bounds, rows_in, rows_out, out, oh, m, k);
+      } else {
+        RoutedHalfKQuantKernel<ExpertFormat::kQ5_K, 96>
+            <<<grid, kThreads, 0, stream>>>(wb, xh, tiles, pad_bounds, rows_in,
+                                            rows_out, out, oh, m, k);
+      }
       return true;
     case ExpertFormat::kQ6_K:
-      RoutedHalfKQuantKernel<ExpertFormat::kQ6_K, 96>
-          <<<grid, kThreads, 0, stream>>>(wb, xh, tiles, pad_bounds, rows_in,
-                                          rows_out, out, oh, m, k);
+      if (geglu) {
+        RoutedHalfKQuantKernel<ExpertFormat::kQ6_K, 96, true>
+            <<<geglu_grid, kThreads, 0, stream>>>(
+                wb, xh, tiles, pad_bounds, rows_in, rows_out, out, oh, m, k);
+      } else {
+        RoutedHalfKQuantKernel<ExpertFormat::kQ6_K, 96>
+            <<<grid, kThreads, 0, stream>>>(wb, xh, tiles, pad_bounds, rows_in,
+                                            rows_out, out, oh, m, k);
+      }
       return true;
     case ExpertFormat::kQ5_1:
       if (out == nullptr || k % kDownStageK != 0) {

@@ -85,13 +85,15 @@ void MoeRoute(const MoeRouteArgs& args, hipStream_t stream);
 /// row rows_out[i] of `out` (FP32) or `out_half` (binary16, saturated)
 /// receives W[expert] x[rows_in[i]]. Covers the formats the Flash-Next
 /// routed GEMM lacks or runs slower (Q4_K, Q5_K, Q6_K, and Q5_1 / Q8_0 with
-/// FP32 outputs; 96-row tiles); returns false for others.
+/// FP32 outputs; 96-row tiles); returns false for others. With `geglu` (a
+/// K-quant fused [gate | up] W, binary16 output) row r of `out_half` holds
+/// the m / 2 values GeGluPackedHalf would make of the binary16 pair.
 [[nodiscard]] bool LaunchRoutedHalfGemm(
     ExpertFormat format, const void* w, const void* x,
     const std::int32_t* tiles, std::uint32_t n_tiles, std::uint32_t tile_rows,
     const std::int32_t* pad_bounds, const std::int32_t* rows_in,
     const std::int32_t* rows_out, float* out, void* out_half, std::uint32_t m,
-    std::uint32_t k, hipStream_t stream);
+    std::uint32_t k, hipStream_t stream, bool geglu = false);
 
 /// Entries of a routed tile map of `rows`-row tiles that any routing of
 /// `slots` assignments over `experts` 16-padded buckets fits in.

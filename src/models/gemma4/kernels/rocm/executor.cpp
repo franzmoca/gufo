@@ -932,21 +932,24 @@ bool Executor::PrefillExperts(const DeviceLayer& l, std::uint32_t n,
   const void* x_half = moe_x_half_;
   auto* gu = static_cast<__half*>(moe_gu_);
   auto* act = static_cast<__half*>(moe_act_);
-  const bool gate_up_ok =
-      own_gate_up
-          ? LaunchRoutedHalfGemm(*own_format, l.gate_up_exps.data, x_half,
-                                 moe_tiles_, tiles, gate_up_rows, moe_bounds_,
-                                 moe_rows_token_, moe_rows_slot_, nullptr, gu,
-                                 2 * width, d, stream)
-          : fn::RoutedF16Gemm(l.gate_up_exps.data, *gate_up,
-                              static_cast<const __half*>(x_half), moe_tiles_,
-                              tiles, kRoutedTileRows, moe_bounds_,
-                              moe_rows_token_, moe_rows_slot_, nullptr, nullptr,
-                              gu, 2 * width, d, stream);
-  if (!gate_up_ok) {
-    return false;
+  // The Gemma routed GEMM applies GeGLU in its epilogue; Flash-Next's writes
+  // [gate | up] for the separate pass.
+  if (own_gate_up) {
+    if (!LaunchRoutedHalfGemm(*own_format, l.gate_up_exps.data, x_half,
+                              moe_tiles_, tiles, gate_up_rows, moe_bounds_,
+                              moe_rows_token_, moe_rows_slot_, nullptr, act,
+                              2 * width, d, stream, true)) {
+      return false;
+    }
+  } else {
+    if (!fn::RoutedF16Gemm(
+            l.gate_up_exps.data, *gate_up, static_cast<const __half*>(x_half),
+            moe_tiles_, tiles, kRoutedTileRows, moe_bounds_, moe_rows_token_,
+            moe_rows_slot_, nullptr, nullptr, gu, 2 * width, d, stream)) {
+      return false;
+    }
+    GeGluPackedHalf(gu, act, n * used, width, stream);
   }
-  GeGluPackedHalf(gu, act, n * used, width, stream);
   if (own_down) {
     return LaunchRoutedHalfGemm(*down_format, l.down_exps.data, act, down_map,
                                 down_tiles, down_rows, moe_bounds_,
