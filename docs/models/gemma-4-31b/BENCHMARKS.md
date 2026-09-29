@@ -27,6 +27,17 @@ Approximately pp2048 / tg128; depth is the cached prefix in tokens.
 
 ![Single user, autoregressive](artifacts/charts/single-ar.svg)
 
+---
+
+<!-- bench:single-ar-q8 -->
+| Gemma 4 31B Q8 AR<br>Depth (tokens) | Gufo pp (tok/s) | llama.cpp pp (tok/s) | Gain | Gufo tg (tok/s) | llama.cpp tg (tok/s) | Gain |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 0 | TODO | TODO | TODO | TODO | TODO | TODO |
+| 4,096 | TODO | TODO | TODO | TODO | TODO | TODO |
+| 16,384 | TODO | TODO | TODO | TODO | TODO | TODO |
+| 32,768 | TODO | TODO | TODO | TODO | TODO | TODO |
+<!-- /bench -->
+
 ## Single user, MTP
 
 pp is the highest measured rate per engine and depth across mixed/repetitive
@@ -47,6 +58,17 @@ text.
 
 ![Single user, MTP](artifacts/charts/single-mtp.svg)
 
+---
+
+<!-- bench:single-mtp-q8 -->
+| Gemma 4 31B Q8 MTP<br>Depth (tokens) | Gufo pp (tok/s) | llama.cpp pp (tok/s) | Gain pp | Gufo tg mixed (tok/s) | llama.cpp tg mixed (tok/s) | Gain mixed | Gufo tg repetitive (tok/s) | llama.cpp tg repetitive (tok/s) | Gain repetitive |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 0 | TODO | TODO | TODO | TODO | TODO | TODO | TODO | TODO | TODO |
+| 4,096 | TODO | TODO | TODO | TODO | TODO | TODO | TODO | TODO | TODO |
+| 16,384 | TODO | TODO | TODO | TODO | TODO | TODO | TODO | TODO | TODO |
+| 32,768 | TODO | TODO | TODO | TODO | TODO | TODO | TODO | TODO | TODO |
+<!-- /bench -->
+
 ## Single user, sampled MTP
 
 The sampler of a typical chat front end: temperature 1, top-k 64, top-p 0.95,
@@ -62,6 +84,14 @@ greedy tables.
 <!-- /bench -->
 
 ![Single user, sampled MTP](artifacts/charts/single-mtp-sampled.svg)
+
+---
+
+<!-- bench:single-mtp-sampled-q8 -->
+| Gemma 4 31B Q8 MTP<br>Depth (tokens) | Gufo pp (tok/s) | llama.cpp pp (tok/s) | Gain | Gufo tg (tok/s) | llama.cpp tg (tok/s) | Gain |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 0 | TODO | TODO | TODO | TODO | TODO | TODO |
+<!-- /bench -->
 
 ## Multiple users, autoregressive
 
@@ -82,6 +112,15 @@ cache (16 MB per layer), about a fifth of an eight-user step.
 <!-- /bench -->
 
 ![Multiple users, autoregressive](artifacts/charts/multi-ar.svg)
+
+---
+
+<!-- bench:multi-ar-q8 -->
+| Gemma 4 31B Q8 AR<br>Users | Gufo AR (tok/s) | llama.cpp AR (tok/s) | Gain |
+| ---: | ---: | ---: | ---: |
+| 1 | TODO | TODO | TODO |
+| 2 | TODO | TODO | TODO |
+<!-- /bench -->
 
 ## Multiple users, MTP
 
@@ -105,6 +144,15 @@ users.
 <!-- /bench -->
 
 ![Multiple users, MTP](artifacts/charts/multi-mtp.svg)
+
+---
+
+<!-- bench:multi-mtp-q8 -->
+| Gemma 4 31B Q8 MTP<br>Users | Gufo mixed (tok/s) | llama.cpp mixed (tok/s) | Gain | Gufo repetitive (tok/s) | llama.cpp repetitive (tok/s) | Gain |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 1 | TODO | TODO | TODO | TODO | TODO | TODO |
+| 2 | TODO | TODO | TODO | TODO | TODO | TODO |
+<!-- /bench -->
 
 
 ## MTP draft policy
@@ -202,9 +250,10 @@ shorter at every measured depth: 117 vs 120 ms at d0, 118 vs 126 ms at 4K,
 C1, capacity 262144, MTP. Cold model files to HTTP readiness.
 
 <!-- bench:loading -->
-| Gemma 4 31B Q4<br>Target | Gufo ready (s) | llama.cpp ready (s) | Gain |
+| Gemma 4 31B<br>Target | Gufo ready (s) | llama.cpp ready (s) | Gain |
 | --- | ---: | ---: | ---: |
 | Q4 | 4.32 | 6.58 | +52.3% |
+| Q8 | TODO | TODO | TODO |
 <!-- /bench -->
 
 ![Loading time](artifacts/charts/loading.svg)
@@ -226,3 +275,12 @@ token instead of 80).
 <!-- /bench -->
 
 ![Memory occupation](artifacts/charts/memory.svg)
+
+---
+
+<!-- bench:memory-q8 -->
+| Gemma 4 31B Q8 AR<br>Workload | Gufo GiB | llama.cpp GiB | Gain |
+| --- | ---: | ---: | ---: |
+| pp2048 + tg128 | TODO | TODO | TODO |
+| 16K prefix, pp4096 + tg128 | TODO | TODO | TODO |
+<!-- /bench -->

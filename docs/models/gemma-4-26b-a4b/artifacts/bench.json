@@ -7,7 +7,7 @@
     "label": "Gemma 4 26B-A4B"
   },
   "files": {
-    "gguf": "target GGUF (gemma-4-26B-A4B-it-UD-Q4_K_XL / UD-Q6_K_XL)",
+    "gguf": "target GGUF (gemma-4-26B-A4B-it-UD-Q4_K_XL / UD-Q6_K_XL / UD-Q8_K_XL)",
     "mtp": "mtp-gemma-4-26B-A4B-it.gguf (Unsloth gemma4-assistant drafter, Q8_0)"
   },
   "variants": {
@@ -22,6 +22,44 @@
       "requires": [
         "gguf"
       ]
+    },
+    "q8": {
+      "label": "UD-Q8_K_XL",
+      "requires": [
+        "gguf"
+      ],
+      "tables": {
+        "single-ar": {
+          "depths": [
+            0,
+            4096,
+            16384,
+            32768
+          ]
+        },
+        "single-mtp": {
+          "depths": [
+            0,
+            4096,
+            16384,
+            32768
+          ]
+        },
+        "single-mtp-sampled": {},
+        "multi-ar": {
+          "concurrency": [
+            1,
+            2
+          ]
+        },
+        "multi-mtp": {
+          "concurrency": [
+            1,
+            2
+          ]
+        },
+        "memory": {}
+      }
     }
   },
   "sampling": {

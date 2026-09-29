@@ -4,10 +4,10 @@
   "model": {
     "id": "Gemma-4-31B-It",
     "docs": "gemma-4-31b",
-    "label": "Gemma 4 31B Q4"
+    "label": "Gemma 4 31B"
   },
   "files": {
-    "gguf": "gemma-4-31B-it-UD-Q4_K_XL.gguf",
+    "gguf": "target GGUF (gemma-4-31B-it-UD-Q4_K_XL / UD-Q8_K_XL)",
     "mtp": "MTP/mtp-gemma-4-31B-it-Q8_0.gguf (gemma4-assistant drafter)"
   },
   "variants": {
@@ -16,6 +16,44 @@
       "requires": [
         "gguf"
       ]
+    },
+    "q8": {
+      "label": "Q8",
+      "requires": [
+        "gguf"
+      ],
+      "tables": {
+        "single-ar": {
+          "depths": [
+            0,
+            4096,
+            16384,
+            32768
+          ]
+        },
+        "single-mtp": {
+          "depths": [
+            0,
+            4096,
+            16384,
+            32768
+          ]
+        },
+        "single-mtp-sampled": {},
+        "multi-ar": {
+          "concurrency": [
+            1,
+            2
+          ]
+        },
+        "multi-mtp": {
+          "concurrency": [
+            1,
+            2
+          ]
+        },
+        "memory": {}
+      }
     }
   },
   "sampling": {
@@ -50,7 +88,7 @@
   "tables": {
     "single-ar": {
       "title": "Single user, autoregressive",
-      "per_variant": false,
+      "per_variant": true,
       "prompt_tokens": 2048,
       "output_tokens": 128,
       "depths": [
@@ -75,7 +113,7 @@
     },
     "single-mtp": {
       "title": "Single user, MTP",
-      "per_variant": false,
+      "per_variant": true,
       "speculative": true,
       "prompt_tokens": 2048,
       "output_tokens": 128,
@@ -111,7 +149,7 @@
     },
     "single-mtp-sampled": {
       "title": "Single user, sampled MTP",
-      "per_variant": false,
+      "per_variant": true,
       "speculative": true,
       "prompt_tokens": 2048,
       "output_tokens": 128,
@@ -138,7 +176,7 @@
     },
     "multi-ar": {
       "title": "Multiple users, autoregressive",
-      "per_variant": false,
+      "per_variant": true,
       "modes": [
         "ar"
       ],
@@ -164,7 +202,7 @@
     },
     "multi-mtp": {
       "title": "Multiple users, MTP",
-      "per_variant": false,
+      "per_variant": true,
       "modes": [
         "mtp"
       ],
@@ -210,7 +248,7 @@
     },
     "memory": {
       "title": "Memory occupation",
-      "per_variant": false,
+      "per_variant": true,
       "context": 133121,
       "workloads": [
         {
