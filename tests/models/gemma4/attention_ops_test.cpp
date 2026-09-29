@@ -367,6 +367,9 @@ int main() {
          "global prefill 2048 rows at 32K", true, 389, true},
         {256, 32, 16, 512, 32768, 1024, 1536, false, kNoLimit,
          "sliding prefill 32K", true, 97},
+        // The 26B-A4B's global layers: 16 query heads over 2 KV heads.
+        {512, 16, 2, 2048, 32768, 0, 0, false, kNoLimit,
+         "26B global prefill 2048 rows at 32K", true, 389, true},
     };
     for (const Case& c : cases) {
       Check(c, rng);

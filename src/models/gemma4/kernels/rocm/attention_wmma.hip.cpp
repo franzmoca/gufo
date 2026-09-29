@@ -338,12 +338,25 @@ __global__ void __launch_bounds__((kPrefillThreads<D, kHeads, kQueryBlocks>))
       scale[i] = row_scale[rb][2 * i + half_id];
     }
     const v16h p_frag = LoadFrag(&p_lds[rb][sub][0]);
+    // Rescale the accumulators before the matrix products, and only when a
+    // row's running maximum moved (a factor of 1 is exact): after the first
+    // tiles almost none do, and the products then issue back to back.
+    bool unchanged = true;
+#pragma unroll
+    for (std::uint32_t i = 0; i < 8; ++i) {
+      unchanged = unchanged && scale[i] == 1.0F;
+    }
+    if (!__all(unchanged)) {
+#pragma unroll
+      for (std::uint32_t t = 0; t < kSliceSteps; ++t) {
+#pragma unroll
+        for (std::uint32_t i = 0; i < 8; ++i) {
+          o_acc[t][i] *= scale[i];
+        }
+      }
+    }
 #pragma unroll
     for (std::uint32_t t = 0; t < kSliceSteps; ++t) {
-#pragma unroll
-      for (std::uint32_t i = 0; i < 8; ++i) {
-        o_acc[t][i] *= scale[i];
-      }
       const v16h v_frag = LoadFrag(&vt_lds[(dim0 + t * 16 + sub) * kVtStride]);
       o_acc[t] = Wmma(p_frag, v_frag, o_acc[t]);
     }
