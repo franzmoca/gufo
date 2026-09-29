@@ -15,7 +15,8 @@ set(CMAKE_C_EXTENSIONS ON)
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
-set(GUFO_VERSION "development" CACHE STRING "Gufo build revision")
+set(GUFO_RELEASE_VERSION "development" CACHE STRING "Gufo release version")
+set(GUFO_REVISION "unknown" CACHE STRING "Gufo source revision")
 include_directories(${CMAKE_SOURCE_DIR})
 find_package(ICU REQUIRED COMPONENTS uc i18n)
 find_package(Threads REQUIRED)
@@ -83,6 +84,7 @@ if (GUFO_ENABLE_SANITIZERS)
 endif()
 
 add_library(gufo_diagnostics STATIC
+  src/core/diagnostics/gpu_queues.cpp
   src/core/diagnostics/linux_sysfs.cpp
   src/core/diagnostics/system_inventory.cpp
   src/core/diagnostics/compatibility.cpp
@@ -96,7 +98,7 @@ add_library(gufo_diagnostics STATIC
 )
 target_include_directories(gufo_diagnostics PUBLIC ${CMAKE_SOURCE_DIR})
 target_compile_definitions(gufo_diagnostics PRIVATE
-  GUFO_VERSION="${GUFO_VERSION}")
+  GUFO_REVISION="${GUFO_REVISION}")
 
 if (ENGINE_ENABLE_HIP)
   target_sources(gufo_diagnostics PRIVATE
@@ -223,7 +225,8 @@ add_executable(gufo
 )
 target_link_libraries(gufo PRIVATE gufo_diagnostics gufo_core gufo_llm_cli gufo_http CURL::libcurl)
 target_compile_definitions(gufo PRIVATE
-  GUFO_VERSION="${GUFO_VERSION}"
+  GUFO_RELEASE_VERSION="${GUFO_RELEASE_VERSION}"
+  GUFO_REVISION="${GUFO_REVISION}"
   GUFO_EVAL_SOURCE_DATA="${CMAKE_CURRENT_SOURCE_DIR}/tests/models/deepseek_v4_flash/fixtures/antirez-ds4.json"
   GUFO_EVAL_INSTALLED_DATA="${CMAKE_INSTALL_PREFIX}/share/gufo/eval/antirez-ds4.json"
   GUFO_H3_SOURCE_MANIFEST="${CMAKE_CURRENT_SOURCE_DIR}/src/models/minimax_h3/MINIMAX_H3_FL2VA_BF16.source-manifest.json"
@@ -251,7 +254,7 @@ if (ENGINE_ENABLE_HIP AND GUFO_BUILD_TOOLS)
     src/cli/bench/kernel_bench_main.cpp
   )
   target_compile_definitions(gufo-kernel-bench PRIVATE
-    GUFO_VERSION="${GUFO_VERSION}")
+    GUFO_REVISION="${GUFO_REVISION}")
   target_include_directories(gufo-kernel-bench SYSTEM PRIVATE
     ${ROCTX_INCLUDE_DIR})
   target_link_libraries(gufo-kernel-bench PRIVATE
@@ -297,7 +300,10 @@ if (BUILD_TESTING)
   gufo_qwen_image_21_register_tests()
 
   add_test(NAME gufo_version COMMAND gufo --version)
-  set_tests_properties(gufo_version PROPERTIES LABELS "cpu")
+  set_tests_properties(gufo_version PROPERTIES
+    LABELS "cpu"
+    PASS_REGULAR_EXPRESSION
+      "gufo version ${GUFO_RELEASE_VERSION} \\(${GUFO_REVISION}\\)")
 
   add_test(NAME gufo_help COMMAND gufo --help)
   set_tests_properties(gufo_help PROPERTIES LABELS "cpu")
@@ -536,6 +542,11 @@ if (BUILD_TESTING)
       ${CMAKE_CURRENT_SOURCE_DIR}/tests/tools/prof_test.py)
   set_tests_properties(prof_test PROPERTIES
     LABELS "cpu;tools;profiling")
+
+  add_executable(gpu_queues_test tests/diagnostics/gpu_queues_test.cpp)
+  target_link_libraries(gpu_queues_test PRIVATE gufo_diagnostics)
+  add_test(NAME gpu_queues_test COMMAND gpu_queues_test)
+  set_tests_properties(gpu_queues_test PROPERTIES LABELS "cpu;diagnostics;serving")
 
   add_executable(bandwidth_test tests/diagnostics/bandwidth_test.cpp)
   target_compile_definitions(bandwidth_test PRIVATE TEST_FIXTURES_DIR="${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/diagnostics")

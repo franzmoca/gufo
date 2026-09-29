@@ -37,7 +37,8 @@ distribution exactly (the rule is shared with Flash-Next and unit-tested
 there). How many drafts a cycle verifies depends on the drafter's outputs,
 earlier verification outcomes and a fixed cost table, never on timings, so
 greedy equality holds under every `--draft-policy`. With `--draft-calibration
-request`, a seed replays the same tokens (`gemma4.target`), though they consume
+request`, a seed replays the same tokens (`gemma4.target`), also beside other
+sessions (a sampled cycle then prices its drafts as if alone), though they consume
 different random draws than an AR run with the same seed; with the default
 shared calibration, what earlier requests taught the policy changes later
 draft counts, so a repeated seed draws a different, equally distributed

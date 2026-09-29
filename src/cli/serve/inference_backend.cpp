@@ -139,7 +139,8 @@ std::optional<ChatRequest> ConstrainChatRequest(
   }
   if (runner.InitialOutputState(request) ==
       TextGenerationBackend::InitialOutputState::kReasoning)
-    grammar = sampling::JsonConstraint::WithReasoning(grammar);
+    grammar = sampling::JsonConstraint::WithReasoning(
+        grammar, runner.Markup().reasoning_end);
   sampling->constraint = runner.BindConstraint(grammar);
   return constrained;
 }
@@ -1808,20 +1809,15 @@ public:
         });
       }
     }
-    auto tokens = DeepSeekRunnerTokens(model_->EncodeChat(
-        messages, tools,
-        models::deepseek_v4_flash::ChatTemplateOptions{
-            .enable_thinking = request.reasoning.enabled.value_or(false),
-            .reasoning_effort =
-                request.reasoning.effort.value_or(ReasoningEffort::kLow),
-            .preserve_thinking =
-                request.reasoning.preserve_thinking.value_or(false),
-            .tools_present =
-                !request.tools.empty() &&
-                request.tool_choice != ChatRequest::ToolChoice::kNone,
-            .require_tool_call =
-                request.tool_choice == ChatRequest::ToolChoice::kRequired,
-        }));
+    auto options = models::deepseek_v4_flash::ResolveDeepSeekChatOptions(
+        request.reasoning);
+    options.tools_present =
+        !request.tools.empty() &&
+        request.tool_choice != ChatRequest::ToolChoice::kNone;
+    options.require_tool_call =
+        request.tool_choice == ChatRequest::ToolChoice::kRequired;
+    auto tokens =
+        DeepSeekRunnerTokens(model_->EncodeChat(messages, tools, options));
     if (tokens.empty()) {
       return std::nullopt;
     }
@@ -1830,7 +1826,9 @@ public:
 
   [[nodiscard]] TextGenerationBackend::InitialOutputState InitialOutputState(
       const ChatRequest& request) const override {
-    return request.reasoning.enabled.value_or(false)
+    return models::deepseek_v4_flash::ResolveDeepSeekChatOptions(
+               request.reasoning)
+                   .enable_thinking
                ? TextGenerationBackend::InitialOutputState::kReasoning
                : TextGenerationBackend::InitialOutputState::kContent;
   }
@@ -3155,6 +3153,16 @@ public:
     return TextGenerationBackend::InitialOutputState::kAuto;
   }
 
+  [[nodiscard]] std::shared_ptr<const sampling::ConstraintVocabulary>
+  BuildConstraintVocabulary() const override {
+    return std::make_shared<const sampling::ConstraintVocabulary>(
+        model_->VocabSize(), [this](std::uint32_t id) {
+          const auto token = static_cast<std::int32_t>(id);
+          return sampling::ConstraintVocabulary::Piece{
+              model_->Decode(std::span(&token, 1)), model_->IsStopToken(token)};
+        });
+  }
+
   [[nodiscard]] TextGenerationBackend::OutputMarkup Markup() const override {
     return {
         .reasoning_start = models::gemma4::kThoughtStart,
@@ -3516,14 +3524,23 @@ struct InferenceBackend::Impl {
         InitialOutputState initial = InitialOutputState::kContent)
         : state_(std::move(model_state)),
           request_(std::move(scheduled_request)) {
-      if (initial == InitialOutputState::kReasoning)
-        reasoning_end_ = state_->scheduler->runner().Tokenize(
-            state_->scheduler->runner().Markup().reasoning_end);
+      const auto& runner = state_->scheduler->runner();
+      if (initial != InitialOutputState::kContent)
+        reasoning_end_ = runner.Tokenize(runner.Markup().reasoning_end);
+      // Output that may open reasoning itself counts it only when it does.
+      if (initial == InitialOutputState::kAuto)
+        reasoning_start_ = runner.Tokenize(runner.Markup().reasoning_start);
     }
 
     Result Wait(const TokenCallback& on_token) override {
       auto result = request_.Wait(on_token);
-      if (!reasoning_end_.empty()) {
+      const bool reasoning =
+          !reasoning_end_.empty() &&
+          (reasoning_start_.empty() ||
+           (result.tokens.size() >= reasoning_start_.size() &&
+            std::equal(reasoning_start_.begin(), reasoning_start_.end(),
+                       result.tokens.begin())));
+      if (reasoning) {
         const auto end =
             std::search(result.tokens.begin(), result.tokens.end(),
                         reasoning_end_.begin(), reasoning_end_.end());
@@ -3539,6 +3556,7 @@ struct InferenceBackend::Impl {
     std::shared_ptr<const State> state_;
     TextGenerationScheduler::Request request_;
     std::vector<tokenization::TokenId> reasoning_end_;
+    std::vector<tokenization::TokenId> reasoning_start_;
   };
 
   [[nodiscard]] std::shared_ptr<const State> Snapshot() const {
@@ -3982,6 +4000,9 @@ bool InferenceBackend::load(std::shared_ptr<const hip::QwenGpuModel> model,
     }
 
     auto new_state = std::make_shared<Impl::State>();
+    new_state->sampling_defaults.model =
+        sampling::TextPreset(model->GetConfig());
+    new_state->sampling_defaults.supplied = {};
     auto runner = std::make_shared<QwenTextRunner>(
         std::move(model), max_context, std::move(dflash_model),
         speculative_options, disk_cache_config.model_artifact_fingerprint,
@@ -4065,6 +4086,9 @@ bool InferenceBackend::load(
 
   try {
     auto new_state = std::make_shared<Impl::State>();
+    new_state->sampling_defaults.model =
+        sampling::TextModelPreset::kDeepSeekV4Flash;
+    new_state->sampling_defaults.supplied = {};
     auto runner = std::make_shared<DeepSeekTextRunner>(
         std::move(model), max_context, use_dspark,
         speculative_config.max_draft_tokens,
@@ -4145,6 +4169,8 @@ bool InferenceBackend::load(
   }
   try {
     auto new_state = std::make_shared<Impl::State>();
+    new_state->sampling_defaults.model = sampling::TextModelPreset::kQwen38;
+    new_state->sampling_defaults.supplied = {};
     auto runner = std::make_shared<QwenFlashNextTextRunner>(
         std::move(model), max_context,
         speculative_config.backend == TextSpeculativeBackend::kMtp,
@@ -4218,6 +4244,8 @@ bool InferenceBackend::load(
   }
   try {
     auto new_state = std::make_shared<Impl::State>();
+    new_state->sampling_defaults.model = sampling::TextModelPreset::kGemma4;
+    new_state->sampling_defaults.supplied = {};
     const std::uint32_t ring =
         static_cast<std::uint32_t>(model->SessionRingSlots());
     auto runner = std::make_shared<Gemma4TextRunner>(
@@ -4336,7 +4364,8 @@ void InferenceBackend::set_model_id(const std::string& model_id) {
 }
 
 void InferenceBackend::set_sampling_defaults(
-    std::size_t max_tokens, const sampling::SamplingConfig& sampling_config) {
+    std::size_t max_tokens, const sampling::SamplingConfig& sampling_config,
+    sampling::SamplingOverrides supplied) {
 #if defined(ENGINE_ENABLE_HIP)
   sampling_config.Validate();
   const std::lock_guard<std::mutex> lock(impl_->state_mutex);
@@ -4344,14 +4373,14 @@ void InferenceBackend::set_sampling_defaults(
     return;
   }
   auto updated = std::make_shared<Impl::State>(*impl_->state);
-  updated->sampling_defaults = {
-      .max_tokens = max_tokens,
-      .sampling = sampling_config,
-  };
+  updated->sampling_defaults.max_tokens = max_tokens;
+  updated->sampling_defaults.sampling = sampling_config;
+  updated->sampling_defaults.supplied = supplied;
   impl_->state = std::move(updated);
 #else
   (void)max_tokens;
   (void)sampling_config;
+  (void)supplied;
 #endif
 }
 

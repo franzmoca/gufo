@@ -236,6 +236,12 @@ void Session::Reset() {
   lookup_.Clear();
   logits_.clear();
   valid_ = false;
+  // A restored snapshot starts a request without Sync.
+  if (model_->options_.draft_calibration == DraftCalibrationScope::kRequest) {
+    for (auto& calibration : calibration_) {
+      calibration.Reset();
+    }
+  }
 }
 
 bool Session::Extend(std::size_t begin, std::string* error_msg,
@@ -471,17 +477,29 @@ struct Session::CycleDraft {
         min_drafts(owner.model_->options_.min_draft_tokens),
         steps(chain_steps),
         max_drafts(slots),
-        costs(SharedCosts(owner, owner_cycle, batch_share)),
+        alone(Alone(owner, owner_cycle)),
+        costs(SharedCosts(owner, owner_cycle, alone ? nullptr : batch_share)),
         calibrated(owner.Calibration(owner_cycle.sampled), costs, min_drafts,
-                   chain_steps, others),
+                   chain_steps, alone ? DraftBatch{} : others),
         share(batch_share),
         context{*owner.pending_} {
     session.lookup_.Extend(session.tokens_);
     if (cycle.sampled) {
       // A cycle-local proposal stream; target draws keep the sampler's.
       draft_rng = sampling::NextRandom(cycle.sampler->mutable_rng_state());
-      draft_sampler = *cycle.sampler;
+      // Drafts are proposals: only the target's verification is
+      // constrained (a grammar may exclude every drafter candidate).
+      draft_sampler = cycle.sampler->WithoutConstraint();
     }
+  }
+
+  /// Whether the cycle prices its drafts as if alone. The tokens a seed
+  /// draws depend on the drafts proposed, so with per-request calibration
+  /// (exact seeded replay) a sampled cycle ignores the sessions batched
+  /// beside it. Greedy output is exact either way.
+  static bool Alone(const Session& owner, const Cycle& c) {
+    return c.sampled && owner.model_->options_.draft_calibration ==
+                            DraftCalibrationScope::kRequest;
   }
 
   /// Drafter steps shared by the sessions of a batch cost each a share.
@@ -526,7 +544,7 @@ struct Session::CycleDraft {
       case DraftPolicy::kCalibrated: {
         const float signal = DraftSignal(c);
         const float before = calibrated.Expected();
-        if (share != nullptr) {
+        if (share != nullptr && !alone) {
           // The other sessions as they stand now.
           const auto own_rows = static_cast<std::uint32_t>(kept + 1);
           calibrated.SetOthers({.rows = share->rows - own_rows,
@@ -581,6 +599,7 @@ struct Session::CycleDraft {
   std::uint32_t min_drafts;
   std::uint32_t steps;  ///< drafter steps the chain may run
   std::uint32_t max_drafts;
+  bool alone;
   DraftCosts costs;
   CalibratedChain calibrated;
   DraftShare* share;

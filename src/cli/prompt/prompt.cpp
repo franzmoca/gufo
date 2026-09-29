@@ -124,11 +124,11 @@ static void RegisterTextOptions(ArgParser& parser, PromptOptions& opt,
   parser.AddOption("-n", "--max-tokens", "N",
                    "Maximum number of new tokens to generate (default: 128)",
                    "Sampling", &opt.max_tokens);
-  RegisterSamplingOptions(parser, &opt.sampling);
+  RegisterSamplingOptions(parser, &opt.sampling, "Sampling", true, true);
 
   // Reasoning
   parser.AddOption("", "--think", "MODE",
-                   "Reasoning mode: on, off, or auto (default: model template)",
+                   "Reasoning mode: on, off, or auto (default: model)",
                    "Reasoning", &opt.reasoning_mode);
   parser.AddOption("", "--reasoning-effort", "LEVEL",
                    "Effort: auto, minimal, low, medium, high, xhigh, or max",
@@ -286,6 +286,24 @@ std::optional<ReasoningEffort> ParseReasoningEffort(std::string_view value) {
     return ReasoningEffort::kMax;
   }
   return std::nullopt;
+}
+
+void ResolvePromptSampling(const core::GgufReader& reader, PromptOptions* opt) {
+  sampling::TextModelPreset preset = sampling::TextModelPreset::kUnspecified;
+  const auto artifact_architecture =
+      reader.GetMetadataString("general.architecture");
+  if (artifact_architecture == "deepseek4") {
+    preset = sampling::TextModelPreset::kDeepSeekV4Flash;
+  } else if (artifact_architecture == "qwen4exp") {
+    preset = sampling::TextModelPreset::kQwen38;
+  } else if (artifact_architecture == "gemma4") {
+    preset = sampling::TextModelPreset::kGemma4;
+  } else if (const auto config = reader.ExtractModelConfig()) {
+    preset = sampling::TextPreset(*config);
+  }
+  opt->sampling = sampling::ResolveTextSampling(
+      preset, PromptReasoningOptions(*opt).enabled, opt->sampling,
+      opt->sampling_supplied);
 }
 
 #if defined(ENGINE_ENABLE_HIP)
@@ -527,12 +545,7 @@ int RunDeepSeekPrompt(const PromptOptions& opt, const core::GgufReader& reader,
                         .tool_calls = {}});
     prompt_tokens = model->EncodeChat(
         messages,
-        models::deepseek_v4_flash::ChatTemplateOptions{
-            .enable_thinking = reasoning.enabled.value_or(false),
-            .reasoning_effort =
-                reasoning.effort.value_or(ReasoningEffort::kLow),
-            .preserve_thinking = reasoning.preserve_thinking.value_or(false),
-        });
+        models::deepseek_v4_flash::ResolveDeepSeekChatOptions(reasoning));
   } else {
     prompt_tokens = model->Tokenize(opt.prompt_text);
   }
@@ -566,11 +579,8 @@ int RunDeepSeekChat(const PromptOptions& opt, const core::GgufReader& reader,
                        .tool_calls = {}});
   }
   const auto reasoning = PromptReasoningOptions(opt);
-  const models::deepseek_v4_flash::ChatTemplateOptions chat_options{
-      .enable_thinking = reasoning.enabled.value_or(false),
-      .reasoning_effort = reasoning.effort.value_or(ReasoningEffort::kLow),
-      .preserve_thinking = reasoning.preserve_thinking.value_or(false),
-  };
+  const auto chat_options =
+      models::deepseek_v4_flash::ResolveDeepSeekChatOptions(reasoning);
   std::cout << "=== Gufo Interactive Chat (DeepSeek V4 Flash) ===\n"
             << "Type 'exit' or Ctrl+D to quit.\n\n";
   for (std::string input;;) {
@@ -854,6 +864,7 @@ static std::optional<PromptOptions> ParseTextOptions(
   if (parser.IsHelpRequested()) {
     return std::nullopt;
   }
+  opt.sampling_supplied = SamplingOptionsSupplied(parser);
   try {
     opt.sampling.Validate();
   } catch (const std::invalid_argument& exception) {
@@ -1006,6 +1017,7 @@ int RunPrompt(std::span<const char* const> args) {
   }
   const std::shared_ptr<const gufo::core::GgufReader> reader(
       std::move(reader_owner));
+  ResolvePromptSampling(*reader, &opt);
 
 #if defined(ENGINE_ENABLE_HIP)
   if (IsGemma4(*reader)) {
@@ -1209,7 +1221,7 @@ int RunChat(std::span<const char* const> args) {
     return 0;
   }
 
-  const auto& opt = *opt_res;
+  auto opt = *opt_res;
   if (opt.model_path.empty()) {
     std::cout << "gufo chat: interactive conversation mode\n"
               << "(Specify --model <PATH.gguf> to load model weights)\n";
@@ -1227,6 +1239,7 @@ int RunChat(std::span<const char* const> args) {
   }
   const std::shared_ptr<const gufo::core::GgufReader> reader(
       std::move(reader_owner));
+  ResolvePromptSampling(*reader, &opt);
 
 #if defined(ENGINE_ENABLE_HIP)
   if (IsGemma4(*reader)) {

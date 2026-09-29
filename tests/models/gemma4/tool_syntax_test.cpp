@@ -25,6 +25,10 @@ void CheckValues() {
                       &name) == R"({"location":"Paris, FR"})",
           "string argument");
   Require(name == "get_weather", "function name");
+  Require(ParseToJson("call:mcp/github.create_issue:v2{n:1}", &name) ==
+                  R"({"n":1})" &&
+              name == "mcp/github.create_issue:v2",
+          "namespaced function name");
   Require(ParseToJson("call:f{}") == "{}", "no arguments");
   Require(ParseToJson("call:f{n:42,x:-1.5,e:1e-05,t:true,f:false,z:null}") ==
               R"({"n":42,"x":-1.5,"e":1e-05,"t":true,"f":false,"z":null})",

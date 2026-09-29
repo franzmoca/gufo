@@ -1102,25 +1102,26 @@ std::shared_ptr<const JsonConstraint> JsonConstraint::Object() {
 }
 
 std::shared_ptr<const JsonConstraint> JsonConstraint::WithReasoning(
-    std::shared_ptr<const JsonConstraint> answer) {
+    std::shared_ptr<const JsonConstraint> answer, std::string_view end) {
+  if (end.empty())
+    throw std::invalid_argument("reasoning end marker is empty");
   // Cache separately from schema compilation. No mutable phase belongs to the
   // model or cache: the normal grammar stack carries it through sampler copies,
   // draft rejection and request restart.
+  using Key = std::pair<std::shared_ptr<const JsonConstraint>, std::string>;
   static std::mutex mutex;
-  static std::map<std::shared_ptr<const JsonConstraint>,
-                  std::shared_ptr<const JsonConstraint>>
-      cache;
+  static std::map<Key, std::shared_ptr<const JsonConstraint>> cache;
+  Key key{answer, std::string(end)};
   {
     const std::lock_guard lock(mutex);
-    if (const auto found = cache.find(answer); found != cache.end())
+    if (const auto found = cache.find(key); found != cache.end())
       return found->second;
   }
   auto grammar = std::shared_ptr<JsonConstraint>(new JsonConstraint(*answer));
-  constexpr std::string_view end = "</think>";
   const auto base = static_cast<std::uint32_t>(grammar->rules_.size());
   grammar->rules_.resize(base + end.size());
   for (std::size_t prefix = 0; prefix < end.size(); ++prefix) {
-    std::array<std::bitset<256>, end.size() + 1> transitions;
+    std::vector<std::bitset<256>> transitions(end.size() + 1);
     for (unsigned byte = 0; byte < 256; ++byte) {
       std::string candidate(end.substr(0, prefix));
       candidate += static_cast<char>(byte);
@@ -1142,11 +1143,11 @@ std::shared_ptr<const JsonConstraint> JsonConstraint::WithReasoning(
   }
   grammar->root_ = base;
   const std::lock_guard lock(mutex);
-  if (const auto found = cache.find(answer); found != cache.end())
+  if (const auto found = cache.find(key); found != cache.end())
     return found->second;
   if (cache.size() >= 16)
     cache.erase(cache.begin());
-  return cache.emplace(std::move(answer), std::move(grammar)).first->second;
+  return cache.emplace(std::move(key), std::move(grammar)).first->second;
 }
 
 std::shared_ptr<const JsonConstraint> JsonConstraint::WithTools(

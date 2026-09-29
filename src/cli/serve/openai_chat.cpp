@@ -221,6 +221,24 @@ bool ParseContent(const json::Value* content,
   return true;
 }
 
+// A tool name reaches the Qwen and DeepSeek renderers unescaped, inside
+// "<function=NAME>" and "name=\"NAME\"", so the characters that frame a call
+// are excluded. The dots, colons and slashes that agent harnesses give bridged
+// tool names are data and are kept. Non-ASCII bytes are excluded as well: a
+// name is placed in a prompt the model reads and in operator logs, where
+// confusable and invisible characters buy a client nothing.
+constexpr std::string_view kToolNameRule =
+    "function names require 1-64 printable ASCII characters other than "
+    "spaces, '<', '>', '\"' and '\\'";
+
+bool RenderableToolName(std::string_view name) {
+  return !name.empty() && name.size() <= 64 &&
+         std::ranges::none_of(name, [](unsigned char c) {
+           return c <= 0x20 || c >= 0x7F || c == '<' || c == '>' || c == '"' ||
+                  c == '\\';
+         });
+}
+
 bool ParseArguments(std::string_view arguments,
                     std::vector<tokenization::ChatMessage::ToolArgument>* out,
                     std::string* error) {
@@ -299,6 +317,12 @@ bool ParseMessage(const json::Value& value, tokenization::ChatMessage* message,
     call.id = item.member_str("id");
     call.name = function->member_str("name");
     const std::string arguments = function->member_str("arguments");
+    // A replayed call is rendered like a fresh one, so it carries the same
+    // name rule: a name that cannot be framed is rejected wherever it enters.
+    if (!call.name.empty() && !RenderableToolName(call.name)) {
+      *error = std::string(kToolNameRule);
+      return false;
+    }
     if (call.name.empty() || arguments.empty() ||
         !ParseArguments(arguments, &call.arguments, error)) {
       if (error->empty()) {
@@ -355,14 +379,8 @@ bool ParseTools(const json::Value* tools,
     tokenization::ChatTool tool;
     tool.name = src->member_str("name");
     tool.description = src->member_str("description");
-    if (tool.name.empty() || tool.name.size() > 64 ||
-        std::ranges::any_of(tool.name, [](unsigned char c) {
-          return !((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
-                   (c >= '0' && c <= '9') || c == '_' || c == '-');
-        })) {
-      *error =
-          "function names require 1-64 ASCII letters, digits, underscores or "
-          "hyphens";
+    if (!RenderableToolName(tool.name)) {
+      *error = std::string(kToolNameRule);
       return false;
     }
     if (std::ranges::any_of(*output, [&](const auto& previous) {
@@ -767,8 +785,10 @@ std::optional<HttpResponse> ParseRequest(const HttpRequest& request,
   }
 
   sampling::SamplingConfig parsed_sampling;
-  if (const auto sampling_error =
-          ParseSamplingConfig(body, output->sampling, &parsed_sampling)) {
+  if (const auto sampling_error = ParseSamplingConfig(
+          body,
+          backend.sampling_defaults().Resolve(output->chat.reasoning.enabled),
+          &parsed_sampling)) {
     return Error(400, "Bad Request", sampling_error->message,
                  sampling_error->code.c_str());
   }
@@ -1015,10 +1035,7 @@ void ParseQwenCalls(
         // Outer closing tags inside a parameter are data, not structure.
         const auto close = body.find("</parameter>");
         if (close == std::string_view::npos || body.find(start) < close ||
-            name.empty() ||
-            std::ranges::any_of(call.arguments, [&](const auto& arg) {
-              return arg.name == name;
-            })) {
+            name.empty()) {
           valid = false;
           break;
         }
@@ -1043,8 +1060,17 @@ void ParseQwenCalls(
             break;
           }
         }
-        call.arguments.push_back(
-            {.name = name, .value = std::move(raw), .is_string = is_string});
+        // Models sometimes repeat a parameter. An identical copy is harmless;
+        // conflicting copies leave no safe choice.
+        const auto previous = std::ranges::find(
+            call.arguments, name, [](const auto& arg) { return arg.name; });
+        if (previous == call.arguments.end()) {
+          call.arguments.push_back(
+              {.name = name, .value = std::move(raw), .is_string = is_string});
+        } else if (previous->value != raw || previous->is_string != is_string) {
+          valid = false;
+          break;
+        }
         body.remove_prefix(close + std::string_view{"</parameter>"}.size());
       }
       complete = valid && consume("</function>") && consume(end);
@@ -1153,6 +1179,7 @@ void ParseDsmlCalls(std::string_view text, std::vector<ParsedToolCall>* calls) {
         text.substr(invoke_start, tag_end - invoke_start + 1), "name");
     call.name = name.value_or("");
 
+    bool valid = true;
     std::size_t parameter_cursor = tag_end + 1;
     while (parameter_cursor < invoke_end) {
       const std::size_t parameter_start =
@@ -1174,16 +1201,28 @@ void ParseDsmlCalls(std::string_view text, std::vector<ParsedToolCall>* calls) {
       const auto parameter_name = Attribute(tag, "name");
       const auto string_value = Attribute(tag, "string");
       if (parameter_name.has_value()) {
-        call.arguments.push_back({
+        tokenization::ChatMessage::ToolArgument argument{
             .name = *parameter_name,
             .value = std::string(Trim(text.substr(
                 parameter_tag_end + 1, parameter_end - parameter_tag_end - 1))),
             .is_string = string_value.value_or("true") != "false",
-        });
+        };
+        // As for Qwen calls: drop an identical repeat and reject a
+        // conflicting one instead of letting the last value win.
+        const auto previous =
+            std::ranges::find(call.arguments, argument.name,
+                              [](const auto& arg) { return arg.name; });
+        if (previous == call.arguments.end()) {
+          call.arguments.push_back(std::move(argument));
+        } else if (previous->value != argument.value ||
+                   previous->is_string != argument.is_string) {
+          valid = false;
+          break;
+        }
       }
       parameter_cursor = parameter_end + kParameterEnds[syntax].size();
     }
-    if (!call.name.empty()) {
+    if (valid && !call.name.empty()) {
       calls->push_back(std::move(call));
     }
     cursor = invoke_end + kInvokeEnds[syntax].size();
@@ -1557,14 +1596,15 @@ public:
       if (view.empty()) {
         return true;
       }
-      if (kThinkStart.starts_with(view)) {
-        if (view == kThinkStart) {
-          state_ = State::kThinking;
-          pending_.clear();
-        }
+      if (view.starts_with(kThinkStart)) {
+        // The whole opening arrived at once (a non-streamed result).
+        state_ = State::kThinking;
+        pending_ = std::string(view.substr(kThinkStart.size()));
+      } else if (kThinkStart.starts_with(view)) {
         return true;
+      } else {
+        state_ = State::kContent;
       }
-      state_ = State::kContent;
     }
 
     if (state_ == State::kThinking) {
@@ -2165,6 +2205,12 @@ bool ParseOpenAiResponseMessage(const json::Value& item,
 
 std::optional<HttpResponse> ParseOpenAiResponseControls(const json::Value& body,
                                                         ChatRequest* chat) {
+  if (const auto* cache = body.find("cache_prompt")) {
+    if (!cache->is_bool())
+      return Error(400, "Bad Request", "'cache_prompt' must be a boolean",
+                   "invalid_cache_prompt");
+    chat->cache_prompt = cache->as_bool();
+  }
   if (const auto* reasoning = body.find("reasoning");
       reasoning && !reasoning->is_null()) {
     if (!reasoning->is_object())

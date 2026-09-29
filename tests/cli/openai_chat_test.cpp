@@ -39,6 +39,8 @@ public:
   }
   [[nodiscard]] InitialOutputState initial_output_state(
       const gufo::server::ChatRequest& request) const override {
+    if (initial_state)
+      return *initial_state;
     return request.reasoning.enabled.value_or(false)
                ? InitialOutputState::kReasoning
                : InitialOutputState::kContent;
@@ -158,6 +160,7 @@ public:
   float last_temperature{0.0F};
   gufo::sampling::SamplingConfig last_sampling;
   std::optional<gufo::server::TextGenerationErrorCode> reject_on_start;
+  std::optional<InitialOutputState> initial_state;
 
 private:
   std::mutex mutex;
@@ -580,6 +583,98 @@ void TestInvalidToolsFailBeforeGeneration() {
   }
 }
 
+void TestToolNameCharacters() {
+  const auto declare = [](const std::string& name) {
+    auto body = gufo::json::parse(R"({
+      "model":"test-model","messages":[{"role":"user","content":"use it"}],
+      "tools":[]
+    })");
+    auto tool = gufo::json::parse(
+        R"({"type":"function","function":{"name":"PLACEHOLDER",
+            "parameters":{"type":"object","properties":{}}}})");
+    tool["function"]["name"] = name;
+    body["tools"].push_back(std::move(tool));
+    return body.dump();
+  };
+  const auto replay = [](const std::string& name) {
+    auto body = gufo::json::parse(R"({
+      "model":"test-model","messages":[{"role":"user","content":"use it"}]
+    })");
+    auto assistant =
+        gufo::json::parse(R"({"role":"assistant","tool_calls":[]})");
+    auto call = gufo::json::parse(
+        R"({"id":"call_1","type":"function","function":{"name":"PLACEHOLDER",
+            "arguments":"{\"path\":\"a.txt\"}"}})");
+    call["function"]["name"] = name;
+    assistant["tool_calls"].push_back(std::move(call));
+    body["messages"].push_back(std::move(assistant));
+    body["messages"].push_back(gufo::json::parse(
+        R"({"role":"tool","tool_call_id":"call_1","content":"done"})"));
+    return body.dump();
+  };
+
+  // Agent harnesses name bridged tools after their server. Nothing between
+  // the request and either renderer treats these characters as structure.
+  const std::vector<std::string> renderable{
+      "read_file",   "read-file", "readFile",
+      "server:tool", "fs/read",   "github.create_issue",
+      "tool@v1",     "a.b.c~d+e", std::string(64, 'n')};
+  for (const std::string& name : renderable) {
+    FakeBackend declared;
+    const auto response =
+        gufo::server::HandleOpenAiChat(Request(declare(name)), declared);
+    Expect(response.status == 200 && declared.last_request.tools.size() == 1 &&
+               declared.last_request.tools.front().name == name,
+           "A renderable tool name reaches the backend unchanged");
+
+    FakeBackend replayed;
+    Expect(gufo::server::HandleOpenAiChat(Request(replay(name)), replayed)
+                       .status == 200 &&
+               replayed.chat_calls == 1,
+           "The same name is accepted when a message replays a call");
+  }
+
+  // The Qwen and DeepSeek renderers append a name verbatim, so a name that
+  // frames a call is refused at both entry points rather than corrupting one.
+  // Non-ASCII is refused with them: a confusable name reaches the prompt and
+  // the operator's logs, where it can only mislead.
+  const std::vector<std::string> unrenderable{"bad>name",
+                                              "bad<name",
+                                              "bad\"name",
+                                              "bad\\name",
+                                              "bad name",
+                                              "bad\nname",
+                                              "bad\x7F"
+                                              "name",
+                                              "outil_traçage",
+                                              "reаd",
+                                              "​read",
+                                              "",
+                                              std::string(65, 'n')};
+  for (const std::string& name : unrenderable) {
+    FakeBackend declared;
+    const auto response =
+        gufo::server::HandleOpenAiChat(Request(declare(name)), declared);
+    Expect(response.status == 400 &&
+               response.body.find("invalid_tools") != std::string::npos &&
+               declared.chat_calls == 0,
+           "An unrenderable declared name fails with invalid_tools");
+
+    if (name.empty())
+      continue;  // An empty replayed name has its own error message.
+    // Messages parse before tools, so a replayed name reports the message
+    // code. Both routes refuse the name; only the code differs.
+    FakeBackend replayed;
+    const auto replay_response =
+        gufo::server::HandleOpenAiChat(Request(replay(name)), replayed);
+    Expect(replay_response.status == 400 &&
+               replay_response.body.find("invalid_messages") !=
+                   std::string::npos &&
+               replayed.chat_calls == 0,
+           "An unrenderable replayed name fails with invalid_messages");
+  }
+}
+
 void TestQwenToolBoundariesAndSchema() {
   using gufo::json::Value;
   const auto schema = gufo::json::parse(R"({
@@ -639,6 +734,20 @@ void TestQwenToolBoundariesAndSchema() {
              R"("text":"True"})"},
         Case{"<tool_call><function=f><parameter=flag>Yes</parameter>"
              "</function></tool_call>",
+             0, ""},
+        // A repeated parameter with the same value is dropped; a conflicting
+        // repeat still rejects the call.
+        Case{"<tool_call>\n<function=f>\n<parameter=text>\na\n</parameter>\n"
+             "<parameter=count>42</parameter><parameter=flag>True</parameter>"
+             "<parameter=text>a</parameter><parameter=count>\n42\n"
+             "</parameter><parameter=flag>true</parameter>\n</function>\n"
+             "</tool_call>",
+             1, R"({"text":"a","count":42,"flag":true})"},
+        Case{"<tool_call><function=f><parameter=text>a</parameter>"
+             "<parameter=text>b</parameter></function></tool_call>",
+             0, ""},
+        Case{"<tool_call><function=f><parameter=text>a</parameter>"
+             "<parameter=text>a </parameter></function></tool_call>",
              0, ""},
         Case{"<tool_call>{\"name\":\"f\",\"arguments\":{\"text\":"
              "\"literal </tool_call>\"}}</tool_call>",
@@ -800,6 +909,35 @@ void TestDeepSeekToolCallsAreStructured() {
       "Hybrid DeepSeek tool arguments are translated");
 }
 
+void TestDeepSeekRepeatedToolParameters() {
+  const auto call = [](std::string_view repeat) {
+    return "<｜DSML｜tool_calls｜><｜DSML｜invoke name=\"read\">"
+           "<｜DSML｜parameter name=\"path\" string=\"true\">/a"
+           "</｜DSML｜parameter><｜DSML｜parameter name=\"path\" "
+           "string=\"true\">" +
+           std::string(repeat) +
+           "</｜DSML｜parameter></｜DSML｜invoke></｜DSML｜tool_calls｜>";
+  };
+  for (const auto& [repeat, accepted] :
+       {std::pair{"\n/a\n", true}, std::pair{"/b", false}}) {
+    FakeBackend backend;
+    backend.pieces = {call(repeat)};
+    const auto response = gufo::server::HandleOpenAiChat(
+        Request(
+            R"({"model":"test-model","messages":[{"role":"user","content":"read"}],)"
+            R"("tools":[{"type":"function","function":{"name":"read",)"
+            R"("parameters":{"type":"object","properties":{"path":{"type":"string"}}}}}]})"),
+        backend);
+    Expect(response.status == 200, "DeepSeek repeated parameter request");
+    Expect((response.body.find(R"("arguments":"{\"path\":\"/a\"}")") !=
+            std::string::npos) == accepted,
+           "identical DeepSeek repeats are dropped, conflicts rejected");
+    Expect((response.body.find(R"("finish_reason":"tool_calls")") !=
+            std::string::npos) == accepted,
+           "a conflicting DeepSeek repeat is not a tool call");
+  }
+}
+
 void TestBackendSamplingDefaults() {
   FakeBackend backend;
   backend.defaults = {
@@ -830,6 +968,77 @@ void TestBackendSamplingDefaults() {
          "Explicit max tokens override the backend default");
   Expect(backend.last_temperature == 0.0F,
          "Explicit temperature overrides the backend default");
+}
+
+void TestModelSamplingDefaults() {
+  using gufo::sampling::TextModelPreset;
+  FakeBackend backend;
+  backend.defaults.model = TextModelPreset::kQwen38;
+  backend.defaults.supplied = {};
+  auto constraint = std::make_shared<gufo::sampling::TokenConstraint>();
+  constraint->grammar = gufo::sampling::JsonConstraint::Object();
+  constraint->vocabulary =
+      std::make_shared<gufo::sampling::ConstraintVocabulary>(
+          2, [](std::uint32_t id) {
+            return gufo::sampling::ConstraintVocabulary::Piece{
+                .text = id == 0 ? "{}" : "", .stop = id == 1};
+          });
+  backend.defaults.sampling.constraint = constraint;
+  auto send = [&](std::string fields) {
+    const auto response = gufo::server::HandleOpenAiChat(
+        Request("{\"model\":\"test-model\",\"messages\":[{\"role\":\"user\","
+                "\"content\":\"hello\"}]" +
+                fields + "}"),
+        backend);
+    Expect(response.status == 200, "Model default request accepted");
+    Expect(backend.last_sampling.constraint ==
+               backend.defaults.sampling.constraint,
+           "Model presets preserve output constraints");
+    return backend.last_sampling;
+  };
+  auto config = send("");
+  Expect(config.temperature == 1.0F && config.top_p == 0.95F &&
+             config.top_k == 20 && config.presence_penalty == 0.0F,
+         "Qwen defaults follow thinking-on template");
+  config = send(R"(,"chat_template_kwargs":{"enable_thinking":false})");
+  Expect(config.temperature == 0.7F && config.top_p == 0.8F &&
+             config.presence_penalty == 1.5F,
+         "Request thinking-off selects its model preset");
+  backend.reasoning_defaults_value.enabled = false;
+  config = send(R"(,"temperature":null,"top_p":null,"presence_penalty":null)");
+  Expect(config.temperature == 0.7F && config.presence_penalty == 1.5F,
+         "Nulls inherit effective server thinking preset");
+  config = send(R"(,"reasoning_effort":"high")");
+  Expect(config.temperature == 1.0F && config.presence_penalty == 0.0F,
+         "Effort enables thinking before sampling resolves");
+  backend.defaults.sampling.temperature = 0.2F;
+  backend.defaults.sampling.top_k = 0;
+  backend.defaults.supplied.temperature = true;
+  backend.defaults.supplied.top_k = true;
+  config = send("");
+  Expect(config.temperature == 0.2F && config.top_k == 0 &&
+             config.top_p == 0.8F && config.presence_penalty == 1.5F,
+         "Partial server override preserves other model defaults");
+  config = send(R"(,"temperature":0,"presence_penalty":0,"top_k":40)");
+  Expect(config.temperature == 0.0F && config.presence_penalty == 0.0F &&
+             config.top_k == 40,
+         "Explicit request zero overrides server and model presets");
+  backend.defaults.model = TextModelPreset::kDeepSeekV4Flash;
+  backend.defaults.supplied = {};
+  for (const bool thinking : {false, true}) {
+    backend.reasoning_defaults_value.enabled = thinking;
+    config = send("");
+    Expect(config.temperature == 1.0F && config.top_p == 0.95F &&
+               config.top_k == 0 && config.min_p == 0.0F &&
+               config.presence_penalty == 0.0F &&
+               config.frequency_penalty == 0.0F &&
+               config.repeat_penalty == 1.0F,
+           "DeepSeek agentic defaults do not depend on reasoning");
+  }
+  backend.defaults.supplied = gufo::sampling::SamplingOverrides::All();
+  config = send("");
+  Expect(config.constraint == backend.defaults.sampling.constraint,
+         "Explicit public-API configuration preserves its output constraint");
 }
 
 void TestCompleteToolDefinitionsReachTemplate() {
@@ -1840,6 +2049,27 @@ void TestResponsesOutput() {
   }
 }
 
+// A model that opens reasoning itself (initial state auto): a buffered
+// result arrives whole, and its reasoning must still be separated.
+void TestResponsesAutoReasoning() {
+  using Backend = gufo::server::TextGenerationBackend;
+  FakeBackend backend;
+  backend.initial_state = Backend::InitialOutputState::kAuto;
+  backend.pieces = {"<think>Check the sum.</think>", "Four."};
+  const auto buffered = gufo::server::CreateOpenAiResponse(
+      Request("{}"), backend, {}, 0, {}, false);
+  const auto body = gufo::json::parse(buffered.body);
+  std::string text, thought;
+  for (const auto& item : body.find("output")->items()) {
+    const bool reasoning = item.member_str("type") == "reasoning";
+    for (const auto& part :
+         item.find(reasoning ? "summary" : "content")->items())
+      (reasoning ? thought : text) += part.member_str("text");
+  }
+  Expect(thought == "Check the sum." && text == "Four.",
+         "A whole auto-reasoning result separates reasoning from text");
+}
+
 void TestResponsesLiveAndCancellation() {
   FakeBackend backend;
   backend.pieces = {"first", "second"};
@@ -1882,6 +2112,7 @@ int main() {
   TestExplicitStopOutputFraming();
   TestStopInsideToolArguments();
   TestResponsesOutput();
+  TestResponsesAutoReasoning();
   TestResponsesLiveAndCancellation();
   TestCachePromptOption();
   TestToolChoiceEnforcement();
@@ -1890,6 +2121,7 @@ int main() {
   TestUtf8Output();
   TestCachedPrefillMetrics();
   TestBackendSamplingDefaults();
+  TestModelSamplingDefaults();
   TestCompleteToolDefinitionsReachTemplate();
   TestFlatToolFieldsReachTemplate();
   TestAllSamplingControlsReachBackend();
@@ -1902,8 +2134,10 @@ int main() {
   TestToolCallsAreStructured();
   TestToolParameterCompatibility();
   TestInvalidToolsFailBeforeGeneration();
+  TestToolNameCharacters();
   TestQwenToolBoundariesAndSchema();
   TestDeepSeekToolCallsAreStructured();
+  TestDeepSeekRepeatedToolParameters();
   TestWrongModelIsRejected();
   TestClientIdentityReachesBackend();
   TestStreamingOverloadIsRejectedBeforeHeaders();

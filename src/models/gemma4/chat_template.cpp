@@ -652,8 +652,23 @@ std::optional<RenderedPrompt> ChatTemplate::Render(
       previous = image.offset;
     }
   }
+  // "call:NAME{" and "declaration:NAME{" end a function name at its first
+  // brace, so a name holding one cannot be framed.
+  constexpr std::string_view kBraceName =
+      "gemma4 function names cannot contain '{'";
+  for (const auto& message : messages) {
+    if (message.name.find('{') != std::string::npos ||
+        std::ranges::any_of(message.tool_calls, [](const auto& call) {
+          return call.name.find('{') != std::string::npos;
+        })) {
+      return fail(std::string(kBraceName));
+    }
+  }
   std::vector<Value> tool_data;
   for (const auto& tool : tools) {
+    if (tool.name.find('{') != std::string::npos) {
+      return fail(std::string(kBraceName));
+    }
     try {
       tool_data.push_back(json::parse(tool.definition_json.empty()
                                           ? std::string("{}")

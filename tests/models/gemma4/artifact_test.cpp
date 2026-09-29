@@ -119,9 +119,11 @@ void CheckRenderedPrompts(const g4::Tokenizer& tokenizer) {
   const auto cases = gemma4_test::LoadTemplateCases(
       std::string(GUFO_GEMMA4_FIXTURES) + "/template_cases.json");
   for (const auto& c : cases) {
-    const auto rendered =
-        g4::ChatTemplate::Render(c.messages, c.tools, c.options);
-    Require(rendered.has_value(), c.name);
+    std::string error;
+    std::vector<std::size_t> images;
+    const auto rendered = g4::ChatTemplate::Render(c.messages, c.tools,
+                                                   c.options, &error, &images);
+    Require(rendered.has_value(), c.name + ": " + error);
     const auto ids = tokenizer.Encode(rendered->text, false, true);
     Require(!ids.empty() && ids[0] == tokenizer.BosToken() &&
                 (ids.size() < 2 || ids[1] != tokenizer.BosToken()),

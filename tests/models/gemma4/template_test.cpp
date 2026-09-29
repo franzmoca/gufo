@@ -93,6 +93,24 @@ void CheckRejections() {
   bad.definition_json = "[1]";
   Require(!g4::ChatTemplate::Render({}, std::span(&bad, 1), {}, &error),
           "non-object tool accepted");
+  gufo::tokenization::ChatTool braced;
+  braced.name = "a{b";
+  Require(!g4::ChatTemplate::Render({}, std::span(&braced, 1), {}, &error),
+          "braced tool name accepted");
+  gufo::tokenization::ChatMessage call(gufo::tokenization::ChatRole::kAssistant,
+                                       "");
+  call.tool_calls.push_back({.id = "c", .name = "x{y", .arguments = {}});
+  Require(!g4::ChatTemplate::Render(std::span(&call, 1), {}, {}, &error),
+          "braced replayed call accepted");
+  gufo::tokenization::ChatTool dotted;
+  dotted.name = "github.create_issue";
+  dotted.definition_json =
+      R"({"type":"function","function":{"name":"github.create_issue"}})";
+  const auto rendered =
+      g4::ChatTemplate::Render({}, std::span(&dotted, 1), {}, &error);
+  Require(rendered && rendered->text.find("declaration:github.create_issue{") !=
+                          std::string::npos,
+          "dotted tool name rendered: " + error);
 }
 
 }  // namespace

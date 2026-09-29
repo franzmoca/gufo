@@ -74,7 +74,7 @@ Text serving defaults match llama.cpp for context and generation length:
 | `--context` | `0`: native context from model metadata, per session |
 | `--max-tokens` | `-1`: until EOS or remaining context is exhausted |
 | `--sessions` | `1` |
-| Thinking / reasoning effort | Model template defaults |
+| Thinking / reasoning effort | Enabled; Qwen `xhigh`, DeepSeek `high` |
 
 Qwen chat prompts are bounded by the session context, not a fixed size: the
 rendered template may use up to 128 bytes per context token (at least 1 MiB).
@@ -86,11 +86,40 @@ context; exhaustion reports `length` or `incomplete`, without discarding earlier
 conversation tokens. Reduce `--context` or `--sessions` if their state exceeds
 available memory.
 
-Gufo retains greedy sampling by default. llama.cpp instead defaults to temperature
-0.8, top-k 40, top-p 0.95 and min-p 0.05; set these explicitly to match its sampler.
-Both leave repetition, frequency and presence penalties disabled.
-Reference: [llama.cpp parameters](https://github.com/ggml-org/llama.cpp/blob/68d9053afd4f4d0752ced6187585f862355a40be/common/common.h)
-and [server options](https://github.com/ggml-org/llama.cpp/blob/68d9053afd4f4d0752ced6187585f862355a40be/tools/server/README.md).
+Text sampling follows each model's recommended defaults in `serve`, `prompt`
+and `chat`. Explicit request values override explicit server options, which
+otherwise inherit the effective thinking preset. Null request values inherit
+where supported; explicit zero values are preserved (`top_p` must remain positive).
+The startup sampling log reports server defaults; requests can override each
+setting independently, including when changing thinking mode.
+
+| Model / mode | Temperature | Top-p | Top-k | Presence penalty |
+| --- | --- | --- | --- | --- |
+| DeepSeek V4 Flash 0731 (agentic) | 1.0 | 0.95 | 0 | 0 |
+| Qwen3.8 27B / Flash-Next, thinking | 1.0 | 0.95 | 20 | 0 |
+| Qwen3.8 27B / Flash-Next, thinking off | 0.7 | 0.8 | 20 | 1.5 |
+| Gemma 4 31B / 26B-A4B, thinking on or off | 1.0 | 0.95 | 64 | 0 |
+
+Min-p and frequency penalty default to zero; repetition penalty is 1.0.
+AR and DFlash2/MTP/DSpark use the same target defaults.
+Use `--temperature 0` or request `"temperature": 0` for greedy
+output; `bench` remains greedy by default. Audio and image generation retain
+their own settings.
+Use `--think off` or request `"reasoning_effort": "none"` to disable thinking.
+DeepSeek maps `minimal`/`low` to `low`, `medium`/`high`/`xhigh` to `high`,
+and `max` to `max`.
+The SDK check `--suite sampling-defaults --sampling-preset qwen38` (or
+`deepseek4`, `gemma4`) compares omitted and explicit settings, including C2
+replay.
+
+Sources: [Qwen27B](https://huggingface.co/Qwen/Qwen3.8-27B#best-practices),
+[Flash-Next](https://huggingface.co/Qwen/Qwen3.8-Flash-Next#best-practices),
+[DeepSeek 0731](https://huggingface.co/deepseek-ai/DeepSeek-V4-Flash-0731/blob/7872f01b1d1fe23eabc4c98b48bffcef5a386062/README.md),
+[DeepSeek thinking defaults](https://api-docs.deepseek.com/guides/thinking_mode),
+[Gemma 4](https://huggingface.co/google/gemma-4-31B-it/blob/main/generation_config.json)
+(also the GGUFs' `general.sampling.*`).
+DeepSeek's 0.95 top-p is its agentic recommendation; neutral penalties and
+disabled unspecified filters are Gufo defaults.
 
 ```sh
 nix build
@@ -161,10 +190,10 @@ Each model chooses its prefill chunk. `--prefill-chunk` limits prompt work
 between active decode rounds without changing a lone request's kernel policy.
 
 Prompt reuse is enabled by default. `cache_prompt: false` on
-`/v1/chat/completions` bypasses both memory and disk lookup for that request;
-the result can still populate the cache. DeepSeek and Qwen tool requests retain
-a checkpoint before the assistant-generation suffix, including when a client
-drops the interrupted assistant and appends `"."` after a tool result. DeepSeek
+`/v1/chat/completions` or `/v1/responses` bypasses memory and disk lookup for
+that request; the result can still populate the cache. DeepSeek and Qwen tool
+requests retain a checkpoint before the assistant-generation suffix, including
+when a client drops the interrupted assistant and appends `"."` after a tool result. DeepSeek
 also accounts for tokenization changes where adjacent user/tool turns join.
 Qwen requests retain this checkpoint with thinking enabled or disabled.
 Warm continuations checkpoint the reused frontier and prefill the new suffix
@@ -221,15 +250,52 @@ reports equality to a fresh full prefill, whose different matrix shapes and
 prefill/decode history can change rounding; that comparison is not silently
 counted as an exact cache replay.
 
+### Hardware compute queues
+
+The gfx1151 command processor keeps eight compute queues mapped at once,
+counted across every process on the device. Past that total the firmware
+scheduler time-slices them even when all of them are empty: the GPU then
+reports a busy engine at its top shader clock and draws about 26 W above idle
+for as long as the processes live. Queues are claimed on a process's first HIP
+dispatch and never released — neither `hipStreamDestroy` nor `hipDeviceReset`
+gives one back — so the count is fixed at startup, and the first dispatch costs
+two queues whatever the configuration. Four HIP processes is therefore the
+ceiling on one device, gufo or otherwise.
+
+Each server reads the queues already in use from
+`/sys/class/kfd/kfd/proc/*/queues/*/type`, which is world-readable and so
+includes processes gufo does not own, then exports `GPU_MAX_HW_QUEUES` before
+loading a model and logs a `queue_budget` event:
+
+| Server | `GPU_MAX_HW_QUEUES` | Resident compute queues |
+| --- | ---: | ---: |
+| `serve llm` | 2 | 3 |
+| `serve tts` | 1 | 2 |
+| `serve asr` | 1 | 2 |
+| `serve image`, `serve video` | runtime default | up to 5 |
+
+Text and audio caps are measured to cost no throughput: `serve llm` is flat from
+the runtime default down to a single queue at one and at four concurrent
+requests, and both audio servers are flat within run-to-run noise. Image and
+video are unmeasured, so they keep the runtime default unless the device is too
+busy to hold it.
+
+The cap is only ever lowered to fit the free slots, never raised to fill them,
+so a server's throughput does not depend on the order the servers started. A
+`GPU_MAX_HW_QUEUES` set by the operator is always left alone, but it is still
+checked: a cap of N resolves to at most N + 1 resident queues, so a value that
+will not fit is reported even though it is honoured. When a server cannot fit,
+it logs a `queue_budget_exceeded` warning and starts anyway.
+
 ### Reasoning controls
 
 `--think auto` uses the model's default. Qwen27B and Flash-Next match the
 official Jinja: thinking enabled, `xhigh` effort, prior reasoning preserved.
 Use `--think off` or `chat_template_kwargs.enable_thinking=false` for direct
-answers. DeepSeek retains its chat-mode default. Quality comparisons must use
-the same reasoning mode and effort.
+answers. DeepSeek defaults to thinking with `high` effort. Quality comparisons
+must use the same reasoning mode and effort.
 
-`POST /v1/chat/completions` accepts top-level `reasoning_effort` (`off`,
+`POST /v1/chat/completions` accepts top-level `reasoning_effort` (`none`,
 `minimal`, `low`, `medium`, `high`, `xhigh`, or `max`) and Pi/llama.cpp-style
 `chat_template_kwargs`:
 
@@ -546,8 +612,17 @@ ordinary continuation.
   Chat Completions shape and the flat Responses-style `{type,name,parameters}`
   shape. Missing or null `parameters` become `{}`. `parametersJsonSchema` is
   accepted as an alias for `parameters`. Flat definitions retain all function
-  fields, including `strict`. Unsupported tool types, malformed entries and
-  non-object parameters return 400 `invalid_tools` before generation.
+  fields, including `strict`. A function name holds 1-64 printable ASCII
+  characters and may use any of them except a space, `<`, `>`, `"` and `\`,
+  which frame a rendered call; dotted and namespaced names such as
+  `github.create_issue` are accepted. OpenAI itself documents a narrower set
+  for this field, so a name outside `[A-Za-z0-9_-]` is portable to gufo but not
+  to every OpenAI-compatible service. Gemma 4 also rejects `{`, which ends a
+  name in its call syntax. The same name rule applies to an
+  assistant `tool_calls` entry that replays a call. Unsupported tool types,
+  malformed entries, unrenderable declared names and non-object parameters
+  return 400 `invalid_tools` before generation; because messages parse first,
+  an unrenderable name in a replayed call returns 400 `invalid_messages`.
 - shared top-k, min-p, repeat, frequency and presence sampling controls
 
 Streaming objects use `chat.completion.chunk` and end with the compatibility
@@ -628,6 +703,8 @@ References: [OpenAI Chat Completions](https://developers.openai.com/api/referenc
 and [llama.cpp grammar sampling](https://github.com/ggml-org/llama.cpp/blob/68d9053afd4f4d0752ced6187585f862355a40be/common/sampling.cpp).
 Verify with `tools/serving/check-openai-sdk.py --suite structured` or
 `--suite structured-limits` (add `--vision` for an image-capable server).
+Its seeded replay checks need a Gemma 4 MTP server started with
+`--draft-calibration request`.
 
 ## Model Discovery
 

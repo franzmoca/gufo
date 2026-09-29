@@ -9,6 +9,7 @@
 #include <mutex>
 #include <span>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include "src/core/json.hpp"
@@ -34,8 +35,11 @@ public:
   static std::shared_ptr<const JsonConstraint> Compile(
       const json::Value& schema, bool strict);
   static std::shared_ptr<const JsonConstraint> Object();
+  /// Any text up to and including `end` (the model's reasoning close), then
+  /// `answer`.
   static std::shared_ptr<const JsonConstraint> WithReasoning(
-      std::shared_ptr<const JsonConstraint> answer);
+      std::shared_ptr<const JsonConstraint> answer,
+      std::string_view end = "</think>");
   using Tool = std::pair<std::string, std::shared_ptr<const JsonConstraint>>;
   static std::shared_ptr<const JsonConstraint> WithTools(
       std::shared_ptr<const JsonConstraint> answer, std::vector<Tool> tools,

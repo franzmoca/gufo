@@ -46,7 +46,8 @@ many a cycle verifies:
 
 `--min-draft-tokens` drafts that many before a policy may stop. The calibrated
 policy learns across requests by default; `--draft-calibration request`
-restarts it with every request, so a seeded sampled request replays exactly.
+restarts it with every request and prices a sampled cycle's drafts as if it
+ran alone, so a seeded sampled request replays exactly, batched or not.
 When the recent context repeats an earlier
 passage of at least 12 tokens (a rewritten file, a quoted log), the tokens that
 followed it fill the remaining draft slots and are verified like drafts (prompt
