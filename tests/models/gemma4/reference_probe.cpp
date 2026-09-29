@@ -2,6 +2,11 @@
 // logits for comparison with tools/gemma4/llama_logits and the GPU runtime.
 //   gemma4_reference_probe --model GGUF (--text TEXT | --chat MESSAGE)
 //       --tokens-out T.i32 --logits-out L.g4lg [--half-kv] [--chunk N]
+//       [--image-embd G4VE]
+// --image-embd places a G4VE file's encoder rows (gemma4_vision_probe
+// --output) on the prompt's run of image soft tokens (with --tokens-in, e.g.
+// gemma4_vision_generate_probe's tokens.i32); it needs a single chunk.
+#include <algorithm>
 #include <chrono>
 #include <cstdlib>
 #include <fstream>
@@ -12,13 +17,15 @@
 #include "src/models/gemma4/chat_template.hpp"
 #include "src/models/gemma4/reference.hpp"
 #include "src/models/gemma4/tokenizer.hpp"
+#include "src/models/gemma4/vision/prompt.hpp"
 #include "tests/models/gemma4/logit_file.hpp"
 
 namespace g4 = gufo::models::gemma4;
 using gemma4_test::Require;
 
 int main(int argc, char** argv) {
-  std::string model, text, chat, tokens_in, tokens_out, logits_out, trace_out;
+  std::string model, text, chat, tokens_in, tokens_out, logits_out, trace_out,
+      image_embd;
   bool half_kv = false;
   bool q8 = false;
   std::size_t chunk = 0;
@@ -49,6 +56,8 @@ int main(int argc, char** argv) {
       trace_out = value();
     else if (arg == "--chunk")
       chunk = std::stoul(value());
+    else if (arg == "--image-embd")
+      image_embd = value();
     else {
       std::cerr << "unknown argument " << arg << '\n';
       return 2;
@@ -95,13 +104,39 @@ int main(int argc, char** argv) {
     const std::size_t step = chunk == 0 ? tokens.size() : chunk;
     Require(trace_out.empty() || step == tokens.size(),
             "--trace-out needs a single chunk");
+    std::vector<float> image_rows;
+    std::vector<g4::Reference::Image> images;
+    if (!image_embd.empty()) {
+      Require(step == tokens.size(), "--image-embd needs a single chunk");
+      std::ifstream in(image_embd, std::ios::binary);
+      std::uint32_t header[4] = {};
+      in.read(reinterpret_cast<char*>(header), sizeof(header));
+      Require(in && header[0] == 0x45563447U &&
+                  header[3] == weights->config.hidden_size,
+              "--image-embd is not a G4VE file of the model's width");
+      image_rows.resize(std::size_t{header[2]} * header[3]);
+      in.read(reinterpret_cast<char*>(image_rows.data()),
+              static_cast<std::streamsize>(image_rows.size() * 4));
+      Require(in.good(), "truncated --image-embd");
+      const auto soft =
+          gufo::models::gemma4::vision::FindImageTokens(*tokenizer).soft;
+      const auto first = std::find(tokens.begin(), tokens.end(), soft);
+      const auto end = std::find_if(first, tokens.end(),
+                                    [&](g4::TokenId t) { return t != soft; });
+      Require(first != tokens.end() &&
+                  static_cast<std::size_t>(end - first) == header[2] &&
+                  std::find(end, tokens.end(), soft) == tokens.end(),
+              "--image-embd rows do not match the prompt's one image");
+      images.push_back({static_cast<std::uint32_t>(first - tokens.begin()),
+                        header[2], image_rows.data()});
+    }
     reference.SetTrace(!trace_out.empty());
     const auto start = std::chrono::steady_clock::now();
     for (std::size_t begin = 0; begin < tokens.size(); begin += step) {
       const std::size_t count = std::min(step, tokens.size() - begin);
       std::vector<float> logits;
       reference.Forward(std::span(tokens).subspan(begin, count), &logits,
-                        nullptr);
+                        nullptr, images);
       file.logits.insert(file.logits.end(), logits.begin(), logits.end());
     }
     for (std::size_t p = 0; p < tokens.size(); ++p) {

@@ -29,12 +29,22 @@ public:
 
   Reference(const ModelWeights& weights, Storage storage);
 
+  /// Rows [row, row + count) of one Forward call hold an image: `embedding`
+  /// ([count][hidden], the encoder output) replaces their token embeddings
+  /// unscaled, and in sliding layers each of them sees every key of its
+  /// image (the window still bounds older keys); global layers stay causal.
+  struct Image {
+    std::uint32_t row{0};
+    std::uint32_t count{0};
+    const float* embedding{nullptr};
+  };
+
   /// Appends `tokens` after the current position. `logits` receives
   /// [tokens.size()][vocab] softcapped rows and `hidden` the post-norm
   /// [tokens.size()][hidden] rows fed to the LM head and to MTP; either may
   /// be null. Processing a prefix in several calls gives identical results.
   void Forward(std::span<const TokenId> tokens, std::vector<float>* logits,
-               std::vector<float>* hidden);
+               std::vector<float>* hidden, std::span<const Image> images = {});
 
   /// When enabled, Forward records the residual stream after every layer:
   /// [layer][row][hidden] for the rows of the latest call.
@@ -50,8 +60,10 @@ private:
   /// out[r][o] = sum_c W[o][c] * x[r][c] for `rows` input rows.
   void MatMul(const TensorRef& weight, const float* x, std::size_t rows,
               float* out) const;
+  /// `ends` (sliding layers, may be empty): per row, the exclusive key end
+  /// when it exceeds the row's own position + 1.
   void Attention(std::uint32_t layer, const float* q, std::size_t rows,
-                 float* out) const;
+                 std::span<const std::uint32_t> ends, float* out) const;
   /// Routed expert mixture of `rows` attention residual rows (26B-A4B):
   /// router, top-k softmax weights, per-expert scale, GeGLU experts.
   void Experts(const LayerWeights& w, const float* x, std::size_t rows,

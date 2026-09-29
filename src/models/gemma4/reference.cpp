@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstring>
+#include <stdexcept>
 
 #include "src/core/quant/ggml_gemm.hpp"
 
@@ -126,6 +127,7 @@ void Reference::MatMul(const TensorRef& weight, const float* x_in,
 }
 
 void Reference::Attention(std::uint32_t layer, const float* q, std::size_t rows,
+                          std::span<const std::uint32_t> ends,
                           float* out) const {
   const Config& c = weights_.config;
   const std::uint32_t dim = c.HeadDim(layer);
@@ -143,11 +145,13 @@ void Reference::Attention(std::uint32_t layer, const float* q, std::size_t rows,
       const std::uint32_t lo = c.IsSliding(layer) && pos + 1 > c.sliding_window
                                    ? pos + 1 - c.sliding_window
                                    : 0;
+      const std::uint32_t hi =
+          ends.empty() ? pos + 1 : std::max(pos + 1, ends[r]);
       const float* qh = q + (r * heads + h) * dim;
       const std::uint32_t kvh = h / group;
-      std::vector<double> scores(pos + 1 - lo);
+      std::vector<double> scores(hi - lo);
       double max_score = -INFINITY;
-      for (std::uint32_t p = lo; p <= pos; ++p) {
+      for (std::uint32_t p = lo; p < hi; ++p) {
         const float* k = keys.data() + p * kv_stride + kvh * dim;
         double s = 0.0;
         for (std::uint32_t d = 0; d < dim; ++d) {
@@ -162,7 +166,7 @@ void Reference::Attention(std::uint32_t layer, const float* q, std::size_t rows,
         total += s;
       }
       std::vector<double> acc(dim, 0.0);
-      for (std::uint32_t p = lo; p <= pos; ++p) {
+      for (std::uint32_t p = lo; p < hi; ++p) {
         const float* v = values.data() + p * kv_stride + kvh * dim;
         const double weight = scores[p - lo] / total;
         for (std::uint32_t d = 0; d < dim; ++d) {
@@ -245,8 +249,8 @@ void Reference::Experts(const LayerWeights& w, const float* x, std::size_t rows,
 }
 
 void Reference::Forward(std::span<const TokenId> tokens,
-                        std::vector<float>* logits,
-                        std::vector<float>* hidden) {
+                        std::vector<float>* logits, std::vector<float>* hidden,
+                        std::span<const Image> images) {
   const Config& c = weights_.config;
   const std::size_t n = tokens.size();
   const std::size_t d = c.hidden_size;
@@ -266,6 +270,20 @@ void Reference::Forward(std::span<const TokenId> tokens,
     for (std::size_t i = 0; i < d; ++i) {
       x[r * d + i] *= embed_scale;
     }
+  }
+  // Image rows take the encoder output unscaled and, in sliding layers, see
+  // their whole image.
+  std::vector<std::uint32_t> ends;
+  for (const Image& image : images) {
+    if (image.count == 0 || std::size_t{image.row} + image.count > n ||
+        image.embedding == nullptr) {
+      throw std::invalid_argument("gemma4 reference: invalid image rows");
+    }
+    std::copy_n(image.embedding, std::size_t{image.count} * d,
+                x.begin() + static_cast<std::ptrdiff_t>(image.row * d));
+    ends.resize(n, 0);
+    std::fill_n(ends.begin() + image.row, image.count,
+                position_ + image.row + image.count);
   }
   if (trace_) {
     layer_trace_.assign(static_cast<std::size_t>(c.num_layers) * n * d, 0.0F);
@@ -319,7 +337,10 @@ void Reference::Forward(std::span<const TokenId> tokens,
     values_[l].insert(values_[l].end(), v.begin(), v.end());
 
     std::vector<float> attn(n * q_dim);
-    Attention(l, q.data(), n, attn.data());
+    Attention(l, q.data(), n,
+              c.IsSliding(l) ? std::span<const std::uint32_t>(ends)
+                             : std::span<const std::uint32_t>{},
+              attn.data());
     std::vector<float> o(n * d);
     MatMul(w.attn_output, attn.data(), n, o.data());
     for (std::size_t r = 0; r < n; ++r) {

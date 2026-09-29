@@ -34,7 +34,9 @@ namespace vision = gufo::models::gemma4::vision;
 
 namespace {
 
-constexpr std::uint32_t kWidth = 5376;
+/// The sidecar's projection width (5376 for the 31B, 2816 for the
+/// 26B-A4B), read before any embedding is handled.
+std::uint32_t projection_width = 0;
 
 struct Difference {
   double relative_rms{0};
@@ -69,10 +71,10 @@ std::vector<float> ReadEmbedding(const std::string& path) {
   std::uint32_t header[4] = {};
   in.read(reinterpret_cast<char*>(header), sizeof(header));
   if (!in || header[0] != 0x45563447U || header[1] != 1U ||
-      header[3] != kWidth) {
-    throw std::runtime_error("not a G4VE file of width 5376: " + path);
+      header[3] != projection_width) {
+    throw std::runtime_error("not a G4VE file of the sidecar's width: " + path);
   }
-  std::vector<float> data(std::size_t{header[2]} * kWidth);
+  std::vector<float> data(std::size_t{header[2]} * projection_width);
   in.read(reinterpret_cast<char*>(data.data()),
           static_cast<std::streamsize>(data.size() * 4));
   if (!in) {
@@ -136,7 +138,9 @@ int Run(int argc, char** argv) {
   const auto reader = gufo::core::GgufReader::OpenFile(mmproj, &error);
   if (!reader)
     throw std::runtime_error(error);
-  const auto weights = vision::Weights::Resolve(*reader, kWidth);
+  projection_width = static_cast<std::uint32_t>(
+      reader->GetMetadataUint64("clip.vision.projection_dim").value_or(0));
+  const auto weights = vision::Weights::Resolve(*reader, projection_width);
   gufo::core::Image image{
       width, height,
       std::vector<std::uint8_t>(std::size_t{width} * height * 3)};
@@ -150,19 +154,19 @@ int Run(int argc, char** argv) {
   std::vector<float> embedding;
   if (reference_enabled) {
     const vision::Reference reference(weights);
-    embedding = reference.Encode(
-        image, [&](std::string_view stage, std::span<const float> data) {
-          const std::string name(stage);
-          if (!dump_dir.empty()) {
-            WriteStage(dump_dir + "/" + name + ".f32", data,
-                       name == "embedding" ? kWidth : vision::kHidden);
-          }
-          stages.emplace(name, std::vector<float>(data.begin(), data.end()));
-        });
+    embedding = reference.Encode(image, [&](std::string_view stage,
+                                            std::span<const float> data) {
+      const std::string name(stage);
+      if (!dump_dir.empty()) {
+        WriteStage(dump_dir + "/" + name + ".f32", data,
+                   name == "embedding" ? projection_width : vision::kHidden);
+      }
+      stages.emplace(name, std::vector<float>(data.begin(), data.end()));
+    });
   }
   if (gpu) {
 #ifdef GUFO_GEMMA4_VISION_GPU
-    vision::Encoder encoder(mmproj, kWidth);
+    vision::Encoder encoder(mmproj, projection_width);
     (void)encoder.Encode(image);  // uploads weights and warms up
     const auto start = std::chrono::steady_clock::now();
     const auto device = encoder.Encode(image);
@@ -172,15 +176,16 @@ int Run(int argc, char** argv) {
     std::printf("gpu encode %ux%u (%u rows): %.1f ms\n", width, height,
                 device->rows(), ms);
     if (reference_enabled) {
-      (void)encoder.Encode(image, [&](std::string_view stage,
-                                      std::span<const float> data) {
-        const auto d = Compare(stages.at(std::string(stage)), data,
-                               stage == "embedding" ? kWidth : vision::kHidden);
-        std::printf("gpu %-10s rel rms %.3e  max abs %.3e\n",
-                    std::string(stage).c_str(), d.relative_rms, d.max_abs);
-      });
+      (void)encoder.Encode(
+          image, [&](std::string_view stage, std::span<const float> data) {
+            const auto d = Compare(
+                stages.at(std::string(stage)), data,
+                stage == "embedding" ? projection_width : vision::kHidden);
+            std::printf("gpu %-10s rel rms %.3e  max abs %.3e\n",
+                        std::string(stage).c_str(), d.relative_rms, d.max_abs);
+          });
     } else {
-      embedding.resize(std::size_t{device->rows()} * kWidth);
+      embedding.resize(std::size_t{device->rows()} * projection_width);
       if (hipMemcpy(embedding.data(), device->data(), embedding.size() * 4,
                     hipMemcpyDeviceToHost) != hipSuccess) {
         throw std::runtime_error("cannot copy embeddings");
@@ -193,8 +198,9 @@ int Run(int argc, char** argv) {
   if (!output.empty() && !embedding.empty()) {
     std::ofstream out(output, std::ios::binary);
     const std::uint32_t header[4] = {
-        0x45563447U, 1U, static_cast<std::uint32_t>(embedding.size() / kWidth),
-        kWidth};
+        0x45563447U, 1U,
+        static_cast<std::uint32_t>(embedding.size() / projection_width),
+        projection_width};
     out.write(reinterpret_cast<const char*>(header), sizeof(header));
     out.write(reinterpret_cast<const char*>(embedding.data()),
               static_cast<std::streamsize>(embedding.size() * 4));
@@ -204,7 +210,7 @@ int Run(int argc, char** argv) {
     if (other.size() != embedding.size()) {
       throw std::runtime_error("embedding shapes differ");
     }
-    const auto d = Compare(embedding, other, kWidth);
+    const auto d = Compare(embedding, other, projection_width);
     std::printf("vs %s: worst row cosine %.6f  rel rms %.3e  max abs %.3e\n",
                 compare.c_str(), d.worst_row_cosine, d.relative_rms, d.max_abs);
   }
