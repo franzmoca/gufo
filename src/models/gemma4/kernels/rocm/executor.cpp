@@ -402,6 +402,8 @@ std::optional<GemvFormat> GemvFormatOf(core::GgmlType type) {
       return GemvFormat::kQ5_K;
     case core::GgmlType::kQ6_K:
       return GemvFormat::kQ6_K;
+    case core::GgmlType::kQ8_0:
+      return GemvFormat::kQ8_0;
     default:
       return std::nullopt;
   }
@@ -494,9 +496,14 @@ void Executor::Project(const DeviceTensor& w, const float* x, const void* xq,
     return;
   }
   // Autoregressive decode: the Gemma GEMV serves every K-quant and Q4_0
-  // projection.
+  // projection, and Q8_0 past 2112 outputs and 1024 inputs (cold weights:
+  // 8192x5376 208 vs 217 us, 5376x16384 407 vs 506, 2816x8192 117 vs 123;
+  // the shared GEMV is faster on the drafter's 1024-wide rows and on short
+  // outputs such as 1024x2816, 18 vs 16 us).
+  const bool gemma_gemv =
+      w.type != core::GgmlType::kQ8_0 || (w.rows > 2112 && w.cols > 1024);
   if (const auto format = GemvFormatOf(w.type);
-      format &&
+      format && gemma_gemv &&
       LaunchKQuantGemv(*format, w.data, x, y, w.rows, w.cols, stream_)) {
     return;
   }

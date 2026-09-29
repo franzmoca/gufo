@@ -166,8 +166,8 @@ void CheckShape(const Format& f, std::size_t m, std::size_t k,
   }
   Require(worst < 2e-6, name + ": decode error " + std::to_string(worst));
 
-  // The Gemma autoregressive GEMV matches the FP64 dot.
-  if (f.gemv) {
+  // The Gemma autoregressive GEMV matches the FP64 dot (256-multiple widths).
+  if (f.gemv && k % 256 == 0) {
     namespace g4k = gufo::models::gemma4::rocm;
     std::vector<float> one(2 * m);
     for (std::size_t r = 0; r < 2; ++r) {
@@ -526,7 +526,12 @@ int main() {
          210,
          {208},
          "Q6_K"},
-        {GgmlType::kQ8_0, std::nullopt, 32, 34, {0}, "Q8_0"},
+        {GgmlType::kQ8_0,
+         gufo::models::gemma4::rocm::GemvFormat::kQ8_0,
+         32,
+         34,
+         {0},
+         "Q8_0"},
         {GgmlType::kQ4_0,
          gufo::models::gemma4::rocm::GemvFormat::kQ4_0,
          32,

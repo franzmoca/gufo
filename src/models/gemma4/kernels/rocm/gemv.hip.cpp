@@ -1,5 +1,5 @@
-// Autoregressive decode projections for Gemma 4's K-quant and Q4_0 weights,
-// and the binary16 small-batch projection.
+// Autoregressive decode projections for Gemma 4's K-quant, Q4_0 and Q8_0
+// weights, and the batch-invariant binary16 small-batch projection.
 //
 // y[m] = sum_k x[k] * W[m][k]; the weights stay in their GGUF blocks and the
 // activations stay FP32. A lane's unit of work is one 16-byte vector of
@@ -17,6 +17,7 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <utility>
 
 #include "src/models/gemma4/kernels/rocm/gemv_tasks.hpp"
 
@@ -52,6 +53,12 @@ struct FormatTraits<GemvFormat::kQ6_K> {
   static constexpr int kBlockBytes = 210;
   static constexpr int kTasks = 4;
 };
+/// Eight 34-byte blocks as one 272-byte group per 256 values.
+template<>
+struct FormatTraits<GemvFormat::kQ8_0> {
+  static constexpr int kBlockBytes = 272;
+  static constexpr int kTasks = 8;
+};
 
 template<GemvFormat F>
 __device__ __forceinline__ float Task(const std::uint8_t* block, int t,
@@ -62,6 +69,8 @@ __device__ __forceinline__ float Task(const std::uint8_t* block, int t,
     return TaskQ45K<false>(block, t, x, acc);
   } else if constexpr (F == GemvFormat::kQ5_K) {
     return TaskQ45K<true>(block, t, x, acc);
+  } else if constexpr (F == GemvFormat::kQ8_0) {
+    return TaskQ80(block, t, x, acc);
   } else {
     return TaskQ6K(block, t, x, acc);
   }
@@ -253,6 +262,15 @@ void LaunchHalf(const void* w, const float* x, float* y, std::uint32_t m,
                 std::uint32_t k, hipStream_t stream) {
   HalfGemvKernel<kRows><<<m, kWave * kWavesPerBlock, 0, stream>>>(
       static_cast<const __half*>(w), x, y, m, k);
+}
+
+/// Calls launch.template operator()<rows>() for rows 1 to kMaxHalfGemvRows.
+template<class Launch>
+bool ForRows(std::uint32_t rows, Launch&& launch) {
+  return [&]<int... N>(std::integer_sequence<int, N...>) {
+    return ((rows == N + 1 && (launch.template operator()<N + 1>(), true)) ||
+            ...);
+  }(std::make_integer_sequence<int, kMaxHalfGemvRows>{});
 }
 
 __global__ void Bf16ToHalfKernel(std::uint16_t* __restrict__ data,
@@ -459,6 +477,9 @@ bool LaunchKQuantGemv(GemvFormat format, const void* w, const float* x,
     case GemvFormat::kQ6_K:
       Launch<GemvFormat::kQ6_K>(w, x, y, m, k, stream);
       return true;
+    case GemvFormat::kQ8_0:
+      Launch<GemvFormat::kQ8_0>(w, x, y, m, k, stream);
+      return true;
   }
   return false;
 }
@@ -468,31 +489,8 @@ bool LaunchHalfGemv(const void* w, const float* x, float* y, std::uint32_t rows,
   if (k % 8 != 0 || m == 0) {
     return false;
   }
-  switch (rows) {
-#define GUFO_HALF_GEMV_CASE(n)            \
-  case n:                                 \
-    LaunchHalf<n>(w, x, y, m, k, stream); \
-    return true;
-    GUFO_HALF_GEMV_CASE(1)
-    GUFO_HALF_GEMV_CASE(2)
-    GUFO_HALF_GEMV_CASE(3)
-    GUFO_HALF_GEMV_CASE(4)
-    GUFO_HALF_GEMV_CASE(5)
-    GUFO_HALF_GEMV_CASE(6)
-    GUFO_HALF_GEMV_CASE(7)
-    GUFO_HALF_GEMV_CASE(8)
-    GUFO_HALF_GEMV_CASE(9)
-    GUFO_HALF_GEMV_CASE(10)
-    GUFO_HALF_GEMV_CASE(11)
-    GUFO_HALF_GEMV_CASE(12)
-    GUFO_HALF_GEMV_CASE(13)
-    GUFO_HALF_GEMV_CASE(14)
-    GUFO_HALF_GEMV_CASE(15)
-    GUFO_HALF_GEMV_CASE(16)
-#undef GUFO_HALF_GEMV_CASE
-    default:
-      return false;
-  }
+  return ForRows(
+      rows, [&]<int kRows>() { LaunchHalf<kRows>(w, x, y, m, k, stream); });
 }
 
 void ConvertBf16ToHalf(void* data, std::size_t count, std::uint32_t* overflow,

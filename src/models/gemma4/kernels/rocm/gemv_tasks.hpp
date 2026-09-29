@@ -247,6 +247,15 @@ __device__ __forceinline__ void DecodeQ5_1(const std::uint8_t* block,
 // (q - 8) d = d q - 8 d. Blocks are 18 bytes, so only every other block is
 // word aligned; each lane loads the five words enclosing its block and
 // selects the payload with byte alignment.
+/// Q8_0 task t of a 256-value group (eight 34-byte blocks; the group is word
+/// aligned, odd blocks start mid-word): block t, ggml's d * q, one FMA chain.
+__device__ __forceinline__ float TaskQ80(const std::uint8_t* group, int t,
+                                         const float* x, float acc) {
+  float w[32];
+  DecodeQ8_0(group + 34 * t, (t & 1) != 0, w);
+  return Accumulate<32>(acc, w, x + 32 * t);
+}
+
 __device__ __forceinline__ float TaskQ40(const std::uint8_t* group, int t,
                                          const float* x, float acc) {
   const std::uint8_t* block = group + 18 * t;
