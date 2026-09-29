@@ -162,8 +162,8 @@ three warmed requests, 64 output tokens, greedy
 | Logo 1584×1584 | 1120 | 1141 | 4.22 | 8.35 | +98.0% | 0.49 | 1.10 | +124.2% | 10.81 | 7.96 | +35.8% |
 
 Gain is llama.cpp time over Gufo time minus one (decode: Gufo over
-llama.cpp). Gufo's vision encoder takes 164 ms for 260 soft tokens and
-1,025 ms for 1,107; the rest of a cold request is ordinary prefill.
+llama.cpp). Gufo's vision encoder takes 162 ms for 260 soft tokens and
+1,147 ms for 1,107; the rest of a cold request is ordinary prefill.
 
 ## Vulkan llama.cpp fork (single user)
 

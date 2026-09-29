@@ -1,5 +1,6 @@
 // HIP vision encoder against the scalar reference on a small synthetic
-// image. Reads the sidecar named by GUFO_GEMMA4_MMPROJ; skips (77) without.
+// image. Reads the sidecar named by GUFO_GEMMA4_MMPROJ (31B or 26B-A4B);
+// skips (77) without.
 #include <cmath>
 #include <cstdint>
 #include <cstdlib>
@@ -26,7 +27,11 @@ int main() {
     std::string error;
     const auto reader = gufo::core::GgufReader::OpenFile(path, &error);
     Require(reader != nullptr, error);
-    const auto weights = vision::Weights::Resolve(*reader, 5376);
+    // The projection width of the target the sidecar belongs to: 5376 for
+    // the 31B, 2816 for the 26B-A4B.
+    const auto width = static_cast<std::uint32_t>(
+        reader->GetMetadataUint64("clip.vision.projection_dim").value_or(0));
+    const auto weights = vision::Weights::Resolve(*reader, width);
     // 144x96: 54 patches, 6 soft tokens; deterministic texture.
     gufo::core::Image image{144, 96, std::vector<std::uint8_t>(144 * 96 * 3)};
     for (std::size_t i = 0; i < image.pixels.size(); ++i) {
@@ -37,7 +42,7 @@ int main() {
         image, [&](std::string_view stage, std::span<const float> data) {
           expected.emplace(stage, std::vector<float>(data.begin(), data.end()));
         });
-    vision::Encoder encoder(path, 5376);
+    vision::Encoder encoder(path, width);
     std::size_t seen = 0;
     const auto embedding = encoder.Encode(
         image, [&](std::string_view stage, std::span<const float> data) {
@@ -49,17 +54,16 @@ int main() {
             norm += double{ref[i]} * ref[i];
           }
           const double relative = std::sqrt(err / norm);
-          // FP32 patch embedding; BF16 GEMM inputs afterwards, whose
-          // rounding grows through the late layers (docs VISION.md).
-          const double limit = stage == "patch"             ? 1e-5
-                               : stage.starts_with("layer") ? 5e-2
-                                                            : 4e-2;
+          // FP32 patch embedding; binary16 GEMM inputs afterwards, whose
+          // rounding grows through the late layers to about 2e-3 (BF16
+          // inputs reached 2e-2; docs VISION.md).
+          const double limit = stage == "patch" ? 1e-5 : 1e-2;
           std::cout << stage << " rel rms " << relative << '\n';
           Require(relative < limit, std::string(stage) + " diverges");
           ++seen;
         });
     Require(seen == expected.size(), "encoder skipped stages");
-    Require(embedding->rows() == 6 && embedding->width() == 5376,
+    Require(embedding->rows() == 6 && embedding->width() == width,
             "embedding shape");
   });
 }

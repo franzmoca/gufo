@@ -18,13 +18,33 @@
 #include "src/models/gemma4/vision/prompt.hpp"
 #include "src/models/gemma4/vision/weights.hpp"
 #include "src/models/qwen/hip/ops/gemm.hpp"
+#include "src/models/qwen38_flash_next/kernels/rocm/kernels.hpp"
 
 namespace gufo::models::gemma4::vision {
 namespace {
-using Bf16 = hip_bfloat16;
+/// GEMM operand format: binary16 activations (and the BF16 weights converted
+/// on upload, exact within its range), FP32 accumulation.
+using Act = _Float16;
+
+/// Binary16 of v, saturated to the finite range.
+__device__ inline Act ToAct(float v) {
+  return static_cast<Act>(fminf(fmaxf(v, -65504.0F), 65504.0F));
+}
+
+/// In place, BF16 weights to binary16 (values below 2^-24 flush to zero).
+__global__ void Bf16ToHalf(std::uint16_t* data, std::size_t count) {
+  const std::size_t i = std::size_t{blockIdx.x} * blockDim.x + threadIdx.x;
+  if (i >= count)
+    return;
+  const float v = __uint_as_float(std::uint32_t{data[i]} << 16U);
+  data[i] = __builtin_bit_cast(std::uint16_t, ToAct(v));
+}
 constexpr unsigned kThreads = 256;
 constexpr unsigned kQkv = 3 * kHidden;
 constexpr unsigned kGateUp = 2 * kFfn;
+/// The down projection's K padded to whole 32-value blocks for the binary16
+/// WMMA GEMM (zero weights and activations past kFfn).
+constexpr unsigned kFfnPadded = (kFfn + 31) / 32 * 32;
 /// Rotary pairs per axis: each half of a head rotates as NEOX pairs.
 constexpr unsigned kRopePairs = kHeadDim / 4;
 /// Attention operands pad each head to whole 16-wide WMMA steps and each
@@ -123,8 +143,8 @@ __global__ void AddPositions(float* hidden, const float* table,
                table[(kPositions + t / columns) * kHidden + d];
 }
 
-/// y[row] = rms(x[row]) * weight (weight may be null) as BF16.
-__global__ void RmsNormBf16(const float* x, const float* weight, Bf16* y,
+/// y[row] = rms(x[row]) * weight (weight may be null) as binary16.
+__global__ void RmsNormHalf(const float* x, const float* weight, Act* y,
                             unsigned width) {
   __shared__ float shared[kThreads];
   const float* row = x + std::size_t{blockIdx.x} * width;
@@ -134,7 +154,7 @@ __global__ void RmsNormBf16(const float* x, const float* weight, Bf16* y,
   const float scale = rsqrtf(BlockSum(sum, shared) / width + kEps);
   for (unsigned j = threadIdx.x; j < width; j += kThreads) {
     y[std::size_t{blockIdx.x} * width + j] =
-        Bf16(row[j] * scale * (weight != nullptr ? weight[j] : 1.0F));
+        ToAct(row[j] * scale * (weight != nullptr ? weight[j] : 1.0F));
   }
 }
 
@@ -234,10 +254,10 @@ __device__ __forceinline__ Half16 LoadHalf16(const _Float16* p) {
 /// binary16 probabilities times V accumulated in FP32. Fragment layout
 /// (wave32 v_wmma_f32_16x16x16_f16): A holds row L%16 and 16 contiguous k, B
 /// column L%16 and 16 contiguous k, and accumulator element i is row
-/// 2i + L/16, column L%16. Writes token-major BF16 rows.
+/// 2i + L/16, column L%16. Writes token-major binary16 rows.
 __global__ void __launch_bounds__(32 * kAttentionWaves)
     FusedAttention(const _Float16* q, const _Float16* k, const _Float16* vt,
-                   Bf16* out, unsigned count, unsigned padded) {
+                   Act* out, unsigned count, unsigned padded) {
   // Per-wave probability tiles: waves never exchange data.
   __shared__ __align__(16) _Float16
       p_lds[kAttentionWaves][16][kKeyTile + 8];
@@ -335,25 +355,30 @@ __global__ void __launch_bounds__(32 * kAttentionWaves)
       const unsigned token = q0 + 2 * i + half;
       if (token < count && d < kHeadDim) {
         out[std::size_t{token} * kHidden + head * kHeadDim + d] =
-            Bf16(acc[c][i] / l[i]);
+            ToAct(acc[c][i] / l[i]);
       }
     }
   }
 }
 
-/// gelu_tanh(gate) * up, from fused [count][gate | up] rows.
-__global__ void GeGlu(const float* gate_up, Bf16* output, unsigned count) {
+/// gelu_tanh(gate) * up, from fused [count][gate | up] rows, as
+/// [count][kFfnPadded] rows.
+__global__ void GeGlu(const float* gate_up, Act* output, unsigned count) {
   const unsigned i = blockIdx.x * blockDim.x + threadIdx.x;
-  if (i >= count * kFfn)
+  if (i >= count * kFfnPadded)
     return;
-  const std::size_t row = i / kFfn;
-  const unsigned j = i % kFfn;
+  const std::size_t row = i / kFfnPadded;
+  const unsigned j = i % kFfnPadded;
+  if (j >= kFfn) {
+    output[i] = Act(0);
+    return;
+  }
   const float x = gate_up[row * kGateUp + j];
   const float up = gate_up[row * kGateUp + kFfn + j];
   const float gelu =
       0.5F * x *
       (1.0F + tanhf(0.7978845608028654F * (x + 0.044715F * x * x * x)));
-  output[row * kFfn + j] = Bf16(gelu * up);
+  output[i] = ToAct(gelu * up);
 }
 
 /// 3x3 mean over the patch grid times sqrt(1152), row-major pooled cells.
@@ -374,9 +399,9 @@ __global__ void Pool(const float* hidden, float* pooled, unsigned columns,
   pooled[i] = sum / (kPoolSize * kPoolSize) * sqrtf(float{kHidden});
 }
 
-/// rms((pooled - bias) * scale) without weight, as BF16.
+/// rms((pooled - bias) * scale) without weight, as binary16.
 __global__ void StandardizeNorm(const float* pooled, const float* bias,
-                                const float* scale, Bf16* output) {
+                                const float* scale, Act* output) {
   __shared__ float shared[kThreads];
   __shared__ float values[kHidden];
   const std::size_t base = std::size_t{blockIdx.x} * kHidden;
@@ -387,7 +412,7 @@ __global__ void StandardizeNorm(const float* pooled, const float* bias,
   }
   const float factor = rsqrtf(BlockSum(sum, shared) / kHidden + kEps);
   for (unsigned j = threadIdx.x; j < kHidden; j += kThreads)
-    output[base + j] = Bf16(values[j] * factor);
+    output[base + j] = ToAct(values[j] * factor);
 }
 
 }  // namespace
@@ -450,6 +475,35 @@ struct Encoder::Impl {
     return buffer;
   }
 
+  /// A BF16 GEMM weight, uploaded and converted to binary16.
+  Allocation UploadHalf(
+      std::initializer_list<const core::GgufTensorInfo*> parts) {
+    std::size_t bytes = 0;
+    for (const auto* part : parts)
+      bytes += part->size_bytes;
+    Allocation buffer = Upload(parts);
+    const std::size_t count = bytes / 2;
+    Bf16ToHalf<<<(count + kThreads - 1) / kThreads, kThreads, 0, stream>>>(
+        static_cast<std::uint16_t*>(buffer.data), count);
+    return buffer;
+  }
+
+  /// A [rows][cols] BF16 GEMM weight as binary16 rows of `padded` values,
+  /// zero past `cols`.
+  Allocation UploadHalfPadded(const core::GgufTensorInfo& part, unsigned rows,
+                              unsigned cols, unsigned padded) {
+    const std::size_t count = std::size_t{rows} * padded;
+    Allocation buffer(count * 2);
+    Check(hipMemsetAsync(buffer.data, 0, count * 2, stream));
+    Check(hipMemcpy2DAsync(buffer.data, std::size_t{padded} * 2, part.data,
+                           std::size_t{cols} * 2, std::size_t{cols} * 2, rows,
+                           hipMemcpyHostToDevice, stream));
+    Bf16ToHalf<<<(count + kThreads - 1) / kThreads, kThreads, 0, stream>>>(
+        static_cast<std::uint16_t*>(buffer.data), count);
+    uploaded_bytes += count * 2;
+    return buffer;
+  }
+
   void UploadWeights() {
     if (uploaded)
       return;
@@ -465,16 +519,16 @@ struct Encoder::Impl {
     position = Upload({weights.position});
     std_bias = Upload({weights.std_bias});
     std_scale = Upload({weights.std_scale});
-    projection = Upload({weights.projection});
+    projection = UploadHalf({weights.projection});
     layers.clear();
     layers.resize(kLayers);
     for (unsigned l = 0; l < kLayers; ++l) {
       const LayerTensors& T = weights.layers[l];
       Layer& L = layers[l];
-      L.qkv = Upload({T.q, T.k, T.v});
-      L.out = Upload({T.out});
-      L.gate_up = Upload({T.gate, T.up});
-      L.down = Upload({T.down});
+      L.qkv = UploadHalf({T.q, T.k, T.v});
+      L.out = UploadHalf({T.out});
+      L.gate_up = UploadHalf({T.gate, T.up});
+      L.down = UploadHalfPadded(*T.down, kHidden, kFfn, kFfnPadded);
       L.ln1 = Upload({T.ln1});
       L.ln2 = Upload({T.ln2});
       L.q_norm = Upload({T.q_norm});
@@ -487,14 +541,16 @@ struct Encoder::Impl {
     uploaded = true;
   }
 
-  /// y[rows][out] = x[rows][in] * W[out][in]^T with BF16 inputs.
-  void Gemm(const Allocation& w, const Bf16* x, float* y, unsigned rows,
+  /// y[rows][out] = x[rows][in] * W[out][in]^T with binary16 inputs.
+  void Gemm(const Allocation& w, const Act* x, float* y, unsigned rows,
             unsigned out, unsigned in) {
-    if (lt->RunBf16(w.data, x, y, rows, out, in, stream))
+    if (qwen38_flash_next::rocm::UnquantizedF16Gemm(
+            w.data, reinterpret_cast<const __half*>(x), y, rows, out, in,
+            stream))
       return;
     constexpr float alpha = 1, beta = 0;
     CheckBlas(hipblasGemmEx(blas, HIPBLAS_OP_T, HIPBLAS_OP_N, out, rows, in,
-                            &alpha, w.data, HIP_R_16BF, in, x, HIP_R_16BF, in,
+                            &alpha, w.data, HIP_R_16F, in, x, HIP_R_16F, in,
                             &beta, y, HIP_R_32F, out, HIPBLAS_COMPUTE_32F,
                             HIPBLAS_GEMM_DEFAULT));
   }
@@ -598,13 +654,13 @@ std::shared_ptr<const Encoder::Embedding> Encoder::Encode(
   Allocation hidden(std::size_t{count} * kHidden * sizeof(float));
   Allocation work(std::size_t{count} *
                   std::max({kGateUp, kQkv, kPatchValues}) * sizeof(float));
-  Allocation normed(std::size_t{count} * kFfn * sizeof(Bf16));
+  Allocation normed(std::size_t{count} * kFfnPadded * sizeof(Act));
   // Q, K and transposed V; padding stays zero.
   const std::size_t head_values = std::size_t{kHeads} * padded * kPaddedDim;
   Allocation qkv(3 * head_values * sizeof(_Float16));
   Check(hipMemsetAsync(qkv.data, 0, 3 * head_values * sizeof(_Float16),
                        stream));
-  Allocation attention(std::size_t{count} * kHidden * sizeof(Bf16));
+  Allocation attention(std::size_t{count} * kHidden * sizeof(Act));
   Allocation pooled(std::size_t{rows} * kHidden * sizeof(float));
   Check(hipMemcpyAsync(pixels.data, image.pixels.data(), image.pixels.size(),
                        hipMemcpyHostToDevice, stream));
@@ -644,25 +700,26 @@ std::shared_ptr<const Encoder::Embedding> Encoder::Encode(
   for (unsigned l = 0; l < kLayers; ++l) {
     check_cancelled();
     const Impl::Layer& L = I.layers[l];
-    RmsNormBf16<<<count, kThreads, 0, stream>>>(
-        hidden.As<float>(), L.ln1.As<float>(), normed.As<Bf16>(), kHidden);
-    I.Gemm(L.qkv, normed.As<Bf16>(), work.As<float>(), count, kQkv, kHidden);
+    RmsNormHalf<<<count, kThreads, 0, stream>>>(
+        hidden.As<float>(), L.ln1.As<float>(), normed.As<Act>(), kHidden);
+    I.Gemm(L.qkv, normed.As<Act>(), work.As<float>(), count, kQkv, kHidden);
     QkvPost<<<count * kHeads, 96, 0, stream>>>(
         work.As<float>(), L.q_norm.As<float>(), L.k_norm.As<float>(), cos, sin,
         q, k, vt, columns, padded);
     FusedAttention<<<attention_grid, 32 * kAttentionWaves, 0, stream>>>(
-        q, k, vt, attention.As<Bf16>(), count, padded);
-    I.Gemm(L.out, attention.As<Bf16>(), work.As<float>(), count, kHidden,
+        q, k, vt, attention.As<Act>(), count, padded);
+    I.Gemm(L.out, attention.As<Act>(), work.As<float>(), count, kHidden,
            kHidden);
     PostNormAdd<<<count, kThreads, 0, stream>>>(
         hidden.As<float>(), work.As<float>(), L.attn_post_norm.As<float>());
-    RmsNormBf16<<<count, kThreads, 0, stream>>>(
-        hidden.As<float>(), L.ln2.As<float>(), normed.As<Bf16>(), kHidden);
-    I.Gemm(L.gate_up, normed.As<Bf16>(), work.As<float>(), count, kGateUp,
+    RmsNormHalf<<<count, kThreads, 0, stream>>>(
+        hidden.As<float>(), L.ln2.As<float>(), normed.As<Act>(), kHidden);
+    I.Gemm(L.gate_up, normed.As<Act>(), work.As<float>(), count, kGateUp,
            kHidden);
-    GeGlu<<<Blocks(std::size_t{count} * kFfn), kThreads, 0, stream>>>(
-        work.As<float>(), normed.As<Bf16>(), count);
-    I.Gemm(L.down, normed.As<Bf16>(), work.As<float>(), count, kHidden, kFfn);
+    GeGlu<<<Blocks(std::size_t{count} * kFfnPadded), kThreads, 0, stream>>>(
+        work.As<float>(), normed.As<Act>(), count);
+    I.Gemm(L.down, normed.As<Act>(), work.As<float>(), count, kHidden,
+           kFfnPadded);
     PostNormAdd<<<count, kThreads, 0, stream>>>(
         hidden.As<float>(), work.As<float>(), L.ffn_post_norm.As<float>());
     observe("layer" + std::to_string(l), hidden.As<float>(),
@@ -674,13 +731,13 @@ std::shared_ptr<const Encoder::Embedding> Encoder::Encode(
   observe("pooled", pooled.As<float>(), std::size_t{rows} * kHidden);
   StandardizeNorm<<<rows, kThreads, 0, stream>>>(
       pooled.As<float>(), I.std_bias.As<float>(), I.std_scale.As<float>(),
-      normed.As<Bf16>());
+      normed.As<Act>());
   auto embedding = std::shared_ptr<Embedding>(new Embedding);
   embedding->rows_ = rows;
   embedding->width_ = width;
   Check(hipMalloc(&embedding->data_,
                   std::size_t{rows} * width * sizeof(float)));
-  I.Gemm(I.projection, normed.As<Bf16>(), embedding->data_, rows, width,
+  I.Gemm(I.projection, normed.As<Act>(), embedding->data_, rows, width,
          kHidden);
   Check(hipGetLastError());
   Check(hipStreamSynchronize(stream));

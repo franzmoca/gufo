@@ -24,8 +24,8 @@ not unquantized-model or GGUF-conversion checks. Measured September 26, 2026.
 | Global-layer keys | K and V share one projection, so the cache keeps V and only the 64 rotated rope pairs of K; the other key dims are V times `k_norm`, folded into the query. Attention with these keys matches FP64 like stored keys (split ≤5e-6, WMMA ≤0.007) |
 | Kernels | Attention vs FP64 on window, ring, key-limit and 32K shapes (split ≤5e-6, WMMA ≤0.007 absolute), repeated launches bit-identical; every decode projection within 2e-6 of an FP64 dot relative to Σ\|wx\| |
 | Serving | Streaming, `reasoning_content`, Gemma tool calls and tool-result turns, multi-turn prompt reuse and disk-cache restore across a restart |
-| Vision encoder | GPU vs the scalar FP64-accumulating reference (`vision::Reference`): embedding relative RMS 1.6% at 260 soft tokens, 2.6% at 1,107 (BF16 projection inputs; the patch stage matches to 5e-7). llama.cpp's own encoder is 5.9% off at 260. `gemma4.vision_encoder` gates every stage |
-| Image prompts | Teacher-forced chart description, text model fed Gufo's encoder vs fed the reference's embeddings: mean KL 0.0021 (260 tokens) and 0.0091 (1,107; top-1 99/101). llama.cpp with `clip.use_gelu` measured the same way: 0.0149 and 0.078. Stock llama.cpp runs the tower with GELU-quick (its converter omits `clip.use_gelu`) and lands at 0.224 |
+| Vision encoder | GPU vs the scalar FP64-accumulating reference (`vision::Reference`): embedding relative RMS 0.27% at 260 soft tokens, 0.41% at 1,107 (binary16 projection inputs; BF16 inputs gave 1.6% and 2.6%; the patch stage matches to 5e-7). llama.cpp's own encoder is 5.9% off at 260. `gemma4.vision_encoder` gates every stage at 1e-2 |
+| Image prompts | Teacher-forced chart description (96 positions from `<image\|>`), text model fed Gufo's encoder vs fed the reference's embeddings: mean KL 0.0012 (260 tokens) and 0.020 (1,107; top-1 95/96). Against the scalar reference text model on the reference's embeddings (260): Gufo 0.0018 (answer positions 0.0003), llama.cpp with `clip.use_gelu` 0.0123 (0.0079). Stock llama.cpp runs the tower with GELU-quick (its converter omits `clip.use_gelu`) and lands at 0.224 on an earlier transcript |
 | Image sessions | `gemma4.vision_session`: a red and a blue image behind identical tokens give different answers (KL 32); changing, rewinding, extending, snapshot-restoring and chunk-splitting image prompts all match fresh sessions. Over HTTP with `--cache-disk`, a follow-up after a restart restored 272 of 316 prompt tokens; the same conversation with a colour-inverted copy of the image (identical tokens) restored none |
 
 Greedy MTP drafts the drafter's argmax and keeps it while the target's own
@@ -67,7 +67,10 @@ Image prompts: `gemma4_vision_generate_probe --image FILE --out-dir D`
 (`--image-tokens`, `--continuation`, `--embeddings`) and `llama_vision
 --image D/image0.rgb W H --tokens D/tokens.i32 --logits-out L.g4lg`, whose
 `--mmproj` should be a copy of the sidecar with `clip.use_gelu = true`
-(see [VISION.md](VISION.md)); `gemma4_vision_probe` compares encoders.
+(see [VISION.md](VISION.md)); `gemma4_vision_probe` compares encoders
+(`--output` writes the reference's embeddings) and `gemma4_reference_probe
+--tokens-in D/tokens.i32 --image-embd E.g4ve` runs the scalar text model on
+them.
 
 ## Benchmark method
 

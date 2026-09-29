@@ -214,3 +214,24 @@ constraint vocabulary. Downloaded and verified the BF16 sidecar.
   - Details in BENCHMARKS.md#image-requests.
 - llama.cpp aborts on 1,120-token images unless its ubatch holds the whole image.
 
+
+**2026-09-29 — binary16 encoder GEMMs and the 26B-A4B.**
+- The 26B-A4B's sidecar (`unsloth/gemma-4-26B-A4B-it-GGUF` `mmproj-BF16.gguf`,
+  SHA-256 `41926ed5f1403cf5add23b0684992805ea6f97253096132e769e65646b8cef9d`,
+  1,194,828,256 bytes) has the same tower and processor as the 31B's
+  (`config.json` `vision_config` and `processor_config.json` are identical);
+  only `projection_dim` differs (2816, the 26B's width). The encoder takes the
+  width from the target, and image rows reach the expert layers like token
+  rows.
+- `vision::Reference`-level checks there showed BF16 GEMM inputs costing more
+  than on the 31B: 1.16% embedding error and mean KL 0.112 from the scalar
+  text model on the reference's embeddings (`Reference` now takes image rows).
+  The encoder's projections now take binary16 inputs through Flash-Next's
+  binary16 WMMA GEMM (weights converted on upload): 0.27% and KL 0.029, the
+  same as the GPU text model fed the reference's embeddings (0.028). On the
+  31B the embedding error drops 1.6% → 0.27% (260 rows) and 2.6% → 0.41%
+  (1,107 rows); encode time is unchanged at 260 rows and 13% longer at 1,107
+  (EXPERIMENTS.md).
+- llama.cpp is not an oracle for the 26B: its Q8_1 activations already put its
+  text logits at KL 0.42 from the reference (26B-A4B QUALITY.md). On the chart
+  prompt its `use_gelu` run sits at 0.251 from the reference, Gufo's at 0.029.
