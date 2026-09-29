@@ -418,6 +418,233 @@ __global__ void __launch_bounds__(kThreads)
   }
 }
 
+/// K values per stage of the down projection kernel: two 32-value blocks.
+constexpr int kDownStageK = 64;
+/// Halves per staged token row of the down kernel: 64 values plus padding
+/// (36 dwords, conflict-free fragment reads).
+constexpr int kDownActStride = kDownStageK + 8;
+/// Bytes per staged Q5_1 row: the stage's two raw 24-byte blocks (d, m, qh,
+/// 16 code bytes each). 48 bytes (12 dwords) spread the 16 rows a fragment
+/// read touches over distinct banks.
+constexpr int kQ51Stride = 48;
+/// Floats per token row of the down kernel's output transpose (128 rows plus
+/// padding: 132 = 4 mod 64 puts a tile's writes on distinct banks).
+constexpr int kOutStride = kRowsPerBlock + 4;
+
+/// Q5_1 K block (32 values) from its staged raw bytes as two fragments:
+/// element j < 16 is the low nibble of qs[j] plus bit j of qh as 16, j >= 16
+/// the high nibble of qs[j - 16] plus bit j; weight q * d + m, one binary16
+/// FMA as in Flash-Next's routed GEMM.
+__device__ __forceinline__ void DecodeQ51(const std::uint8_t* block, bool live,
+                                          v16h* lo, v16h* hi) {
+  const uint2 head = *reinterpret_cast<const uint2*>(block);
+  const uint2 q0 = *reinterpret_cast<const uint2*>(block + 8);
+  const uint2 q1 = *reinterpret_cast<const uint2*>(block + 16);
+  const std::uint32_t qs[4] = {q0.x, q0.y, q1.x, q1.y};
+  const std::uint32_t qh = head.y;
+  const __half2 dm = __builtin_bit_cast(__half2, live ? head.x : 0U);
+  const __half2 scale = __low2half2(dm);
+  const __half2 bias = __high2half2(dm);
+#pragma unroll
+  for (int part = 0; part < 2; ++part) {
+    __half2 h[8];
+#pragma unroll
+    for (int i = 0; i < 4; ++i) {
+      const std::uint32_t bits = qh >> (16 * part + 4 * i);
+      // Bit b of `bits` (b < 4) to bit 4 of byte b.
+      const std::uint32_t high = ((bits & 1U) | ((bits & 2U) << 7U) |
+                                  ((bits & 4U) << 14U) | ((bits & 8U) << 21U))
+                                 << 4U;
+      const std::uint32_t codes = ((qs[i] >> (4 * part)) & 0x0F0F0F0FU) | high;
+      CodesToHalvesAffine(codes, scale, bias, &h[2 * i]);
+    }
+    if (part == 0) {
+      __builtin_memcpy(lo, h, 32);
+    } else {
+      __builtin_memcpy(hi, h, 32);
+    }
+  }
+}
+
+/// Routed Q5_1 down projection with FP32 outputs: the layout and tiling of
+/// RoutedHalfKQuantKernel over 64-value stages (three 16-byte pieces per
+/// row, consecutive threads on consecutive pieces). Each token tile's
+/// results are transposed through LDS so a token's 128 outputs leave as
+/// one contiguous 512-byte store.
+template<int kTileTokens>
+__global__ void __launch_bounds__(kThreads)
+    RoutedHalfQ51Kernel(const std::uint8_t* __restrict__ w,
+                        const __half* __restrict__ x,
+                        const std::int32_t* __restrict__ tiles,
+                        const std::int32_t* __restrict__ pad_bounds,
+                        const std::int32_t* __restrict__ rows_in,
+                        const std::int32_t* __restrict__ rows_out,
+                        float* __restrict__ out, std::uint32_t m,
+                        std::uint32_t k) {
+  constexpr int kTokTiles = kTileTokens / 16;
+  constexpr int kPieces = kRowsPerBlock * kQ51Stride / 16;  // per stage
+  constexpr int kActChunks = kTileTokens * kDownStageK / 8;
+  constexpr int kActPer = (kActChunks + kThreads - 1) / kThreads;
+  constexpr int kActBytes = kTileTokens * kDownActStride * 2;
+  constexpr int kOutBytes = 16 * kOutStride * 4;
+  __shared__ __attribute__((
+      aligned(16))) std::uint8_t s_rows[kRowsPerBlock * kQ51Stride];
+  __shared__ __attribute__((aligned(16))) std::uint8_t
+      s_act_bytes[kActBytes > kOutBytes ? kActBytes : kOutBytes];
+  auto* s_act = reinterpret_cast<__half*>(s_act_bytes);
+  const std::int32_t tile = tiles[blockIdx.y];
+  const int expert = tile & 0xFFFF;
+  const int t_local = (tile >> 16) * kTileTokens;
+  const int bucket_begin = pad_bounds[expert];
+  const int bucket_rows = pad_bounds[expert + 1] - bucket_begin;
+  if (t_local >= bucket_rows) {
+    return;
+  }
+  const int live_tiles = min(kTokTiles, (bucket_rows - t_local + 15) / 16);
+  const int tid = static_cast<int>(threadIdx.x);
+  const int lane = tid % kWave;
+  const int wave = tid / kWave;
+  const int sub = lane & 15;
+  const int half = lane >> 4;
+  const std::uint32_t row0 = blockIdx.x * kRowsPerBlock;
+  const std::size_t row_bytes = std::size_t{k} / 32 * 24;
+  const std::uint8_t* w_expert =
+      w + std::size_t{static_cast<std::uint32_t>(expert)} * m * row_bytes;
+
+  // Weight fetch: piece c (tid, and tid + 256 for tid < 128) is bytes
+  // 16 (c % 3) of row c / 3's stage.
+  static_assert(kPieces > kThreads && kPieces <= 2 * kThreads);
+  const auto piece_src = [&](int c) {
+    const std::uint32_t r = row0 + static_cast<std::uint32_t>(c / 3);
+    return w_expert + std::size_t{r < m ? r : m - 1} * row_bytes + (c % 3) * 16;
+  };
+  const bool f_second = tid + kThreads < kPieces;
+  const std::uint8_t* f_src0 = piece_src(tid);
+  const std::uint8_t* f_src1 = piece_src(f_second ? tid + kThreads : tid);
+  uint4 f_data0;
+  uint4 f_data1;
+  const auto fetch_weights = [&](int stage) {
+    f_data0 = *reinterpret_cast<const uint4*>(f_src0 + stage * 48);
+    f_data1 = *reinterpret_cast<const uint4*>(f_src1 + stage * 48);
+  };
+  const auto commit_weights = [&] {
+    *reinterpret_cast<uint4*>(s_rows + (tid / 3) * kQ51Stride +
+                              (tid % 3) * 16) = f_data0;
+    if (f_second) {
+      const int c = tid + kThreads;
+      *reinterpret_cast<uint4*>(s_rows + (c / 3) * kQ51Stride + (c % 3) * 16) =
+          f_data1;
+    }
+  };
+
+  std::int32_t a_src[kActPer];
+#pragma unroll
+  for (int i = 0; i < kActPer; ++i) {
+    const int chunk = tid + i * kThreads;
+    const int t = chunk / 8;
+    a_src[i] = -1;
+    if (chunk < kActChunks && t_local + t < bucket_rows) {
+      const std::int32_t src = rows_in[bucket_begin + t_local + t];
+      if (src >= 0) {
+        a_src[i] = src * static_cast<std::int32_t>(k) + (chunk % 8) * 8;
+      }
+    }
+  }
+  uint4 a_data[kActPer];
+  const auto fetch_act = [&](int stage) {
+#pragma unroll
+    for (int i = 0; i < kActPer; ++i) {
+      a_data[i] = a_src[i] >= 0 ? *reinterpret_cast<const uint4*>(
+                                      x + a_src[i] + stage * kDownStageK)
+                                : make_uint4(0U, 0U, 0U, 0U);
+    }
+  };
+  const auto commit_act = [&] {
+#pragma unroll
+    for (int i = 0; i < kActPer; ++i) {
+      const int chunk = tid + i * kThreads;
+      if (chunk < kActChunks) {
+        *reinterpret_cast<uint4*>(s_act + (chunk / 8) * kDownActStride +
+                                  (chunk % 8) * 8) = a_data[i];
+      }
+    }
+  };
+
+  v8f acc[kTokTiles];
+#pragma unroll
+  for (int j = 0; j < kTokTiles; ++j) {
+    acc[j] = v8f{0.0F, 0.0F, 0.0F, 0.0F, 0.0F, 0.0F, 0.0F, 0.0F};
+  }
+  const bool live = row0 + static_cast<std::uint32_t>(wave * 16 + sub) < m;
+  const int stages = static_cast<int>(k / kDownStageK);
+  fetch_weights(0);
+  fetch_act(0);
+  for (int stage = 0; stage < stages; ++stage) {
+    commit_weights();
+    commit_act();
+    __syncthreads();
+    if (stage + 1 < stages) {
+      fetch_weights(stage + 1);
+      fetch_act(stage + 1);
+    }
+    const std::uint8_t* row = s_rows + (wave * 16 + sub) * kQ51Stride;
+#pragma unroll
+    for (int s = 0; s < 2; ++s) {
+      v16h a_lo;
+      v16h a_hi;
+      DecodeQ51(row + 24 * s, live, &a_lo, &a_hi);
+#pragma unroll
+      for (int j = 0; j < kTokTiles; ++j) {
+        if (j < live_tiles) {
+          const __half* b = s_act + (j * 16 + sub) * kDownActStride + s * 32;
+          v16h b_lo;
+          v16h b_hi;
+          __builtin_memcpy(&b_lo, b, 32);
+          __builtin_memcpy(&b_hi, b + 16, 32);
+          acc[j] = Wmma(a_lo, b_lo, acc[j]);
+          acc[j] = Wmma(a_hi, b_hi, acc[j]);
+        }
+      }
+    }
+    __syncthreads();
+  }
+  // Epilogue per token tile: [token][row] through LDS, then 16 threads per
+  // token store its 128 rows contiguously.
+  auto* s_out = reinterpret_cast<float*>(s_act_bytes);
+#pragma unroll
+  for (int j = 0; j < kTokTiles; ++j) {
+    if (j >= live_tiles) {
+      break;
+    }
+#pragma unroll
+    for (int i = 0; i < 8; ++i) {
+      s_out[sub * kOutStride + wave * 16 + 2 * i + half] = acc[j][i];
+    }
+    __syncthreads();
+    const int tt = tid / 16;
+    const int t = t_local + j * 16 + tt;
+    const std::int32_t dst = t < bucket_rows ? rows_out[bucket_begin + t] : -1;
+    if (dst >= 0) {
+      const int r = (tid % 16) * 8;
+      const float* src = s_out + tt * kOutStride + r;
+      float* o = out + std::size_t{static_cast<std::uint32_t>(dst)} * m + row0 +
+                 static_cast<std::uint32_t>(r);
+      if (row0 + static_cast<std::uint32_t>(r) + 8 <= m) {
+        reinterpret_cast<float4*>(o)[0] = *reinterpret_cast<const float4*>(src);
+        reinterpret_cast<float4*>(o)[1] =
+            *reinterpret_cast<const float4*>(src + 4);
+      } else {
+        for (int q = 0; q < 8; ++q) {
+          if (row0 + static_cast<std::uint32_t>(r + q) < m) {
+            o[q] = src[q];
+          }
+        }
+      }
+    }
+    __syncthreads();
+  }
+}
+
 }  // namespace
 
 bool LaunchRoutedHalfGemm(ExpertFormat format, const void* w, const void* x,
@@ -428,8 +655,9 @@ bool LaunchRoutedHalfGemm(ExpertFormat format, const void* w, const void* x,
                           const std::int32_t* rows_out, float* out,
                           void* out_half, std::uint32_t m, std::uint32_t k,
                           hipStream_t stream) {
-  if (tile_rows != 96 || k % 256 != 0 || n_tiles == 0 ||
-      (out == nullptr) == (out_half == nullptr)) {
+  if (tile_rows != 96 || n_tiles == 0 ||
+      (out == nullptr) == (out_half == nullptr) ||
+      (format != ExpertFormat::kQ5_1 && k % 256 != 0)) {
     return false;
   }
   const dim3 grid((m + kRowsPerBlock - 1) / kRowsPerBlock, n_tiles);
@@ -451,6 +679,13 @@ bool LaunchRoutedHalfGemm(ExpertFormat format, const void* w, const void* x,
       RoutedHalfKQuantKernel<ExpertFormat::kQ6_K, 96>
           <<<grid, kThreads, 0, stream>>>(wb, xh, tiles, pad_bounds, rows_in,
                                           rows_out, out, oh, m, k);
+      return true;
+    case ExpertFormat::kQ5_1:
+      if (out == nullptr || k % kDownStageK != 0) {
+        return false;
+      }
+      RoutedHalfQ51Kernel<96><<<grid, kThreads, 0, stream>>>(
+          wb, xh, tiles, pad_bounds, rows_in, rows_out, out, m, k);
       return true;
     default:
       return false;

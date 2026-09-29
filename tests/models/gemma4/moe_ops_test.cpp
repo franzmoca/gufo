@@ -515,15 +515,15 @@ void CheckFinish(std::mt19937& rng) {
 
 /// The K-quant routed prefill GEMM over binary16 rows, in the routing layout
 /// the executor builds (Flash-Next compaction, 96-row tiles), against FP64
-/// dots of the dequantized rows and the binary16 inputs; Q4_K and Q5_K also
-/// bit for bit against Flash-Next's routed GEMM over 48-row tiles.
-void CheckRoutedPrefill(const Format& f, std::mt19937& rng) {
+/// dots of the dequantized rows and the binary16 inputs; Q4_K, Q5_K (gate/up
+/// shape) and Q5_1 (down shape) also bit for bit against Flash-Next's routed
+/// GEMM.
+void CheckRoutedPrefill(const Format& f, std::uint32_t m, std::uint32_t k,
+                        std::mt19937& rng) {
   namespace fn = gufo::models::qwen38_flash_next::rocm;
   // About 150 rows per expert: a full 96-row tile and a partly live one.
   constexpr std::uint32_t kTokens = 300;
   constexpr std::uint32_t kExpertsHere = 16;
-  constexpr std::uint32_t m = 2 * kWidth;
-  constexpr std::uint32_t k = kHidden;
   constexpr std::uint32_t kTile = 96;
   std::vector<std::int32_t> ids(kTokens * kUsed);
   std::vector<std::uint32_t> counts(kExpertsHere, 0);
@@ -577,15 +577,18 @@ void CheckRoutedPrefill(const Format& f, std::mt19937& rng) {
           "routed prefill GEMM rejected " + std::string(f.name));
   const auto got = Host(dy, slots * m);
   if (f.format != g4k::ExpertFormat::kQ6_K) {
-    const std::vector<std::int32_t> tiles48 = tile_map(48);
+    // Flash-Next's widest tile per format: 48 rows (K-quants), 64 (Q5_1).
+    const std::uint32_t rows = f.format == g4k::ExpertFormat::kQ5_1 ? 64 : 48;
+    const std::vector<std::int32_t> tiles48 = tile_map(rows);
     auto* dtiles48 = Device(tiles48.data(), tiles48.size());
     HIP_CHECK(hipMemset(dy, 0, slots * m * sizeof(float)));
+    const fn::WeightType type =
+        f.format == g4k::ExpertFormat::kQ4_K   ? fn::WeightType::kQ4_K
+        : f.format == g4k::ExpertFormat::kQ5_K ? fn::WeightType::kQ5_K
+                                               : fn::WeightType::kQ5_1;
     Require(fn::RoutedF16Gemm(
-                dw,
-                f.format == g4k::ExpertFormat::kQ4_K ? fn::WeightType::kQ4_K
-                                                     : fn::WeightType::kQ5_K,
-                reinterpret_cast<const __half*>(dx), dtiles48,
-                static_cast<std::uint32_t>(tiles48.size()), 48, bounds,
+                dw, type, reinterpret_cast<const __half*>(dx), dtiles48,
+                static_cast<std::uint32_t>(tiles48.size()), rows, bounds,
                 rows_token, rows_slot, nullptr, dy, nullptr, m, k, nullptr),
             "Flash-Next routed GEMM rejected " + std::string(f.name));
     const auto flash = Host(dy, slots * m);
@@ -653,7 +656,8 @@ int main() {
       CheckProjection(f, kHidden, kWidth, 1, rng);
     }
     for (const Format& f : {q4k, q5k, q6k}) {
-      CheckRoutedPrefill(f, rng);
+      CheckRoutedPrefill(f, 2 * kWidth, kHidden, rng);
     }
+    CheckRoutedPrefill(q51, kHidden, kWidth, rng);
   });
 }
