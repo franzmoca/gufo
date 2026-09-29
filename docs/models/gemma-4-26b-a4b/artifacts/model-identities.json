@@ -2,11 +2,13 @@
   "sha256": {
     "Target UD-Q4_K_XL": "ef728c8e0c337fd1067b947af006e38a9ef2419e56feced4fd29b4bf0636e30c",
     "Target UD-Q6_K_XL": "b01ee10a1423c17f9c4384f1fc569726b8782c5403557ff138ceb9468ca49d6b",
-    "MTP gemma4-assistant Q8_0": "6326fb9f5e487aa8dcdd313a091e3c67724cb2a666ec3b7d2895b5b26d93ed1b"
+    "MTP gemma4-assistant Q8_0": "6326fb9f5e487aa8dcdd313a091e3c67724cb2a666ec3b7d2895b5b26d93ed1b",
+    "Vision sidecar mmproj-BF16": "41926ed5f1403cf5add23b0684992805ea6f97253096132e769e65646b8cef9d"
   },
   "sources": {
     "target": "unsloth/gemma-4-26B-A4B-it-GGUF, revision c099eb48e663fd284577b04978a94ffccb261841, gemma-4-26B-A4B-it-UD-Q4_K_XL.gguf and gemma-4-26B-A4B-it-UD-Q6_K_XL.gguf",
     "mtp": "unsloth/gemma-4-26B-A4B-it-GGUF, same revision, mtp-gemma-4-26B-A4B-it.gguf",
+    "vision": "unsloth/gemma-4-26B-A4B-it-GGUF, same revision, mmproj-BF16.gguf (1,194,828,256 bytes)",
     "chatTemplate": "GGUF tokenizer.chat_template, SHA-256 845f1ee48e39fc942fe190da9df6a1c5db229e17a96ea08966ad1c9274e73d1b (same as the 31B)"
   },
   "scope": "Current retained benchmark and qualification evidence; per-artifact source revisions and commands are authoritative.",

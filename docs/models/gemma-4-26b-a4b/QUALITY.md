@@ -17,9 +17,18 @@ GGUF-conversion checks. Measured September 28, 2026.
 | GPU prefill (binary16 activations, binary16 WMMA attention) vs scalar reference, same prompt | Mean KL 3.7e-5 (limit 1e-3), top-1 21/22 (a near-tie) | Mean KL 3.7e-5, top-1 22/22 |
 | Bulk prefill vs exact rows, 1542-token conversation past the window and ring | Mean KL 0.027 (limit 0.06), top-1 1490/1542 | Mean KL 0.030, top-1 1490/1542 |
 | Bulk prefill vs exact rows, 1353-token repetitive prompt (reported, not a gate) | Mean KL 1.74, top-1 794/1353 | Mean KL 1.80, top-1 798/1353 |
+| Image prompt, 624×960 chart at 260 soft tokens, 96 teacher-forced positions from `<image\|>`, vs the scalar reference fed the reference encoder's embeddings | Mean KL 0.029 (80 answer positions 0.0039), top-1 95/96; llama.cpp `use_gelu` 0.251 (0.0125) | Mean KL 0.129 (answer 0.0012), top-1 93/96; llama.cpp 0.474 (0.0104) |
+| Image sessions | `gemma4.vision_session` (changed image, rewind, extension, snapshot, chunking) passes | Passes |
 | Greedy MTP vs single-token decode with the drafter loaded, three prompts, plus prompt-lookup copies; batched sessions vs their own decode | Identical token IDs (`gemma4.target`) | Identical token IDs |
 | Sampled MTP | Seeded replay repeats the same tokens (`gemma4.target`) | Same |
 | Session state | Prefix extension, rewind and snapshot restore after a ring wrap continue bit for bit (`gemma4.target`) | Same |
+
+The image rows' largest differences sit on the user's question right after
+the image (positions 266–280, up to KL 8.7 on UD-Q6_K_XL at one token), which
+the Gufo text model fed the reference's embeddings shares (0.028 / 0.182
+overall). The encoder matches `vision::Reference` to 0.27% embedding relative
+RMS; with BF16 projection inputs it was 1.16% and the Q4 row 0.112. llama.cpp
+is no oracle here: its Q8_1 activations (below) already cost KL 0.42 on text.
 
 ## Routing sensitivity
 

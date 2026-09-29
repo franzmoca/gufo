@@ -5,8 +5,10 @@ Google's Gemma 4 26B-A4B IT, a mixture-of-experts model, in Unsloth's GGUFs:
 (15.8 GiB) and **gemma-4-26B-A4B-it-UD-Q6_K_XL.gguf** (21.7 GiB). The
 tokenizer and chat template match the [31B](../gemma-4-31b/README.md), and the
 same Gemma 4 engine serves both. Every mode, option and serving feature
-described there applies here, except images: the vision sidecar is not
-qualified for this model yet.
+described there applies here. Images use this repository's BF16 vision
+sidecar (`mmproj-BF16.gguf`, the 31B's tower with a 2816-wide projection),
+found beside the model or passed with `--mmproj`; `--image-tokens` works as
+on the 31B ([VISION.md](../gemma-4-31b/VISION.md)).
 
 [Benchmarks](BENCHMARKS.md) · [Quality](QUALITY.md) · [Experiments](EXPERIMENTS.md)
 
@@ -38,11 +40,13 @@ By its header UD-Q4_K_M uses the same formats; it has not been run.
 nix develop -c hf download unsloth/gemma-4-26B-A4B-it-GGUF \
   --revision c099eb48e663fd284577b04978a94ffccb261841 \
   --include gemma-4-26B-A4B-it-UD-Q4_K_XL.gguf mtp-gemma-4-26B-A4B-it.gguf \
+  mmproj-BF16.gguf \
   --local-dir models/gemma-4-26b-a4b
 nix build
 MODEL=models/gemma-4-26b-a4b/gemma-4-26B-A4B-it-UD-Q4_K_XL.gguf
 MTP=models/gemma-4-26b-a4b/mtp-gemma-4-26B-A4B-it.gguf
 ./result/bin/gufo chat --model "$MODEL"
+./result/bin/gufo prompt --model "$MODEL" --image photo.jpg -p "Describe it."
 ./result/bin/gufo serve llm --model "$MODEL" --speculative mtp \
   --mtp-model "$MTP" --context 131072
 ```
