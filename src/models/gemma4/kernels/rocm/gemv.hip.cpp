@@ -1,4 +1,5 @@
-// Autoregressive decode projections for Gemma 4's K-quant and Q4_0 weights.
+// Autoregressive decode projections for Gemma 4's K-quant and Q4_0 weights,
+// and the binary16 small-batch projection.
 //
 // y[m] = sum_k x[k] * W[m][k]; the weights stay in their GGUF blocks and the
 // activations stay FP32. A lane's unit of work is one 16-byte vector of
@@ -14,6 +15,7 @@
 #include <hip/hip_fp16.h>
 #include <hip/hip_runtime.h>
 
+#include <algorithm>
 #include <cstdint>
 
 #include "src/models/gemma4/kernels/rocm/gemv_tasks.hpp"
@@ -171,6 +173,102 @@ void Launch(const void* w, const float* x, float* y, std::uint32_t m,
   } else {
     KQuantGemvKernel<F, false>
         <<<blocks, kWave * kWavesPerBlock, 0, stream>>>(weights, x, y, m, k);
+  }
+}
+
+/// Binary16 weights, up to kMaxHalfGemvRows activation rows per weight
+/// pass. A wave takes one output row in 256-value units, eight values (one
+/// 16-byte vector) per lane, contracted per activation row in one FMA chain;
+/// the workgroup's waves take interleaved units and are summed in wave order
+/// after a fixed xor tree. A row's arithmetic never depends on kRows.
+template<int kRows>
+__global__ void __launch_bounds__(kWave* kWavesPerBlock)
+    HalfGemvKernel(const __half* __restrict__ w, const float* __restrict__ x,
+                   float* __restrict__ y, std::uint32_t m, std::uint32_t k) {
+  __shared__ float partial[kSlices][kRows];
+  const int lane = threadIdx.x % kWave;
+  const int slice = threadIdx.x / kWave;
+  const std::uint32_t row = blockIdx.x;
+  const __half* wrow = w + static_cast<std::size_t>(row) * k;
+  const std::uint32_t units = (k + 255) / 256;
+  float acc[kRows];
+#pragma unroll
+  for (int r = 0; r < kRows; ++r) {
+    acc[r] = 0.0F;
+  }
+#pragma unroll 2
+  for (std::uint32_t unit = slice; unit < units; unit += kSlices) {
+    const std::uint32_t at = unit * 256 + static_cast<std::uint32_t>(lane) * 8;
+    if (at >= k) {
+      continue;
+    }
+    const uint4 packed = *reinterpret_cast<const uint4*>(wrow + at);
+    const std::uint32_t words[4] = {packed.x, packed.y, packed.z, packed.w};
+    float wv[8];
+#pragma unroll
+    for (int i = 0; i < 4; ++i) {
+      const __half2 pair = __builtin_bit_cast(__half2, words[i]);
+      wv[2 * i] = __low2float(pair);
+      wv[2 * i + 1] = __high2float(pair);
+    }
+#pragma unroll
+    for (int r = 0; r < kRows; ++r) {
+      const float* xr = x + static_cast<std::size_t>(r) * k + at;
+      const float4 x0 = *reinterpret_cast<const float4*>(xr);
+      const float4 x1 = *reinterpret_cast<const float4*>(xr + 4);
+      const float xv[8] = {x0.x, x0.y, x0.z, x0.w, x1.x, x1.y, x1.z, x1.w};
+#pragma unroll
+      for (int i = 0; i < 8; ++i) {
+        acc[r] = __builtin_fmaf(wv[i], xv[i], acc[r]);
+      }
+    }
+  }
+#pragma unroll
+  for (int r = 0; r < kRows; ++r) {
+#pragma unroll
+    for (int offset = kWave / 2; offset > 0; offset >>= 1) {
+      acc[r] += __shfl_xor(acc[r], offset, kWave);
+    }
+  }
+  if (lane == 0) {
+#pragma unroll
+    for (int r = 0; r < kRows; ++r) {
+      partial[slice][r] = acc[r];
+    }
+  }
+  __syncthreads();
+  if (threadIdx.x < kRows) {
+    const int r = static_cast<int>(threadIdx.x);
+    float sum = partial[0][r];
+#pragma unroll
+    for (int s = 1; s < kSlices; ++s) {
+      sum += partial[s][r];
+    }
+    y[static_cast<std::size_t>(r) * m + row] = sum;
+  }
+}
+
+template<int kRows>
+void LaunchHalf(const void* w, const float* x, float* y, std::uint32_t m,
+                std::uint32_t k, hipStream_t stream) {
+  HalfGemvKernel<kRows><<<m, kWave * kWavesPerBlock, 0, stream>>>(
+      static_cast<const __half*>(w), x, y, m, k);
+}
+
+__global__ void Bf16ToHalfKernel(std::uint16_t* __restrict__ data,
+                                 std::size_t count,
+                                 std::uint32_t* __restrict__ overflow) {
+  std::uint32_t outside = 0;
+  for (std::size_t i =
+           blockIdx.x * static_cast<std::size_t>(blockDim.x) + threadIdx.x;
+       i < count; i += static_cast<std::size_t>(gridDim.x) * blockDim.x) {
+    const float v = __uint_as_float(static_cast<std::uint32_t>(data[i]) << 16U);
+    const __half h = __float2half_rn(v);
+    outside += __hisinf(h) != 0 || __hisnan(h) ? 1U : 0U;
+    data[i] = __builtin_bit_cast(std::uint16_t, h);
+  }
+  if (outside != 0) {
+    atomicAdd(overflow, outside);
   }
 }
 
@@ -363,6 +461,50 @@ bool LaunchKQuantGemv(GemvFormat format, const void* w, const float* x,
       return true;
   }
   return false;
+}
+
+bool LaunchHalfGemv(const void* w, const float* x, float* y, std::uint32_t rows,
+                    std::uint32_t m, std::uint32_t k, hipStream_t stream) {
+  if (k % 8 != 0 || m == 0) {
+    return false;
+  }
+  switch (rows) {
+#define GUFO_HALF_GEMV_CASE(n)            \
+  case n:                                 \
+    LaunchHalf<n>(w, x, y, m, k, stream); \
+    return true;
+    GUFO_HALF_GEMV_CASE(1)
+    GUFO_HALF_GEMV_CASE(2)
+    GUFO_HALF_GEMV_CASE(3)
+    GUFO_HALF_GEMV_CASE(4)
+    GUFO_HALF_GEMV_CASE(5)
+    GUFO_HALF_GEMV_CASE(6)
+    GUFO_HALF_GEMV_CASE(7)
+    GUFO_HALF_GEMV_CASE(8)
+    GUFO_HALF_GEMV_CASE(9)
+    GUFO_HALF_GEMV_CASE(10)
+    GUFO_HALF_GEMV_CASE(11)
+    GUFO_HALF_GEMV_CASE(12)
+    GUFO_HALF_GEMV_CASE(13)
+    GUFO_HALF_GEMV_CASE(14)
+    GUFO_HALF_GEMV_CASE(15)
+    GUFO_HALF_GEMV_CASE(16)
+#undef GUFO_HALF_GEMV_CASE
+    default:
+      return false;
+  }
+}
+
+void ConvertBf16ToHalf(void* data, std::size_t count, std::uint32_t* overflow,
+                       hipStream_t stream) {
+  constexpr int kThreads = 256;
+  if (count == 0) {
+    return;
+  }
+  const std::size_t blocks =
+      std::min<std::size_t>((count + kThreads - 1) / kThreads, 4096);
+  Bf16ToHalfKernel<<<static_cast<unsigned>(blocks), kThreads, 0, stream>>>(
+      static_cast<std::uint16_t*>(data), count, overflow);
 }
 
 void RepackQ8_0AsQ4K(const void* src, void* dst, std::uint32_t rows,

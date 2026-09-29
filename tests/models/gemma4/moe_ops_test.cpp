@@ -57,6 +57,15 @@ std::vector<std::uint8_t> RandomMatrix(const Format& f, std::size_t rows,
                                        std::size_t cols, std::mt19937& rng) {
   const std::size_t blocks = rows * cols / f.block;
   std::vector<std::uint8_t> data(blocks * f.bytes + 4096, 0);
+  if (f.type == GgmlType::kF16) {
+    // Trained-weight magnitudes rather than random bit patterns.
+    std::normal_distribution<float> normal(0.0F, 0.02F);
+    for (std::size_t i = 0; i < rows * cols; ++i) {
+      const std::uint16_t h = Half(normal(rng));
+      std::memcpy(&data[2 * i], &h, 2);
+    }
+    return data;
+  }
   std::uniform_int_distribution<int> byte(0, 255);
   std::uniform_real_distribution<float> scale(0.0005F, 0.004F);
   for (std::size_t i = 0; i < blocks * f.bytes; ++i) {
@@ -660,7 +669,15 @@ void CheckRoutedPrefill(const Format& f, std::uint32_t m, std::uint32_t k,
     HIP_CHECK(hipMalloc(&want, slots * width * 2));
     HIP_CHECK(hipMalloc(&fused, slots * width * 2));
     const auto n_tiles = static_cast<std::uint32_t>(tiles.size());
-    if (f.format == g4k::ExpertFormat::kQ8_0) {
+    if (f.format == g4k::ExpertFormat::kF16) {
+      // The FP32 rows above, rounded as the binary16 output would be.
+      std::vector<__half> rows(got.size());
+      for (std::size_t i = 0; i < got.size(); ++i) {
+        rows[i] = __float2half(std::clamp(got[i], -65504.0F, 65504.0F));
+      }
+      HIP_CHECK(
+          hipMemcpy(gu, rows.data(), rows.size() * 2, hipMemcpyHostToDevice));
+    } else if (f.format == g4k::ExpertFormat::kQ8_0) {
       const std::vector<std::int32_t> tiles64 = tile_map(64);
       auto* dtiles64 = Device(tiles64.data(), tiles64.size());
       Require(fn::RoutedF16Gemm(dw, fn::WeightType::kQ8_0,
@@ -692,7 +709,8 @@ void CheckRoutedPrefill(const Format& f, std::uint32_t m, std::uint32_t k,
       HIP_CHECK(hipFree(p));
     }
   }
-  if (f.format != g4k::ExpertFormat::kQ6_K) {
+  if (f.format != g4k::ExpertFormat::kQ6_K &&
+      f.format != g4k::ExpertFormat::kF16) {
     // Flash-Next's widest tile per format: 48 rows (K-quants), 64 (Q5_1,
     // Q8_0).
     const bool down = f.format == g4k::ExpertFormat::kQ5_1 ||
@@ -767,18 +785,21 @@ int main() {
         g4k::ExpertFormat::kQ8_0, GgmlType::kQ8_0, 32, 34, {0}, "Q8_0"};
     const Format q51{
         g4k::ExpertFormat::kQ5_1, GgmlType::kQ5_1, 32, 24, {0, 2}, "Q5_1"};
+    // BF16 experts (the UD-Q8_K_XL last layer) run as binary16.
+    const Format f16{
+        g4k::ExpertFormat::kF16, GgmlType::kF16, 32, 64, {}, "F16"};
     // Fused gate/up [2 * 704, 2816] and down [2816, 704] of every format the
     // Unsloth quants use.
-    for (const Format& f : {q4k, q5k, q6k, q80}) {
+    for (const Format& f : {q4k, q5k, q6k, q80, f16}) {
       CheckProjection(f, 2 * kWidth, kHidden, kUsed, rng);
     }
-    for (const Format& f : {q51, q80}) {
+    for (const Format& f : {q51, q80, f16}) {
       CheckProjection(f, kHidden, kWidth, 1, rng);
     }
-    for (const Format& f : {q4k, q5k, q6k, q80}) {
+    for (const Format& f : {q4k, q5k, q6k, q80, f16}) {
       CheckRoutedPrefill(f, 2 * kWidth, kHidden, true, rng);
     }
-    for (const Format& f : {q51, q80}) {
+    for (const Format& f : {q51, q80, f16}) {
       CheckRoutedPrefill(f, kHidden, kWidth, false, rng);
     }
   });

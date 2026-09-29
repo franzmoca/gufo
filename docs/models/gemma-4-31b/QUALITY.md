@@ -47,6 +47,23 @@ copies are verified like drafts (sampled: as point-mass proposals under the
 same rule); `gemma4.target` checks greedy equality and seeded replay on a
 prompt that copies a paragraph, with accepted copies.
 
+## UD-Q8_K_XL
+
+Measured September 30, 2026 with `gemma4.target` (same prompts and limits as
+above, Q8_0 drafter). Its F16 projections run on the binary16 kernels
+(decode FP32 activations; prefill binary16 activations with FP32
+accumulation, the Q8_0 projections keeping Q8_1 activations).
+
+| Check | Result |
+| --- | --- |
+| GPU decode vs scalar reference | Mean KL 6.3e-7 (limit 1e-5), max 6.2e-6, top-1 22/22 |
+| Eight-row verification | Bit-identical to single-token decode; the binary16 GEMV rounds every width from 1 to 16 rows identically (`gemma4.projection_ops`) |
+| GPU prefill vs scalar reference | Mean KL 0.0025 (limit 0.015), max 0.017, top-1 22/22 |
+| Bulk prefill vs exact rows, 1542-token conversation | Mean KL 0.029 (limit 0.15), top-1 1474/1542 |
+| Bulk prefill vs exact rows, 1353-token repetitive prompt (reported) | Mean KL 1.41, top-1 1018/1353 |
+| Greedy MTP vs single-token decode, batched sessions, session state | Identical token IDs; bit-for-bit continuation (`gemma4.target`) |
+| Image sessions | `gemma4.vision_session` passes |
+
 ## Reproduce
 
 ```sh

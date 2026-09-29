@@ -2,8 +2,12 @@
 
 Dense Gemma 4 text model on gfx1151: 60 layers, five sliding-window (1024)
 layers per global layer, tied embedding and a final logit softcap.
-Supported target: `unsloth/gemma-4-31B-it-GGUF`, **UD-Q4_K_XL** (single file),
-with the optional `gemma4-assistant` MTP drafter from the same repository.
+Supported targets: `unsloth/gemma-4-31B-it-GGUF`, **UD-Q4_K_XL** and
+**UD-Q8_K_XL** (single files), with the optional `gemma4-assistant` MTP
+drafter from the same repository. UD-Q8_K_XL is Q8_0 except the F16 Q/K and
+MLP projections of layers 1, 52, 53, 57, 58 and 59 (5.1 of its 35 GB), which
+run on binary16 kernels: a batch-invariant GEMV up to 16 rows and the binary16
+WMMA GEMM in prefill.
 Image input uses the BF16 vision sidecar from the same repository
 (`mmproj-BF16.gguf`, found beside the model or passed with `--mmproj`); see
 [VISION.md](VISION.md). `--image-tokens` sets the soft tokens per image: 70,

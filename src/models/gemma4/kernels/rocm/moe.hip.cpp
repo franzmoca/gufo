@@ -344,8 +344,8 @@ __global__ void __launch_bounds__(kThreads) RouteGroupedKernel(
 // ---------------------------------------------------------------------------
 
 /// Storage of each format. K-quants: bytes per 256-value super-block, lanes
-/// per row (tasks per super-block) and values per task. Q8_0/Q5_1: bytes
-/// per 32-value block; eight lanes take eight consecutive blocks.
+/// per row (tasks per super-block) and values per task. Q8_0/Q5_1/binary16:
+/// bytes per 32-value block; eight lanes take eight consecutive blocks.
 template<ExpertFormat F>
 struct Traits;
 template<>
@@ -383,6 +383,13 @@ struct Traits<ExpertFormat::kQ5_1> {
   static constexpr int kValues = 32;
   static constexpr bool kBlockwise = true;
 };
+template<>
+struct Traits<ExpertFormat::kF16> {
+  static constexpr int kBytes = 64;
+  static constexpr int kTasks = 8;
+  static constexpr int kValues = 32;
+  static constexpr bool kBlockwise = true;
+};
 
 template<ExpertFormat F>
 __host__ __device__ constexpr std::size_t RowBytes(std::uint32_t k) {
@@ -412,6 +419,19 @@ __device__ __forceinline__ bool Decode(const std::uint8_t* row,
       // Rows are word aligned (a multiple of eight blocks is 272 bytes and
       // expert widths keep k / 32 even), so odd blocks start mid-word.
       DecodeQ8_0(p, (block & 1U) != 0, w);
+    } else if constexpr (F == ExpertFormat::kF16) {
+      const auto* v = reinterpret_cast<const uint4*>(p);
+#pragma unroll
+      for (int i = 0; i < 4; ++i) {
+        const uint4 q = v[i];
+        const std::uint32_t words[4] = {q.x, q.y, q.z, q.w};
+#pragma unroll
+        for (int j = 0; j < 4; ++j) {
+          const __half2 pair = __builtin_bit_cast(__half2, words[j]);
+          w[8 * i + 2 * j] = __low2float(pair);
+          w[8 * i + 2 * j + 1] = __high2float(pair);
+        }
+      }
     } else {
       DecodeQ5_1(p, w);
     }
@@ -855,6 +875,13 @@ bool LaunchRoutedGemv(ExpertFormat format, const void* w,
       }
       LaunchRouted<ExpertFormat::kQ5_1>(w, groups, max_groups, x, x_div, y, m,
                                         k, stream, geglu);
+      return true;
+    case ExpertFormat::kF16:
+      if (k % 32 != 0) {
+        return false;
+      }
+      LaunchRouted<ExpertFormat::kF16>(w, groups, max_groups, x, x_div, y, m, k,
+                                       stream, geglu);
       return true;
   }
   return false;

@@ -2,7 +2,8 @@
 
 Google's Gemma 4 26B-A4B IT, a mixture-of-experts model, in Unsloth's GGUFs:
 `unsloth/gemma-4-26B-A4B-it-GGUF`, **gemma-4-26B-A4B-it-UD-Q4_K_XL.gguf**
-(15.8 GiB) and **gemma-4-26B-A4B-it-UD-Q6_K_XL.gguf** (21.7 GiB). The
+(15.8 GiB), **gemma-4-26B-A4B-it-UD-Q6_K_XL.gguf** (21.7 GiB) and
+**gemma-4-26B-A4B-it-UD-Q8_K_XL.gguf** (25.7 GiB). The
 tokenizer and chat template match the [31B](../gemma-4-31b/README.md), and the
 same Gemma 4 engine serves both. Every mode, option and serving feature
 described there applies here. Images use this repository's BF16 vision
@@ -24,13 +25,19 @@ on the 31B ([VISION.md](../gemma-4-31b/VISION.md)).
   of a softmax. Their weights are renormalized and multiplied by a
   per-expert output scale.
 
-Both quants keep attention, the dense MLP and the tied vocabulary head in
-Q8_0 (about 73% of the bytes a token reads). They differ only in the experts:
+Every quant keeps attention, the dense MLP and the tied vocabulary head in
+Q8_0 (about 73% of the bytes a token reads), except that UD-Q8_K_XL stores
+all of layer 29 in BF16. They differ otherwise only in the experts:
 
 | Quant | Gate/up experts | Down experts |
 | --- | --- | --- |
 | UD-Q4_K_XL | Q4_K (layer 29: Q5_K) | Q5_1 (layer 29: Q8_0) |
 | UD-Q6_K_XL | Q6_K (layer 29: Q8_0) | Q8_0 |
+| UD-Q8_K_XL | Q8_0 (layer 29: BF16) | Q8_0 (layer 29: BF16) |
+
+BF16 tensors are rewritten as binary16 on upload: every BF16 value from 2^-17
+to 65504 in magnitude is exactly a binary16 value, and the load fails if one
+lies beyond the binary16 range.
 
 By its header UD-Q4_K_M uses the same formats; it has not been run.
 

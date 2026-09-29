@@ -12,7 +12,14 @@ namespace gufo::models::gemma4::rocm {
 /// 32 bits wide: the value crosses from GCC-built host code into clang-built
 /// HIP code, and clang assumes a narrower argument arrives zero-extended where
 /// GCC leaves the upper bits undefined.
-enum class ExpertFormat : std::uint32_t { kQ4_K, kQ5_K, kQ6_K, kQ8_0, kQ5_1 };
+enum class ExpertFormat : std::uint32_t {
+  kQ4_K,
+  kQ5_K,
+  kQ6_K,
+  kQ8_0,
+  kQ5_1,
+  kF16,
+};
 
 /// Rows whose assignments one expert group can hold: an expert appears at
 /// most once per row, so this bounds the rows of a grouped (decode or
@@ -87,9 +94,11 @@ void MoeRoute(const MoeRouteArgs& args, hipStream_t stream);
 /// expert | tile << 16 entries built for `tile_rows` bucket rows per tile):
 /// row rows_out[i] of `out` (FP32) or `out_half` (binary16, saturated)
 /// receives W[expert] x[rows_in[i]]. Covers the formats the Flash-Next
-/// routed GEMM lacks or runs slower (Q4_K, Q5_K, Q6_K, and Q5_1 / Q8_0 with
-/// FP32 outputs; 96-row tiles); returns false for others. With `geglu` (a
-/// K-quant or Q8_0 fused [gate | up] W, binary16 output) row r of `out_half`
+/// routed GEMM lacks or runs slower (Q4_K, Q5_K, Q6_K, and Q5_1 / Q8_0 /
+/// binary16 with FP32 outputs; 96-row tiles); returns false for others. With
+/// `geglu` (a
+/// K-quant, Q8_0 or binary16 fused [gate | up] W, binary16 output) row r of
+/// `out_half`
 /// holds the m / 2 values GeGluPackedHalf would make of the binary16 pair.
 [[nodiscard]] bool LaunchRoutedHalfGemm(
     ExpertFormat format, const void* w, const void* x,

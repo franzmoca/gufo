@@ -74,7 +74,7 @@ public:
 
   [[nodiscard]] static std::size_t ScratchBytes(
       const Config& config, const Config* draft, std::uint32_t vocab,
-      std::size_t max_cols, std::uint32_t max_rows,
+      std::size_t max_cols, std::size_t max_half_cols, std::uint32_t max_rows,
       std::uint32_t max_logit_rows, std::uint32_t max_context);
   /// Per-session cache bytes for per-layer K row widths (KeyWidths).
   [[nodiscard]] static std::size_t CacheBytes(
@@ -165,6 +165,10 @@ private:
   /// prefill GEMMs when rows exceed the small-batch limit (Quantize).
   void Project(const DeviceTensor& w, const float* x, const void* xq,
                std::uint32_t rows, float* y);
+  /// Project for binary16 weights: the batch-invariant small-batch GEMV up
+  /// to kSplitRows rows, the binary16 WMMA GEMM past that.
+  void ProjectHalf(const DeviceTensor& w, const float* x, const void* xq,
+                   std::uint32_t rows, float* y);
   /// Stages x for the prefill GEMMs: the tiled Q8_1 encoding, or binary16
   /// rows on models whose prefill runs with binary16 activations
   /// (half_prefill_). Returns null at small-batch widths.

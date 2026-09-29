@@ -43,10 +43,10 @@ struct Format {
 }
 
 /// Projection formats with decode GEMV, batched verification and prefill
-/// GEMM kernels.
+/// GEMM kernels. BF16 projections run as binary16 (converted at upload).
 constexpr std::initializer_list<GgmlType> kProjection = {
     GgmlType::kQ8_0, GgmlType::kQ4_0, GgmlType::kQ4_K, GgmlType::kQ5_K,
-    GgmlType::kQ6_K};
+    GgmlType::kQ6_K, GgmlType::kF16,  GgmlType::kBF16};
 /// Embedding rows are decoded one token at a time; the tied LM head also
 /// needs a GEMV, which every listed format has.
 constexpr std::initializer_list<GgmlType> kEmbedding = {
@@ -55,11 +55,13 @@ constexpr std::initializer_list<GgmlType> kEmbedding = {
 constexpr std::initializer_list<GgmlType> kVector = {GgmlType::kF32};
 /// Routed expert formats with decode, verification and prefill kernels: the
 /// fused gate/up projection reduces over the hidden width, the down
-/// projection over the (not 256-aligned) expert width.
+/// projection over the (not 256-aligned) expert width. BF16 experts run as
+/// binary16, like BF16 projections.
 constexpr std::initializer_list<GgmlType> kExpertGateUp = {
-    GgmlType::kQ4_K, GgmlType::kQ5_K, GgmlType::kQ6_K, GgmlType::kQ8_0};
-constexpr std::initializer_list<GgmlType> kExpertDown = {GgmlType::kQ5_1,
-                                                         GgmlType::kQ8_0};
+    GgmlType::kQ4_K, GgmlType::kQ5_K, GgmlType::kQ6_K,
+    GgmlType::kQ8_0, GgmlType::kF16,  GgmlType::kBF16};
+constexpr std::initializer_list<GgmlType> kExpertDown = {
+    GgmlType::kQ5_1, GgmlType::kQ8_0, GgmlType::kF16, GgmlType::kBF16};
 
 struct Binder {
   const core::GgufReader& reader;

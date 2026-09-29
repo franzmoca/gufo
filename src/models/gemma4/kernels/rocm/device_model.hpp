@@ -87,6 +87,11 @@ public:
   [[nodiscard]] std::size_t resident_bytes() const noexcept { return bytes_; }
   /// Widest reduction dimension among the projections (activation staging).
   [[nodiscard]] std::size_t max_cols() const noexcept { return max_cols_; }
+  /// Widest reduction among the binary16 dense projections (0 without any):
+  /// their prefill GEMM reads binary16 activation rows.
+  [[nodiscard]] std::size_t max_half_cols() const noexcept {
+    return max_half_cols_;
+  }
 
 private:
   DeviceModel() = default;
@@ -102,6 +107,7 @@ private:
   std::vector<void*> allocations_;
   std::size_t bytes_{0};
   std::size_t max_cols_{0};
+  std::size_t max_half_cols_{0};
 };
 
 }  // namespace gufo::models::gemma4::rocm

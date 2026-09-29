@@ -69,8 +69,8 @@ constexpr std::uint32_t kRoutedKQuantTileRows = 96;
 bool HalfExperts(const DeviceLayer& l, const Config& c);
 
 Layout Plan(const Config& c, const Config* draft, std::uint32_t vocab,
-            std::size_t max_cols, std::uint32_t rows, std::uint32_t logit_rows,
-            std::uint32_t max_context) {
+            std::size_t max_cols, std::size_t max_half_cols, std::uint32_t rows,
+            std::uint32_t logit_rows, std::uint32_t max_context) {
   const std::size_t f = sizeof(float);
   const std::uint32_t ring = RingSlots(c, rows);
   const std::size_t partial_floats = std::max(
@@ -106,6 +106,11 @@ Layout Plan(const Config& c, const Config* draft, std::uint32_t vocab,
   l.q8 = take(q8_rows > kSplitRows
                   ? hip::QuantizedActivationBytes(q8_rows, max_cols)
                   : 0);
+  // Binary16 activation rows: every prefill input of an expert model, the
+  // inputs of binary16 projections otherwise.
+  const std::size_t half_cols = c.HasExperts() ? max_cols : max_half_cols;
+  l.x_half =
+      take(q8_rows > kSplitRows ? std::size_t{q8_rows} * half_cols * 2 : 0);
   if (c.HasExperts()) {
     // Prefill stages binary16 activations; the expert buffers hold FP32 rows
     // at grouped widths and binary16 rows in prefill.
@@ -113,7 +118,6 @@ Layout Plan(const Config& c, const Config* draft, std::uint32_t vocab,
     const std::size_t grouped =
         std::size_t{std::min(rows, kMaxGroupSlots)} * c.experts_used;
     const std::size_t width = c.expert_ffn_size;
-    l.x_half = take(std::size_t{q8_rows} * max_cols * 2);
     l.moe_x_half = take(std::size_t{rows} * c.hidden_size * 2);
     l.moe_h = take(std::size_t{rows} * c.hidden_size * f);
     l.moe_logits = take(std::size_t{rows} * c.num_experts * f);
@@ -180,11 +184,12 @@ std::uint32_t RingSlots(const Config& config, std::uint32_t max_rows) noexcept {
 
 std::size_t Executor::ScratchBytes(const Config& config, const Config* draft,
                                    std::uint32_t vocab, std::size_t max_cols,
+                                   std::size_t max_half_cols,
                                    std::uint32_t max_rows,
                                    std::uint32_t max_logit_rows,
                                    std::uint32_t max_context) {
-  return Plan(config, draft, vocab, max_cols, max_rows, max_logit_rows,
-              max_context)
+  return Plan(config, draft, vocab, max_cols, max_half_cols, max_rows,
+              max_logit_rows, max_context)
       .total;
 }
 
@@ -226,8 +231,8 @@ Executor::Executor(const DeviceModel& model, std::uint32_t max_rows,
       key_widths_(KeyWidths(model)) {
   const Layout l =
       Plan(model.config(), model.has_draft() ? &model.draft().config : nullptr,
-           model.vocab_size(), model.max_cols(), max_rows, max_logit_rows,
-           max_context);
+           model.vocab_size(), model.max_cols(), model.max_half_cols(),
+           max_rows, max_logit_rows, max_context);
   if (const Config& c = model.config();
       c.HasExperts() &&
       (c.hidden_size % 128 != 0 || c.hidden_size > kMaxRouterHidden ||
@@ -266,10 +271,10 @@ Executor::Executor(const DeviceModel& model, std::uint32_t max_rows,
   logits_ = reinterpret_cast<float*>(base + l.logits);
   partials_ = reinterpret_cast<float*>(base + l.partials);
   q8_ = base + l.q8;
+  x_half_ = base + l.x_half;
   if (model.config().HasExperts()) {
     const Config& c = model.config();
     half_prefill_ = true;
-    x_half_ = base + l.x_half;
     moe_x_half_ = base + l.moe_x_half;
     moe_h_ = reinterpret_cast<float*>(base + l.moe_h);
     moe_logits_ = reinterpret_cast<float*>(base + l.moe_logits);
@@ -423,6 +428,10 @@ qwen38_flash_next::rocm::DenseF16Plan HalfPlan(std::uint32_t m,
 
 void Executor::Project(const DeviceTensor& w, const float* x, const void* xq,
                        std::uint32_t rows, float* y) {
+  if (w.type == core::GgmlType::kF16) {
+    ProjectHalf(w, x, xq, rows, y);
+    return;
+  }
   if (rows > kSplitRows) {
     if (half_prefill_) {
       // Binary16 activations: Q8_0 weights decode to binary16 in the WMMA
@@ -492,6 +501,35 @@ void Executor::Project(const DeviceTensor& w, const float* x, const void* xq,
     return;
   }
   hip::LaunchGEMV(w.data, w.type, x, y, w.rows, w.cols, stream_);
+}
+
+static_assert(
+    kMaxHalfGemvRows == kSplitRows,
+    "the binary16 GEMV serves every row count below the prefill GEMM");
+
+void Executor::ProjectHalf(const DeviceTensor& w, const float* x,
+                           const void* xq, std::uint32_t rows, float* y) {
+  if (rows <= kSplitRows) {
+    // One kernel at every decode width: verification rows round like
+    // single tokens.
+    if (!LaunchHalfGemv(w.data, x, y, rows, w.rows, w.cols, stream_)) {
+      throw std::runtime_error("gemma4 binary16 projection shape unsupported");
+    }
+    return;
+  }
+  // Binary16 prefill inputs come from their producers; the W8A8 prefill
+  // narrows the FP32 rows here.
+  const void* xh = xq;
+  if (!half_prefill_) {
+    qwen38_flash_next::rocm::NarrowActivations(
+        x, x_half_, false, std::size_t{rows} * w.cols, stream_);
+    xh = x_half_;
+  }
+  if (!qwen38_flash_next::rocm::UnquantizedF16Gemm(
+          w.data, static_cast<const __half*>(xh), y, rows, w.rows, w.cols,
+          stream_)) {
+    throw std::runtime_error("gemma4 binary16 prefill shape unsupported");
+  }
 }
 
 bool Executor::DerivedKeys(std::uint32_t layer) const {
@@ -586,16 +624,29 @@ void Executor::Forward(std::span<const Segment> segments,
                 "writes past the grouped width");
   // Whether the previous layer's mixture wrote this layer's binary16 input.
   bool half_ready = false;
-  // A binary16 input whose every consumer is a Q8_0 projection (the binary16
-  // GEMM) needs no FP32 row.
+  // A binary16 input whose every consumer is a Q8_0 or binary16 projection
+  // (the binary16 GEMMs) needs no FP32 row.
   const auto half_only = [&](std::initializer_list<const DeviceTensor*> ws) {
     return half && std::all_of(ws.begin(), ws.end(), [](const DeviceTensor* w) {
-             return w->empty() || w->type == core::GgmlType::kQ8_0;
+             return w->empty() || w->type == core::GgmlType::kQ8_0 ||
+                    w->type == core::GgmlType::kF16;
            });
   };
   const auto qkv_half_only = [&](const DeviceLayer& L) {
     return !L.attn_qkv.empty() ? half_only({&L.attn_qkv})
                                : half_only({&L.attn_q, &L.attn_k, &L.attn_v});
+  };
+  // A W8A8 prefill input that a binary16 projection reads keeps its FP32
+  // rows (the norms write Q8_1 rows instead of them); its Q8_0 consumers
+  // quantize those rows.
+  const auto fp32_input = [&](std::initializer_list<const DeviceTensor*> ws) {
+    return prefill &&
+           std::any_of(ws.begin(), ws.end(), [](const DeviceTensor* w) {
+             return w->type == core::GgmlType::kF16;
+           });
+  };
+  const auto qkv_fp32 = [&](const DeviceLayer& L) {
+    return fp32_input({&L.attn_qkv, &L.attn_q, &L.attn_k, &L.attn_v});
   };
   for (std::uint32_t l = 0; l < c.num_layers; ++l) {
     const DeviceLayer& L = layers[l];
@@ -603,10 +654,10 @@ void Executor::Forward(std::span<const Segment> segments,
     const std::uint32_t dim = c.HeadDim(l);
     // Layer l > 0 of a prefill reads the rows the previous layer's post-FFN
     // norm wrote (Q8_1 or binary16).
-    const void* hq = l == 0       ? Quantize(h_, n, d)
-                     : half_ready ? x_half_
-                     : prefill    ? q8_
-                                  : Quantize(h_, n, d);
+    const void* hq = l == 0                    ? Quantize(h_, n, d)
+                     : half_ready              ? x_half_
+                     : prefill && !qkv_fp32(L) ? q8_
+                                               : Quantize(h_, n, d);
     // A fused projection leaves [q | k | v] rows in k_; QkvPost reads them
     // strided and writes packed queries to q_.
     const std::uint32_t qkv_stride = L.attn_qkv.empty() ? 0 : L.attn_qkv.rows;
@@ -689,13 +740,18 @@ void Executor::Forward(std::span<const Segment> segments,
                                      ? half_only({&L.ffn_gate_up})
                                      : half_only({&L.ffn_gate, &L.ffn_up});
     const bool experts_half_only = half && moe && HalfExperts(L, c);
-    PostAttentionNorm(
-        o_, L.post_attn_norm.f32(), x_, L.ffn_norm.f32(),
-        dense_half_only ? nullptr : h_, n, d, eps, stream_,
-        prefill ? q8_ : nullptr, moe ? L.pre_ffn_norm_2.f32() : nullptr,
-        moe && !experts_half_only ? moe_h_ : nullptr, half ? x_half_ : nullptr,
-        half && moe ? moe_x_half_ : nullptr);
-    const void* fq = prefill ? q8_ : half ? x_half_ : Quantize(h_, n, d);
+    const bool dense_fp32 =
+        fp32_input({&L.ffn_gate_up, &L.ffn_gate, &L.ffn_up});
+    PostAttentionNorm(o_, L.post_attn_norm.f32(), x_, L.ffn_norm.f32(),
+                      dense_half_only ? nullptr : h_, n, d, eps, stream_,
+                      prefill && !dense_fp32 ? q8_ : nullptr,
+                      moe ? L.pre_ffn_norm_2.f32() : nullptr,
+                      moe && !experts_half_only ? moe_h_ : nullptr,
+                      half ? x_half_ : nullptr,
+                      half && moe ? moe_x_half_ : nullptr);
+    const void* fq = prefill && !dense_fp32 ? q8_
+                     : half                 ? x_half_
+                                            : Quantize(h_, n, d);
     // At grouped widths the experts run beside the dense MLP on their own
     // stream: routing is latency bound, the projections bandwidth bound.
     const bool concurrent = moe && n <= kMaxGroupSlots;
@@ -717,7 +773,8 @@ void Executor::Forward(std::span<const Segment> segments,
     } else {
       Project(L.ffn_gate, h_, fq, n, gate_);
       Project(L.ffn_up, h_, fq, n, up_);
-      if (prefill) {
+      // A binary16 down projection narrows the FP32 GeGLU rows itself.
+      if (prefill && L.ffn_down.type != core::GgmlType::kF16) {
         GeGluQuantize(gate_, up_, q8_, n, c.ffn_size, stream_);
         gq = q8_;
       } else {
@@ -756,9 +813,10 @@ void Executor::Forward(std::span<const Segment> segments,
       MoeFinish(finish, stream_);
       half_ready = finish.h_half != nullptr;
     } else {
-      PostFeedForwardNorm(o_, L.post_ffn_norm.f32(), L.output_scale, x_, next,
-                          h_, n, d, eps, stream_,
-                          prefill && !last ? q8_ : nullptr);
+      PostFeedForwardNorm(
+          o_, L.post_ffn_norm.f32(), L.output_scale, x_, next, h_, n, d, eps,
+          stream_,
+          prefill && !last && !qkv_fp32(layers[l + 1]) ? q8_ : nullptr);
       half_ready = false;
     }
     if (tap_sink_) {
@@ -795,6 +853,8 @@ std::optional<ExpertFormat> ExpertFormatOf(core::GgmlType type) {
       return ExpertFormat::kQ8_0;
     case core::GgmlType::kQ5_1:
       return ExpertFormat::kQ5_1;
+    case core::GgmlType::kF16:
+      return ExpertFormat::kF16;
     default:
       return std::nullopt;
   }
@@ -818,18 +878,28 @@ std::optional<qwen38_flash_next::rocm::WeightType> RoutedHalfType(
   }
 }
 
-/// K-quant gate/up takes the Gemma routed binary16 GEMM, Q8_0 Flash-Next's.
+/// Gate/up formats the Gemma routed binary16 GEMM takes (with its GeGLU
+/// epilogue).
 bool OwnGateUp(std::optional<ExpertFormat> format) {
   return format &&
          (*format == ExpertFormat::kQ4_K || *format == ExpertFormat::kQ5_K ||
-          *format == ExpertFormat::kQ6_K || *format == ExpertFormat::kQ8_0);
+          *format == ExpertFormat::kQ6_K || *format == ExpertFormat::kQ8_0 ||
+          *format == ExpertFormat::kF16);
+}
+
+/// Down formats the Gemma routed binary16 GEMM takes.
+bool OwnDown(std::optional<ExpertFormat> format) {
+  return format &&
+         (*format == ExpertFormat::kQ5_1 || *format == ExpertFormat::kQ8_0 ||
+          *format == ExpertFormat::kF16);
 }
 
 bool HalfExperts(const DeviceLayer& l, const Config& c) {
   return (RoutedHalfType(l.gate_up_exps.type) ||
           OwnGateUp(ExpertFormatOf(l.gate_up_exps.type))) &&
-         RoutedHalfType(l.down_exps.type) && c.hidden_size % 256 == 0 &&
-         c.expert_ffn_size % 64 == 0;
+         (RoutedHalfType(l.down_exps.type) ||
+          OwnDown(ExpertFormatOf(l.down_exps.type))) &&
+         c.hidden_size % 256 == 0 && c.expert_ffn_size % 64 == 0;
 }
 
 }  // namespace
@@ -931,10 +1001,9 @@ bool Executor::PrefillExperts(const DeviceLayer& l, std::uint32_t n,
       own_gate_up ? kRoutedKQuantTileRows : kRoutedTileRows;
   const std::uint32_t tiles =
       RoutedTileCapacity(slots, c.num_experts, gate_up_rows);
-  // The down projection takes the Gemma routed GEMM (Q5_1 or Q8_0).
+  // The down projection takes the Gemma routed GEMM (Q5_1, Q8_0, binary16).
   const auto down_format = ExpertFormatOf(l.down_exps.type);
-  const bool own_down = down_format && (*down_format == ExpertFormat::kQ5_1 ||
-                                        *down_format == ExpertFormat::kQ8_0);
+  const bool own_down = OwnDown(down_format);
   const std::uint32_t down_rows =
       own_down ? kRoutedKQuantTileRows : kRoutedDownRows;
   const std::uint32_t down_tiles =

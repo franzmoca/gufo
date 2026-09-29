@@ -5,6 +5,9 @@
 #include <algorithm>
 #include <cmath>
 #include <initializer_list>
+#include <string>
+#include <string_view>
+#include <vector>
 
 #include "src/core/hip/weight_upload.hpp"
 #include "src/models/gemma4/kernels/rocm/gemv.hpp"
@@ -26,6 +29,15 @@ struct Uploader {
   std::string* error;
   std::uint32_t shard_base{0};
   bool ok{true};
+  /// BF16 layer tensors to rewrite as binary16 once uploaded.
+  struct HalfConversion {
+    void* data;
+    std::size_t count;
+    std::string name;
+  };
+  std::vector<HalfConversion> halves;
+  /// Widest reduction of a binary16 dense projection.
+  std::size_t max_half_cols{0};
 
   void Fail(const std::string& message) {
     if (ok && error != nullptr) {
@@ -167,7 +179,44 @@ struct Uploader {
     d.gate_up_exps = Copy(l.gate_up_exps);
     d.down_exps = Copy(l.down_exps);
     d.down_exps_scale = Copy(l.down_exps_scale);
+    // Binary16 kernels serve the BF16 projections and experts: fused tensors
+    // convert once with their views.
+    Half(d.attn_qkv, l.attn_q.name, {&d.attn_q, &d.attn_k, &d.attn_v});
+    Half(d.ffn_gate_up, l.ffn_gate.name, {&d.ffn_gate, &d.ffn_up});
+    Half(d.attn_q, l.attn_q.name);
+    Half(d.attn_k, l.attn_k.name);
+    Half(d.attn_v, l.attn_v.name);
+    Half(d.attn_output, l.attn_output.name);
+    Half(d.ffn_gate, l.ffn_gate.name);
+    Half(d.ffn_up, l.ffn_up.name);
+    Half(d.ffn_down, l.ffn_down.name);
+    Half(d.gate_up_exps, l.gate_up_exps.name);
+    Half(d.down_exps, l.down_exps.name);
+    for (const DeviceTensor* t :
+         {&d.attn_qkv, &d.attn_q, &d.attn_k, &d.attn_v, &d.attn_output,
+          &d.ffn_gate_up, &d.ffn_gate, &d.ffn_up, &d.ffn_down}) {
+      if (t->type == core::GgmlType::kF16 && t->experts == 1) {
+        max_half_cols = std::max<std::size_t>(max_half_cols, t->cols);
+      }
+    }
     return d;
+  }
+
+  /// Queues a BF16 tensor's conversion to binary16 and retypes it and the
+  /// `views` into it.
+  void Half(DeviceTensor& t, std::string_view name,
+            std::initializer_list<DeviceTensor*> views = {}) {
+    if (t.empty() || t.type != core::GgmlType::kBF16) {
+      return;
+    }
+    halves.push_back(
+        {t.data, std::size_t{t.rows} * t.cols * t.experts, std::string(name)});
+    t.type = core::GgmlType::kF16;
+    for (DeviceTensor* v : views) {
+      if (!v->empty()) {
+        v->type = core::GgmlType::kF16;
+      }
+    }
   }
 };
 
@@ -247,6 +296,42 @@ std::unique_ptr<DeviceModel> DeviceModel::Upload(
   }
   if (!up.ok || !stager->Finish(error_msg)) {
     return nullptr;
+  }
+  m->max_half_cols_ = up.max_half_cols;
+  if (!up.halves.empty()) {
+    // Every BF16 weight from 2^-17 to 65504 in magnitude is a binary16 value;
+    // one past the binary16 range would become infinite.
+    std::uint32_t* overflow = nullptr;
+    std::vector<std::uint32_t> counts(up.halves.size());
+    bool converted =
+        hipMalloc(&overflow, counts.size() * sizeof(std::uint32_t)) ==
+            hipSuccess &&
+        hipMemset(overflow, 0, counts.size() * sizeof(std::uint32_t)) ==
+            hipSuccess;
+    for (std::size_t i = 0; converted && i < up.halves.size(); ++i) {
+      ConvertBf16ToHalf(up.halves[i].data, up.halves[i].count, overflow + i,
+                        nullptr);
+    }
+    converted = converted && hipMemcpy(counts.data(), overflow,
+                                       counts.size() * sizeof(std::uint32_t),
+                                       hipMemcpyDeviceToHost) == hipSuccess;
+    (void)hipFree(overflow);
+    if (!converted) {
+      if (error_msg != nullptr) {
+        *error_msg = "BF16 to binary16 weight conversion failed";
+      }
+      return nullptr;
+    }
+    for (std::size_t i = 0; i < counts.size(); ++i) {
+      if (counts[i] != 0) {
+        if (error_msg != nullptr) {
+          *error_msg = "tensor " + up.halves[i].name + " has " +
+                       std::to_string(counts[i]) +
+                       " BF16 values outside the binary16 range";
+        }
+        return nullptr;
+      }
+    }
   }
   const hipError_t status = hipDeviceSynchronize();
   if (status != hipSuccess) {

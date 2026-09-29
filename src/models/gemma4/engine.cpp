@@ -197,8 +197,9 @@ std::size_t Model::ResidentBytes() const noexcept {
   return device_->resident_bytes() +
          rocm::Executor::ScratchBytes(
              config(), HasMtp() ? &draft_weights_->config : nullptr,
-             VocabSize(), device_->max_cols(), options_.prefill_chunk,
-             options_.max_logit_rows, options_.max_context);
+             VocabSize(), device_->max_cols(), device_->max_half_cols(),
+             options_.prefill_chunk, options_.max_logit_rows,
+             options_.max_context);
 }
 
 std::size_t Model::SessionBytes(std::uint32_t context) const noexcept {

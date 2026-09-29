@@ -2,27 +2,29 @@
 
 **Decode matches the scalar reference up to routing near-ties; greedy MTP
 matches single-token decoding; prefill stays within 4e-5 of the reference,
-where llama.cpp lands at 0.4.** Unsloth UD-Q4_K_XL and UD-Q6_K_XL targets with
-the Unsloth Q8_0 `gemma4-assistant` drafter;
+where llama.cpp lands at 0.4.** Unsloth UD-Q4_K_XL, UD-Q6_K_XL and UD-Q8_K_XL
+targets with the Unsloth Q8_0 `gemma4-assistant` drafter;
 [identities](artifacts/model-identities.json). The arbiter is Gufo's scalar
 CPU implementation of the llama.cpp `gemma4` graph, routed experts included,
 over the same GGUF (FP32 activations, binary16 KV,
 `src/models/gemma4/reference.cpp`). These are not unquantized-model or
 GGUF-conversion checks. Measured September 28, 2026; text rows remeasured
-September 29 after the decode GeGLU fusion.
+September 29 after the decode GeGLU fusion. UD-Q8_K_XL measured September
+30; the reference reads its layer-29 BF16 weights directly, so its rows also
+cover the load-time binary16 rewrite.
 
-| Check | UD-Q4_K_XL | UD-Q6_K_XL |
-| --- | --- | --- |
-| GPU decode (FP32 activations) vs scalar reference, 22-token chat prompt | Mean KL 1.1e-6 (limit 1e-4), max 1.4e-5, top-1 22/22 | Mean KL 4.8e-7, max 5.0e-6, top-1 22/22 |
-| Eight-row verification | Bit-identical to single-token decode | Bit-identical to single-token decode |
-| GPU prefill (binary16 activations, binary16 WMMA attention) vs scalar reference, same prompt | Mean KL 3.7e-5 (limit 1e-3), top-1 21/22 (a near-tie) | Mean KL 2.9e-5, top-1 22/22 |
-| Bulk prefill vs exact rows, 1542-token conversation past the window and ring | Mean KL 0.027 (limit 0.06), top-1 1489/1542 | Mean KL 0.019, top-1 1494/1542 |
-| Bulk prefill vs exact rows, 1353-token repetitive prompt (reported, not a gate) | Mean KL 1.71, top-1 780/1353 | Mean KL 1.84, top-1 766/1353 |
-| Image prompt, 624×960 chart at 260 soft tokens, 96 teacher-forced positions from `<image\|>`, vs the scalar reference fed the reference encoder's embeddings | Mean KL 0.029 (80 answer positions 0.0039), top-1 95/96; llama.cpp `use_gelu` 0.251 (0.0125) | Mean KL 0.129 (answer 0.0012), top-1 93/96; llama.cpp 0.474 (0.0104) |
-| Image sessions | `gemma4.vision_session` (changed image, rewind, extension, snapshot, chunking) passes | Passes |
-| Greedy MTP vs single-token decode with the drafter loaded, three prompts, plus prompt-lookup copies; batched sessions vs their own decode | Identical token IDs (`gemma4.target`) | Identical token IDs |
-| Sampled MTP | Seeded replay repeats the same tokens (`gemma4.target`) | Same |
-| Session state | Prefix extension, rewind and snapshot restore after a ring wrap continue bit for bit (`gemma4.target`) | Same |
+| Check | UD-Q4_K_XL | UD-Q6_K_XL | UD-Q8_K_XL |
+| --- | --- | --- | --- |
+| GPU decode (FP32 activations) vs scalar reference, 22-token chat prompt | Mean KL 1.1e-6 (limit 1e-4), max 1.4e-5, top-1 22/22 | Mean KL 4.8e-7, max 5.0e-6, top-1 22/22 | Mean KL 8.8e-7, max 6.2e-6, top-1 22/22 |
+| Eight-row verification | Bit-identical to single-token decode | Bit-identical to single-token decode | Bit-identical to single-token decode |
+| GPU prefill (binary16 activations, binary16 WMMA attention) vs scalar reference, same prompt | Mean KL 3.7e-5 (limit 1e-3), top-1 21/22 (a near-tie) | Mean KL 2.9e-5, top-1 22/22 | Mean KL 3.3e-5, top-1 22/22 |
+| Bulk prefill vs exact rows, 1542-token conversation past the window and ring | Mean KL 0.027 (limit 0.06), top-1 1489/1542 | Mean KL 0.019, top-1 1494/1542 | Mean KL 0.031, top-1 1480/1542 |
+| Bulk prefill vs exact rows, 1353-token repetitive prompt (reported, not a gate) | Mean KL 1.71, top-1 780/1353 | Mean KL 1.84, top-1 766/1353 | Mean KL 2.10, top-1 720/1353 |
+| Image prompt, 624×960 chart at 260 soft tokens, 96 teacher-forced positions from `<image\|>`, vs the scalar reference fed the reference encoder's embeddings | Mean KL 0.029 (80 answer positions 0.0039), top-1 95/96; llama.cpp `use_gelu` 0.251 (0.0125) | Mean KL 0.129 (answer 0.0012), top-1 93/96; llama.cpp 0.474 (0.0104) | Not measured |
+| Image sessions | `gemma4.vision_session` (changed image, rewind, extension, snapshot, chunking) passes | Passes | Passes |
+| Greedy MTP vs single-token decode with the drafter loaded, three prompts, plus prompt-lookup copies; batched sessions vs their own decode | Identical token IDs (`gemma4.target`) | Identical token IDs | Identical token IDs |
+| Sampled MTP | Seeded replay repeats the same tokens (`gemma4.target`) | Same | Same |
+| Session state | Prefix extension, rewind and snapshot restore after a ring wrap continue bit for bit (`gemma4.target`) | Same | Same |
 
 The image rows' largest differences sit on the user's question right after
 the image (positions 266–280, up to KL 8.7 on UD-Q6_K_XL at one token), which

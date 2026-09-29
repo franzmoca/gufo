@@ -1,10 +1,11 @@
 {
   "sha256": {
     "Target UD-Q4_K_XL": "9e92cb6236044c6a9870af406029c74a76e0571c157a6f95df724dcc8c7a1575",
+    "Target UD-Q8_K_XL": "d1808aea1320e2d1cd0296fbda97b2d2a889cf49a8b212f9eee8b21979e73190",
     "MTP gemma4-assistant Q8_0": "5ae8b0117bed601e8924c6305bd5b0585de361d51f0e77091bcb4252cf1f27de"
   },
   "sources": {
-    "target": "unsloth/gemma-4-31B-it-GGUF, revision c1ac76e99d5513b141e8adde7288b85c3f9c32ec, gemma-4-31B-it-UD-Q4_K_XL.gguf",
+    "target": "unsloth/gemma-4-31B-it-GGUF, revision c1ac76e99d5513b141e8adde7288b85c3f9c32ec, gemma-4-31B-it-UD-Q4_K_XL.gguf and gemma-4-31B-it-UD-Q8_K_XL.gguf",
     "mtp": "unsloth/gemma-4-31B-it-GGUF, same revision, MTP/mtp-gemma-4-31B-it-Q8_0.gguf",
     "chatTemplate": "GGUF tokenizer.chat_template, SHA-256 845f1ee48e39fc942fe190da9df6a1c5db229e17a96ea08966ad1c9274e73d1b",
     "tokenizerGoldens": "unsloth/gemma-4-31B-it, revision 51c9f6265ea38755c708a6e356dfc1af4a436e35"
