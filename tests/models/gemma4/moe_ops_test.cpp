@@ -378,6 +378,49 @@ void CheckProjection(const Format& f, std::uint32_t m, std::uint32_t k,
     }
   }
 
+  // The fused gate/up form: GeGLU of the same rows, batch invariant too.
+  if (x_div == kUsed) {
+    const std::uint32_t width = m / 2;
+    const auto run_geglu = [&](std::uint32_t first_row, std::uint32_t rows) {
+      std::vector<std::int32_t> sub(ids.begin() + first_row * kUsed,
+                                    ids.begin() + (first_row + rows) * kUsed);
+      const auto table = Groups(sub);
+      HIP_CHECK(
+          hipMemcpy(dg, table.data(), table.size() * 4, hipMemcpyHostToDevice));
+      HIP_CHECK(hipMemset(dy, 0xFF, std::size_t{rows} * kUsed * width * 4));
+      const float* xin = dx + std::size_t{first_row} * kUsed / x_div * k;
+      Require(g4k::LaunchRoutedGemv(f.format, dw, dg, rows * kUsed, xin, x_div,
+                                    dy, m, k, nullptr, true),
+              name + ": GeGLU shape rejected");
+      return Host(dy, std::size_t{rows} * kUsed * width);
+    };
+    const auto fused = run_geglu(0, kRows);
+    double geglu_worst = 0.0;
+    for (std::size_t s = 0; s < std::size_t{kRows} * kUsed; ++s) {
+      for (std::uint32_t c = 0; c < width; ++c) {
+        const double g = all[s * m + c];
+        const double u = all[s * m + width + c];
+        const double want = 0.5 * g *
+                            (1.0 + std::tanh(0.7978845608028654 * g *
+                                             (1.0 + 0.044715 * g * g))) *
+                            u;
+        // FP32 1 + tanh cancels for very negative gates: scale the error by
+        // |gate * up|.
+        geglu_worst =
+            std::max(geglu_worst, std::fabs(fused[s * width + c] - want) /
+                                      (std::fabs(g * u) + 1e-3));
+      }
+    }
+    Require(geglu_worst < 1e-6,
+            name + ": GeGLU error " + std::to_string(geglu_worst));
+    for (std::uint32_t rows : {1U, 5U}) {
+      const auto part = run_geglu(3, rows);
+      Require(std::memcmp(part.data(), &fused[std::size_t{3} * kUsed * width],
+                          part.size() * 4) == 0,
+              name + ": fused GeGLU depends on the batch");
+    }
+  }
+
   // Cold weights as in decode: a full 128-expert tensor, fresh random
   // experts every launch, so the 32 MiB MALL holds none of them.
   const std::size_t expert_bytes = std::size_t{m} * row_bytes;

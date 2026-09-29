@@ -872,15 +872,14 @@ void Executor::Experts(const DeviceLayer& l, std::uint32_t n,
         MoeRoute(route, stream);
       }
       const std::uint32_t max_groups = std::min(c.num_experts, rows * used);
-      auto* gu = static_cast<float*>(moe_gu_);
       auto* act = static_cast<float*>(moe_act_);
+      // The gate/up projection applies GeGLU in its epilogue.
       if (!gate_up || !down ||
           !LaunchRoutedGemv(*gate_up, l.gate_up_exps.data, moe_groups_,
-                            max_groups, moe_h_ + std::size_t{r0} * d, used, gu,
-                            2 * width, d, stream)) {
+                            max_groups, moe_h_ + std::size_t{r0} * d, used, act,
+                            2 * width, d, stream, true)) {
         throw std::runtime_error("gemma4 expert gate/up format unsupported");
       }
-      GeGluPacked(gu, act, rows * used, width, stream);
       if (!LaunchRoutedGemv(*down, l.down_exps.data, moe_groups_, max_groups,
                             act, 1, moe_out_ + std::size_t{r0} * used * d, d,
                             width, stream)) {

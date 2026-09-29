@@ -357,7 +357,19 @@ constexpr int kSlotsPerPass = 4;
 /// Workgroup: kWaves / kSplit wave groups of kRowsPerWave output rows; the
 /// kSplit waves of a group take interleaved 256-value units of the
 /// reduction and are summed in wave order. blockIdx.y is the expert group.
-template<ExpertFormat F, int kSplit>
+/// gelu_tanh(x) * u.
+__device__ inline float GeGlu(float x, float u) {
+  constexpr float kSqrt2OverPi = 0.79788456080286535587989211986876F;
+  constexpr float kCoefA = 0.044715F;
+  const float g =
+      0.5F * x * (1.0F + tanhf(kSqrt2OverPi * x * (1.0F + kCoefA * x * x)));
+  return g * u;
+}
+
+/// kGeGlu: the first half of the wave groups take gate rows, the second
+/// half the matching up rows (m / 2 further), and the block writes
+/// GeGlu(gate, up) rows of width m / 2.
+template<ExpertFormat F, int kSplit, bool kGeGlu>
 __global__ void __launch_bounds__(kThreads)
     RoutedGemvKernel(const std::uint8_t* __restrict__ w,
                      const std::int32_t* __restrict__ groups,
@@ -365,7 +377,9 @@ __global__ void __launch_bounds__(kThreads)
                      float* __restrict__ y, std::uint32_t m, std::uint32_t k) {
   using T = Traits<F>;
   constexpr int kRowsPerWave = kWave / T::kTasks;
-  constexpr int kRowsPerBlock = kRowsPerWave * (kWaves / kSplit);
+  constexpr int kGroups = kWaves / kSplit;
+  constexpr int kRowsPerBlock = kRowsPerWave * kGroups;
+  static_assert(!kGeGlu || kGroups % 2 == 0);
   __shared__ float partial[kSlotsPerPass][kSplit][kWaves / kSplit][kWave];
   if (static_cast<int>(blockIdx.y) >= groups[0]) {
     return;
@@ -378,8 +392,14 @@ __global__ void __launch_bounds__(kThreads)
   const int slice = wave % kSplit;
   const int wave_group = wave / kSplit;
   const int t = lane % T::kTasks;
+  const std::uint32_t half_m = m / 2;
   const std::uint32_t row =
-      blockIdx.x * kRowsPerBlock + wave_group * kRowsPerWave + lane / T::kTasks;
+      kGeGlu
+          ? (wave_group / (kGroups / 2)) * half_m +
+                blockIdx.x * (kRowsPerBlock / 2) +
+                (wave_group % (kGroups / 2)) * kRowsPerWave + lane / T::kTasks
+          : blockIdx.x * kRowsPerBlock + wave_group * kRowsPerWave +
+                lane / T::kTasks;
   const std::uint32_t units = (k + 255) / 256;
   const std::uint8_t* base =
       w + (std::size_t{static_cast<std::uint32_t>(expert)} * m + row) *
@@ -418,7 +438,31 @@ __global__ void __launch_bounds__(kThreads)
         acc[j] += __shfl_xor(acc[j], offset, kWave);
       }
     }
-    if constexpr (kSplit == 1) {
+    if constexpr (kGeGlu) {
+#pragma unroll
+      for (int j = 0; j < kSlotsPerPass; ++j) {
+        partial[j][slice][wave_group][lane] = acc[j];
+      }
+      __syncthreads();
+      // Row sums in wave order, as without the fusion.
+      if (slice == 0 && t == 0 && wave_group < kGroups / 2 && row < half_m) {
+#pragma unroll
+        for (int j = 0; j < kSlotsPerPass; ++j) {
+          if (slot[j] >= 0) {
+            float gate = partial[j][0][wave_group][lane];
+            float up = partial[j][0][wave_group + kGroups / 2][lane];
+#pragma unroll
+            for (int s = 1; s < kSplit; ++s) {
+              gate += partial[j][s][wave_group][lane];
+              up += partial[j][s][wave_group + kGroups / 2][lane];
+            }
+            y[std::size_t{static_cast<std::uint32_t>(slot[j])} * half_m + row] =
+                GeGlu(gate, up);
+          }
+        }
+      }
+      __syncthreads();
+    } else if constexpr (kSplit == 1) {
       if (t == 0 && row < m) {
 #pragma unroll
         for (int j = 0; j < kSlotsPerPass; ++j) {
@@ -452,28 +496,43 @@ __global__ void __launch_bounds__(kThreads)
   }
 }
 
-template<ExpertFormat F>
+template<ExpertFormat F, bool kGeGlu>
 void LaunchRouted(const void* w, const std::int32_t* groups,
                   std::uint32_t max_groups, const float* x, std::uint32_t x_div,
                   float* y, std::uint32_t m, std::uint32_t k,
                   hipStream_t stream) {
   constexpr int kRowsPerWave = kWave / Traits<F>::kTasks;
   const auto* weights = static_cast<const std::uint8_t*>(w);
+  // A GeGLU launch covers m / 2 gate rows and their up rows.
+  const std::uint32_t rows = kGeGlu ? m / 2 : m;
+  constexpr int kShare = kGeGlu ? 2 : 1;
   // Measured with cold experts on gfx1151: short reductions (the 704-wide
   // down projection) run whole rows per wave; the 2816-wide gate/up splits
   // its 11 super-blocks over four waves (eight leave most slices one).
   if (k < 2048) {
-    constexpr int kRows = kRowsPerWave * kWaves;
-    RoutedGemvKernel<F, 1>
-        <<<dim3((m + kRows - 1) / kRows, max_groups), kThreads, 0, stream>>>(
+    constexpr int kRows = kRowsPerWave * kWaves / kShare;
+    RoutedGemvKernel<F, 1, kGeGlu>
+        <<<dim3((rows + kRows - 1) / kRows, max_groups), kThreads, 0, stream>>>(
             weights, groups, x, x_div, y, m, k);
     return;
   }
   constexpr int kSplit = 4;
-  constexpr int kRows = kRowsPerWave * (kWaves / kSplit);
-  RoutedGemvKernel<F, kSplit>
-      <<<dim3((m + kRows - 1) / kRows, max_groups), kThreads, 0, stream>>>(
+  constexpr int kRows = kRowsPerWave * (kWaves / kSplit) / kShare;
+  RoutedGemvKernel<F, kSplit, kGeGlu>
+      <<<dim3((rows + kRows - 1) / kRows, max_groups), kThreads, 0, stream>>>(
           weights, groups, x, x_div, y, m, k);
+}
+
+template<ExpertFormat F>
+void LaunchRouted(const void* w, const std::int32_t* groups,
+                  std::uint32_t max_groups, const float* x, std::uint32_t x_div,
+                  float* y, std::uint32_t m, std::uint32_t k,
+                  hipStream_t stream, bool geglu) {
+  if (geglu) {
+    LaunchRouted<F, true>(w, groups, max_groups, x, x_div, y, m, k, stream);
+  } else {
+    LaunchRouted<F, false>(w, groups, max_groups, x, x_div, y, m, k, stream);
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -656,8 +715,9 @@ void MoeRoute(const MoeRouteArgs& a, hipStream_t stream) {
 bool LaunchRoutedGemv(ExpertFormat format, const void* w,
                       const std::int32_t* groups, std::uint32_t max_groups,
                       const float* x, std::uint32_t x_div, float* y,
-                      std::uint32_t m, std::uint32_t k, hipStream_t stream) {
-  if (max_groups == 0 || x_div == 0) {
+                      std::uint32_t m, std::uint32_t k, hipStream_t stream,
+                      bool geglu) {
+  if (max_groups == 0 || x_div == 0 || (geglu && m % 2 != 0)) {
     return false;
   }
   switch (format) {
@@ -666,21 +726,21 @@ bool LaunchRoutedGemv(ExpertFormat format, const void* w,
         return false;
       }
       LaunchRouted<ExpertFormat::kQ4_K>(w, groups, max_groups, x, x_div, y, m,
-                                        k, stream);
+                                        k, stream, geglu);
       return true;
     case ExpertFormat::kQ5_K:
       if (k % 256 != 0) {
         return false;
       }
       LaunchRouted<ExpertFormat::kQ5_K>(w, groups, max_groups, x, x_div, y, m,
-                                        k, stream);
+                                        k, stream, geglu);
       return true;
     case ExpertFormat::kQ6_K:
       if (k % 256 != 0) {
         return false;
       }
       LaunchRouted<ExpertFormat::kQ6_K>(w, groups, max_groups, x, x_div, y, m,
-                                        k, stream);
+                                        k, stream, geglu);
       return true;
     case ExpertFormat::kQ8_0:
       // Word-aligned rows: an even number of 34-byte blocks.
@@ -688,14 +748,14 @@ bool LaunchRoutedGemv(ExpertFormat format, const void* w,
         return false;
       }
       LaunchRouted<ExpertFormat::kQ8_0>(w, groups, max_groups, x, x_div, y, m,
-                                        k, stream);
+                                        k, stream, geglu);
       return true;
     case ExpertFormat::kQ5_1:
       if (k % 32 != 0) {
         return false;
       }
       LaunchRouted<ExpertFormat::kQ5_1>(w, groups, max_groups, x, x_div, y, m,
-                                        k, stream);
+                                        k, stream, geglu);
       return true;
   }
   return false;
