@@ -7,7 +7,10 @@
 
 namespace gufo::models::gemma4::rocm {
 
-enum class GemvFormat : std::uint8_t { kQ4_0, kQ4_K, kQ5_K, kQ6_K };
+/// 32 bits wide: the value crosses from GCC-built host code into clang-built
+/// HIP code, and clang assumes a narrower argument arrives zero-extended where
+/// GCC leaves the upper bits undefined.
+enum class GemvFormat : std::uint32_t { kQ4_0, kQ4_K, kQ5_K, kQ6_K };
 
 /// y[m] = W x for K-quant or Q4_0 W ([m][k] in GGUF blocks) and an FP32
 /// activation row: the autoregressive decode projection. Returns false without
