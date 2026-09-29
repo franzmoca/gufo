@@ -79,8 +79,8 @@ void MoeRoute(const MoeRouteArgs& args, hipStream_t stream);
 /// expert | tile << 16 entries built for `tile_rows` bucket rows per tile):
 /// row rows_out[i] of `out` (FP32) or `out_half` (binary16, saturated)
 /// receives W[expert] x[rows_in[i]]. Covers the formats the Flash-Next
-/// routed GEMM lacks or runs slower (Q4_K, Q5_K, Q6_K, and Q5_1 with FP32
-/// outputs; 96-row tiles); returns false for others.
+/// routed GEMM lacks or runs slower (Q4_K, Q5_K, Q6_K, and Q5_1 / Q8_0 with
+/// FP32 outputs; 96-row tiles); returns false for others.
 [[nodiscard]] bool LaunchRoutedHalfGemm(
     ExpertFormat format, const void* w, const void* x,
     const std::int32_t* tiles, std::uint32_t n_tiles, std::uint32_t tile_rows,

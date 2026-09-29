@@ -67,12 +67,14 @@ __device__ __forceinline__ void CodesToHalves(std::uint32_t codes,
   out[1] = __hmul2(__hsub2(__builtin_bit_cast(__half2, p1), offset), scale);
 }
 
-/// Four byte codes q (< 1024) as two half2 of q * scale + bias.
+/// Four byte codes c (< 1024) as two half2 of (c - offset) * scale + bias,
+/// offset 0 or 128 (a signed byte carried as q + 128).
 __device__ __forceinline__ void CodesToHalvesAffine(std::uint32_t codes,
                                                     __half2 scale, __half2 bias,
-                                                    __half2* out) {
+                                                    __half2* out,
+                                                    float offset = 0.0F) {
   constexpr std::uint32_t kMagic = 0x64646464U;
-  const __half2 magic = __float2half2_rn(-1024.0F);
+  const __half2 magic = __float2half2_rn(-1024.0F - offset);
   const std::uint32_t p0 = __builtin_amdgcn_perm(codes, kMagic, 0x01050004U);
   const std::uint32_t p1 = __builtin_amdgcn_perm(codes, kMagic, 0x03070206U);
   out[0] =
@@ -427,6 +429,16 @@ constexpr int kDownActStride = kDownStageK + 8;
 /// 16 code bytes each). 48 bytes (12 dwords) spread the 16 rows a fragment
 /// read touches over distinct banks.
 constexpr int kQ51Stride = 48;
+/// Bytes per staged Q8_0 row: the stage's two raw 34-byte blocks as 17
+/// words (d0, codes 0-31, d1, codes 0-31; the first block's codes start two
+/// bytes into a word), padded to 80 bytes (20 dwords, conflict-free).
+constexpr int kQ80Stride = 80;
+constexpr int kQ80Words = 17;
+
+template<ExpertFormat F>
+constexpr int kDownStride = F == ExpertFormat::kQ5_1 ? kQ51Stride : kQ80Stride;
+template<ExpertFormat F>
+constexpr int kDownBlockBytes = F == ExpertFormat::kQ5_1 ? 24 : 34;
 /// Floats per token row of the down kernel's output transpose (128 rows plus
 /// padding: 132 = 4 mod 64 puts a tile's writes on distinct banks).
 constexpr int kOutStride = kRowsPerBlock + 4;
@@ -466,29 +478,72 @@ __device__ __forceinline__ void DecodeQ51(const std::uint8_t* block, bool live,
   }
 }
 
-/// Routed Q5_1 down projection with FP32 outputs: the layout and tiling of
-/// RoutedHalfKQuantKernel over 64-value stages (three 16-byte pieces per
+/// Q8_0 K block s (< 2) of a staged row's 17 words as two fragments: codes
+/// flipped to q + 128 and taken back out by the magic, weight q * d, the
+/// binary16 FMA of Flash-Next's routed GEMM.
+__device__ __forceinline__ void DecodeQ80(const std::uint32_t (&w)[kQ80Words],
+                                          int s, bool live, v16h* lo,
+                                          v16h* hi) {
+  std::uint32_t codes[8];
+  std::uint32_t d_bits = 0;
+  if (s == 0) {
+    d_bits = w[0] & 0xFFFFU;
+#pragma unroll
+    for (int i = 0; i < 8; ++i) {
+      codes[i] = __builtin_amdgcn_alignbit(w[i + 1], w[i], 16);
+    }
+  } else {
+    d_bits = w[8] >> 16U;
+#pragma unroll
+    for (int i = 0; i < 8; ++i) {
+      codes[i] = w[9 + i];
+    }
+  }
+  const __half2 dm = __builtin_bit_cast(__half2, live ? d_bits : 0U);
+  const __half2 scale = __low2half2(dm);
+  const __half2 bias = __high2half2(dm);
+#pragma unroll
+  for (int part = 0; part < 2; ++part) {
+    __half2 h[8];
+#pragma unroll
+    for (int i = 0; i < 4; ++i) {
+      CodesToHalvesAffine(codes[4 * part + i] ^ 0x80808080U, scale, bias,
+                          &h[2 * i], 128.0F);
+    }
+    if (part == 0) {
+      __builtin_memcpy(lo, h, 32);
+    } else {
+      __builtin_memcpy(hi, h, 32);
+    }
+  }
+}
+
+/// Routed Q5_1 / Q8_0 down projection with FP32 outputs: the layout and tiling
+/// of RoutedHalfKQuantKernel over 64-value stages (three 16-byte pieces per
 /// row, consecutive threads on consecutive pieces). Each token tile's
 /// results are transposed through LDS so a token's 128 outputs leave as
 /// one contiguous 512-byte store.
-template<int kTileTokens>
+template<ExpertFormat F, int kTileTokens>
 __global__ void __launch_bounds__(kThreads)
-    RoutedHalfQ51Kernel(const std::uint8_t* __restrict__ w,
-                        const __half* __restrict__ x,
-                        const std::int32_t* __restrict__ tiles,
-                        const std::int32_t* __restrict__ pad_bounds,
-                        const std::int32_t* __restrict__ rows_in,
-                        const std::int32_t* __restrict__ rows_out,
-                        float* __restrict__ out, std::uint32_t m,
-                        std::uint32_t k) {
+    RoutedHalfDownKernel(const std::uint8_t* __restrict__ w,
+                         const __half* __restrict__ x,
+                         const std::int32_t* __restrict__ tiles,
+                         const std::int32_t* __restrict__ pad_bounds,
+                         const std::int32_t* __restrict__ rows_in,
+                         const std::int32_t* __restrict__ rows_out,
+                         float* __restrict__ out, std::uint32_t m,
+                         std::uint32_t k) {
+  constexpr bool kQ8 = F == ExpertFormat::kQ8_0;
+  constexpr int kStride = kDownStride<F>;
+  constexpr int kStageBytes = 2 * kDownBlockBytes<F>;
   constexpr int kTokTiles = kTileTokens / 16;
   constexpr int kPieces = kRowsPerBlock * kQ51Stride / 16;  // per stage
   constexpr int kActChunks = kTileTokens * kDownStageK / 8;
   constexpr int kActPer = (kActChunks + kThreads - 1) / kThreads;
   constexpr int kActBytes = kTileTokens * kDownActStride * 2;
   constexpr int kOutBytes = 16 * kOutStride * 4;
-  __shared__ __attribute__((
-      aligned(16))) std::uint8_t s_rows[kRowsPerBlock * kQ51Stride];
+  __shared__
+      __attribute__((aligned(16))) std::uint8_t s_rows[kRowsPerBlock * kStride];
   __shared__ __attribute__((aligned(16))) std::uint8_t
       s_act_bytes[kActBytes > kOutBytes ? kActBytes : kOutBytes];
   auto* s_act = reinterpret_cast<__half*>(s_act_bytes);
@@ -507,33 +562,61 @@ __global__ void __launch_bounds__(kThreads)
   const int sub = lane & 15;
   const int half = lane >> 4;
   const std::uint32_t row0 = blockIdx.x * kRowsPerBlock;
-  const std::size_t row_bytes = std::size_t{k} / 32 * 24;
+  const std::size_t row_bytes = std::size_t{k} / 32 * kDownBlockBytes<F>;
   const std::uint8_t* w_expert =
       w + std::size_t{static_cast<std::uint32_t>(expert)} * m * row_bytes;
 
-  // Weight fetch: piece c (tid, and tid + 256 for tid < 128) is bytes
-  // 16 (c % 3) of row c / 3's stage.
+  // Weight fetch. Q5_1: piece c (tid, and tid + 256 for tid < 128) is bytes
+  // 16 (c % 3) of row c / 3's stage. Q8_0: word c = tid + 256 i is word
+  // c % 17 of row c / 17's stage (the rows are only 2-byte aligned).
   static_assert(kPieces > kThreads && kPieces <= 2 * kThreads);
-  const auto piece_src = [&](int c) {
-    const std::uint32_t r = row0 + static_cast<std::uint32_t>(c / 3);
-    return w_expert + std::size_t{r < m ? r : m - 1} * row_bytes + (c % 3) * 16;
+  constexpr int kWords = kRowsPerBlock * kQ80Words;
+  constexpr int kWordsPer = kQ8 ? (kWords + kThreads - 1) / kThreads : 1;
+  const auto row_src = [&](int r_local) {
+    const std::uint32_t r = row0 + static_cast<std::uint32_t>(r_local);
+    return w_expert + std::size_t{r < m ? r : m - 1} * row_bytes;
   };
   const bool f_second = tid + kThreads < kPieces;
-  const std::uint8_t* f_src0 = piece_src(tid);
-  const std::uint8_t* f_src1 = piece_src(f_second ? tid + kThreads : tid);
+  const std::uint8_t* f_src0 = row_src(tid / 3) + (tid % 3) * 16;
+  const int c1 = f_second ? tid + kThreads : tid;
+  const std::uint8_t* f_src1 = row_src(c1 / 3) + (c1 % 3) * 16;
   uint4 f_data0;
   uint4 f_data1;
+  std::uint32_t f_words[kWordsPer];
+  const auto word_of = [&](int i) {
+    const int c = tid + i * kThreads;
+    return c < kWords ? c : kWords - 1;
+  };
   const auto fetch_weights = [&](int stage) {
-    f_data0 = *reinterpret_cast<const uint4*>(f_src0 + stage * 48);
-    f_data1 = *reinterpret_cast<const uint4*>(f_src1 + stage * 48);
+    if constexpr (kQ8) {
+#pragma unroll
+      for (int i = 0; i < kWordsPer; ++i) {
+        const int c = word_of(i);
+        f_words[i] = *reinterpret_cast<const std::uint32_t*>(
+            row_src(c / kQ80Words) + stage * kStageBytes + (c % kQ80Words) * 4);
+      }
+    } else {
+      f_data0 = *reinterpret_cast<const uint4*>(f_src0 + stage * kStageBytes);
+      f_data1 = *reinterpret_cast<const uint4*>(f_src1 + stage * kStageBytes);
+    }
   };
   const auto commit_weights = [&] {
-    *reinterpret_cast<uint4*>(s_rows + (tid / 3) * kQ51Stride +
-                              (tid % 3) * 16) = f_data0;
-    if (f_second) {
-      const int c = tid + kThreads;
-      *reinterpret_cast<uint4*>(s_rows + (c / 3) * kQ51Stride + (c % 3) * 16) =
-          f_data1;
+    if constexpr (kQ8) {
+#pragma unroll
+      for (int i = 0; i < kWordsPer; ++i) {
+        const int c = tid + i * kThreads;
+        if (c < kWords) {
+          *reinterpret_cast<std::uint32_t*>(s_rows + (c / kQ80Words) * kStride +
+                                            (c % kQ80Words) * 4) = f_words[i];
+        }
+      }
+    } else {
+      *reinterpret_cast<uint4*>(s_rows + (tid / 3) * kStride + (tid % 3) * 16) =
+          f_data0;
+      if (f_second) {
+        *reinterpret_cast<uint4*>(s_rows + (c1 / 3) * kStride + (c1 % 3) * 16) =
+            f_data1;
+      }
     }
   };
 
@@ -587,12 +670,29 @@ __global__ void __launch_bounds__(kThreads)
       fetch_weights(stage + 1);
       fetch_act(stage + 1);
     }
-    const std::uint8_t* row = s_rows + (wave * 16 + sub) * kQ51Stride;
+    const std::uint8_t* row = s_rows + (wave * 16 + sub) * kStride;
+    std::uint32_t words[kQ80Words];
+    if constexpr (kQ8) {
+      const auto* r4 = reinterpret_cast<const uint4*>(row);
+#pragma unroll
+      for (int i = 0; i < 4; ++i) {
+        const uint4 v = r4[i];
+        words[4 * i] = v.x;
+        words[4 * i + 1] = v.y;
+        words[4 * i + 2] = v.z;
+        words[4 * i + 3] = v.w;
+      }
+      words[16] = reinterpret_cast<const std::uint32_t*>(row)[16];
+    }
 #pragma unroll
     for (int s = 0; s < 2; ++s) {
       v16h a_lo;
       v16h a_hi;
-      DecodeQ51(row + 24 * s, live, &a_lo, &a_hi);
+      if constexpr (kQ8) {
+        DecodeQ80(words, s, live, &a_lo, &a_hi);
+      } else {
+        DecodeQ51(row + 24 * s, live, &a_lo, &a_hi);
+      }
 #pragma unroll
       for (int j = 0; j < kTokTiles; ++j) {
         if (j < live_tiles) {
@@ -657,7 +757,8 @@ bool LaunchRoutedHalfGemm(ExpertFormat format, const void* w, const void* x,
                           hipStream_t stream) {
   if (tile_rows != 96 || n_tiles == 0 ||
       (out == nullptr) == (out_half == nullptr) ||
-      (format != ExpertFormat::kQ5_1 && k % 256 != 0)) {
+      (format != ExpertFormat::kQ5_1 && format != ExpertFormat::kQ8_0 &&
+       k % 256 != 0)) {
     return false;
   }
   const dim3 grid((m + kRowsPerBlock - 1) / kRowsPerBlock, n_tiles);
@@ -684,8 +785,17 @@ bool LaunchRoutedHalfGemm(ExpertFormat format, const void* w, const void* x,
       if (out == nullptr || k % kDownStageK != 0) {
         return false;
       }
-      RoutedHalfQ51Kernel<96><<<grid, kThreads, 0, stream>>>(
-          wb, xh, tiles, pad_bounds, rows_in, rows_out, out, m, k);
+      RoutedHalfDownKernel<ExpertFormat::kQ5_1, 96>
+          <<<grid, kThreads, 0, stream>>>(wb, xh, tiles, pad_bounds, rows_in,
+                                          rows_out, out, m, k);
+      return true;
+    case ExpertFormat::kQ8_0:
+      if (out == nullptr || k % kDownStageK != 0) {
+        return false;
+      }
+      RoutedHalfDownKernel<ExpertFormat::kQ8_0, 96>
+          <<<grid, kThreads, 0, stream>>>(wb, xh, tiles, pad_bounds, rows_in,
+                                          rows_out, out, m, k);
       return true;
     default:
       return false;

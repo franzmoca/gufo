@@ -911,8 +911,10 @@ bool Executor::PrefillExperts(const DeviceLayer& l, std::uint32_t n,
       own_gate_up ? kRoutedKQuantTileRows : kRoutedTileRows;
   const std::uint32_t tiles =
       RoutedTileCapacity(slots, c.num_experts, gate_up_rows);
-  // Q5_1 down takes the Gemma routed GEMM, Q8_0 Flash-Next's.
-  const bool own_down = l.down_exps.type == core::GgmlType::kQ5_1;
+  // The down projection takes the Gemma routed GEMM (Q5_1 or Q8_0).
+  const auto down_format = ExpertFormatOf(l.down_exps.type);
+  const bool own_down = down_format && (*down_format == ExpertFormat::kQ5_1 ||
+                                        *down_format == ExpertFormat::kQ8_0);
   const std::uint32_t down_rows =
       own_down ? kRoutedKQuantTileRows : kRoutedDownRows;
   const std::uint32_t down_tiles =
@@ -943,8 +945,8 @@ bool Executor::PrefillExperts(const DeviceLayer& l, std::uint32_t n,
   }
   GeGluPackedHalf(gu, act, n * used, width, stream);
   if (own_down) {
-    return LaunchRoutedHalfGemm(ExpertFormat::kQ5_1, l.down_exps.data, act,
-                                down_map, down_tiles, down_rows, moe_bounds_,
+    return LaunchRoutedHalfGemm(*down_format, l.down_exps.data, act, down_map,
+                                down_tiles, down_rows, moe_bounds_,
                                 moe_rows_slot_, moe_rows_slot_, moe_out_,
                                 nullptr, d, width, stream);
   }
