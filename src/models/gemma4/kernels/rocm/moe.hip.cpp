@@ -11,6 +11,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <stdexcept>
 
 #include "src/models/gemma4/kernels/rocm/gemv_tasks.hpp"
 
@@ -567,7 +568,67 @@ __global__ void __launch_bounds__(kFinishThreads)
   }
 }
 
+/// Tile index of a map entry past the last tile: beyond every bucket.
+constexpr std::int32_t kDeadTile = 0x7FFF;
+
+/// One block: thread e counts expert e's tiles of both heights, an ordered
+/// scan places them, and the remaining entries become dead tiles.
+__global__ void __launch_bounds__(256)
+    BuildRoutedTilesKernel(const std::uint32_t* __restrict__ counts,
+                           std::uint32_t experts, std::uint32_t rows_a,
+                           std::uint32_t capacity_a,
+                           std::int32_t* __restrict__ tiles_a,
+                           std::uint32_t rows_b, std::uint32_t capacity_b,
+                           std::int32_t* __restrict__ tiles_b) {
+  __shared__ std::uint32_t scan_a[256];
+  __shared__ std::uint32_t scan_b[256];
+  const std::uint32_t e = threadIdx.x;
+  const std::uint32_t padded = e < experts ? (counts[e] + 15U) / 16U * 16U : 0;
+  const std::uint32_t n_a = (padded + rows_a - 1) / rows_a;
+  const std::uint32_t n_b = (padded + rows_b - 1) / rows_b;
+  scan_a[e] = n_a;
+  scan_b[e] = n_b;
+  __syncthreads();
+  // Inclusive Hillis-Steele scan; integer sums, so order-free.
+  for (std::uint32_t step = 1; step < 256; step <<= 1) {
+    const std::uint32_t add_a = e >= step ? scan_a[e - step] : 0;
+    const std::uint32_t add_b = e >= step ? scan_b[e - step] : 0;
+    __syncthreads();
+    scan_a[e] += add_a;
+    scan_b[e] += add_b;
+    __syncthreads();
+  }
+  const std::uint32_t first_a = scan_a[e] - n_a;
+  const std::uint32_t first_b = scan_b[e] - n_b;
+  for (std::uint32_t j = 0; j < n_a; ++j) {
+    tiles_a[first_a + j] = static_cast<std::int32_t>(e | (j << 16));
+  }
+  for (std::uint32_t j = 0; j < n_b; ++j) {
+    tiles_b[first_b + j] = static_cast<std::int32_t>(e | (j << 16));
+  }
+  constexpr std::int32_t kDead = kDeadTile << 16;
+  for (std::uint32_t i = scan_a[255] + e; i < capacity_a; i += 256) {
+    tiles_a[i] = kDead;
+  }
+  for (std::uint32_t i = scan_b[255] + e; i < capacity_b; i += 256) {
+    tiles_b[i] = kDead;
+  }
+}
+
 }  // namespace
+
+void BuildRoutedTiles(const std::uint32_t* counts, std::uint32_t experts,
+                      std::uint32_t rows_a, std::uint32_t capacity_a,
+                      std::int32_t* tiles_a, std::uint32_t rows_b,
+                      std::uint32_t capacity_b, std::int32_t* tiles_b,
+                      hipStream_t stream) {
+  if (experts > 256) {
+    throw std::invalid_argument("routed tile map supports 256 experts");
+  }
+  BuildRoutedTilesKernel<<<1, 256, 0, stream>>>(counts, experts, rows_a,
+                                                capacity_a, tiles_a, rows_b,
+                                                capacity_b, tiles_b);
+}
 
 void MoeRoute(const MoeRouteArgs& a, hipStream_t stream) {
   if (!a.raw_logits) {

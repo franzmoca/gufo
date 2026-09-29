@@ -79,13 +79,32 @@ void MoeRoute(const MoeRouteArgs& args, hipStream_t stream);
 /// expert | tile << 16 entries built for `tile_rows` bucket rows per tile):
 /// row rows_out[i] of `out` (FP32) or `out_half` (binary16, saturated)
 /// receives W[expert] x[rows_in[i]]. Covers the formats the Flash-Next
-/// routed GEMM lacks (Q6_K, 96-row tiles); returns false for others.
+/// routed GEMM lacks or runs slower (Q4_K, Q5_K, Q6_K; 96-row tiles);
+/// returns false for others.
 [[nodiscard]] bool LaunchRoutedHalfGemm(
     ExpertFormat format, const void* w, const void* x,
     const std::int32_t* tiles, std::uint32_t n_tiles, std::uint32_t tile_rows,
     const std::int32_t* pad_bounds, const std::int32_t* rows_in,
     const std::int32_t* rows_out, float* out, void* out_half, std::uint32_t m,
     std::uint32_t k, hipStream_t stream);
+
+/// Entries of a routed tile map of `rows`-row tiles that any routing of
+/// `slots` assignments over `experts` 16-padded buckets fits in.
+[[nodiscard]] constexpr std::uint32_t RoutedTileCapacity(
+    std::uint32_t slots, std::uint32_t experts, std::uint32_t rows) noexcept {
+  return (slots + 15 * experts) / rows + experts;
+}
+
+/// Builds on the device the routed tile maps of two tile heights from the
+/// per-expert assignment counts: expert | tile << 16 in expert order, the
+/// entries past the last tile holding a tile index beyond every bucket, which
+/// the routed GEMMs skip. The GEMMs launch `capacity` tiles, so the host never
+/// reads the counts. experts <= 256.
+void BuildRoutedTiles(const std::uint32_t* counts, std::uint32_t experts,
+                      std::uint32_t rows_a, std::uint32_t capacity_a,
+                      std::int32_t* tiles_a, std::uint32_t rows_b,
+                      std::uint32_t capacity_b, std::int32_t* tiles_b,
+                      hipStream_t stream);
 
 /// The feed-forward residual of an expert layer, per row r:
 ///   f = rms(dense[r]) * norm1 + rms(sum_j weights[r][j] *

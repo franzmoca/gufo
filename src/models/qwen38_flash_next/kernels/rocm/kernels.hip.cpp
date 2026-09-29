@@ -3763,6 +3763,10 @@ __launch_bounds__(256) __global__
   const int t_local = (tile >> 16) * BN;
   const int bucket_begin = pad_bounds[expert];
   const int bucket_rows = pad_bounds[expert + 1] - bucket_begin;
+  // A map built on the device pads its tail with tiles past every bucket.
+  if (t_local >= bucket_rows) {
+    return;
+  }
   const int live_tok_tiles =
       std::min(kTokTiles, (bucket_rows - t_local + 15) / 16);
   const int num_kb = static_cast<int>(k / 32);

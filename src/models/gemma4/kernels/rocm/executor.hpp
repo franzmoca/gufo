@@ -232,8 +232,6 @@ private:
   std::int32_t* moe_rows_token_{nullptr};
   std::int32_t* moe_rows_slot_{nullptr};
   std::int32_t* moe_tiles_{nullptr};
-  std::uint32_t* moe_counts_host_{nullptr};
-  std::int32_t* moe_tiles_host_{nullptr};
   // Drafter scratch (present with an MTP drafter).
   std::uint32_t* draft_tokens_{nullptr};
   float* draft_embed_{nullptr};
