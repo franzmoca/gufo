@@ -165,11 +165,12 @@ Gain is llama.cpp time over Gufo time minus one (decode: Gufo over
 llama.cpp). Gufo's vision encoder takes 164 ms for 260 soft tokens and
 1,025 ms for 1,107; the rest of a cold request is ordinary prefill.
 
-## gemma-control fork (single user)
+## Vulkan llama.cpp fork (single user)
 
-The previous production setup: halo-box/strix-llama.cpp `8c1c282ec` on Vulkan
-RADV with `GGML_VK_MMV_NO_SPLIT=1 -b 2048 -ub 512`, same GGUF files, same
-driver workloads and four draft tokens (Gufo up to seven). Hand-rendered from
+A third-party baseline: the Strix Halo llama.cpp fork halo-box/strix-llama.cpp
+`8c1c282ec` on Vulkan RADV with `GGML_VK_MMV_NO_SPLIT=1 -b 2048 -ub 512`, same
+GGUF files, same driver workloads and four draft tokens (Gufo up to seven).
+Hand-rendered from
 [artifacts/fork](artifacts/fork). At 128K with MTP its Vulkan queue timed out
 (`Fence fallback timer expired on ring comp_1.1.0`); its repetitive MTP
 workload was not run.

@@ -106,8 +106,9 @@ seed. Speed depends on acceptance and verification cost.
 - `draftPolicy` (`"fixed"` / `"adaptive"`) — DFlash2 block-length policy;
   defaults to adaptive.
 - `minDraftTokens` — minimum draft length where supported. DFlash2, DSpark,
-  and Flash-Next MTP require the default of one. Gemma 4 drafts a fixed
-  `draftTokens` (at most 7; 4 is fastest on prose).
+  and Flash-Next MTP require the default of one. Gemma 4 drafts up to
+  `draftTokens` (at most 7) and its draft policy chooses how many a cycle
+  verifies; see the [Gemma 4 model card](models/gemma-4-31b/README.md).
 
 **Server limits (protecting the machine from clients)**
 

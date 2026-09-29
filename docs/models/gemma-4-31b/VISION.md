@@ -10,9 +10,9 @@ snapshots stay unchanged when no image is present.
   `7a4601b12ec680f706a7e0c7e1f78f579b1db64d485a9e352ee87d4b9daa45e4`
   (1,200,726,496 bytes, downloaded 2026-09-28 next to the Unsloth target).
 - Graph semantics: llama.cpp `tools/mtmd/models/gemma4v.cpp`, `clip.cpp`
-  (`PROJECTOR_TYPE_GEMMA4V`), `mtmd.cpp` and `src/models/gemma4.cpp`, as read in
-  the strix-llama.cpp checkout. The repo reference `.#llama-cpp-reference`
-  (b11069) ships the same `clip_graph_gemma4v` and `llama-mtmd-cli`.
+  (`PROJECTOR_TYPE_GEMMA4V`), `mtmd.cpp` and `src/models/gemma4.cpp`; the repo reference
+  `.#llama-cpp-reference` (b11069) ships `clip_graph_gemma4v` and
+  `llama-mtmd-cli`.
 - Preprocessing and prompt: `google/gemma-4-31B-it` `processor_config.json`,
   `config.json`, `chat_template.jinja`, and transformers `models/gemma4`
   `processing_gemma4.py` / `image_processing_gemma4.py`.

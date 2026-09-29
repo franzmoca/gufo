@@ -11,14 +11,14 @@
   },
   "scope": "Current retained benchmark and qualification evidence; per-artifact source revisions and commands are authoritative.",
   "benchmarks-2026-09-26": {
-    "scope": "Single-user AR/MTP depth sweeps, loading and memory on both engines; llama.cpp multi-user AR/MTP; gemma-control fork single-user AR and mixed MTP (UTC dates in artifacts)",
+    "scope": "Single-user AR/MTP depth sweeps, loading and memory on both engines; llama.cpp multi-user AR/MTP; third-party Vulkan fork (halo-box/strix-llama.cpp) single-user AR and mixed MTP (UTC dates in artifacts)",
     "gufo": {
       "revision": "b3a13bc",
       "build": "nix build",
       "binarySha256Prefix": "0c9b2e4f28af17b6"
     },
     "reference": "llama.cpp b11069 from flake.nix (commit 68d9053a), ROCm gfx1151",
-    "fork": "halo-box/strix-llama.cpp 8c1c282ec, Vulkan RADV container (localhost/llama-vulkan-strix-llama, gemma-control's strix-vulkan backend), GGML_VK_MMV_NO_SPLIT=1, -b 2048 -ub 512 -t 8; launched through an uncommitted podman wrapper",
+    "fork": "halo-box/strix-llama.cpp 8c1c282ec, Vulkan RADV, GGML_VK_MMV_NO_SPLIT=1, -b 2048 -ub 512 -t 8",
     "measurement": "One warmed sample per point, greedy, thinking off, four MTP draft tokens on both engines. Loading drops the page cache with echo 3 > /proc/sys/vm/drop_caches before each launch."
   }
 }

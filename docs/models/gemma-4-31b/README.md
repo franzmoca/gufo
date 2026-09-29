@@ -83,5 +83,4 @@ Tests live in `tests/models/gemma4` (`gemma4.*` in CTest; set
 `tools/gemma4` holds the tokenizer/template golden generators, the
 teacher-forced llama.cpp logit dumper (`llama_logits.cpp`),
 `compare_logits.py` and `draft_policy_bench.py`, an HTTP A/B of
-`--draft-policy` settings on prose, story and code workloads. The implementation plan and dated progress are in
-[PLAN.md](PLAN.md).
+`--draft-policy` settings on prose, story and code workloads.

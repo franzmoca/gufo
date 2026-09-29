@@ -77,8 +77,8 @@ drafts up to seven tokens under Gufo's confidence-based length control
 prefix of the stated depth. Loading: cold files (page cache dropped with
 `echo 3 > /proc/sys/vm/drop_caches`), C1, MTP, capacity 262144. Memory: C1, AR,
 capacity 133121, peak device-global HIP allocation. The llama.cpp reference is
-`b11069` (ROCm) from `flake.nix`. The gemma-control fork (halo-box/strix-llama.cpp
-`8c1c282ec`, Vulkan RADV, `GGML_VK_MMV_NO_SPLIT=1 -b 2048 -ub 512`) was
-measured with the same driver through a local container wrapper; its results
+`b11069` (ROCm) from `flake.nix`. The third-party Vulkan fork
+halo-box/strix-llama.cpp (`8c1c282ec`, Vulkan RADV,
+`GGML_VK_MMV_NO_SPLIT=1 -b 2048 -ub 512`) was measured with the same driver; its results
 are in [artifacts/fork](artifacts/fork). Commands, counts and server flags are
 recorded per row in the artifacts.
