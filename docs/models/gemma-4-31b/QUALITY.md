@@ -103,3 +103,12 @@ halo-box/strix-llama.cpp (`8c1c282ec`, Vulkan RADV,
 `GGML_VK_MMV_NO_SPLIT=1 -b 2048 -ub 512`) was measured with the same driver; its results
 are in [artifacts/fork](artifacts/fork). Commands, counts and server flags are
 recorded per row in the artifacts.
+
+UD-Q8_K_XL tables: Gufo and llama.cpp September 30, 2026 (Gufo revision
+beeb28a, `nix build`, binary SHA-256 prefix b69774722d0a30d1), a reduced grid
+under the same driver, workloads and server flags: single-user depths 0, 4096,
+16384 and 32768, sampled MTP at depth 0 (three seeds), one and two users,
+memory and loading. Gufo drafts under its calibrated policy. Every Gufo
+multi-user completion matches its C1 hash (AR against AR C1, MTP against MTP
+C1); the AR C1 hashes llama.cpp's MTP rows are compared with were qualified
+once with an isolated C1 AR run (`multi-*-q8-gufo-ar.json`).

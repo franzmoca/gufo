@@ -23,30 +23,27 @@
     "schemaVersion": "1.0.0"
   },
   "measuredOn": "2026-09-29",
-  "mode": "mtp",
+  "mode": null,
   "model": {
     "id": "Gemma-4-31B-It",
-    "variant": null
+    "variant": "q8"
   },
   "notes": [
     "llama.cpp: llama-server version: 0.4.1-dev (build 11069, commit 68d9053a)",
-    "file cache reset before each launch with the supplied --drop-caches command",
-    "readiness = HTTP 200 on /health",
-    "rows not measured on 2026-09-29 retain values from 2026-09-26"
+    "peak device-global hipMemGetInfo used bytes (total - free), sampled every 250 ms during the request; idle_gib is the same counter before the server started",
+    "server mode: ar"
   ],
   "referenceName": "llama.cpp",
   "rows": {
-    "default": {
-      "command": "llama-server -m gemma-4-31B-it-UD-Q4_K_XL.gguf -c 262144 -np 1 --port 58455 --host 127.0.0.1 --alias bench -ngl 999 -fa on --cache-reuse 0 --jinja --reasoning off --cache-ram 0 --spec-type draft-mtp --spec-draft-model mtp-gemma-4-31B-it-Q8_0.gguf --spec-draft-ngl 999 --spec-draft-n-max 4",
-      "ready_s": 6.585,
-      "ready_s_sd": null,
-      "samples": 1
+    "16K prefix, pp4096 + tg128": {
+      "command": "llama-server -m gemma-4-31B-it-UD-Q8_K_XL.gguf -c 133121 -np 1 --port 50943 --host 127.0.0.1 --alias bench -ngl 999 -fa on --cache-reuse 0 --jinja --reasoning off --cache-ram 0",
+      "gib": 52.96,
+      "idle_gib": 3.01
     },
-    "q8": {
-      "command": "llama-server -m gemma-4-31B-it-UD-Q8_K_XL.gguf -c 262144 -np 1 --port 59119 --host 127.0.0.1 --alias bench -ngl 999 -fa on --cache-reuse 0 --jinja --reasoning off --cache-ram 0 --spec-type draft-mtp --spec-draft-model mtp-gemma-4-31B-it-Q8_0.gguf --spec-draft-ngl 999 --spec-draft-n-max 4",
-      "ready_s": 10.27,
-      "ready_s_sd": null,
-      "samples": 1
+    "pp2048 + tg128": {
+      "command": "llama-server -m gemma-4-31B-it-UD-Q8_K_XL.gguf -c 133121 -np 1 --port 50943 --host 127.0.0.1 --alias bench -ngl 999 -fa on --cache-reuse 0 --jinja --reasoning off --cache-ram 0",
+      "gib": 50.79,
+      "idle_gib": 3.01
     }
   },
   "schemaVersion": 1,
@@ -56,11 +53,11 @@
       "-m",
       "gemma-4-31B-it-UD-Q8_K_XL.gguf",
       "-c",
-      "262144",
+      "133121",
       "-np",
       "1",
       "--port",
-      "59119",
+      "50943",
       "--host",
       "127.0.0.1",
       "--alias",
@@ -75,15 +72,7 @@
       "--reasoning",
       "off",
       "--cache-ram",
-      "0",
-      "--spec-type",
-      "draft-mtp",
-      "--spec-draft-model",
-      "mtp-gemma-4-31B-it-Q8_0.gguf",
-      "--spec-draft-ngl",
-      "999",
-      "--spec-draft-n-max",
-      "4"
+      "0"
     ]
   },
   "source": {
@@ -91,6 +80,6 @@
     "dirty": true,
     "revision": "beeb28a4309f6ab2d4aac14cfe635a6ff4e2d064"
   },
-  "table": "loading",
+  "table": "memory-q8",
   "target": "reference"
 }

@@ -26,33 +26,53 @@
   "mode": "mtp",
   "model": {
     "id": "Gemma-4-26B-A4B-It",
-    "variant": null
+    "variant": "q8"
   },
   "notes": [
     "llama.cpp: llama-server version: 0.4.1-dev (build 11069, commit 68d9053a)",
-    "file cache reset before each launch with the supplied --drop-caches command",
-    "readiness = HTTP 200 on /health",
-    "rows not measured on 2026-09-29 retain values from 2026-09-28"
+    "pp2048/tg128; depth is a cached conversation prefix of synthetic text (8-token reply); measured turn task is recorded per row; tolerance max(32, 0.500%) on cache_n and prompt_n; actual counts per sample in rows",
+    "synthetic text: 1.145 tokens/word, template overhead 13 tokens"
   ],
   "referenceName": "llama.cpp",
   "rows": {
-    "q4": {
-      "command": "llama-server -m gemma-4-26B-A4B-it-UD-Q4_K_XL.gguf -c 262144 -np 1 --port 58745 --host 127.0.0.1 --alias bench -ngl 999 -fa on --cache-reuse 0 --jinja --reasoning off --cache-ram 0 --spec-type draft-mtp --spec-draft-model mtp-gemma-4-26B-A4B-it.gguf --spec-draft-ngl 999 --spec-draft-n-max 4",
-      "ready_s": 5.633,
-      "ready_s_sd": null,
-      "samples": 1
-    },
-    "q6": {
-      "command": "llama-server -m gemma-4-26B-A4B-it-UD-Q6_K_XL.gguf -c 262144 -np 1 --port 57309 --host 127.0.0.1 --alias bench -ngl 999 -fa on --cache-reuse 0 --jinja --reasoning off --cache-ram 0 --spec-type draft-mtp --spec-draft-model mtp-gemma-4-26B-A4B-it.gguf --spec-draft-ngl 999 --spec-draft-n-max 4",
-      "ready_s": 6.838,
-      "ready_s_sd": null,
-      "samples": 1
-    },
-    "q8": {
-      "command": "llama-server -m gemma-4-26B-A4B-it-UD-Q8_K_XL.gguf -c 262144 -np 1 --port 37197 --host 127.0.0.1 --alias bench -ngl 999 -fa on --cache-reuse 0 --jinja --reasoning off --cache-ram 0 --spec-type draft-mtp --spec-draft-model mtp-gemma-4-26B-A4B-it.gguf --spec-draft-ngl 999 --spec-draft-n-max 4",
-      "ready_s": 7.652,
-      "ready_s_sd": null,
-      "samples": 1
+    "0": {
+      "acceptance": 28.84,
+      "acceptance_sd": 1.95,
+      "accepted_per_step": 1.12,
+      "accepted_per_step_sd": 0.07,
+      "command": "llama-server -m gemma-4-26B-A4B-it-UD-Q8_K_XL.gguf -c 133760 -np 1 --port 46383 --host 127.0.0.1 --alias bench -ngl 999 -fa on --cache-reuse 0 --jinja --reasoning off --cache-ram 0 --spec-type draft-mtp --spec-draft-model mtp-gemma-4-26B-A4B-it.gguf --spec-draft-ngl 999 --spec-draft-n-max 4",
+      "counts": [
+        {
+          "cache_n": 1,
+          "completion_sha256": "6b8bff7b7956794112bc81391c56b5e072e75d71abcb7c8582f8845414b0b981",
+          "draft_n": 236,
+          "draft_n_accepted": 67,
+          "predicted_n": 128,
+          "prompt_n": 2037
+        },
+        {
+          "cache_n": 1,
+          "completion_sha256": "89542cb13bf063b24ee9854aeef11a53e6c8864af76bb4c50798648948763cc4",
+          "draft_n": 226,
+          "draft_n_accepted": 70,
+          "predicted_n": 128,
+          "prompt_n": 2037
+        },
+        {
+          "cache_n": 1,
+          "completion_sha256": "37e42dff6636e7d23a65f9589ea17c073d28e0df6f9a43a5ae05e7b9b286de9a",
+          "draft_n": 243,
+          "draft_n_accepted": 66,
+          "predicted_n": 128,
+          "prompt_n": 2050
+        }
+      ],
+      "pp": 1360.7,
+      "pp_sd": 13.47,
+      "samples": 3,
+      "tg": 38.41,
+      "tg_sd": 1.34,
+      "workload": "story"
     }
   },
   "schemaVersion": 1,
@@ -62,11 +82,11 @@
       "-m",
       "gemma-4-26B-A4B-it-UD-Q8_K_XL.gguf",
       "-c",
-      "262144",
+      "133760",
       "-np",
       "1",
       "--port",
-      "37197",
+      "46383",
       "--host",
       "127.0.0.1",
       "--alias",
@@ -97,6 +117,6 @@
     "dirty": true,
     "revision": "beeb28a4309f6ab2d4aac14cfe635a6ff4e2d064"
   },
-  "table": "loading",
+  "table": "single-mtp-sampled-q8",
   "target": "reference"
 }

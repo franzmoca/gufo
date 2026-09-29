@@ -1,8 +1,9 @@
 # Gemma 4 26B-A4B benchmarks
 
 AMD Strix Halo `gfx1151`, 128 GB unified memory. Unsloth
-`gemma-4-26B-A4B-it` UD-Q4_K_XL and UD-Q6_K_XL targets with the Unsloth Q8_0
-`gemma4-assistant` MTP drafter. Gufo drafts up to seven tokens under its
+`gemma-4-26B-A4B-it` UD-Q4_K_XL, UD-Q6_K_XL and UD-Q8_K_XL targets with the
+Unsloth Q8_0 `gemma4-assistant` MTP drafter. The UD-Q8_K_XL tables are a
+reduced grid (depths to 32K, up to two users, measured 2026-09-30). Gufo drafts up to seven tokens under its
 calibrated length control; llama.cpp drafts up to four. HTTP, greedy,
 thinking off. llama.cpp is the repository's pinned `b11069` (ROCm) reference.
 Positive gain favors Gufo. **TODO** means unmeasured.
@@ -49,18 +50,20 @@ Approximately pp2048 / tg128; depth is the cached prefix in tokens.
 <!-- bench:single-ar-q8 -->
 | Gemma 4 26B-A4B UD-Q8_K_XL AR<br>Depth (tokens) | Gufo pp (tok/s) | llama.cpp pp (tok/s) | Gain | Gufo tg (tok/s) | llama.cpp tg (tok/s) | Gain |
 | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| 0 | TODO | TODO | TODO | TODO | TODO | TODO |
-| 4,096 | TODO | TODO | TODO | TODO | TODO | TODO |
-| 16,384 | TODO | TODO | TODO | TODO | TODO | TODO |
-| 32,768 | TODO | TODO | TODO | TODO | TODO | TODO |
+| 0 | 3427.92 | 1392.01 | +146.3% | 45.72 | 38.69 | +18.2% |
+| 4,096 | 3135.01 | 1212.07 | +158.6% | 45.31 | 38.17 | +18.7% |
+| 16,384 | 2439.11 | 907.60 | +168.7% | 43.51 | 36.66 | +18.7% |
+| 32,768 | 2070.76 | 680.43 | +204.3% | 41.82 | 34.84 | +20.0% |
 <!-- /bench -->
+
+![Single user, autoregressive](artifacts/charts/single-ar-q8.svg)
 
 ## Single user, MTP
 
 pp is the highest measured rate per engine and depth across mixed/repetitive
 text. Greedy texts differ between the engines, so accepted drafts per cycle
 differ per depth (artifacts). Over the same HTTP path Gufo's AR decodes at
-50.7 (Q4) and 47.0 (Q6) tok/s at d0.
+50.7 (Q4), 47.0 (Q6) and 45.7 (Q8) tok/s at d0.
 
 <!-- bench:single-mtp-q4 -->
 | Gemma 4 26B-A4B UD-Q4_K_XL MTP<br>Depth (tokens) | Gufo pp (tok/s) | llama.cpp pp (tok/s) | Gain pp | Gufo tg mixed (tok/s) | llama.cpp tg mixed (tok/s) | Gain mixed | Gufo tg repetitive (tok/s) | llama.cpp tg repetitive (tok/s) | Gain repetitive |
@@ -99,11 +102,13 @@ differ per depth (artifacts). Over the same HTTP path Gufo's AR decodes at
 <!-- bench:single-mtp-q8 -->
 | Gemma 4 26B-A4B UD-Q8_K_XL MTP<br>Depth (tokens) | Gufo pp (tok/s) | llama.cpp pp (tok/s) | Gain pp | Gufo tg mixed (tok/s) | llama.cpp tg mixed (tok/s) | Gain mixed | Gufo tg repetitive (tok/s) | llama.cpp tg repetitive (tok/s) | Gain repetitive |
 | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| 0 | TODO | TODO | TODO | TODO | TODO | TODO | TODO | TODO | TODO |
-| 4,096 | TODO | TODO | TODO | TODO | TODO | TODO | TODO | TODO | TODO |
-| 16,384 | TODO | TODO | TODO | TODO | TODO | TODO | TODO | TODO | TODO |
-| 32,768 | TODO | TODO | TODO | TODO | TODO | TODO | TODO | TODO | TODO |
+| 0 | 3411.96 | 1376.85 | +147.8% | 70.25 | 47.09 | +49.2% | 177.12 | 54.45 | +225.3% |
+| 4,096 | 3171.11 | 1175.04 | +169.9% | 67.99 | 49.15 | +38.3% | 130.76 | 58.39 | +123.9% |
+| 16,384 | 2448.45 | 885.18 | +176.6% | 59.15 | 47.25 | +25.2% | 138.44 | 54.67 | +153.2% |
+| 32,768 | 2059.98 | 659.89 | +212.2% | 61.12 | 34.99 | +74.7% | 126.88 | 58.45 | +117.1% |
 <!-- /bench -->
+
+![Single user, MTP](artifacts/charts/single-mtp-q8.svg)
 
 ## Single user, sampled MTP
 
@@ -133,8 +138,10 @@ after the cached prefix. Mean of three requests with seeds 1–3.
 <!-- bench:single-mtp-sampled-q8 -->
 | Gemma 4 26B-A4B UD-Q8_K_XL MTP<br>Depth (tokens) | Gufo pp (tok/s) | llama.cpp pp (tok/s) | Gain | Gufo tg (tok/s) | llama.cpp tg (tok/s) | Gain |
 | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| 0 | TODO | TODO | TODO | TODO | TODO | TODO |
+| 0 | 3373.53 ± 20.25 | 1360.70 ± 13.47 | +147.9% | 60.02 ± 1.35 | 38.41 ± 1.34 | +56.3% |
 <!-- /bench -->
+
+![Single user, sampled MTP](artifacts/charts/single-mtp-sampled-q8.svg)
 
 ## Multiple users, autoregressive
 
@@ -172,9 +179,11 @@ All sessions prefilled before timed decoding; throughput sums individual rates.
 <!-- bench:multi-ar-q8 -->
 | Gemma 4 26B-A4B UD-Q8_K_XL AR<br>Users | Gufo AR (tok/s) | llama.cpp AR (tok/s) | Gain |
 | ---: | ---: | ---: | ---: |
-| 1 | TODO | TODO | TODO |
-| 2 | TODO | TODO | TODO |
+| 1 | 45.70 | 38.46 | +18.8% |
+| 2 | 82.39 | 59.11 | +39.4% |
 <!-- /bench -->
+
+![Multiple users, autoregressive](artifacts/charts/multi-ar-q8.svg)
 
 ## Multiple users, MTP
 
@@ -215,9 +224,11 @@ Gufo's own AR (126 vs 143 tok/s, one sample).
 <!-- bench:multi-mtp-q8 -->
 | Gemma 4 26B-A4B UD-Q8_K_XL MTP<br>Users | Gufo mixed (tok/s) | llama.cpp mixed (tok/s) | Gain | Gufo repetitive (tok/s) | llama.cpp repetitive (tok/s) | Gain |
 | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| 1 | TODO | TODO | TODO | TODO | TODO | TODO |
-| 2 | TODO | TODO | TODO | TODO | TODO | TODO |
+| 1 | 68.55 | 47.59 | +44.0% | 176.90 | 52.22 | +238.8% |
+| 2 | 119.21 | 75.70 | +57.5% | 231.09 | 88.95 | +159.8% |
 <!-- /bench -->
+
+![Multiple users, MTP](artifacts/charts/multi-mtp-q8.svg)
 
 ## Image requests
 
@@ -251,7 +262,7 @@ C1, context capacity 262144, MTP. Cold model files to HTTP readiness.
 | --- | ---: | ---: | ---: |
 | UD-Q4_K_XL | 3.87 | 5.63 | +45.5% |
 | UD-Q6_K_XL | 4.91 | 6.84 | +39.3% |
-| UD-Q8_K_XL | TODO | TODO | TODO |
+| UD-Q8_K_XL | 5.79 | 7.65 | +32.1% |
 <!-- /bench -->
 
 ![Loading time](artifacts/charts/loading.svg)
@@ -286,6 +297,8 @@ cache, so its footprint does not grow with the prefix.
 <!-- bench:memory-q8 -->
 | Gemma 4 26B-A4B UD-Q8_K_XL AR<br>Workload | Gufo GiB | llama.cpp GiB | Gain |
 | --- | ---: | ---: | ---: |
-| pp2048 + tg128 | TODO | TODO | TODO |
-| 16K prefix, pp4096 + tg128 | TODO | TODO | TODO |
+| pp2048 + tg128 | 32.71 | 33.59 | +2.7% |
+| 16K prefix, pp4096 + tg128 | 33.45 | 34.14 | +2.1% |
 <!-- /bench -->
+
+![Memory occupation](artifacts/charts/memory-q8.svg)

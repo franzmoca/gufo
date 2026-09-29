@@ -23,5 +23,15 @@
     "fork": "halo-box/strix-llama.cpp 8c1c282ec, Vulkan RADV, GGML_VK_MMV_NO_SPLIT=1, -b 2048 -ub 512 -t 8",
     "measurement": "One warmed sample per point, greedy, thinking off, four MTP draft tokens on both engines. Loading drops the page cache with echo 3 > /proc/sys/vm/drop_caches before each launch.",
     "images": "Gufo image requests remeasured 2026-09-29 with the binary16 vision encoder; llama.cpp rows from 2026-09-28"
+  },
+  "benchmarks-2026-09-30-q8": {
+    "gufo": {
+      "revision": "beeb28a",
+      "build": "nix build",
+      "binarySha256Prefix": "b69774722d0a30d1",
+      "tables": "UD-Q8_K_XL reduced grid: single-user depths 0/4096/16384/32768, sampled MTP d0, C1-C2, memory, loading"
+    },
+    "reference": "llama.cpp b11069 from flake.nix, ROCm gfx1151, measured 2026-09-30 on the same grid",
+    "measurement": "One warmed sample per point (sampled MTP: three seeds), greedy, thinking off; MTP drafts up to seven (Gufo, calibrated policy) and four (llama.cpp). Loading drops the page cache with sync; echo 3 > /proc/sys/vm/drop_caches before each launch."
   }
 }

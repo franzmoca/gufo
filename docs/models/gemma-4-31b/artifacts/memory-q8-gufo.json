@@ -23,28 +23,26 @@
     "schemaVersion": "1.0.0"
   },
   "measuredOn": "2026-09-29",
-  "mode": "mtp",
+  "mode": null,
   "model": {
     "id": "Gemma-4-31B-It",
-    "variant": null
+    "variant": "q8"
   },
   "notes": [
-    "file cache reset before each launch with the supplied --drop-caches command",
-    "readiness = HTTP 200 on /ready"
+    "peak device-global hipMemGetInfo used bytes (total - free), sampled every 250 ms during the request; idle_gib is the same counter before the server started",
+    "server mode: ar"
   ],
   "referenceName": "llama.cpp",
   "rows": {
-    "default": {
-      "command": "gufo serve --port 52911 --sessions 1 llm --model gemma-4-31B-it-UD-Q4_K_XL.gguf --context 262144 --served-model-name bench --think off --max-pending-per-client 8 --speculative mtp --mtp-model mtp-gemma-4-31B-it-Q8_0.gguf --draft-tokens 7",
-      "ready_s": 4.322,
-      "ready_s_sd": null,
-      "samples": 1
+    "16K prefix, pp4096 + tg128": {
+      "command": "gufo serve --port 34401 --sessions 1 llm --model gemma-4-31B-it-UD-Q8_K_XL.gguf --context 133121 --served-model-name bench --think off --max-pending-per-client 8",
+      "gib": 51.03,
+      "idle_gib": 3.01
     },
-    "q8": {
-      "command": "gufo serve --port 33949 --sessions 1 llm --model gemma-4-31B-it-UD-Q8_K_XL.gguf --context 262144 --served-model-name bench --think off --max-pending-per-client 8 --speculative mtp --mtp-model mtp-gemma-4-31B-it-Q8_0.gguf --draft-tokens 7",
-      "ready_s": 7.056,
-      "ready_s_sd": null,
-      "samples": 1
+    "pp2048 + tg128": {
+      "command": "gufo serve --port 34401 --sessions 1 llm --model gemma-4-31B-it-UD-Q8_K_XL.gguf --context 133121 --served-model-name bench --think off --max-pending-per-client 8",
+      "gib": 48.11,
+      "idle_gib": 3.01
     }
   },
   "schemaVersion": 1,
@@ -53,26 +51,20 @@
       "gufo",
       "serve",
       "--port",
-      "33949",
+      "34401",
       "--sessions",
       "1",
       "llm",
       "--model",
       "gemma-4-31B-it-UD-Q8_K_XL.gguf",
       "--context",
-      "262144",
+      "133121",
       "--served-model-name",
       "bench",
       "--think",
       "off",
       "--max-pending-per-client",
-      "8",
-      "--speculative",
-      "mtp",
-      "--mtp-model",
-      "mtp-gemma-4-31B-it-Q8_0.gguf",
-      "--draft-tokens",
-      "7"
+      "8"
     ]
   },
   "source": {
@@ -80,6 +72,6 @@
     "dirty": true,
     "revision": "beeb28a4309f6ab2d4aac14cfe635a6ff4e2d064"
   },
-  "table": "loading",
+  "table": "memory-q8",
   "target": "gufo"
 }
