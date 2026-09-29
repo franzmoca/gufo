@@ -755,6 +755,10 @@ std::optional<qwen38_flash_next::rocm::WeightType> RoutedHalfType(
 /// 48, which it needs its own tile map for).
 constexpr std::uint32_t kRoutedTileRows = 48;
 constexpr std::uint32_t kRoutedDownRows = 64;
+/// The Gemma Q6_K gate/up GEMM skips a tile's empty 16-row parts, so wide
+/// tiles cost no padding work: 96 rows 4.3 ms per 2048-row layer, 48 rows
+/// 6.3, 128 rows 4.7 (one block per WGP).
+constexpr std::uint32_t kRoutedQ6KTileRows = 96;
 
 }  // namespace
 
@@ -855,11 +859,13 @@ bool Executor::PrefillExperts(const DeviceLayer& l, std::uint32_t n,
   HIP_CHECK(hipStreamSynchronize(stream));
   // The down projection's map follows the gate/up map at a fixed offset.
   const std::size_t down_at = std::size_t{n} * used / 16 + c.num_experts;
+  const std::uint32_t gate_up_rows =
+      q6_gate_up ? kRoutedQ6KTileRows : kRoutedTileRows;
   std::uint32_t tiles = 0;
   std::uint32_t down_tiles = 0;
   for (std::uint32_t e = 0; e < c.num_experts; ++e) {
     const std::uint32_t padded = (moe_counts_host_[e] + 15U) / 16U * 16U;
-    for (std::uint32_t j = 0; j * kRoutedTileRows < padded; ++j) {
+    for (std::uint32_t j = 0; j * gate_up_rows < padded; ++j) {
       moe_tiles_host_[tiles++] = static_cast<std::int32_t>(e | (j << 16));
     }
     for (std::uint32_t j = 0; j * kRoutedDownRows < padded; ++j) {
@@ -879,7 +885,7 @@ bool Executor::PrefillExperts(const DeviceLayer& l, std::uint32_t n,
   const bool gate_up_ok =
       q6_gate_up
           ? LaunchRoutedHalfGemm(ExpertFormat::kQ6_K, l.gate_up_exps.data,
-                                 x_half_, moe_tiles_, tiles, kRoutedTileRows,
+                                 x_half_, moe_tiles_, tiles, gate_up_rows,
                                  moe_bounds_, moe_rows_token_, moe_rows_slot_,
                                  nullptr, gu, 2 * width, d, stream)
           : fn::RoutedF16Gemm(l.gate_up_exps.data, *gate_up,

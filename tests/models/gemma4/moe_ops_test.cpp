@@ -514,15 +514,16 @@ void CheckFinish(std::mt19937& rng) {
 }
 
 /// The Q6_K routed prefill GEMM over binary16 rows, in the routing layout
-/// the executor builds (Flash-Next compaction, 48-row tiles), against FP64
+/// the executor builds (Flash-Next compaction, 96-row tiles), against FP64
 /// dots of the dequantized rows and the binary16 inputs.
 void CheckRoutedPrefill(const Format& f, std::mt19937& rng) {
   namespace fn = gufo::models::qwen38_flash_next::rocm;
-  constexpr std::uint32_t kTokens = 150;
+  // About 150 rows per expert: a full 96-row tile and a partly live one.
+  constexpr std::uint32_t kTokens = 300;
   constexpr std::uint32_t kExpertsHere = 16;
   constexpr std::uint32_t m = 2 * kWidth;
   constexpr std::uint32_t k = kHidden;
-  constexpr std::uint32_t kTile = 48;
+  constexpr std::uint32_t kTile = 96;
   std::vector<std::int32_t> ids(kTokens * kUsed);
   std::vector<std::uint32_t> counts(kExpertsHere, 0);
   for (std::uint32_t t = 0; t < kTokens; ++t) {

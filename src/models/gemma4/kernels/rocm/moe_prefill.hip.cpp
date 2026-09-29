@@ -4,12 +4,14 @@
 // tile map of expert | tile << 16 entries.
 //
 // A block computes 128 output rows (eight waves of 16) for one tile of
-// kTileTokens bucket rows. Per 32-value K block the tile's activations are
-// staged in LDS (double buffered, one barrier per block) and every lane
-// decodes its own weight row straight into binary16 WMMA fragments.
-// Fragment layout (wave32 v_wmma_f32_16x16x16_f16): A holds row L%16 and B
-// column L%16, each with 16 K values in both half-waves; C lane L holds
-// column L%16, rows 2 i + L/16.
+// kTileTokens bucket rows. A stage is half a Q6_K super-block (128 K values,
+// four 32-value K blocks): two threads per row fetch its 96 code bytes, eight
+// scales and d one stage ahead in registers, with neighbouring threads on
+// neighbouring bytes, and commit them with the tile's activations to LDS.
+// Each lane then decodes its own row's K blocks straight into binary16 WMMA
+// fragments. Fragment layout (wave32 v_wmma_f32_16x16x16_f16): A holds row
+// L%16 and B column L%16, each with 16 K values in both half-waves; C lane L
+// holds column L%16, rows 2 i + L/16.
 #include <hip/hip_fp16.h>
 #include <hip/hip_runtime.h>
 
@@ -26,9 +28,15 @@ using v8f = __attribute__((__vector_size__(8 * sizeof(float)))) float;
 constexpr int kThreads = 256;
 constexpr int kWave = 32;
 constexpr int kRowsPerBlock = 128;
-/// Halves per staged token row: 32 values plus padding against bank
-/// conflicts on the fragment reads.
-constexpr int kActStride = 40;
+/// K values per stage: half a Q6_K super-block.
+constexpr int kStageK = 128;
+/// Bytes per staged row: 64 low-bit bytes, 32 high-bit bytes, 16 bytes of
+/// eight binary16 scales. 112 = 28 dwords puts the 16 rows a fragment read
+/// touches on distinct bank groups.
+constexpr int kRowStride = 112;
+/// Halves per staged token row: 128 values plus padding (68 dwords) against
+/// bank conflicts on the fragment reads.
+constexpr int kActStride = kStageK + 8;
 
 __device__ __forceinline__ v8f Wmma(v16h a, v16h b, v8f c) {
   return __builtin_amdgcn_wmma_f32_16x16x16_f16_w32(a, b, c);
@@ -46,40 +54,36 @@ __device__ __forceinline__ void CodesToHalves(std::uint32_t codes,
   out[1] = __hmul2(__hsub2(__builtin_bit_cast(__half2, p1), offset), scale);
 }
 
-/// Q6_K K block `kb` (32 values) of a row as two fragments. Block j = kb % 8
-/// of a super-block is half n = j / 4, quarter s = j % 4: low (s < 2) or
-/// high nibbles of ql[64 n + 32 (s % 2) + l], bits 2 s of qh[32 n + l],
-/// scales sc[8 n + 2 s] (l < 16) and sc[8 n + 2 s + 1], offset 32.
-__device__ __forceinline__ void DecodeQ6K(const std::uint8_t* row, int kb,
+/// K block s (< 4) of a staged half super-block as two fragments: low
+/// (s < 2) or high nibbles of ql[32 (s % 2) + l], bits 2 s of qh[l], scales
+/// 2 s (l < 16) and 2 s + 1, offset 32.
+__device__ __forceinline__ void DecodeQ6K(const uint4 (&ql)[4],
+                                          const uint4 (&qh)[2],
+                                          const __half2 (&scale)[4], int s,
                                           v16h* lo, v16h* hi) {
-  const std::uint8_t* block = row + (kb / 8) * 210;
-  const int j = kb % 8;
-  const int n = j / 4;
-  const int s = j % 4;
-  const uint4* ql =
-      reinterpret_cast<const uint4*>(block + 64 * n + 32 * (s & 1));
-  const uint4* qh = reinterpret_cast<const uint4*>(block + 128 + 32 * n);
-  const float d = __half2float(*reinterpret_cast<const __half*>(block + 208));
-  const auto* sc = reinterpret_cast<const std::int8_t*>(block + 192 + 8 * n);
   const int nibble = (s >> 1) * 4;
   const int high = 2 * s;
   const __half2 offset = __float2half2_rn(1056.0F);
 #pragma unroll
   for (int part = 0; part < 2; ++part) {
-    const uint4 l4 = ql[part];
+    const uint4 l4 = ql[2 * (s & 1) + part];
     const uint4 h4 = qh[part];
     const std::uint32_t lw[4] = {l4.x, l4.y, l4.z, l4.w};
     const std::uint32_t hw[4] = {h4.x, h4.y, h4.z, h4.w};
-    const __half2 scale =
-        __float2half2_rn(d * static_cast<float>(sc[2 * s + part]));
+    const __half2 sc =
+        part == 0 ? __low2half2(scale[s]) : __high2half2(scale[s]);
     __half2 h[8];
 #pragma unroll
     for (int i = 0; i < 4; ++i) {
       const std::uint32_t codes = ((lw[i] >> nibble) & 0x0F0F0F0FU) |
                                   (((hw[i] >> high) & 0x03030303U) << 4U);
-      CodesToHalves(codes, offset, scale, &h[2 * i]);
+      CodesToHalves(codes, offset, sc, &h[2 * i]);
     }
-    __builtin_memcpy(part == 0 ? lo : hi, h, 32);
+    if (part == 0) {
+      __builtin_memcpy(lo, h, 32);
+    } else {
+      __builtin_memcpy(hi, h, 32);
+    }
   }
 }
 
@@ -94,9 +98,13 @@ __global__ void __launch_bounds__(kThreads)
                         float* __restrict__ out, __half* __restrict__ out_half,
                         std::uint32_t m, std::uint32_t k) {
   constexpr int kTokTiles = kTileTokens / 16;
-  constexpr int kLoads = kTileTokens * 4;  // uint4 per staged K block
+  // uint4 activation chunks per stage (16 per token) and per thread.
+  constexpr int kActChunks = kTileTokens * kStageK / 8;
+  constexpr int kActPer = (kActChunks + kThreads - 1) / kThreads;
+  __shared__ __attribute__((
+      aligned(16))) std::uint8_t s_rows[kRowsPerBlock * kRowStride];
   __shared__
-      __attribute__((aligned(16))) __half s_act[2][kTileTokens * kActStride];
+      __attribute__((aligned(16))) __half s_act[kTileTokens * kActStride];
   const std::int32_t tile = tiles[blockIdx.y];
   const int expert = tile & 0xFFFF;
   const int t_local = (tile >> 16) * kTileTokens;
@@ -105,34 +113,103 @@ __global__ void __launch_bounds__(kThreads)
   if (t_local >= bucket_rows) {
     return;
   }
+  const int live_tiles = min(kTokTiles, (bucket_rows - t_local + 15) / 16);
   const int tid = static_cast<int>(threadIdx.x);
   const int lane = tid % kWave;
   const int wave = tid / kWave;
   const int sub = lane & 15;
   const int half = lane >> 4;
-  const std::uint32_t row =
-      blockIdx.x * kRowsPerBlock + static_cast<std::uint32_t>(wave * 16 + sub);
   const std::size_t row_bytes = std::size_t{k} / 256 * 210;
-  const std::uint8_t* w_row =
-      w + (std::size_t{static_cast<std::uint32_t>(expert)} * m +
-           (row < m ? row : m - 1)) *
-              row_bytes;
 
-  // Activation staging: thread tid < kLoads loads 8 values (a quarter of
-  // the K block) of token tid / 4.
-  const int a_tok = tid / 4;
-  const int a_quarter = tid % 4;
-  const uint4* a_src = nullptr;
-  if (tid < kLoads && t_local + a_tok < bucket_rows) {
-    const std::int32_t src = rows_in[bucket_begin + t_local + a_tok];
-    if (src >= 0) {
-      a_src = reinterpret_cast<const uint4*>(
-                  x + std::size_t{static_cast<std::uint32_t>(src)} * k) +
-              a_quarter;
+  // Weight fetch: thread tid moves row tid / 2 of the block. Part 0 takes
+  // ql bytes 0-47 of the stage, part 1 ql 48-63 and the 32 qh bytes, plus
+  // the eight scales and d, which it commits as binary16 d * sc.
+  const int f_row = tid >> 1;
+  const int f_part = tid & 1;
+  const std::uint32_t f_global = blockIdx.x * kRowsPerBlock + f_row;
+  const bool f_live = f_global < m;
+  const std::uint8_t* f_ptr =
+      w + (std::size_t{static_cast<std::uint32_t>(expert)} * m +
+           (f_live ? f_global : m - 1)) *
+              row_bytes;
+  uint4 f_code0;
+  uint4 f_code1;
+  uint4 f_code2;
+  uint2 f_sc;
+  float f_d = 0.0F;
+  const auto fetch_weights = [&](int stage) {
+    const std::uint8_t* block = f_ptr + (stage / 2) * 210;
+    const int n = stage % 2;
+    // Part 0: ql bytes 0-47; part 1: ql 48-63, then the qh bytes at
+    // 128 + 32 n, 64 - 32 n bytes past the end of ql.
+    const std::uint8_t* first = block + 64 * n + 48 * f_part;
+    const int gap = f_part * (64 - 32 * n);
+    f_code0 = *reinterpret_cast<const uint4*>(first);
+    f_code1 = *reinterpret_cast<const uint4*>(first + 16 + gap);
+    f_code2 = *reinterpret_cast<const uint4*>(first + 32 + gap);
+    f_sc = *reinterpret_cast<const uint2*>(block + 192 + 8 * n);
+    f_d = __half2float(*reinterpret_cast<const __half*>(block + 208));
+  };
+  const auto commit_weights = [&] {
+    auto* dst = reinterpret_cast<uint4*>(s_rows + f_row * kRowStride);
+    dst[3 * f_part] = f_code0;
+    dst[3 * f_part + 1] = f_code1;
+    dst[3 * f_part + 2] = f_code2;
+    if (f_part == 1) {
+      const float d = f_live ? f_d : 0.0F;
+      const std::uint32_t sw[2] = {f_sc.x, f_sc.y};
+      std::uint32_t packed[4];
+#pragma unroll
+      for (int i = 0; i < 4; ++i) {
+        const auto lo = static_cast<std::int8_t>(sw[i / 2] >> (16 * (i % 2)));
+        const auto hi =
+            static_cast<std::int8_t>(sw[i / 2] >> (16 * (i % 2) + 8));
+        // The rounding DecodeQ6K applied per block: d * sc in FP32, then
+        // binary16.
+        packed[i] = __builtin_bit_cast(
+            std::uint32_t,
+            __halves2half2(__float2half_rn(d * static_cast<float>(lo)),
+                           __float2half_rn(d * static_cast<float>(hi))));
+      }
+      dst[6] = make_uint4(packed[0], packed[1], packed[2], packed[3]);
+    }
+  };
+
+  // Activation fetch: chunk c = tid + 256 i is token c / 16, eight values at
+  // K offset 8 (c % 16) of the stage; a_src is that chunk's offset in x at
+  // stage 0, or -1 for a padding row.
+  std::int32_t a_src[kActPer];
+#pragma unroll
+  for (int i = 0; i < kActPer; ++i) {
+    const int chunk = tid + i * kThreads;
+    const int t = chunk / 16;
+    a_src[i] = -1;
+    if (chunk < kActChunks && t_local + t < bucket_rows) {
+      const std::int32_t src = rows_in[bucket_begin + t_local + t];
+      if (src >= 0) {
+        a_src[i] = src * static_cast<std::int32_t>(k) + (chunk % 16) * 8;
+      }
     }
   }
-  const auto load = [&](int kb) {
-    return a_src != nullptr ? a_src[kb * 4] : make_uint4(0U, 0U, 0U, 0U);
+  uint4 a_data[kActPer];
+  const auto fetch_act = [&](int stage) {
+#pragma unroll
+    for (int i = 0; i < kActPer; ++i) {
+      a_data[i] =
+          a_src[i] >= 0
+              ? *reinterpret_cast<const uint4*>(x + a_src[i] + stage * kStageK)
+              : make_uint4(0U, 0U, 0U, 0U);
+    }
+  };
+  const auto commit_act = [&] {
+#pragma unroll
+    for (int i = 0; i < kActPer; ++i) {
+      const int chunk = tid + i * kThreads;
+      if (chunk < kActChunks) {
+        *reinterpret_cast<uint4*>(s_act + (chunk / 16) * kActStride +
+                                  (chunk % 16) * 8) = a_data[i];
+      }
+    }
   };
 
   v8f acc[kTokTiles];
@@ -140,31 +217,44 @@ __global__ void __launch_bounds__(kThreads)
   for (int j = 0; j < kTokTiles; ++j) {
     acc[j] = v8f{0.0F, 0.0F, 0.0F, 0.0F, 0.0F, 0.0F, 0.0F, 0.0F};
   }
-  const int blocks = static_cast<int>(k / 32);
-  uint4 next = load(0);
-  for (int kb = 0; kb < blocks; ++kb) {
-    __half* stage = s_act[kb & 1];
-    if (tid < kLoads) {
-      *reinterpret_cast<uint4*>(stage + a_tok * kActStride + a_quarter * 8) =
-          next;
+  const int stages = static_cast<int>(k / kStageK);
+  fetch_weights(0);
+  fetch_act(0);
+  for (int stage = 0; stage < stages; ++stage) {
+    commit_weights();
+    commit_act();
+    __syncthreads();
+    if (stage + 1 < stages) {
+      fetch_weights(stage + 1);
+      fetch_act(stage + 1);
+    }
+    const auto* row =
+        reinterpret_cast<const uint4*>(s_rows + (wave * 16 + sub) * kRowStride);
+    const uint4 ql[4] = {row[0], row[1], row[2], row[3]};
+    const uint4 qh[2] = {row[4], row[5]};
+    const uint4 sc4 = row[6];
+    const __half2 scale[4] = {
+        __builtin_bit_cast(__half2, sc4.x), __builtin_bit_cast(__half2, sc4.y),
+        __builtin_bit_cast(__half2, sc4.z), __builtin_bit_cast(__half2, sc4.w)};
+#pragma unroll
+    for (int s = 0; s < 4; ++s) {
+      v16h a_lo;
+      v16h a_hi;
+      DecodeQ6K(ql, qh, scale, s, &a_lo, &a_hi);
+#pragma unroll
+      for (int j = 0; j < kTokTiles; ++j) {
+        if (j < live_tiles) {
+          const __half* b = s_act + (j * 16 + sub) * kActStride + s * 32;
+          v16h b_lo;
+          v16h b_hi;
+          __builtin_memcpy(&b_lo, b, 32);
+          __builtin_memcpy(&b_hi, b + 16, 32);
+          acc[j] = Wmma(a_lo, b_lo, acc[j]);
+          acc[j] = Wmma(a_hi, b_hi, acc[j]);
+        }
+      }
     }
     __syncthreads();
-    if (kb + 1 < blocks) {
-      next = load(kb + 1);
-    }
-    v16h a_lo;
-    v16h a_hi;
-    DecodeQ6K(w_row, kb, &a_lo, &a_hi);
-#pragma unroll
-    for (int j = 0; j < kTokTiles; ++j) {
-      const __half* b = stage + (j * 16 + sub) * kActStride;
-      v16h b_lo;
-      v16h b_hi;
-      __builtin_memcpy(&b_lo, b, 32);
-      __builtin_memcpy(&b_hi, b + 16, 32);
-      acc[j] = Wmma(a_lo, b_lo, acc[j]);
-      acc[j] = Wmma(a_hi, b_hi, acc[j]);
-    }
   }
 #pragma unroll
   for (int j = 0; j < kTokTiles; ++j) {
@@ -204,11 +294,11 @@ bool LaunchRoutedHalfGemm(ExpertFormat format, const void* w, const void* x,
                           const std::int32_t* rows_out, float* out,
                           void* out_half, std::uint32_t m, std::uint32_t k,
                           hipStream_t stream) {
-  if (format != ExpertFormat::kQ6_K || tile_rows != 48 || k % 256 != 0 ||
+  if (format != ExpertFormat::kQ6_K || tile_rows != 96 || k % 256 != 0 ||
       n_tiles == 0 || (out == nullptr) == (out_half == nullptr)) {
     return false;
   }
-  RoutedHalfQ6KKernel<48>
+  RoutedHalfQ6KKernel<96>
       <<<dim3((m + kRowsPerBlock - 1) / kRowsPerBlock, n_tiles), kThreads, 0,
          stream>>>(static_cast<const std::uint8_t*>(w),
                    static_cast<const __half*>(x), tiles, pad_bounds, rows_in,
