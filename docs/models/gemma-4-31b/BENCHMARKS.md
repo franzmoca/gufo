@@ -15,14 +15,14 @@ Approximately pp2048 / tg128; depth is the cached prefix in tokens.
 <!-- bench:single-ar -->
 | Gemma 4 31B Q4 AR<br>Depth (tokens) | Gufo pp (tok/s) | llama.cpp pp (tok/s) | Gain | Gufo tg (tok/s) | llama.cpp tg (tok/s) | Gain |
 | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| 0 | 427.05 | 300.91 | +41.9% | 10.73 | 9.80 | +9.5% |
-| 4,096 | 390.56 | 264.62 | +47.6% | 10.60 | 9.61 | +10.3% |
-| 8,192 | 368.90 | 239.48 | +54.0% | 10.46 | 9.43 | +10.9% |
-| 12,288 | 345.49 | 215.96 | +60.0% | 10.37 | 9.26 | +12.0% |
-| 16,384 | 343.90 | 202.00 | +70.2% | 10.24 | 9.11 | +12.4% |
-| 32,768 | 294.07 | 154.12 | +90.8% | 9.81 | 8.51 | +15.3% |
-| 65,536 | 225.69 | 104.28 | +116.4% | 9.07 | 7.53 | +20.5% |
-| 131,072 | 156.09 | 64.56 | +141.8% | 7.84 | 6.12 | +28.1% |
+| 0 | 416.28 | 300.91 | +38.3% | 10.97 | 9.80 | +11.9% |
+| 4,096 | 398.99 | 264.62 | +50.8% | 10.85 | 9.61 | +12.9% |
+| 8,192 | 382.26 | 239.48 | +59.6% | 10.69 | 9.43 | +13.4% |
+| 12,288 | 361.53 | 215.96 | +67.4% | 10.59 | 9.26 | +14.4% |
+| 16,384 | 353.63 | 202.00 | +75.1% | 10.46 | 9.11 | +14.8% |
+| 32,768 | 306.50 | 154.12 | +98.9% | 10.01 | 8.51 | +17.6% |
+| 65,536 | 242.23 | 104.28 | +132.3% | 9.24 | 7.53 | +22.7% |
+| 131,072 | 158.16 | 64.56 | +145.0% | 7.98 | 6.12 | +30.4% |
 <!-- /bench -->
 
 ![Single user, autoregressive](artifacts/charts/single-ar.svg)
@@ -32,19 +32,17 @@ Approximately pp2048 / tg128; depth is the cached prefix in tokens.
 pp is the highest measured rate per engine and depth across mixed/repetitive
 text.
 
-\* Gufo cells measured with the previous `--draft-policy confidence` default; see [MTP draft policy](#mtp-draft-policy) for the calibrated default at d0 and 8K.
-
 <!-- bench:single-mtp -->
 | Gemma 4 31B Q4 MTP<br>Depth (tokens) | Gufo pp (tok/s) | llama.cpp pp (tok/s) | Gain pp | Gufo tg mixed (tok/s) | llama.cpp tg mixed (tok/s) | Gain mixed | Gufo tg repetitive (tok/s) | llama.cpp tg repetitive (tok/s) | Gain repetitive |
 | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| 0 | 420.58 | 294.20 | +43.0% | 23.19 | 19.08 | +21.5% | 59.51 | 31.11 | +91.3% |
-| 4,096 | 397.33 | 253.33 | +56.8% | 23.49 | 20.32 | +15.6% | 53.70 | 32.28 | +66.4% |
-| 8,192 | 373.91 | 231.63 | +61.4% | 22.25 | 18.58 | +19.8% | 55.08 | 28.74 | +91.6% |
-| 12,288 | 356.43 | 211.21 | +68.8% | 21.53 | 18.14 | +18.7% | 53.72 | 28.37 | +89.4% |
-| 16,384 | 347.03 | 195.22 | +77.8% | 21.65 | 15.95 | +35.7% | 49.73 | 27.19 | +82.9% |
-| 32,768 | 303.82 | 150.59 | +101.8% | 21.00 | 14.89 | +41.0% | 45.09 | 21.08 | +113.9% |
-| 65,536 | 231.72 | 102.73 | +125.6% | 15.83 | 10.56 | +49.9% | 38.27 | 14.85 | +157.7% |
-| 131,072 | 161.18 | 63.79 | +152.7% | 12.73 | 6.92 | +84.0% | 30.77 | 4.09 | +652.3% |
+| 0 | 426.52 | 294.20 | +45.0% | 23.24 | 19.08 | +21.8% | 60.85 | 31.11 | +95.6% |
+| 4,096 | 404.86 | 253.33 | +59.8% | 21.37 | 20.32 | +5.2% | 54.54 | 32.28 | +69.0% |
+| 8,192 | 378.22 | 231.63 | +63.3% | 23.90 | 18.58 | +28.6% | 56.15 | 28.74 | +95.4% |
+| 12,288 | 361.30 | 211.21 | +71.1% | 21.44 | 18.14 | +18.2% | 54.82 | 28.37 | +93.2% |
+| 16,384 | 354.14 | 195.22 | +81.4% | 21.50 | 15.95 | +34.8% | 51.49 | 27.19 | +89.4% |
+| 32,768 | 310.37 | 150.59 | +106.1% | 20.88 | 14.89 | +40.2% | 46.49 | 21.08 | +120.5% |
+| 65,536 | 240.69 | 102.73 | +134.3% | 17.40 | 10.56 | +64.8% | 38.72 | 14.85 | +160.7% |
+| 131,072 | 162.58 | 63.79 | +154.9% | 13.44 | 6.92 | +94.2% | 30.89 | 4.09 | +655.3% |
 <!-- /bench -->
 
 ![Single user, MTP](artifacts/charts/single-mtp.svg)
@@ -57,16 +55,10 @@ turn itself is greedy). Mean of three requests with seeds 1–3; sampled text
 differs between engines and runs, so acceptance varies more than in the
 greedy tables.
 
-\* Gufo cells measured with the previous `--draft-policy confidence` default; see [MTP draft policy](#mtp-draft-policy) for the calibrated default at d0 and 8K.
-
 <!-- bench:single-mtp-sampled -->
 | Gemma 4 31B Q4 MTP<br>Depth (tokens) | Gufo pp (tok/s) | llama.cpp pp (tok/s) | Gain | Gufo tg (tok/s) | llama.cpp tg (tok/s) | Gain |
 | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| 0 | 419.66 ± 3.43 | 293.21 ± 0.96 | +43.1% | 19.71 ± 0.76 | 18.12 ± 1.97 | +8.8% |
-| 4,096 | 398.27 ± 3.61 | 256.40 ± 2.11 | +55.3% | 20.49 ± 1.44 | 16.51 ± 0.64 | +24.1% |
-| 16,384 | 343.57 ± 1.76 | 195.75 ± 1.13 | +75.5% | 18.30 ± 0.76 | 14.03 ± 1.35 | +30.4% |
-| 32,768 | 297.39 ± 1.88 | 150.21 ± 0.25 | +98.0% | 16.89 ± 0.85 | 10.62 ± 0.56 | +59.0% |
-| 65,536 | 231.60 ± 0.79 | 102.75 ± 0.08 | +125.4% | 15.24 ± 1.30 | 9.37 ± 0.88 | +62.6% |
+| 0 | 417.56 ± 3.50 | 293.21 ± 0.96 | +42.4% | 21.42 ± 0.31 | 18.12 ± 1.97 | +18.2% |
 <!-- /bench -->
 
 ![Single user, sampled MTP](artifacts/charts/single-mtp-sampled.svg)
@@ -82,11 +74,11 @@ cache (16 MB per layer), about a fifth of an eight-user step.
 <!-- bench:multi-ar -->
 | Gemma 4 31B Q4 AR<br>Users | Gufo AR (tok/s) | llama.cpp AR (tok/s) | Gain |
 | ---: | ---: | ---: | ---: |
-| 1 | 10.71 | 9.79 | +9.4% |
-| 2 | 19.44 | 17.54 | +10.8% |
-| 4 | 32.73 | 28.83 | +13.5% |
-| 6 | 43.81 | 34.03 | +28.7% |
-| 8 | 47.01 | 35.08 | +34.0% |
+| 1 | 10.97 | 9.79 | +12.1% |
+| 2 | 19.93 | 17.54 | +13.6% |
+| 4 | 33.56 | 28.83 | +16.4% |
+| 6 | 44.38 | 34.03 | +30.4% |
+| 8 | 48.19 | 35.08 | +37.4% |
 <!-- /bench -->
 
 ![Multiple users, autoregressive](artifacts/charts/multi-ar.svg)
@@ -102,16 +94,14 @@ llama.cpp verifies up to 4 drafts per user with Q8_1-activation matrix kernels,
 which scale further with rows. Gufo's lead from AR does not carry past two
 users.
 
-\* Gufo cells measured with the previous `--draft-policy confidence` default; see [MTP draft policy](#mtp-draft-policy) for the calibrated default at d0 and 8K.
-
 <!-- bench:multi-mtp -->
 | Gemma 4 31B Q4 MTP<br>Users | Gufo mixed (tok/s) | llama.cpp mixed (tok/s) | Gain | Gufo repetitive (tok/s) | llama.cpp repetitive (tok/s) | Gain |
 | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| 1 | 23.27 | 20.73 | +12.3% | 59.68 | 30.93 | +93.0% |
-| 2 | 30.80 | 32.25 | -4.5% | 68.28 | 49.44 | +38.1% |
-| 4 | 39.00 | 48.28 | -19.2% | 63.44 | 75.05 | -15.5% |
-| 6 | 48.04 | 58.11 | -17.3% | 53.60 | 99.65 | -46.2% |
-| 8 | 50.13 | 57.05 | -12.1% | 55.58 | 87.82 | -36.7% |
+| 1 | 23.06 | 20.73 | +11.2% | 60.71 | 30.93 | +96.3% |
+| 2 | 37.12 | 32.25 | +15.1% | 69.19 | 49.44 | +39.9% |
+| 4 | 48.40 | 48.28 | +0.2% | 66.22 | 75.05 | -11.8% |
+| 6 | 52.72 | 58.11 | -9.3% | 57.15 | 99.65 | -42.6% |
+| 8 | 55.52 | 57.05 | -2.7% | 58.89 | 87.82 | -32.9% |
 <!-- /bench -->
 
 ![Multiple users, MTP](artifacts/charts/multi-mtp.svg)
@@ -119,9 +109,8 @@ users.
 
 ## MTP draft policy
 
-`--draft-policy calibrated` became the default on September 28, 2026, after
-the MTP tables above were measured with the previous `confidence` rule
-(cells marked \*). Relative A/B of the two policies on one development
+`--draft-policy calibrated` became the default on September 28, 2026; the MTP
+tables above use it. Relative A/B of the two policies on one development
 build (`gpu-test` preset), two runs each in ABBA order with one server per
 run; greedy texts are identical under both policies, sampled texts differ
 because draft counts change the random draws. Depth is a shared earlier
@@ -156,10 +145,10 @@ three warmed requests, 64 output tokens, greedy
 
 | Image | Budget | Prompt tokens | Gufo cold TTFT (s) | llama.cpp cold TTFT (s) | Gain | Gufo follow-up TTFT (s) | llama.cpp follow-up TTFT (s) | Gain | Gufo tg (tok/s) | llama.cpp tg (tok/s) | Gain |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| Chart 624×960 | 280 | 313 | 1.26 | 1.92 | +52.6% | 0.40 | 0.70 | +73.2% | 11.19 | 9.90 | +13.0% |
-| Logo 768×768 | 280 | 309 | 1.33 | 1.85 | +38.5% | 0.43 | 0.72 | +68.0% | 11.19 | 9.54 | +17.3% |
-| Chart 1296×1968 | 1120 | 1161 | 4.46 | 8.34 | +87.1% | 0.48 | 1.04 | +118.2% | 10.81 | 8.27 | +30.7% |
-| Logo 1584×1584 | 1120 | 1141 | 4.22 | 8.35 | +98.0% | 0.49 | 1.10 | +124.2% | 10.81 | 7.96 | +35.8% |
+| Chart 624×960 | 280 | 312 | 1.32 | 1.92 | +45.5% | 0.41 | 0.70 | +68.4% | 11.43 | 9.90 | +15.5% |
+| Logo 768×768 | 280 | 309 | 1.30 | 1.85 | +42.4% | 0.41 | 0.72 | +75.9% | 11.43 | 9.54 | +19.8% |
+| Chart 1296×1968 | 1120 | 1160 | 4.57 | 8.34 | +82.4% | 0.47 | 1.04 | +121.8% | 11.05 | 8.27 | +33.6% |
+| Logo 1584×1584 | 1120 | 1140 | 4.34 | 8.35 | +92.4% | 0.48 | 1.10 | +126.3% | 11.04 | 7.96 | +38.7% |
 
 Gain is llama.cpp time over Gufo time minus one (decode: Gufo over
 llama.cpp). Gufo's vision encoder takes 162 ms for 260 soft tokens and
@@ -171,7 +160,8 @@ A third-party baseline: the Strix Halo llama.cpp fork halo-box/strix-llama.cpp
 `8c1c282ec` on Vulkan RADV with `GGML_VK_MMV_NO_SPLIT=1 -b 2048 -ub 512`, same
 GGUF files, same driver workloads and four draft tokens (Gufo up to seven).
 Hand-rendered from
-[artifacts/fork](artifacts/fork). At 128K with MTP its Vulkan queue timed out
+[artifacts/fork](artifacts/fork); the Gufo cells here are from the
+September 26 run (revision b3a13bc), not the refreshed tables above. At 128K with MTP its Vulkan queue timed out
 (`Fence fallback timer expired on ring comp_1.1.0`); its repetitive MTP
 workload was not run.
 
@@ -214,7 +204,7 @@ C1, capacity 262144, MTP. Cold model files to HTTP readiness.
 <!-- bench:loading -->
 | Gemma 4 31B Q4<br>Target | Gufo ready (s) | llama.cpp ready (s) | Gain |
 | --- | ---: | ---: | ---: |
-| Q4 | 4.41 | 6.58 | +49.2% |
+| Q4 | 4.32 | 6.58 | +52.3% |
 <!-- /bench -->
 
 ![Loading time](artifacts/charts/loading.svg)
@@ -231,8 +221,8 @@ token instead of 80).
 <!-- bench:memory -->
 | Gemma 4 31B Q4 AR<br>Workload | Gufo GiB | llama.cpp GiB | Gain |
 | --- | ---: | ---: | ---: |
-| pp2048 + tg128 | 32.87 | 35.47 | +7.9% |
-| 16K prefix, pp4096 + tg128 | 34.26 | 37.64 | +9.9% |
+| pp2048 + tg128 | 32.96 | 35.47 | +7.6% |
+| 16K prefix, pp4096 + tg128 | 35.88 | 37.64 | +4.9% |
 <!-- /bench -->
 
 ![Memory occupation](artifacts/charts/memory.svg)

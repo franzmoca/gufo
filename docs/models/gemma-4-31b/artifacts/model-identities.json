@@ -10,15 +10,17 @@
     "tokenizerGoldens": "unsloth/gemma-4-31B-it, revision 51c9f6265ea38755c708a6e356dfc1af4a436e35"
   },
   "scope": "Current retained benchmark and qualification evidence; per-artifact source revisions and commands are authoritative.",
-  "benchmarks-2026-09-26": {
+  "benchmarks-2026-09-29": {
     "scope": "Single-user AR/MTP depth sweeps, loading and memory on both engines; llama.cpp multi-user AR/MTP; third-party Vulkan fork (halo-box/strix-llama.cpp) single-user AR and mixed MTP (UTC dates in artifacts)",
     "gufo": {
-      "revision": "b3a13bc",
+      "revision": "c7e3ad7",
       "build": "nix build",
-      "binarySha256Prefix": "0c9b2e4f28af17b6"
+      "binarySha256Prefix": "7edba3755e723bd3",
+      "tables": "every Gufo table, remeasured 2026-09-29 (sampled MTP at depth 0 only)"
     },
-    "reference": "llama.cpp b11069 from flake.nix (commit 68d9053a), ROCm gfx1151",
+    "reference": "llama.cpp b11069 from flake.nix (commit 68d9053a), ROCm gfx1151; measured 2026-09-26 and not rerun (same pinned build)",
     "fork": "halo-box/strix-llama.cpp 8c1c282ec, Vulkan RADV, GGML_VK_MMV_NO_SPLIT=1, -b 2048 -ub 512 -t 8",
-    "measurement": "One warmed sample per point, greedy, thinking off, four MTP draft tokens on both engines. Loading drops the page cache with echo 3 > /proc/sys/vm/drop_caches before each launch."
+    "measurement": "One warmed sample per point, greedy, thinking off, four MTP draft tokens on both engines. Loading drops the page cache with echo 3 > /proc/sys/vm/drop_caches before each launch.",
+    "images": "Gufo image requests remeasured 2026-09-29 with the binary16 vision encoder; llama.cpp rows from 2026-09-28"
   }
 }

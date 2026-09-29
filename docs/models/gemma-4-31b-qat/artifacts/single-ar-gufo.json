@@ -22,7 +22,7 @@
     "fingerprintId": "f94b1af68c1490af59badc77b6ee2b002119985fa41fd820f3db1d38a94eb12a",
     "schemaVersion": "1.0.0"
   },
-  "measuredOn": "2026-09-28",
+  "measuredOn": "2026-09-29",
   "mode": null,
   "model": {
     "id": "Gemma-4-31B-It-QAT",
@@ -35,7 +35,7 @@
   "referenceName": "llama.cpp",
   "rows": {
     "0": {
-      "command": "gufo serve --port 58067 --sessions 1 llm --model gemma-4-31B-it-qat-UD-Q4_K_XL.gguf --context 133760 --served-model-name bench --think off --max-pending-per-client 8",
+      "command": "gufo serve --port 42195 --sessions 1 llm --model gemma-4-31B-it-qat-UD-Q4_K_XL.gguf --context 133760 --served-model-name bench --think off --max-pending-per-client 8",
       "counts": [
         {
           "cache_n": 0,
@@ -46,15 +46,15 @@
           "prompt_n": 2038
         }
       ],
-      "pp": 461.82,
+      "pp": 451.88,
       "pp_sd": null,
       "samples": 1,
-      "tg": 11.68,
+      "tg": 12.07,
       "tg_sd": null,
       "workload": "prose"
     },
     "12288": {
-      "command": "gufo serve --port 58067 --sessions 1 llm --model gemma-4-31B-it-qat-UD-Q4_K_XL.gguf --context 133760 --served-model-name bench --think off --max-pending-per-client 8",
+      "command": "gufo serve --port 42195 --sessions 1 llm --model gemma-4-31B-it-qat-UD-Q4_K_XL.gguf --context 133760 --served-model-name bench --think off --max-pending-per-client 8",
       "counts": [
         {
           "cache_n": 12256,
@@ -65,15 +65,15 @@
           "prompt_n": 2066
         }
       ],
-      "pp": 383.61,
+      "pp": 390.58,
       "pp_sd": null,
       "samples": 1,
-      "tg": 11.27,
+      "tg": 11.63,
       "tg_sd": null,
       "workload": "prose"
     },
     "131072": {
-      "command": "gufo serve --port 58067 --sessions 1 llm --model gemma-4-31B-it-qat-UD-Q4_K_XL.gguf --context 133760 --served-model-name bench --think off --max-pending-per-client 8",
+      "command": "gufo serve --port 42195 --sessions 1 llm --model gemma-4-31B-it-qat-UD-Q4_K_XL.gguf --context 133760 --served-model-name bench --think off --max-pending-per-client 8",
       "counts": [
         {
           "cache_n": 131276,
@@ -84,15 +84,15 @@
           "prompt_n": 2076
         }
       ],
-      "pp": 166.28,
+      "pp": 163.05,
       "pp_sd": null,
       "samples": 1,
-      "tg": 8.36,
+      "tg": 8.55,
       "tg_sd": null,
       "workload": "prose"
     },
     "16384": {
-      "command": "gufo serve --port 58067 --sessions 1 llm --model gemma-4-31B-it-qat-UD-Q4_K_XL.gguf --context 133760 --served-model-name bench --think off --max-pending-per-client 8",
+      "command": "gufo serve --port 42195 --sessions 1 llm --model gemma-4-31B-it-qat-UD-Q4_K_XL.gguf --context 133760 --served-model-name bench --think off --max-pending-per-client 8",
       "counts": [
         {
           "cache_n": 16384,
@@ -103,15 +103,15 @@
           "prompt_n": 2052
         }
       ],
-      "pp": 370.75,
+      "pp": 381.2,
       "pp_sd": null,
       "samples": 1,
-      "tg": 11.11,
+      "tg": 11.46,
       "tg_sd": null,
       "workload": "prose"
     },
     "32768": {
-      "command": "gufo serve --port 58067 --sessions 1 llm --model gemma-4-31B-it-qat-UD-Q4_K_XL.gguf --context 133760 --served-model-name bench --think off --max-pending-per-client 8",
+      "command": "gufo serve --port 42195 --sessions 1 llm --model gemma-4-31B-it-qat-UD-Q4_K_XL.gguf --context 133760 --served-model-name bench --think off --max-pending-per-client 8",
       "counts": [
         {
           "cache_n": 32801,
@@ -122,34 +122,34 @@
           "prompt_n": 2051
         }
       ],
-      "pp": 313.52,
+      "pp": 326.61,
       "pp_sd": null,
       "samples": 1,
-      "tg": 10.61,
+      "tg": 10.94,
       "tg_sd": null,
       "workload": "prose"
     },
     "4096": {
-      "command": "gufo serve --port 58067 --sessions 1 llm --model gemma-4-31B-it-qat-UD-Q4_K_XL.gguf --context 133760 --served-model-name bench --think off --max-pending-per-client 8",
+      "command": "gufo serve --port 42195 --sessions 1 llm --model gemma-4-31B-it-qat-UD-Q4_K_XL.gguf --context 133760 --served-model-name bench --think off --max-pending-per-client 8",
       "counts": [
         {
           "cache_n": 4073,
-          "completion_sha256": "8964d36e3d32513aba929f32abb5cd111d9f723b2fafa96e5d4dd6ce0aed3453",
+          "completion_sha256": "3f7df7928b40e454ef4e99d7e147ab27ddb67322c53a99c44624eecb6b37c56f",
           "draft_n": 0,
           "draft_n_accepted": 0,
           "predicted_n": 128,
           "prompt_n": 2055
         }
       ],
-      "pp": 422.11,
+      "pp": 428.69,
       "pp_sd": null,
       "samples": 1,
-      "tg": 11.5,
+      "tg": 11.91,
       "tg_sd": null,
       "workload": "prose"
     },
     "65536": {
-      "command": "gufo serve --port 58067 --sessions 1 llm --model gemma-4-31B-it-qat-UD-Q4_K_XL.gguf --context 133760 --served-model-name bench --think off --max-pending-per-client 8",
+      "command": "gufo serve --port 42195 --sessions 1 llm --model gemma-4-31B-it-qat-UD-Q4_K_XL.gguf --context 133760 --served-model-name bench --think off --max-pending-per-client 8",
       "counts": [
         {
           "cache_n": 65642,
@@ -160,15 +160,15 @@
           "prompt_n": 2078
         }
       ],
-      "pp": 241.87,
+      "pp": 250.39,
       "pp_sd": null,
       "samples": 1,
-      "tg": 9.75,
+      "tg": 10.02,
       "tg_sd": null,
       "workload": "prose"
     },
     "8192": {
-      "command": "gufo serve --port 58067 --sessions 1 llm --model gemma-4-31B-it-qat-UD-Q4_K_XL.gguf --context 133760 --served-model-name bench --think off --max-pending-per-client 8",
+      "command": "gufo serve --port 42195 --sessions 1 llm --model gemma-4-31B-it-qat-UD-Q4_K_XL.gguf --context 133760 --served-model-name bench --think off --max-pending-per-client 8",
       "counts": [
         {
           "cache_n": 8176,
@@ -179,10 +179,10 @@
           "prompt_n": 2062
         }
       ],
-      "pp": 395.04,
+      "pp": 408.09,
       "pp_sd": null,
       "samples": 1,
-      "tg": 11.35,
+      "tg": 11.72,
       "tg_sd": null,
       "workload": "prose"
     }
@@ -193,7 +193,7 @@
       "gufo",
       "serve",
       "--port",
-      "58067",
+      "42195",
       "--sessions",
       "1",
       "llm",
@@ -212,7 +212,7 @@
   "source": {
     "buildMode": "nix-release",
     "dirty": true,
-    "revision": "153b45e286436f31cc4fe93e32a37349bbdbf1b1"
+    "revision": "c8a978443c69ca4845819de5a1467171ed3353ab"
   },
   "table": "single-ar",
   "target": "gufo"

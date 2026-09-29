@@ -22,7 +22,7 @@
     "fingerprintId": "f94b1af68c1490af59badc77b6ee2b002119985fa41fd820f3db1d38a94eb12a",
     "schemaVersion": "1.0.0"
   },
-  "measuredOn": "2026-09-28",
+  "measuredOn": "2026-09-29",
   "mode": "mtp",
   "model": {
     "id": "Gemma-4-26B-A4B-It",
@@ -35,14 +35,14 @@
   "referenceName": "llama.cpp",
   "rows": {
     "q4": {
-      "command": "gufo serve --port 60873 --sessions 1 llm --model gemma-4-26B-A4B-it-UD-Q4_K_XL.gguf --context 262144 --served-model-name bench --think off --max-pending-per-client 8 --speculative mtp --mtp-model mtp-gemma-4-26B-A4B-it.gguf --draft-tokens 7",
-      "ready_s": 3.816,
+      "command": "gufo serve --port 57681 --sessions 1 llm --model gemma-4-26B-A4B-it-UD-Q4_K_XL.gguf --context 262144 --served-model-name bench --think off --max-pending-per-client 8 --speculative mtp --mtp-model mtp-gemma-4-26B-A4B-it.gguf --draft-tokens 7",
+      "ready_s": 3.868,
       "ready_s_sd": null,
       "samples": 1
     },
     "q6": {
-      "command": "gufo serve --port 55393 --sessions 1 llm --model gemma-4-26B-A4B-it-UD-Q6_K_XL.gguf --context 262144 --served-model-name bench --think off --max-pending-per-client 8 --speculative mtp --mtp-model mtp-gemma-4-26B-A4B-it.gguf --draft-tokens 7",
-      "ready_s": 4.909,
+      "command": "gufo serve --port 34383 --sessions 1 llm --model gemma-4-26B-A4B-it-UD-Q6_K_XL.gguf --context 262144 --served-model-name bench --think off --max-pending-per-client 8 --speculative mtp --mtp-model mtp-gemma-4-26B-A4B-it.gguf --draft-tokens 7",
+      "ready_s": 4.911,
       "ready_s_sd": null,
       "samples": 1
     }
@@ -53,7 +53,7 @@
       "gufo",
       "serve",
       "--port",
-      "55393",
+      "34383",
       "--sessions",
       "1",
       "llm",
@@ -78,7 +78,7 @@
   "source": {
     "buildMode": "nix-release",
     "dirty": true,
-    "revision": "6a0af62930752da76a5601510dc3fc8d5b2b3ef0"
+    "revision": "c8a978443c69ca4845819de5a1467171ed3353ab"
   },
   "table": "loading",
   "target": "gufo"

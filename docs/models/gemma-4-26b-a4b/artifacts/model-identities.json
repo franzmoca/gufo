@@ -12,20 +12,15 @@
     "chatTemplate": "GGUF tokenizer.chat_template, SHA-256 845f1ee48e39fc942fe190da9df6a1c5db229e17a96ea08966ad1c9274e73d1b (same as the 31B)"
   },
   "scope": "Current retained benchmark and qualification evidence; per-artifact source revisions and commands are authoritative.",
-  "benchmarks-2026-09-28": {
+  "benchmarks-2026-09-29": {
     "gufo": {
-      "revision": "6a0af62",
+      "revision": "c7e3ad7",
       "build": "nix build",
-      "binarySha256Prefix": "c557716f0c964dee",
-      "tables": "single-user AR, MTP and sampled MTP; multi-user AR; loading; memory"
+      "binarySha256Prefix": "7edba3755e723bd3",
+      "tables": "every Gufo table, remeasured 2026-09-29 (sampled MTP at depth 0 only)"
     },
-    "gufoMultiUserMtp": {
-      "revision": "7133015",
-      "build": "nix build",
-      "binarySha256Prefix": "d10fe88eebdf03ce",
-      "tables": "multi-user MTP (batch-aware draft policy) and its C1 AR completion references"
-    },
-    "reference": "llama.cpp b11069 from flake.nix (commit 68d9053a), ROCm gfx1151",
-    "measurement": "One warmed sample per point (sampled MTP: three seeds), greedy, thinking off; MTP drafts up to seven (Gufo, calibrated policy) and four (llama.cpp). Loading drops the page cache with sync; echo 3 > /proc/sys/vm/drop_caches before each launch."
+    "reference": "llama.cpp b11069 from flake.nix (commit 68d9053a), ROCm gfx1151; measured 2026-09-28 and not rerun (same pinned build)",
+    "measurement": "One warmed sample per point (sampled MTP: three seeds), greedy, thinking off; MTP drafts up to seven (Gufo, calibrated policy) and four (llama.cpp). Loading drops the page cache with sync; echo 3 > /proc/sys/vm/drop_caches before each launch.",
+    "images": "image requests 2026-09-29, UD-Q4_K_XL, Gufo c7e3ad7 and llama.cpp b11069 (tools/gemma4/image_bench.py)"
   }
 }

@@ -116,11 +116,7 @@
       "prompt_tokens": 2048,
       "output_tokens": 128,
       "depths": [
-        0,
-        4096,
-        16384,
-        32768,
-        65536
+        0
       ],
       "context": 133760,
       "depth_tolerance": 0.005,

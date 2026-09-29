@@ -8,15 +8,16 @@ the Unsloth Q8_0 `gemma4-assistant` drafter;
 CPU implementation of the llama.cpp `gemma4` graph, routed experts included,
 over the same GGUF (FP32 activations, binary16 KV,
 `src/models/gemma4/reference.cpp`). These are not unquantized-model or
-GGUF-conversion checks. Measured September 28, 2026.
+GGUF-conversion checks. Measured September 28, 2026; text rows remeasured
+September 29 after the decode GeGLU fusion.
 
 | Check | UD-Q4_K_XL | UD-Q6_K_XL |
 | --- | --- | --- |
-| GPU decode (FP32 activations) vs scalar reference, 22-token chat prompt | Mean KL 2.7e-5 (limit 1e-4), max 2.6e-4, top-1 22/22 | Mean KL 6.8e-7, max 9.1e-6, top-1 22/22 |
+| GPU decode (FP32 activations) vs scalar reference, 22-token chat prompt | Mean KL 1.1e-6 (limit 1e-4), max 1.4e-5, top-1 22/22 | Mean KL 4.8e-7, max 5.0e-6, top-1 22/22 |
 | Eight-row verification | Bit-identical to single-token decode | Bit-identical to single-token decode |
-| GPU prefill (binary16 activations, binary16 WMMA attention) vs scalar reference, same prompt | Mean KL 3.7e-5 (limit 1e-3), top-1 21/22 (a near-tie) | Mean KL 3.7e-5, top-1 22/22 |
-| Bulk prefill vs exact rows, 1542-token conversation past the window and ring | Mean KL 0.027 (limit 0.06), top-1 1490/1542 | Mean KL 0.030, top-1 1490/1542 |
-| Bulk prefill vs exact rows, 1353-token repetitive prompt (reported, not a gate) | Mean KL 1.74, top-1 794/1353 | Mean KL 1.80, top-1 798/1353 |
+| GPU prefill (binary16 activations, binary16 WMMA attention) vs scalar reference, same prompt | Mean KL 3.7e-5 (limit 1e-3), top-1 21/22 (a near-tie) | Mean KL 2.9e-5, top-1 22/22 |
+| Bulk prefill vs exact rows, 1542-token conversation past the window and ring | Mean KL 0.027 (limit 0.06), top-1 1489/1542 | Mean KL 0.019, top-1 1494/1542 |
+| Bulk prefill vs exact rows, 1353-token repetitive prompt (reported, not a gate) | Mean KL 1.71, top-1 780/1353 | Mean KL 1.84, top-1 766/1353 |
 | Image prompt, 624×960 chart at 260 soft tokens, 96 teacher-forced positions from `<image\|>`, vs the scalar reference fed the reference encoder's embeddings | Mean KL 0.029 (80 answer positions 0.0039), top-1 95/96; llama.cpp `use_gelu` 0.251 (0.0125) | Mean KL 0.129 (answer 0.0012), top-1 93/96; llama.cpp 0.474 (0.0104) |
 | Image sessions | `gemma4.vision_session` (changed image, rewind, extension, snapshot, chunking) passes | Passes |
 | Greedy MTP vs single-token decode with the drafter loaded, three prompts, plus prompt-lookup copies; batched sessions vs their own decode | Identical token IDs (`gemma4.target`) | Identical token IDs |
@@ -89,14 +90,12 @@ near Genoa." --half-kv --tokens-out T.i32 --logits-out R.g4lg`, then
 
 ## Benchmark method
 
-September 28–29, 2026; one warmed sample per point (sampled MTP: three seeds),
+Gufo September 29, 2026 (revision c7e3ad7, every table; sampled MTP at depth
+0), llama.cpp September 28; one warmed sample per point (sampled MTP: three seeds),
 greedy, thinking off, the same driver workloads, server flags and table grid
 as the [31B](../gemma-4-31b/QUALITY.md#benchmark-method), per quant. Gufo
 drafts up to seven tokens under the calibrated policy (`--draft-tokens 7`),
-llama.cpp up to four. Single-user tables, multi-user AR, loading and memory
-ran on revision 6a0af62; multi-user MTP and its C1 AR completion references
-on 7133015, after the batch-aware draft policy (single-session decoding is
-unchanged between the two). Loading drops the page cache
+llama.cpp up to four. Loading drops the page cache
 (`sync; echo 3 > /proc/sys/vm/drop_caches`) before each launch. Every Gufo
 multi-user MTP completion (C1–C8, both workloads, both quants) matches its
 AR C1 hash; commands, counts and server flags are recorded per row in the

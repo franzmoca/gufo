@@ -4,75 +4,75 @@
     "server": "gufo-280",
     "runs": [
       {
-        "prompt_tokens": 313,
-        "cold_ttft_s": 1.2462609359936323,
-        "cold_prompt_ms": 1171.106013,
-        "decode_tok_s": 11.189920078590497,
-        "follow_ttft_s": 0.39795110299019143,
-        "follow_cached_tokens": 306,
-        "answer": "This image is a composite layout divided into two main sections: \"Test Images\" at the top and a reference guide containing \"Grayscales\" and \"Primary Colors\" at the bottom.\n\n### Test Images Section\nThe"
+        "prompt_tokens": 312,
+        "cold_ttft_s": 1.264673178025987,
+        "cold_prompt_ms": 1195.7529359999999,
+        "decode_tok_s": 11.432115376172254,
+        "follow_ttft_s": 0.40772191499127075,
+        "follow_cached_tokens": 305,
+        "answer": "This image is a composite layout divided into two main sections: \"Test Images\" and a reference guide containing \"Grayscales\" and \"Primary Colors.\"\n\n### Test Images Section\nThe top half of the image co"
       },
       {
-        "prompt_tokens": 316,
-        "cold_ttft_s": 1.259454276994802,
-        "cold_prompt_ms": 1183.842881,
-        "decode_tok_s": 11.185598649679568,
-        "follow_ttft_s": 0.40251794501091354,
-        "follow_cached_tokens": 309,
+        "prompt_tokens": 312,
+        "cold_ttft_s": 1.361671219987329,
+        "cold_prompt_ms": 1297.555148,
+        "decode_tok_s": 11.407436494125948,
+        "follow_ttft_s": 0.4140742500021588,
+        "follow_cached_tokens": 305,
         "answer": "This image is a composite layout divided into two main sections: \"Test Images\" and a reference guide containing \"Grayscales\" and \"Primary Colors.\"\n\n### 1. Test Images Section\nThe top half of the image"
       },
       {
-        "prompt_tokens": 313,
-        "cold_ttft_s": 1.2838779089943273,
-        "cold_prompt_ms": 1205.672882,
-        "decode_tok_s": 11.190247095103516,
-        "follow_ttft_s": 0.40423071300028823,
-        "follow_cached_tokens": 306,
+        "prompt_tokens": 314,
+        "cold_ttft_s": 1.3211922140035313,
+        "cold_prompt_ms": 1246.719236,
+        "decode_tok_s": 11.430873865803889,
+        "follow_ttft_s": 0.4177025140088517,
+        "follow_cached_tokens": 307,
         "answer": "This image is a composite layout divided into two main sections: \"Test Images\" and a reference guide containing \"Grayscales\" and \"Primary Colors.\"\n\n### 1. Test Images Section\nThe top half of the image"
       }
     ],
-    "cold_ttft_s": 1.259454276994802,
-    "cold_prompt_ms": 1183.842881,
-    "decode_tok_s": 11.189920078590497,
-    "follow_ttft_s": 0.40251794501091354,
-    "prompt_tokens": 313
+    "cold_ttft_s": 1.3211922140035313,
+    "cold_prompt_ms": 1246.719236,
+    "decode_tok_s": 11.430873865803889,
+    "follow_ttft_s": 0.4140742500021588,
+    "prompt_tokens": 312
   },
   {
     "image": "logo-768x768.png",
     "server": "gufo-280",
     "runs": [
       {
-        "prompt_tokens": 309,
-        "cold_ttft_s": 1.3155437500099652,
-        "cold_prompt_ms": 1236.223605,
-        "decode_tok_s": 11.19120484078881,
-        "follow_ttft_s": 0.41937687298923265,
-        "follow_cached_tokens": 302,
-        "answer": "A detailed pixel art illustration of an owl's head, centered against a textured green background. The owl is depicted with a high level of detail, featuring intricate brown and tan plumage that create"
-      },
-      {
         "prompt_tokens": 306,
-        "cold_ttft_s": 1.3319942560046911,
-        "cold_prompt_ms": 1238.399035,
-        "decode_tok_s": 11.192118101640713,
-        "follow_ttft_s": 0.4287006869999459,
+        "cold_ttft_s": 1.2962978080031462,
+        "cold_prompt_ms": 1217.5297610000002,
+        "decode_tok_s": 11.437259740891234,
+        "follow_ttft_s": 0.40726419299608096,
         "follow_cached_tokens": 299,
         "answer": "A high-resolution pixel art illustration of an owl's head, centered against a textured green background. The owl is depicted in a symmetrical, front-facing composition.\n\n**The Owl:**\n*   **Feathers:**"
       },
       {
-        "prompt_tokens": 307,
-        "cold_ttft_s": 1.3324512709950795,
-        "cold_prompt_ms": 1252.172926,
-        "decode_tok_s": 11.193907001663225,
-        "follow_ttft_s": 0.4264857350062812,
-        "follow_cached_tokens": 300,
-        "answer": "A high-resolution pixel art illustration of an owl's head, centered against a textured green background. The owl is depicted with intricate detail, featuring layers of brown and tan feathers that crea"
+        "prompt_tokens": 309,
+        "cold_ttft_s": 1.296103099011816,
+        "cold_prompt_ms": 1206.45019,
+        "decode_tok_s": 11.42592571466532,
+        "follow_ttft_s": 0.4019513170060236,
+        "follow_cached_tokens": 302,
+        "answer": "A detailed pixel art illustration of an owl's head, centered against a textured green background. The owl is depicted with a high level of detail, featuring intricate brown and tan plumage that create"
+      },
+      {
+        "prompt_tokens": 311,
+        "cold_ttft_s": 1.317276646004757,
+        "cold_prompt_ms": 1206.1251149999998,
+        "decode_tok_s": 11.387317556201303,
+        "follow_ttft_s": 0.4175742579973303,
+        "follow_cached_tokens": 304,
+        "answer": "A high-resolution pixel art illustration of an owl's head, centered against a textured green background. The owl is depicted in a symmetrical, front-facing view.\n\n**The Owl:**\n*   **Feathers:** The pl"
       }
     ],
-    "cold_ttft_s": 1.3319942560046911,
-    "cold_prompt_ms": 1238.399035,
-    "decode_tok_s": 11.192118101640713,
-    "follow_ttft_s": 0.4264857350062812,
-    "prompt_tokens": 309
+    "cold_ttft_s": 1.2962978080031462,
+    "cold_prompt_ms": 1206.45019,
+    "decode_tok_s": 11.42592571466532,
+    "follow_ttft_s": 0.40726419299608096,
+    "prompt_tokens": 306
   }
 ]

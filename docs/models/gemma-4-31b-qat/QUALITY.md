@@ -50,10 +50,10 @@ compared with `tools/gemma4/compare_logits.py L.g4lg G.g4lg`. Short prompt:
 
 ## Benchmark method
 
-September 28, 2026; one warmed sample per point, greedy, thinking off, the
+Gufo September 29, 2026 (revision c7e3ad7; sampled MTP at depth 0), llama.cpp
+September 28; one warmed sample per point, greedy, thinking off, the
 same driver workloads, server flags and table grid as the
 [standard 31B](../gemma-4-31b/QUALITY.md#benchmark-method). MTP drafts up to
-seven tokens under Gufo's confidence-based length control
-(`--draft-tokens 7`) and up to four on llama.cpp. Loading drops the page cache
+seven tokens under Gufo's calibrated policy (`--draft-tokens 7`) and up to four on llama.cpp. Loading drops the page cache
 (`sync; echo 3 > /proc/sys/vm/drop_caches`) before each launch. Commands,
 counts and server flags are recorded per row in the artifacts.

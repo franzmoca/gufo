@@ -22,7 +22,7 @@
     "fingerprintId": "f94b1af68c1490af59badc77b6ee2b002119985fa41fd820f3db1d38a94eb12a",
     "schemaVersion": "1.0.0"
   },
-  "measuredOn": "2026-09-28",
+  "measuredOn": "2026-09-29",
   "mode": "mtp",
   "model": {
     "id": "Gemma-4-31B-It-QAT",
@@ -35,8 +35,8 @@
   "referenceName": "llama.cpp",
   "rows": {
     "default": {
-      "command": "gufo serve --port 50021 --sessions 1 llm --model gemma-4-31B-it-qat-UD-Q4_K_XL.gguf --context 262144 --served-model-name bench --think off --max-pending-per-client 8 --speculative mtp --mtp-model mtp-gemma-4-31B-it.gguf --draft-tokens 7",
-      "ready_s": 3.857,
+      "command": "gufo serve --port 52293 --sessions 1 llm --model gemma-4-31B-it-qat-UD-Q4_K_XL.gguf --context 262144 --served-model-name bench --think off --max-pending-per-client 8 --speculative mtp --mtp-model mtp-gemma-4-31B-it.gguf --draft-tokens 7",
+      "ready_s": 3.976,
       "ready_s_sd": null,
       "samples": 1
     }
@@ -47,7 +47,7 @@
       "gufo",
       "serve",
       "--port",
-      "50021",
+      "52293",
       "--sessions",
       "1",
       "llm",
@@ -72,7 +72,7 @@
   "source": {
     "buildMode": "nix-release",
     "dirty": true,
-    "revision": "153b45e286436f31cc4fe93e32a37349bbdbf1b1"
+    "revision": "c8a978443c69ca4845819de5a1467171ed3353ab"
   },
   "table": "loading",
   "target": "gufo"

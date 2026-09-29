@@ -22,7 +22,7 @@
     "fingerprintId": "f94b1af68c1490af59badc77b6ee2b002119985fa41fd820f3db1d38a94eb12a",
     "schemaVersion": "1.0.0"
   },
-  "measuredOn": "2026-09-28",
+  "measuredOn": "2026-09-29",
   "mode": null,
   "model": {
     "id": "Gemma-4-26B-A4B-It",
@@ -35,13 +35,13 @@
   "referenceName": "llama.cpp",
   "rows": {
     "16K prefix, pp4096 + tg128": {
-      "command": "gufo serve --port 50521 --sessions 1 llm --model gemma-4-26B-A4B-it-UD-Q4_K_XL.gguf --context 133121 --served-model-name bench --think off --max-pending-per-client 8",
-      "gib": 23.57,
+      "command": "gufo serve --port 37167 --sessions 1 llm --model gemma-4-26B-A4B-it-UD-Q4_K_XL.gguf --context 133121 --served-model-name bench --think off --max-pending-per-client 8",
+      "gib": 23.54,
       "idle_gib": 3.01
     },
     "pp2048 + tg128": {
-      "command": "gufo serve --port 50521 --sessions 1 llm --model gemma-4-26B-A4B-it-UD-Q4_K_XL.gguf --context 133121 --served-model-name bench --think off --max-pending-per-client 8",
-      "gib": 22.83,
+      "command": "gufo serve --port 37167 --sessions 1 llm --model gemma-4-26B-A4B-it-UD-Q4_K_XL.gguf --context 133121 --served-model-name bench --think off --max-pending-per-client 8",
+      "gib": 22.8,
       "idle_gib": 3.01
     }
   },
@@ -51,7 +51,7 @@
       "gufo",
       "serve",
       "--port",
-      "50521",
+      "37167",
       "--sessions",
       "1",
       "llm",
@@ -70,7 +70,7 @@
   "source": {
     "buildMode": "nix-release",
     "dirty": true,
-    "revision": "6a0af62930752da76a5601510dc3fc8d5b2b3ef0"
+    "revision": "c8a978443c69ca4845819de5a1467171ed3353ab"
   },
   "table": "memory-q4",
   "target": "gufo"

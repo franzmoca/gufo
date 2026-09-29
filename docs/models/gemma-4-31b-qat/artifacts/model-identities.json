@@ -11,13 +11,14 @@
     "chatTemplate": "GGUF tokenizer.chat_template, SHA-256 845f1ee48e39fc942fe190da9df6a1c5db229e17a96ea08966ad1c9274e73d1b (same as the standard 31B)"
   },
   "scope": "Current retained benchmark and qualification evidence; per-artifact source revisions and commands are authoritative.",
-  "benchmarks-2026-09-28": {
+  "benchmarks-2026-09-29": {
     "gufo": {
-      "revision": "153b45e",
+      "revision": "c7e3ad7",
       "build": "nix build",
-      "binarySha256Prefix": "68d2de156e4751c8"
+      "binarySha256Prefix": "7edba3755e723bd3",
+      "tables": "every Gufo table, remeasured 2026-09-29 (sampled MTP at depth 0 only)"
     },
-    "reference": "llama.cpp b11069 from flake.nix (commit 68d9053a), ROCm gfx1151",
+    "reference": "llama.cpp b11069 from flake.nix (commit 68d9053a), ROCm gfx1151; measured 2026-09-28 and not rerun (same pinned build)",
     "measurement": "One warmed sample per point, greedy, thinking off; MTP drafts up to seven (Gufo) and four (llama.cpp). Loading drops the page cache with sync; echo 3 > /proc/sys/vm/drop_caches before each launch."
   }
 }
