@@ -184,8 +184,18 @@ bool HcMixF16Gemm(const void* up, const __half* low_rank, const __half* xn,
 bool UnquantizedF16Gemm(const void* w, const __half* x, float* out,
                         std::size_t batch, std::size_t m, std::size_t k,
                         hipStream_t stream);
+/// Wide-batch tile plans a caller may choose for DenseF16Gemm; kAuto keeps
+/// the Flash-Next dispatch. The others apply from 1024 rows: eight row groups
+/// (each weight fragment reused across the token tiles), optionally with the
+/// two-block stage for long K.
+enum class DenseF16Plan : std::uint8_t {
+  kAuto,
+  kRowGroups8,
+  kStagedRowGroups8,
+};
 bool DenseF16Gemm(const void* w, const __half* x, float* out, std::size_t batch,
-                  std::size_t m, std::size_t k, hipStream_t stream);
+                  std::size_t m, std::size_t k, hipStream_t stream,
+                  DenseF16Plan plan = DenseF16Plan::kAuto);
 
 /// SSM Q8_0 projection fused with its four-tap convolution. Supports
 /// [m=16384,k=2560,channels=10240] and at least 1024 tokens. qkvz retains

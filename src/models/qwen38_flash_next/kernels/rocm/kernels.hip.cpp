@@ -5373,7 +5373,8 @@ bool UnquantizedF16Gemm(const void* w, const __half* x, float* out,
 }
 
 bool DenseF16Gemm(const void* w, const __half* x, float* out, std::size_t batch,
-                  std::size_t m, std::size_t k, hipStream_t stream) {
+                  std::size_t m, std::size_t k, hipStream_t stream,
+                  DenseF16Plan plan) {
   if (m == 0 || k == 0 || batch == 0 || k % 32 != 0) {
     return false;
   }
@@ -5394,7 +5395,14 @@ bool DenseF16Gemm(const void* w, const __half* x, float* out, std::size_t batch,
     constexpr int kBN = 128;
     const dim3 grid(static_cast<unsigned int>((batch + kBN - 1) / kBN),
                     static_cast<unsigned int>((m + kWideBM - 1) / kWideBM));
-    if (m == 10240 && k == 320 && batch >= 1024) {
+    const bool planned = plan != DenseF16Plan::kAuto && batch >= 1024;
+    if (planned && plan == DenseF16Plan::kStagedRowGroups8) {
+      hipLaunchKernelGGL((DenseF16GEMMKernel<kWideBM, kBN, 2, 8, 1>), grid,
+                         dim3(kThreads), 0, stream, w, x, out, batch, m, k);
+    } else if (planned) {
+      hipLaunchKernelGGL((DenseF16GEMMKernel<kWideBM, kBN, 1, 8, 1>), grid,
+                         dim3(kThreads), 0, stream, w, x, out, batch, m, k);
+    } else if (m == 10240 && k == 320 && batch >= 1024) {
       hipLaunchKernelGGL((DenseF16GEMMKernel<kWideBM, kBN, 1, 4, 2, 8>), grid,
                          dim3(kThreads), 0, stream, w, x, out, batch, m, k);
     } else if (batch >= 1024 && (((m == 16384 || m == 13312) && k == 2560) ||
@@ -5402,15 +5410,6 @@ bool DenseF16Gemm(const void* w, const __half* x, float* out, std::size_t batch,
       // Eight row groups reuse each weight fragment across all token tiles
       // and keep fewer weight fragments live. K accumulation is unchanged.
       hipLaunchKernelGGL((DenseF16GEMMKernel<kWideBM, kBN, 2, 8, 1>), grid,
-                         dim3(kThreads), 0, stream, w, x, out, batch, m, k);
-    } else if (batch >= 1024 && m == 2816 && k >= 4096) {
-      // Gemma 4 26B-A4B attention output (176 blocks over a long K): the
-      // two-block stage and eight row groups, 2013 -> 1759 us per 2048 rows.
-      hipLaunchKernelGGL((DenseF16GEMMKernel<kWideBM, kBN, 2, 8, 1>), grid,
-                         dim3(kThreads), 0, stream, w, x, out, batch, m, k);
-    } else if (batch >= 1024 && m == 2816 && k == 2112) {
-      // Gemma 4 26B-A4B dense MLP down: eight row groups, 605 -> 582 us.
-      hipLaunchKernelGGL((DenseF16GEMMKernel<kWideBM, kBN, 1, 8, 1>), grid,
                          dim3(kThreads), 0, stream, w, x, out, batch, m, k);
     } else {
       hipLaunchKernelGGL((DenseF16GEMMKernel<kWideBM, kBN, 1, 4, 2>), grid,
