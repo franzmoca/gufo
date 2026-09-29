@@ -822,7 +822,7 @@ std::optional<qwen38_flash_next::rocm::WeightType> RoutedHalfType(
 bool OwnGateUp(std::optional<ExpertFormat> format) {
   return format &&
          (*format == ExpertFormat::kQ4_K || *format == ExpertFormat::kQ5_K ||
-          *format == ExpertFormat::kQ6_K);
+          *format == ExpertFormat::kQ6_K || *format == ExpertFormat::kQ8_0);
 }
 
 bool HalfExperts(const DeviceLayer& l, const Config& c) {

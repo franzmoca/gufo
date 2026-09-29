@@ -601,8 +601,9 @@ __device__ __forceinline__ void DecodeQ80(const std::uint32_t (&w)[kQ80Words],
 /// of RoutedHalfKQuantKernel over 64-value stages (three 16-byte pieces per
 /// row, consecutive threads on consecutive pieces). Each token tile's
 /// results are transposed through LDS so a token's 128 outputs leave as
-/// one contiguous 512-byte store.
-template<ExpertFormat F, int kTileTokens>
+/// one contiguous 512-byte store. kGeGlu (Q8_0): the gate/up projection with
+/// RoutedHalfKQuantKernel's row split and GeGLU epilogue into `out_half`.
+template<ExpertFormat F, int kTileTokens, bool kGeGlu = false>
 __global__ void __launch_bounds__(kThreads)
     RoutedHalfDownKernel(const std::uint8_t* __restrict__ w,
                          const __half* __restrict__ x,
@@ -610,8 +611,8 @@ __global__ void __launch_bounds__(kThreads)
                          const std::int32_t* __restrict__ pad_bounds,
                          const std::int32_t* __restrict__ rows_in,
                          const std::int32_t* __restrict__ rows_out,
-                         float* __restrict__ out, std::uint32_t m,
-                         std::uint32_t k) {
+                         float* __restrict__ out, __half* __restrict__ out_half,
+                         std::uint32_t m, std::uint32_t k) {
   constexpr bool kQ8 = F == ExpertFormat::kQ8_0;
   constexpr int kStride = kDownStride<F>;
   constexpr int kStageBytes = 2 * kDownBlockBytes<F>;
@@ -641,9 +642,29 @@ __global__ void __launch_bounds__(kThreads)
   const int sub = lane & 15;
   const int half = lane >> 4;
   const std::uint32_t row0 = blockIdx.x * kRowsPerBlock;
+  const std::uint32_t half_m = m / 2;
   const std::size_t row_bytes = std::size_t{k} / 32 * kDownBlockBytes<F>;
   const std::uint8_t* w_expert =
       w + std::size_t{static_cast<std::uint32_t>(expert)} * m * row_bytes;
+  // Block row l's matrix row: kGeGlu, gate rows then their up rows.
+  const auto matrix_row = [&](int l) -> std::uint32_t {
+    if constexpr (kGeGlu) {
+      return (l >= kRowsPerBlock / 2 ? half_m : 0U) +
+             blockIdx.x * (kRowsPerBlock / 2) +
+             static_cast<std::uint32_t>(l % (kRowsPerBlock / 2));
+    } else {
+      return row0 + static_cast<std::uint32_t>(l);
+    }
+  };
+  const auto row_live = [&](int l) {
+    if constexpr (kGeGlu) {
+      return blockIdx.x * (kRowsPerBlock / 2) +
+                 static_cast<std::uint32_t>(l % (kRowsPerBlock / 2)) <
+             half_m;
+    } else {
+      return matrix_row(l) < m;
+    }
+  };
 
   // Weight fetch. Q5_1: piece c (tid, and tid + 256 for tid < 128) is bytes
   // 16 (c % 3) of row c / 3's stage. Q8_0: word c = tid + 256 i is word
@@ -652,8 +673,9 @@ __global__ void __launch_bounds__(kThreads)
   constexpr int kWords = kRowsPerBlock * kQ80Words;
   constexpr int kWordsPer = kQ8 ? (kWords + kThreads - 1) / kThreads : 1;
   const auto row_src = [&](int r_local) {
-    const std::uint32_t r = row0 + static_cast<std::uint32_t>(r_local);
-    return w_expert + std::size_t{r < m ? r : m - 1} * row_bytes;
+    return w_expert +
+           std::size_t{row_live(r_local) ? matrix_row(r_local) : m - 1} *
+               row_bytes;
   };
   const bool f_second = tid + kThreads < kPieces;
   const std::uint8_t* f_src0 = row_src(tid / 3) + (tid % 3) * 16;
@@ -737,7 +759,7 @@ __global__ void __launch_bounds__(kThreads)
   for (int j = 0; j < kTokTiles; ++j) {
     acc[j] = v8f{0.0F, 0.0F, 0.0F, 0.0F, 0.0F, 0.0F, 0.0F, 0.0F};
   }
-  const bool live = row0 + static_cast<std::uint32_t>(wave * 16 + sub) < m;
+  const bool live = row_live(wave * 16 + sub);
   const int stages = static_cast<int>(k / kDownStageK);
   fetch_weights(0);
   fetch_act(0);
@@ -786,6 +808,53 @@ __global__ void __launch_bounds__(kThreads)
       }
     }
     __syncthreads();
+  }
+  if constexpr (kGeGlu) {
+    // Up waves hand their binary16 rows to the gate waves through LDS, as in
+    // RoutedHalfKQuantKernel.
+    static_assert(4 * kTokTiles * 8 * kWave * 2 <=
+                  static_cast<int>(sizeof(s_act_bytes)));
+    if (wave >= 4) {
+#pragma unroll
+      for (int j = 0; j < kTokTiles; ++j) {
+#pragma unroll
+        for (int i = 0; i < 8; ++i) {
+          s_act[(((wave - 4) * kTokTiles + j) * 8 + i) * kWave + lane] =
+              SaturatedHalf(acc[j][i]);
+        }
+      }
+    }
+    __syncthreads();
+    if (wave >= 4) {
+      return;
+    }
+#pragma unroll
+    for (int j = 0; j < kTokTiles; ++j) {
+      const int t = t_local + j * 16 + sub;
+      if (t >= bucket_rows) {
+        continue;
+      }
+      const std::int32_t dst = rows_out[bucket_begin + t];
+      if (dst < 0) {
+        continue;
+      }
+      const std::size_t base =
+          std::size_t{static_cast<std::uint32_t>(dst)} * half_m;
+#pragma unroll
+      for (int i = 0; i < 8; ++i) {
+        const std::uint32_t r =
+            blockIdx.x * (kRowsPerBlock / 2) +
+            static_cast<std::uint32_t>(wave * 16 + 2 * i + half);
+        if (r < half_m) {
+          const __half up =
+              s_act[((wave * kTokTiles + j) * 8 + i) * kWave + lane];
+          const float v = GeGluValue(__half2float(SaturatedHalf(acc[j][i])),
+                                     __half2float(up));
+          out_half[base + r] = SaturatedHalf(v);
+        }
+      }
+    }
+    return;
   }
   // Epilogue per token tile: [token][row] through LDS, then 16 threads per
   // token store its 128 rows contiguously.
@@ -841,8 +910,7 @@ bool LaunchRoutedHalfGemm(ExpertFormat format, const void* w, const void* x,
     return false;
   }
   if (geglu &&
-      (out_half == nullptr || m % 2 != 0 || format == ExpertFormat::kQ5_1 ||
-       format == ExpertFormat::kQ8_0)) {
+      (out_half == nullptr || m % 2 != 0 || format == ExpertFormat::kQ5_1)) {
     return false;
   }
   const dim3 grid((m + kRowsPerBlock - 1) / kRowsPerBlock, n_tiles);
@@ -891,15 +959,22 @@ bool LaunchRoutedHalfGemm(ExpertFormat format, const void* w, const void* x,
       }
       RoutedHalfDownKernel<ExpertFormat::kQ5_1, 96>
           <<<grid, kThreads, 0, stream>>>(wb, xh, tiles, pad_bounds, rows_in,
-                                          rows_out, out, m, k);
+                                          rows_out, out, nullptr, m, k);
       return true;
     case ExpertFormat::kQ8_0:
-      if (out == nullptr || k % kDownStageK != 0) {
+      if (k % kDownStageK != 0 || (out == nullptr) != geglu) {
         return false;
       }
-      RoutedHalfDownKernel<ExpertFormat::kQ8_0, 96>
-          <<<grid, kThreads, 0, stream>>>(wb, xh, tiles, pad_bounds, rows_in,
-                                          rows_out, out, m, k);
+      if (geglu) {
+        RoutedHalfDownKernel<ExpertFormat::kQ8_0, 96, true>
+            <<<geglu_grid, kThreads, 0, stream>>>(wb, xh, tiles, pad_bounds,
+                                                  rows_in, rows_out, nullptr,
+                                                  oh, m, k);
+      } else {
+        RoutedHalfDownKernel<ExpertFormat::kQ8_0, 96>
+            <<<grid, kThreads, 0, stream>>>(wb, xh, tiles, pad_bounds, rows_in,
+                                            rows_out, out, nullptr, m, k);
+      }
       return true;
     default:
       return false;
