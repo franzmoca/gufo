@@ -755,10 +755,10 @@ std::optional<qwen38_flash_next::rocm::WeightType> RoutedHalfType(
 /// 48, which it needs its own tile map for).
 constexpr std::uint32_t kRoutedTileRows = 48;
 constexpr std::uint32_t kRoutedDownRows = 64;
-/// The Gemma Q6_K gate/up GEMM skips a tile's empty 16-row parts, so wide
-/// tiles cost no padding work: 96 rows 4.3 ms per 2048-row layer, 48 rows
-/// 6.3, 128 rows 4.7 (one block per WGP).
-constexpr std::uint32_t kRoutedQ6KTileRows = 96;
+/// The Gemma K-quant gate/up GEMM skips a tile's empty 16-row parts, so
+/// wide tiles cost no padding work: Q6_K 96 rows 4.3 ms per 2048-row layer,
+/// 48 rows 6.3, 128 rows 4.7 (one block per WGP).
+constexpr std::uint32_t kRoutedKQuantTileRows = 96;
 
 }  // namespace
 
@@ -847,9 +847,12 @@ bool Executor::PrefillExperts(const DeviceLayer& l, std::uint32_t n,
   const std::uint32_t width = c.expert_ffn_size;
   const auto gate_up = RoutedHalfType(l.gate_up_exps.type);
   const auto down = RoutedHalfType(l.down_exps.type);
-  // Q6_K gate/up takes the Gemma routed binary16 GEMM.
-  const bool q6_gate_up = l.gate_up_exps.type == core::GgmlType::kQ6_K;
-  if ((!gate_up && !q6_gate_up) || !down || d % 256 != 0 || width % 64 != 0) {
+  // K-quant gate/up takes the Gemma routed binary16 GEMM, Q8_0 Flash-Next's.
+  const auto own_format = ExpertFormatOf(l.gate_up_exps.type);
+  const bool own_gate_up = own_format && (*own_format == ExpertFormat::kQ4_K ||
+                                          *own_format == ExpertFormat::kQ5_K ||
+                                          *own_format == ExpertFormat::kQ6_K);
+  if ((!gate_up && !own_gate_up) || !down || d % 256 != 0 || width % 64 != 0) {
     return false;
   }
   // The tile map needs the per-expert counts on the host.
@@ -860,7 +863,7 @@ bool Executor::PrefillExperts(const DeviceLayer& l, std::uint32_t n,
   // The down projection's map follows the gate/up map at a fixed offset.
   const std::size_t down_at = std::size_t{n} * used / 16 + c.num_experts;
   const std::uint32_t gate_up_rows =
-      q6_gate_up ? kRoutedQ6KTileRows : kRoutedTileRows;
+      own_gate_up ? kRoutedKQuantTileRows : kRoutedTileRows;
   std::uint32_t tiles = 0;
   std::uint32_t down_tiles = 0;
   for (std::uint32_t e = 0; e < c.num_experts; ++e) {
@@ -883,11 +886,11 @@ bool Executor::PrefillExperts(const DeviceLayer& l, std::uint32_t n,
   auto* gu = static_cast<__half*>(moe_gu_);
   auto* act = static_cast<__half*>(moe_act_);
   const bool gate_up_ok =
-      q6_gate_up
-          ? LaunchRoutedHalfGemm(ExpertFormat::kQ6_K, l.gate_up_exps.data,
-                                 x_half_, moe_tiles_, tiles, gate_up_rows,
-                                 moe_bounds_, moe_rows_token_, moe_rows_slot_,
-                                 nullptr, gu, 2 * width, d, stream)
+      own_gate_up
+          ? LaunchRoutedHalfGemm(*own_format, l.gate_up_exps.data, x_half_,
+                                 moe_tiles_, tiles, gate_up_rows, moe_bounds_,
+                                 moe_rows_token_, moe_rows_slot_, nullptr, gu,
+                                 2 * width, d, stream)
           : fn::RoutedF16Gemm(l.gate_up_exps.data, *gate_up,
                               static_cast<const __half*>(x_half_), moe_tiles_,
                               tiles, kRoutedTileRows, moe_bounds_,
