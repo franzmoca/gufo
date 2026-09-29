@@ -730,14 +730,13 @@ __device__ __forceinline__ float ReduceScatterN(float (&v)[N]) {
 /// Online softmax per 32-key tile. A row's arithmetic does not depend on R or
 /// on the rows sharing its block: scores reduce in groups of KG keys and only
 /// the load batching (LG keys) varies with R. Writes (m, l, unnormalized acc).
-template<int D, int G, int R, int WPH>
+template<int D, int G, int R, int WPH, int CW>
 __global__ void __launch_bounds__(kThreads* WPH)
     __attribute__((amdgpu_waves_per_eu(R == 4 ? 8 : 1)))
     RowSplitAttentionKernel(AttentionArgs a, std::uint32_t first_split,
                             std::uint32_t splits) {
   constexpr int P = D / kWave;
   constexpr int C = static_cast<int>(SplitChunk(D));
-  constexpr int CW = kWaves / G;  // chunks per block
   constexpr int KG = P >= 16 ? 2 : 4;
   constexpr int LG = R == 1 && WPH == 1 ? 8 : KG;
   constexpr int kBlockThreads = kThreads * WPH;
@@ -1203,7 +1202,10 @@ template<int D, int G>
 void LaunchSplitAttention(const AttentionArgs& a, hipStream_t stream) {
   // Splits cover the batch's keys [lowest window start, highest key) in
   // absolute-position chunks. A block holds the G query heads of one KV head
-  // for kWaves / G consecutive chunks and up to kRowBlock rows.
+  // for CW consecutive chunks and up to kRowBlock rows. At hd256 (G = 2) two
+  // chunks per block rather than four: the waves share nothing, and the
+  // doubled grid fills more of the GPU (tg d2048 50.6 -> 51.0).
+  constexpr int CW = G == kWaves ? 1 : 2;
   const std::uint32_t chunk = SplitChunk(D);
   const std::uint32_t last_position =
       a.shared_position ? a.first_position : a.first_position + a.rows - 1;
@@ -1217,13 +1219,12 @@ void LaunchSplitAttention(const AttentionArgs& a, hipStream_t stream) {
   if (splits > kMaxSplits) {
     throw std::invalid_argument("split attention context too long");
   }
-  constexpr std::uint32_t kChunksPerBlock = kWaves / G;
-  const std::uint32_t chunk_blocks =
-      (splits + kChunksPerBlock - 1) / kChunksPerBlock;
+  constexpr std::uint32_t kBlock = G * CW * kWave;
+  const std::uint32_t chunk_blocks = (splits + CW - 1) / CW;
   if (a.rows == 1) {
     // Single-token decode batches loads deeper; the arithmetic is the same.
-    RowSplitAttentionKernel<D, G, 1, 1>
-        <<<dim3(1, a.kv_heads, chunk_blocks), kThreads, 0, stream>>>(
+    RowSplitAttentionKernel<D, G, 1, 1, CW>
+        <<<dim3(1, a.kv_heads, chunk_blocks), kBlock, 0, stream>>>(
             a, first_split, splits);
   } else if constexpr (G == kWaves) {
     // hd512: two waves per head, three rows each, keep a block's rows within
@@ -1231,23 +1232,23 @@ void LaunchSplitAttention(const AttentionArgs& a, hipStream_t stream) {
     // block still streams each key once.
     if (a.rows > 6) {
       constexpr std::uint32_t kRows = 4 * 2;
-      RowSplitAttentionKernel<D, G, 4, 2>
+      RowSplitAttentionKernel<D, G, 4, 2, CW>
           <<<dim3((a.rows + kRows - 1) / kRows, a.kv_heads, chunk_blocks),
              2 * kThreads, 0, stream>>>(a, first_split, splits);
     } else {
       constexpr std::uint32_t kRows = 3 * 2;
-      RowSplitAttentionKernel<D, G, 3, 2>
+      RowSplitAttentionKernel<D, G, 3, 2, CW>
           <<<dim3((a.rows + kRows - 1) / kRows, a.kv_heads, chunk_blocks),
              2 * kThreads, 0, stream>>>(a, first_split, splits);
     }
   } else if (a.rows > kRowBlock && a.rows <= 8) {
-    RowSplitAttentionKernel<D, G, 8, 1>
-        <<<dim3(1, a.kv_heads, chunk_blocks), kThreads, 0, stream>>>(
+    RowSplitAttentionKernel<D, G, 8, 1, CW>
+        <<<dim3(1, a.kv_heads, chunk_blocks), kBlock, 0, stream>>>(
             a, first_split, splits);
   } else {
-    RowSplitAttentionKernel<D, G, kRowBlock, 1>
+    RowSplitAttentionKernel<D, G, kRowBlock, 1, CW>
         <<<dim3((a.rows + kRowBlock - 1) / kRowBlock, a.kv_heads, chunk_blocks),
-           kThreads, 0, stream>>>(a, first_split, splits);
+           kBlock, 0, stream>>>(a, first_split, splits);
   }
   AttentionMergeKernel<D>
       <<<dim3(a.heads, a.rows, D / kMergeThreads), kMergeThreads, 0, stream>>>(
