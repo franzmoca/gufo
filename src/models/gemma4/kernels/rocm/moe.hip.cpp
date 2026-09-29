@@ -565,7 +565,9 @@ __global__ void __launch_bounds__(kFinishThreads)
     const std::uint32_t i = threadIdx.x + j * kFinishThreads;
     if (i < a.hidden) {
       const float v = mv[j] * rx * a.next_norm[i];
-      a.h[base + i] = v;
+      if (a.h != nullptr) {
+        a.h[base + i] = v;
+      }
       if (a.h_half != nullptr) {
         static_cast<__half*>(a.h_half)[base + i] = HalfOf(v);
       }

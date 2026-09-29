@@ -205,7 +205,9 @@ __device__ inline void StoreNormedRow(const float (&xv)[RowRegisters<kBlock>()],
     const float v = i < dim ? xv[j] * r * next_norm[i] : 0.0F;
     if (q8 == nullptr) {
       if (i < dim) {
-        h[base + i] = v;
+        if (h != nullptr) {
+          h[base + i] = v;
+        }
         if (h_half != nullptr) {
           h_half[base + i] = HalfOf(v);
         }
@@ -263,13 +265,15 @@ __global__ void __launch_bounds__(kBlock)
   }
   const float r2 = RmsScale(BlockSumOf<kBlock>(ss2, scratch), dim, eps);
   StoreNormedRow<kBlock>(xv, r2, next_norm, h, q8, rows, dim, h_half);
-  if (h2 != nullptr) {
+  if (h2 != nullptr || h2_half != nullptr) {
 #pragma unroll
     for (std::uint32_t j = 0; j < kRegs; ++j) {
       const std::uint32_t i = threadIdx.x + j * kBlock;
       if (i < dim) {
         const float v = xv[j] * r2 * second_norm[i];
-        h2[base + i] = v;
+        if (h2 != nullptr) {
+          h2[base + i] = v;
+        }
         if (h2_half != nullptr) {
           h2_half[base + i] = HalfOf(v);
         }
@@ -1281,6 +1285,9 @@ void LaunchAttention(const AttentionArgs& a, hipStream_t stream) {
       if (a.rope_pairs != 0) {
         throw std::invalid_argument("derived keys need the WMMA prefill path");
       }
+      if (a.out == nullptr) {
+        throw std::invalid_argument("this attention needs its FP32 output");
+      }
       AttentionKernel<D><<<dim3(1, a.heads, a.rows), kThreads, 0, stream>>>(a);
       if (a.out_half != nullptr) {
         const std::size_t count = std::size_t{a.rows} * a.heads * D;
@@ -1333,7 +1340,9 @@ __global__ void GeGluPackedKernel(const float* gu, float* out,
     const std::size_t col = i % width;
     const float* row = gu + slot * 2 * width;
     const float v = GeGluValue(row[col], row[width + col]);
-    out[i] = v;
+    if (out != nullptr) {
+      out[i] = v;
+    }
     if (out_half != nullptr) {
       out_half[i] = HalfOf(v);
     }

@@ -374,7 +374,9 @@ __global__ void __launch_bounds__((kPrefillThreads<D, kHeads, kQueryBlocks>))
 #pragma unroll
     for (std::uint32_t t = 0; t < kSliceSteps; ++t) {
       const float v = o_acc[t][i] * inv;
-      a.out[at + t * 16] = v;
+      if (a.out != nullptr) {
+        a.out[at + t * 16] = v;
+      }
       if (out_half != nullptr) {
         out_half[at + t * 16] = HalfOf(v);
       }

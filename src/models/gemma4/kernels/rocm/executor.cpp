@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <initializer_list>
 #include <limits>
 #include <optional>
 #include <stdexcept>
@@ -62,6 +63,10 @@ constexpr std::uint32_t kRoutedDownRows = 64;
 /// wide tiles cost no padding work: Q6_K 96 rows 4.3 ms per 2048-row layer,
 /// 48 rows 6.3, 128 rows 4.7 (one block per WGP).
 constexpr std::uint32_t kRoutedKQuantTileRows = 96;
+
+/// Whether layer l's experts take the binary16 prefill route (the formats
+/// PrefillExperts covers).
+bool HalfExperts(const DeviceLayer& l, const Config& c);
 
 Layout Plan(const Config& c, const Config* draft, std::uint32_t vocab,
             std::size_t max_cols, std::uint32_t rows, std::uint32_t logit_rows,
@@ -561,6 +566,17 @@ void Executor::Forward(std::span<const Segment> segments,
                 "writes past the grouped width");
   // Whether the previous layer's mixture wrote this layer's binary16 input.
   bool half_ready = false;
+  // A binary16 input whose every consumer is a Q8_0 projection (the binary16
+  // GEMM) needs no FP32 row.
+  const auto half_only = [&](std::initializer_list<const DeviceTensor*> ws) {
+    return half && std::all_of(ws.begin(), ws.end(), [](const DeviceTensor* w) {
+             return w->empty() || w->type == core::GgmlType::kQ8_0;
+           });
+  };
+  const auto qkv_half_only = [&](const DeviceLayer& L) {
+    return !L.attn_qkv.empty() ? half_only({&L.attn_qkv})
+                               : half_only({&L.attn_q, &L.attn_k, &L.attn_v});
+  };
   for (std::uint32_t l = 0; l < c.num_layers; ++l) {
     const DeviceLayer& L = layers[l];
     const bool sliding = c.IsSliding(l);
@@ -623,7 +639,9 @@ void Executor::Forward(std::span<const Segment> segments,
       att.q = q_ + std::size_t{row0} * c.QDim(l);
       att.k_cache = cache.k[l];
       att.v_cache = cache.v[l];
-      att.out = attn_ + std::size_t{row0} * c.QDim(l);
+      att.out = half_only({&L.attn_output})
+                    ? nullptr
+                    : attn_ + std::size_t{row0} * c.QDim(l);
       att.partials = partials_;
       att.rows = seg.rows;
       att.heads = c.num_heads;
@@ -647,11 +665,16 @@ void Executor::Forward(std::span<const Segment> segments,
             half ? x_half_ : Quantize(attn_, n, c.QDim(l)), n, o_);
     // Expert layers also normalize the attention residual for the experts.
     const bool moe = !L.gate_up_exps.empty();
-    PostAttentionNorm(o_, L.post_attn_norm.f32(), x_, L.ffn_norm.f32(), h_, n,
-                      d, eps, stream_, prefill ? q8_ : nullptr,
-                      moe ? L.pre_ffn_norm_2.f32() : nullptr,
-                      moe ? moe_h_ : nullptr, half ? x_half_ : nullptr,
-                      half && moe ? moe_x_half_ : nullptr);
+    const bool dense_half_only = !L.ffn_gate_up.empty()
+                                     ? half_only({&L.ffn_gate_up})
+                                     : half_only({&L.ffn_gate, &L.ffn_up});
+    const bool experts_half_only = half && moe && HalfExperts(L, c);
+    PostAttentionNorm(
+        o_, L.post_attn_norm.f32(), x_, L.ffn_norm.f32(),
+        dense_half_only ? nullptr : h_, n, d, eps, stream_,
+        prefill ? q8_ : nullptr, moe ? L.pre_ffn_norm_2.f32() : nullptr,
+        moe && !experts_half_only ? moe_h_ : nullptr, half ? x_half_ : nullptr,
+        half && moe ? moe_x_half_ : nullptr);
     const void* fq = prefill ? q8_ : half ? x_half_ : Quantize(h_, n, d);
     // At grouped widths the experts run beside the dense MLP on their own
     // stream: routing is latency bound, the projections bandwidth bound.
@@ -667,8 +690,8 @@ void Executor::Forward(std::span<const Segment> segments,
     if (!L.ffn_gate_up.empty() && !prefill) {
       // One projection writes [gate | up] rows.
       Project(L.ffn_gate_up, h_, fq, n, gate_);
-      GeGluPacked(gate_, act_, n, c.ffn_size, stream_,
-                  half ? x_half_ : nullptr);
+      GeGluPacked(gate_, half_only({&L.ffn_down}) ? nullptr : act_, n,
+                  c.ffn_size, stream_, half ? x_half_ : nullptr);
       down_in = act_;
       gq = half ? x_half_ : Quantize(act_, n, c.ffn_size);
     } else {
@@ -704,7 +727,7 @@ void Executor::Forward(std::span<const Segment> segments,
       finish.scale = L.output_scale;
       finish.x = x_;
       finish.next_norm = next;
-      finish.h = h_;
+      finish.h = half && !last && qkv_half_only(layers[l + 1]) ? nullptr : h_;
       finish.rows = n;
       finish.hidden = d;
       finish.used = c.experts_used;
@@ -773,6 +796,20 @@ std::optional<qwen38_flash_next::rocm::WeightType> RoutedHalfType(
     default:
       return std::nullopt;
   }
+}
+
+/// K-quant gate/up takes the Gemma routed binary16 GEMM, Q8_0 Flash-Next's.
+bool OwnGateUp(std::optional<ExpertFormat> format) {
+  return format &&
+         (*format == ExpertFormat::kQ4_K || *format == ExpertFormat::kQ5_K ||
+          *format == ExpertFormat::kQ6_K);
+}
+
+bool HalfExperts(const DeviceLayer& l, const Config& c) {
+  return (RoutedHalfType(l.gate_up_exps.type) ||
+          OwnGateUp(ExpertFormatOf(l.gate_up_exps.type))) &&
+         RoutedHalfType(l.down_exps.type) && c.hidden_size % 256 == 0 &&
+         c.expert_ffn_size % 64 == 0;
 }
 
 }  // namespace
@@ -860,16 +897,13 @@ bool Executor::PrefillExperts(const DeviceLayer& l, std::uint32_t n,
   const std::uint32_t d = c.hidden_size;
   const std::uint32_t used = c.experts_used;
   const std::uint32_t width = c.expert_ffn_size;
-  const auto gate_up = RoutedHalfType(l.gate_up_exps.type);
-  const auto down = RoutedHalfType(l.down_exps.type);
-  // K-quant gate/up takes the Gemma routed binary16 GEMM, Q8_0 Flash-Next's.
-  const auto own_format = ExpertFormatOf(l.gate_up_exps.type);
-  const bool own_gate_up = own_format && (*own_format == ExpertFormat::kQ4_K ||
-                                          *own_format == ExpertFormat::kQ5_K ||
-                                          *own_format == ExpertFormat::kQ6_K);
-  if ((!gate_up && !own_gate_up) || !down || d % 256 != 0 || width % 64 != 0) {
+  if (!HalfExperts(l, c)) {
     return false;
   }
+  const auto gate_up = RoutedHalfType(l.gate_up_exps.type);
+  const auto down = RoutedHalfType(l.down_exps.type);
+  const auto own_format = ExpertFormatOf(l.gate_up_exps.type);
+  const bool own_gate_up = OwnGateUp(own_format);
   // Tile maps built on the device, the down projection's after the gate/up
   // one; each GEMM launches its map's capacity and skips the dead entries.
   const std::uint32_t slots = n * used;
