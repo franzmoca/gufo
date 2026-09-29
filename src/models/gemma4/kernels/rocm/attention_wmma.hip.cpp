@@ -82,7 +82,7 @@ constexpr std::uint32_t kGlobalPairs = 64;
 template<std::uint32_t D, std::uint32_t kHeads, std::uint32_t kQueryBlocks,
          bool kGlobal>
 __global__ void __launch_bounds__((kPrefillThreads<D, kHeads, kQueryBlocks>))
-    __attribute__((amdgpu_waves_per_eu(kGlobal ? 8 : 1)))
+    __attribute__((amdgpu_waves_per_eu(kGlobal || D == 256 ? 8 : 1)))
     WmmaPrefillAttentionKernel(AttentionArgs a) {
   if constexpr (kGlobal) {
     a.window = 0;
@@ -222,7 +222,7 @@ __global__ void __launch_bounds__((kPrefillThreads<D, kHeads, kQueryBlocks>))
   // d + D / 2 of one key; rotated dims come from the rotated-dims K cache,
   // every other key dim is its value (the query carries the key weight).
   // Each chunk's key source is fixed per thread; only the key slot moves.
-  static_assert(kStage == 2 && kThreads == D,
+  static_assert(D != 512 || (kStage == 2 && kThreads == D),
                 "a thread's chunks must pair dims d and d + D / 2");
   const __half* key_base[kStage];
   std::uint32_t key_stride[kStage];
@@ -539,8 +539,10 @@ bool LaunchWmmaPrefillAttention(const AttentionArgs& a, hipStream_t stream) {
     return false;
   }
   if (a.head_dim == 256) {
-    // Two heads x two 16-query blocks, two waves per row block.
-    return Launch<256, 2, 2>(a, stream);
+    // Two heads x four 16-query blocks, two waves per row block: the
+    // staged window serves 128 rows (the kernel is bound by its K/V
+    // traffic), and 192 VGPRs keep two blocks per WGP.
+    return Launch<256, 2, 4>(a, stream);
   }
   if (a.head_dim == 512) {
     // Four heads x one 16-query block, four waves per row block.
