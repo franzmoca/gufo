@@ -5361,6 +5361,15 @@ bool DenseF16Gemm(const void* w, const __half* x, float* out, std::size_t batch,
       // and keep fewer weight fragments live. K accumulation is unchanged.
       hipLaunchKernelGGL((DenseF16GEMMKernel<kWideBM, kBN, 2, 8, 1>), grid,
                          dim3(kThreads), 0, stream, w, x, out, batch, m, k);
+    } else if (batch >= 1024 && m == 2816 && k >= 4096) {
+      // Gemma 4 26B-A4B attention output (176 blocks over a long K): the
+      // two-block stage and eight row groups, 2013 -> 1759 us per 2048 rows.
+      hipLaunchKernelGGL((DenseF16GEMMKernel<kWideBM, kBN, 2, 8, 1>), grid,
+                         dim3(kThreads), 0, stream, w, x, out, batch, m, k);
+    } else if (batch >= 1024 && m == 2816 && k == 2112) {
+      // Gemma 4 26B-A4B dense MLP down: eight row groups, 605 -> 582 us.
+      hipLaunchKernelGGL((DenseF16GEMMKernel<kWideBM, kBN, 1, 8, 1>), grid,
+                         dim3(kThreads), 0, stream, w, x, out, batch, m, k);
     } else {
       hipLaunchKernelGGL((DenseF16GEMMKernel<kWideBM, kBN, 1, 4, 2>), grid,
                          dim3(kThreads), 0, stream, w, x, out, batch, m, k);
