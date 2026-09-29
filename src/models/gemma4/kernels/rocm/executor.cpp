@@ -117,7 +117,7 @@ Layout Plan(const Config& c, const Config* draft, std::uint32_t vocab,
         qwen38_flash_next::rocm::RoutedCompactRows(slots, c.num_experts);
     l.moe_rows_token = take(compact * sizeof(std::int32_t));
     l.moe_rows_slot = take(compact * sizeof(std::int32_t));
-    l.moe_tiles = take((slots / 16 + c.num_experts) * sizeof(std::int32_t));
+    l.moe_tiles = take(2 * (slots / 16 + c.num_experts) * sizeof(std::int32_t));
   }
   if (draft != nullptr) {
     // One row per session drafting in the same step.
@@ -266,8 +266,8 @@ Executor::Executor(const DeviceModel& model, std::uint32_t max_rows,
     HIP_CHECK(hipHostMalloc(&moe_counts_host_,
                             c.num_experts * sizeof(std::uint32_t)));
     const std::size_t slots = std::size_t{max_rows} * c.experts_used;
-    HIP_CHECK(hipHostMalloc(
-        &moe_tiles_host_, (slots / 16 + c.num_experts) * sizeof(std::int32_t)));
+    HIP_CHECK(hipHostMalloc(&moe_tiles_host_, 2 * (slots / 16 + c.num_experts) *
+                                                  sizeof(std::int32_t)));
   }
   if (model.has_draft()) {
     draft_tokens_ = reinterpret_cast<std::uint32_t*>(base + l.draft_tokens);
@@ -750,8 +750,11 @@ std::optional<qwen38_flash_next::rocm::WeightType> RoutedHalfType(
   }
 }
 
-/// Token rows per routed binary16 GEMM tile.
+/// Token rows per routed binary16 GEMM tile: 48 for gate/up (the widest
+/// Q4_K/Q5_K tile), 64 for the Q5_1/Q8_0 down projection (2.5% faster than
+/// 48, which it needs its own tile map for).
 constexpr std::uint32_t kRoutedTileRows = 48;
+constexpr std::uint32_t kRoutedDownRows = 64;
 
 }  // namespace
 
@@ -850,16 +853,23 @@ bool Executor::PrefillExperts(const DeviceLayer& l, std::uint32_t n,
                            c.num_experts * sizeof(std::uint32_t),
                            hipMemcpyDeviceToHost, stream));
   HIP_CHECK(hipStreamSynchronize(stream));
+  // The down projection's map follows the gate/up map at a fixed offset.
+  const std::size_t down_at = std::size_t{n} * used / 16 + c.num_experts;
   std::uint32_t tiles = 0;
+  std::uint32_t down_tiles = 0;
   for (std::uint32_t e = 0; e < c.num_experts; ++e) {
     const std::uint32_t padded = (moe_counts_host_[e] + 15U) / 16U * 16U;
     for (std::uint32_t j = 0; j * kRoutedTileRows < padded; ++j) {
       moe_tiles_host_[tiles++] = static_cast<std::int32_t>(e | (j << 16));
     }
+    for (std::uint32_t j = 0; j * kRoutedDownRows < padded; ++j) {
+      moe_tiles_host_[down_at + down_tiles++] =
+          static_cast<std::int32_t>(e | (j << 16));
+    }
   }
   HIP_CHECK(hipMemcpyAsync(moe_tiles_, moe_tiles_host_,
-                           tiles * sizeof(std::int32_t), hipMemcpyHostToDevice,
-                           stream));
+                           (down_at + down_tiles) * sizeof(std::int32_t),
+                           hipMemcpyHostToDevice, stream));
   fn::RoutedCompact(moe_ids_, moe_counts_, moe_bounds_, moe_cursors_,
                     moe_rows_token_, moe_rows_slot_, n, used, c.num_experts,
                     stream);
@@ -881,10 +891,10 @@ bool Executor::PrefillExperts(const DeviceLayer& l, std::uint32_t n,
     return false;
   }
   GeGluPackedHalf(gu, act, n * used, width, stream);
-  return fn::RoutedF16Gemm(l.down_exps.data, *down, act, moe_tiles_, tiles,
-                           kRoutedTileRows, moe_bounds_, moe_rows_slot_,
-                           moe_rows_slot_, nullptr, moe_out_, nullptr, d, width,
-                           stream);
+  return fn::RoutedF16Gemm(l.down_exps.data, *down, act, moe_tiles_ + down_at,
+                           down_tiles, kRoutedDownRows, moe_bounds_,
+                           moe_rows_slot_, moe_rows_slot_, nullptr, moe_out_,
+                           nullptr, d, width, stream);
 }
 
 void Executor::CommitHidden(KvCache& cache, std::uint32_t row) {
