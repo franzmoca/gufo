@@ -105,7 +105,7 @@ struct Routing {
 
 /// Routes `rows` rows on the device (with the group table).
 Routing Route(const float* dx, const float* router, const float* expert_scale,
-              std::uint32_t rows) {
+              std::uint32_t rows, std::uint32_t* sync = nullptr) {
   float* logits = nullptr;
   std::int32_t* ids = nullptr;
   float* weights = nullptr;
@@ -128,6 +128,7 @@ Routing Route(const float* dx, const float* router, const float* expert_scale,
   a.experts = kExperts;
   a.used = kUsed;
   a.eps = kEps;
+  a.sync = sync;
   g4k::MoeRoute(a, nullptr);
   Routing r;
   r.ids = Host(ids, rows * kUsed);
@@ -212,6 +213,33 @@ void CheckRouting(std::mt19937& rng) {
     }
   }
   Require(seen == kRows * kUsed, "groups do not cover every slot");
+
+  // One-launch routing (the decode path) gives the same bits, twice in a
+  // row (its counter returns to zero).
+  {
+    std::uint32_t* sync = nullptr;
+    HIP_CHECK(hipMalloc(&sync, sizeof(std::uint32_t)));
+    HIP_CHECK(hipMemset(sync, 0, sizeof(std::uint32_t)));
+    for (int round = 0; round < 2; ++round) {
+      const Routing fused = Route(d_x, d_router, d_es, kRows, sync);
+      Require(fused.ids == all.ids, "one-launch routing: ids differ");
+      // Each group's expert, slot count and slots.
+      bool same = fused.groups[0] == all.groups[0];
+      for (std::int32_t g = 0; same && g < all.groups[0]; ++g) {
+        const std::int32_t* x = &all.groups[1 + g * g4k::kGroupInts];
+        const std::int32_t* y = &fused.groups[1 + g * g4k::kGroupInts];
+        same = std::equal(x, x + 2 + x[1], y);
+      }
+      Require(same, "one-launch routing: groups differ");
+      Require(std::memcmp(fused.weights.data(), all.weights.data(),
+                          all.weights.size() * 4) == 0,
+              "one-launch routing: weights differ");
+      Require(std::memcmp(fused.logits.data(), all.logits.data(),
+                          all.logits.size() * 4) == 0,
+              "one-launch routing: logits differ");
+    }
+    HIP_CHECK(hipFree(sync));
+  }
 
   // Batch invariance: each row routed alone gives identical bits.
   for (std::uint32_t r = 0; r < kRows; r += 5) {

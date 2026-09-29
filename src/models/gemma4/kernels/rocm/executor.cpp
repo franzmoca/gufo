@@ -30,9 +30,9 @@ std::size_t AlignUp(std::size_t n) {
 struct Layout {
   std::size_t tokens, logit_index, key_ends, x, h, q, k, v, attn, o, gate, up,
       hsel, logits, partials, q8, act;
-  std::size_t x_half, moe_x_half, moe_h, moe_logits, moe_ids, moe_weights,
-      moe_groups, moe_gu, moe_act, moe_out, moe_counts, moe_bounds, moe_cursors,
-      moe_rows_token, moe_rows_slot, moe_tiles;
+  std::size_t x_half, moe_x_half, moe_sync, moe_h, moe_logits, moe_ids,
+      moe_weights, moe_groups, moe_gu, moe_act, moe_out, moe_counts, moe_bounds,
+      moe_cursors, moe_rows_token, moe_rows_slot, moe_tiles;
   std::size_t draft_tokens, draft_embed, draft_concat, draft_x, draft_h,
       draft_q, draft_attn, draft_o, draft_gate, draft_up, draft_logits,
       draft_next, draft_candidates, draft_candidate_scratch;
@@ -126,6 +126,7 @@ Layout Plan(const Config& c, const Config* draft, std::uint32_t vocab,
     l.moe_act = take(std::max(slots * width * 2, grouped * width * f));
     l.moe_out = take(slots * c.hidden_size * f);
     l.moe_counts = take(c.num_experts * sizeof(std::uint32_t));
+    l.moe_sync = take(sizeof(std::uint32_t));
     l.moe_bounds = take((c.num_experts + 1) * sizeof(std::int32_t));
     l.moe_cursors = take(c.num_experts * sizeof(std::int32_t));
     const std::size_t compact =
@@ -279,6 +280,8 @@ Executor::Executor(const DeviceModel& model, std::uint32_t max_rows,
     moe_act_ = base + l.moe_act;
     moe_out_ = reinterpret_cast<float*>(base + l.moe_out);
     moe_counts_ = reinterpret_cast<std::uint32_t*>(base + l.moe_counts);
+    moe_sync_ = reinterpret_cast<std::uint32_t*>(base + l.moe_sync);
+    HIP_CHECK(hipMemset(moe_sync_, 0, sizeof(std::uint32_t)));
     moe_bounds_ = reinterpret_cast<std::int32_t*>(base + l.moe_bounds);
     moe_cursors_ = reinterpret_cast<std::int32_t*>(base + l.moe_cursors);
     moe_rows_token_ = reinterpret_cast<std::int32_t*>(base + l.moe_rows_token);
@@ -834,6 +837,7 @@ void Executor::Experts(const DeviceLayer& l, std::uint32_t n,
   route.weights = moe_weights_;
   route.counts = grouped ? nullptr : moe_counts_;
   route.groups = grouped ? moe_groups_ : nullptr;
+  route.sync = grouped ? moe_sync_ : nullptr;
   route.rows = n;
   route.hidden = d;
   route.experts = c.num_experts;

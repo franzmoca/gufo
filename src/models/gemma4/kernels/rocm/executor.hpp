@@ -230,6 +230,7 @@ private:
   void* moe_act_{nullptr};  ///< GeGLU rows: FP32, or binary16 in prefill
   float* moe_out_{nullptr};
   std::uint32_t* moe_counts_{nullptr};
+  std::uint32_t* moe_sync_{nullptr};  ///< One-launch routing's block counter
   std::int32_t* moe_bounds_{nullptr};
   std::int32_t* moe_cursors_{nullptr};
   std::int32_t* moe_rows_token_{nullptr};

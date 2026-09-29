@@ -57,6 +57,9 @@ struct MoeRouteArgs {
   std::uint32_t experts;
   std::uint32_t used;
   float eps;
+  /// Optional: a zero counter that lets grouped routing (with `groups`,
+  /// rows <= 16) run as one launch; left at zero afterwards.
+  std::uint32_t* sync;
 };
 void MoeRoute(const MoeRouteArgs& args, hipStream_t stream);
 

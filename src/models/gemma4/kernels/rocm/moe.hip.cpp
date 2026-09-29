@@ -56,9 +56,6 @@ __device__ inline float BlockSum(float v, float* scratch) {
 constexpr int kRouterRows = 16;  // rows per router block
 constexpr int kRouterVec = kMaxRouterHidden / (4 * kWave);
 
-/// One wave per expert holds router[e] * router_scale in registers (float4
-/// i of lane l covers elements 4 (l + 32 i) ..) and dots it with each row of
-/// the block's row group.
 __global__ void ScaleRouterKernel(float* router, const float* scale,
                                   std::uint32_t hidden, std::size_t count) {
   const std::size_t i = std::size_t{blockIdx.x} * blockDim.x + threadIdx.x;
@@ -67,6 +64,55 @@ __global__ void ScaleRouterKernel(float* router, const float* scale,
   }
 }
 
+__device__ __forceinline__ void LoadRouterRow(const float* router,
+                                              std::uint32_t e,
+                                              std::uint32_t hidden,
+                                              std::uint32_t vecs, int lane,
+                                              float4 (&w)[kRouterVec]) {
+  const auto* wr =
+      reinterpret_cast<const float4*>(router + std::size_t{e} * hidden);
+#pragma unroll
+  for (std::uint32_t i = 0; i < kRouterVec; ++i) {
+    if (i < vecs) {
+      w[i] = wr[lane + kWave * i];
+    }
+  }
+}
+
+/// Row xr's logit for this wave's expert: each lane's FMA chain over its
+/// float4 slots, wave sums of the dot and of the squares, scaled by
+/// rms(x)^-1 / sqrt(hidden).
+__device__ __forceinline__ float RouterLogit(const float4 (&w)[kRouterVec],
+                                             const float4* xr,
+                                             std::uint32_t vecs, int lane,
+                                             std::uint32_t hidden, float eps) {
+  float dot = 0.0F;
+  float ss = 0.0F;
+#pragma unroll
+  for (std::uint32_t i = 0; i < kRouterVec; ++i) {
+    if (i < vecs) {
+      const float4 v = xr[lane + kWave * i];
+      dot = __builtin_fmaf(w[i].x, v.x, dot);
+      dot = __builtin_fmaf(w[i].y, v.y, dot);
+      dot = __builtin_fmaf(w[i].z, v.z, dot);
+      dot = __builtin_fmaf(w[i].w, v.w, dot);
+      ss = __builtin_fmaf(v.x, v.x, ss);
+      ss = __builtin_fmaf(v.y, v.y, ss);
+      ss = __builtin_fmaf(v.z, v.z, ss);
+      ss = __builtin_fmaf(v.w, v.w, ss);
+    }
+  }
+  dot = WaveSum(dot);
+  ss = WaveSum(ss);
+  const float inv_root = 1.0F / sqrtf(static_cast<float>(hidden));
+  const float r_scale =
+      1.0F / sqrtf(ss / static_cast<float>(hidden) + eps) * inv_root;
+  return dot * r_scale;
+}
+
+/// One wave per expert holds router[e] * router_scale in registers (float4
+/// i of lane l covers elements 4 (l + 32 i) ..) and dots it with each row of
+/// the block's row group.
 __global__ void __launch_bounds__(kThreads)
     RouterKernel(const float* __restrict__ x, const float* __restrict__ router,
                  float* __restrict__ logits, std::uint32_t rows,
@@ -78,75 +124,31 @@ __global__ void __launch_bounds__(kThreads)
   }
   const std::uint32_t vecs = hidden / (4 * kWave);
   float4 w[kRouterVec];
-  const auto* wr =
-      reinterpret_cast<const float4*>(router + std::size_t{e} * hidden);
-#pragma unroll
-  for (std::uint32_t i = 0; i < kRouterVec; ++i) {
-    if (i < vecs) {
-      w[i] = wr[lane + kWave * i];
-    }
-  }
-  const float inv_root = 1.0F / sqrtf(static_cast<float>(hidden));
+  LoadRouterRow(router, e, hidden, vecs, lane, w);
   const std::uint32_t r0 = blockIdx.x * kRouterRows;
   const std::uint32_t r1 = min(rows, r0 + kRouterRows);
   for (std::uint32_t r = r0; r < r1; ++r) {
-    const auto* xr =
-        reinterpret_cast<const float4*>(x + std::size_t{r} * hidden);
-    float dot = 0.0F;
-    float ss = 0.0F;
-#pragma unroll
-    for (std::uint32_t i = 0; i < kRouterVec; ++i) {
-      if (i < vecs) {
-        const float4 v = xr[lane + kWave * i];
-        dot = __builtin_fmaf(w[i].x, v.x, dot);
-        dot = __builtin_fmaf(w[i].y, v.y, dot);
-        dot = __builtin_fmaf(w[i].z, v.z, dot);
-        dot = __builtin_fmaf(w[i].w, v.w, dot);
-        ss = __builtin_fmaf(v.x, v.x, ss);
-        ss = __builtin_fmaf(v.y, v.y, ss);
-        ss = __builtin_fmaf(v.z, v.z, ss);
-        ss = __builtin_fmaf(v.w, v.w, ss);
-      }
-    }
-    dot = WaveSum(dot);
-    ss = WaveSum(ss);
+    const float logit = RouterLogit(
+        w, reinterpret_cast<const float4*>(x + std::size_t{r} * hidden), vecs,
+        lane, hidden, eps);
     if (lane == 0) {
-      const float r_scale =
-          1.0F / sqrtf(ss / static_cast<float>(hidden) + eps) * inv_root;
-      logits[std::size_t{r} * experts + e] = dot * r_scale;
+      logits[std::size_t{r} * experts + e] = logit;
     }
   }
 }
 
 constexpr int kMaxExpertsPerLane = 8;  // 256 experts
 
-/// One wave per row: `used` rounds of a wave argmax (larger logit, then
-/// lower expert), then the softmax over the chosen logits.
-__global__ void __launch_bounds__(kThreads)
-    TopKKernel(const float* __restrict__ logits,
-               const float* __restrict__ expert_scale,
-               std::int32_t* __restrict__ ids, float* __restrict__ weights,
-               std::uint32_t* __restrict__ counts, std::uint32_t rows,
-               std::uint32_t experts, std::uint32_t used,
-               const float* __restrict__ x, std::uint32_t hidden, float eps) {
-  const int lane = threadIdx.x % kWave;
-  const std::uint32_t r = blockIdx.x * kWaves + threadIdx.x / kWave;
-  if (r >= rows) {
-    return;
-  }
-  // With `x` the logits are raw dot products, scaled here by the row's
-  // rms(x) / sqrt(hidden) as RouterKernel scales them.
-  float row_scale = 1.0F;
-  if (x != nullptr) {
-    const float* xr = x + std::size_t{r} * hidden;
-    float ss = 0.0F;
-    for (std::uint32_t i = lane; i < hidden; i += kWave) {
-      ss = __builtin_fmaf(xr[i], xr[i], ss);
-    }
-    ss = WaveSum(ss);
-    row_scale = 1.0F / sqrtf(ss / static_cast<float>(hidden) + eps) *
-                (1.0F / sqrtf(static_cast<float>(hidden)));
-  }
+/// Row r's top `used` experts (larger logit, then lower expert) and their
+/// weights: `used` rounds of a wave argmax, then the softmax over the chosen
+/// logits. Every lane of the wave calls it.
+__device__ inline void TopKRow(const float* __restrict__ logits,
+                               const float* __restrict__ expert_scale,
+                               std::int32_t* __restrict__ ids,
+                               float* __restrict__ weights,
+                               std::uint32_t* __restrict__ counts,
+                               std::uint32_t r, std::uint32_t experts,
+                               std::uint32_t used, float row_scale, int lane) {
   float v[kMaxExpertsPerLane];
 #pragma unroll
   for (int i = 0; i < kMaxExpertsPerLane; ++i) {
@@ -203,12 +205,43 @@ __global__ void __launch_bounds__(kThreads)
   }
 }
 
-/// One thread per expert collects its slots in order; a block scan over
-/// the non-empty experts places the groups.
+/// One wave per row: `used` rounds of a wave argmax (larger logit, then
+/// lower expert), then the softmax over the chosen logits.
 __global__ void __launch_bounds__(kThreads)
-    GroupsKernel(const std::int32_t* __restrict__ ids,
-                 std::int32_t* __restrict__ groups, std::uint32_t slots,
-                 std::uint32_t experts) {
+    TopKKernel(const float* __restrict__ logits,
+               const float* __restrict__ expert_scale,
+               std::int32_t* __restrict__ ids, float* __restrict__ weights,
+               std::uint32_t* __restrict__ counts, std::uint32_t rows,
+               std::uint32_t experts, std::uint32_t used,
+               const float* __restrict__ x, std::uint32_t hidden, float eps) {
+  const int lane = threadIdx.x % kWave;
+  const std::uint32_t r = blockIdx.x * kWaves + threadIdx.x / kWave;
+  if (r >= rows) {
+    return;
+  }
+  // With `x` the logits are raw dot products, scaled here by the row's
+  // rms(x) / sqrt(hidden) as RouterKernel scales them.
+  float row_scale = 1.0F;
+  if (x != nullptr) {
+    const float* xr = x + std::size_t{r} * hidden;
+    float ss = 0.0F;
+    for (std::uint32_t i = lane; i < hidden; i += kWave) {
+      ss = __builtin_fmaf(xr[i], xr[i], ss);
+    }
+    ss = WaveSum(ss);
+    row_scale = 1.0F / sqrtf(ss / static_cast<float>(hidden) + eps) *
+                (1.0F / sqrtf(static_cast<float>(hidden)));
+  }
+  TopKRow(logits, expert_scale, ids, weights, counts, r, experts, used,
+          row_scale, lane);
+}
+
+/// The group table of `slots` expert ids, built by one 256-thread block:
+/// one thread per expert collects its slots in order; a block scan over the
+/// non-empty experts places the groups.
+__device__ inline void BuildGroups(const std::int32_t* __restrict__ ids,
+                                   std::int32_t* __restrict__ groups,
+                                   std::uint32_t slots, std::uint32_t experts) {
   __shared__ std::int32_t s_ids[kMaxGroupSlots * 8];
   __shared__ int scan[kThreads];
   for (std::uint32_t i = threadIdx.x; i < slots; i += kThreads) {
@@ -245,6 +278,64 @@ __global__ void __launch_bounds__(kThreads)
   }
   if (threadIdx.x == kThreads - 1) {
     groups[0] = scan[kThreads - 1];
+  }
+}
+
+__global__ void __launch_bounds__(kThreads)
+    GroupsKernel(const std::int32_t* __restrict__ ids,
+                 std::int32_t* __restrict__ groups, std::uint32_t slots,
+                 std::uint32_t experts) {
+  BuildGroups(ids, groups, slots, experts);
+}
+
+/// Routing at grouped widths in one launch: RouterKernel's blocks (one row
+/// group, kWaves experts each), and the last block to finish, counted on
+/// `sync` (zero between launches), selects every row's experts and builds
+/// the group table. The arithmetic is RouterKernel's, TopKKernel's and
+/// GroupsKernel's.
+__global__ void __launch_bounds__(kThreads) RouteGroupedKernel(
+    const float* __restrict__ x, const float* __restrict__ router,
+    float* __restrict__ logits, const float* __restrict__ expert_scale,
+    std::int32_t* __restrict__ ids, float* __restrict__ weights,
+    std::int32_t* __restrict__ groups, std::uint32_t* __restrict__ sync,
+    std::uint32_t rows, std::uint32_t hidden, std::uint32_t experts,
+    std::uint32_t used, float eps) {
+  const int lane = threadIdx.x % kWave;
+  const int wave = threadIdx.x / kWave;
+  const std::uint32_t e = blockIdx.y * kWaves + wave;
+  if (e < experts) {
+    const std::uint32_t vecs = hidden / (4 * kWave);
+    float4 w[kRouterVec];
+    LoadRouterRow(router, e, hidden, vecs, lane, w);
+    for (std::uint32_t r = 0; r < rows; ++r) {
+      const float logit = RouterLogit(
+          w, reinterpret_cast<const float4*>(x + std::size_t{r} * hidden), vecs,
+          lane, hidden, eps);
+      if (lane == 0) {
+        logits[std::size_t{r} * experts + e] = logit;
+      }
+    }
+  }
+  // Publish this block's logits, then count it.
+  __threadfence();
+  __syncthreads();
+  __shared__ bool last;
+  if (threadIdx.x == 0) {
+    last = atomicAdd(sync, 1U) == gridDim.y - 1;
+  }
+  __syncthreads();
+  if (!last) {
+    return;
+  }
+  __threadfence();  // every block's logits are visible past the count
+  for (std::uint32_t r = wave; r < rows; r += kWaves) {
+    TopKRow(logits, expert_scale, ids, weights, nullptr, r, experts, used, 1.0F,
+            lane);
+  }
+  __syncthreads();
+  BuildGroups(ids, groups, rows * used, experts);
+  if (threadIdx.x == 0) {
+    *sync = 0;
   }
 }
 
@@ -697,6 +788,14 @@ void BuildRoutedTiles(const std::uint32_t* counts, std::uint32_t experts,
 }
 
 void MoeRoute(const MoeRouteArgs& a, hipStream_t stream) {
+  if (a.sync != nullptr && a.groups != nullptr && !a.raw_logits &&
+      a.rows <= kRouterRows) {
+    RouteGroupedKernel<<<dim3(1, (a.experts + kWaves - 1) / kWaves), kThreads,
+                         0, stream>>>(
+        a.x, a.router, a.logits, a.expert_scale, a.ids, a.weights, a.groups,
+        a.sync, a.rows, a.hidden, a.experts, a.used, a.eps);
+    return;
+  }
   if (!a.raw_logits) {
     RouterKernel<<<dim3((a.rows + kRouterRows - 1) / kRouterRows,
                         (a.experts + kWaves - 1) / kWaves),
