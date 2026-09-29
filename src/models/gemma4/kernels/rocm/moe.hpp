@@ -126,6 +126,8 @@ struct MoeFinishArgs {
   std::uint32_t hidden;
   std::uint32_t used;
   float eps;
+  /// Optional binary16 copy of h (round to nearest, as NarrowActivations).
+  void* h_half;
 };
 void MoeFinish(const MoeFinishArgs& args, hipStream_t stream);
 

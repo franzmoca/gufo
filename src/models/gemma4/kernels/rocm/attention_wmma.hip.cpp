@@ -25,6 +25,8 @@
 #include <cmath>
 #include <cstdint>
 
+#include "src/models/gemma4/kernels/rocm/half_store.hpp"
+
 namespace gufo::models::gemma4::rocm {
 namespace {
 
@@ -366,11 +368,16 @@ __global__ void __launch_bounds__((kPrefillThreads<D, kHeads, kQueryBlocks>))
     }
     const float l = row_sum[rb][r];
     const float inv = l > 0.0F ? 1.0F / l : 0.0F;
-    float* out = a.out + (static_cast<std::size_t>(row) * a.heads + head) * D +
-                 dim0 + sub;
+    const std::size_t at =
+        (static_cast<std::size_t>(row) * a.heads + head) * D + dim0 + sub;
+    auto* out_half = static_cast<__half*>(a.out_half);
 #pragma unroll
     for (std::uint32_t t = 0; t < kSliceSteps; ++t) {
-      out[t * 16] = o_acc[t][i] * inv;
+      const float v = o_acc[t][i] * inv;
+      a.out[at + t * 16] = v;
+      if (out_half != nullptr) {
+        out_half[at + t * 16] = HalfOf(v);
+      }
     }
   }
 }

@@ -214,9 +214,12 @@ private:
   float* logits_{nullptr};
   float* partials_{nullptr};
   void* q8_{nullptr};
-  /// Prefill activations as binary16 (Q8_1 costs this model's accuracy).
+  /// Prefill activations as binary16 (Q8_1 costs this model's accuracy),
+  /// written by the kernels producing them: each projection input in x_half_,
+  /// the expert input, read after the dense MLP, in moe_x_half_.
   bool half_prefill_{false};
   void* x_half_{nullptr};
+  void* moe_x_half_{nullptr};
   // Routed expert scratch (present on mixture-of-experts models).
   float* moe_h_{nullptr};  ///< Expert input rows
   float* moe_logits_{nullptr};

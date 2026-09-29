@@ -29,8 +29,8 @@ std::size_t AlignUp(std::size_t n) {
 struct Layout {
   std::size_t tokens, logit_index, key_ends, x, h, q, k, v, attn, o, gate, up,
       hsel, logits, partials, q8, act;
-  std::size_t x_half, moe_h, moe_logits, moe_ids, moe_weights, moe_groups,
-      moe_gu, moe_act, moe_out, moe_counts, moe_bounds, moe_cursors,
+  std::size_t x_half, moe_x_half, moe_h, moe_logits, moe_ids, moe_weights,
+      moe_groups, moe_gu, moe_act, moe_out, moe_counts, moe_bounds, moe_cursors,
       moe_rows_token, moe_rows_slot, moe_tiles;
   std::size_t draft_tokens, draft_embed, draft_concat, draft_x, draft_h,
       draft_q, draft_attn, draft_o, draft_gate, draft_up, draft_logits,
@@ -109,6 +109,7 @@ Layout Plan(const Config& c, const Config* draft, std::uint32_t vocab,
         std::size_t{std::min(rows, kMaxGroupSlots)} * c.experts_used;
     const std::size_t width = c.expert_ffn_size;
     l.x_half = take(std::size_t{q8_rows} * max_cols * 2);
+    l.moe_x_half = take(std::size_t{rows} * c.hidden_size * 2);
     l.moe_h = take(std::size_t{rows} * c.hidden_size * f);
     l.moe_logits = take(std::size_t{rows} * c.num_experts * f);
     l.moe_ids = take(slots * sizeof(std::int32_t));
@@ -263,6 +264,7 @@ Executor::Executor(const DeviceModel& model, std::uint32_t max_rows,
     const Config& c = model.config();
     half_prefill_ = true;
     x_half_ = base + l.x_half;
+    moe_x_half_ = base + l.moe_x_half;
     moe_h_ = reinterpret_cast<float*>(base + l.moe_h);
     moe_logits_ = reinterpret_cast<float*>(base + l.moe_logits);
     moe_ids_ = reinterpret_cast<std::int32_t*>(base + l.moe_ids);
@@ -551,13 +553,24 @@ void Executor::Forward(std::span<const Segment> segments,
   // W8A8 GEMMs; the norms and GeGLU write that encoding directly. Binary16
   // prefill stages each input before its projections instead.
   const bool prefill = n > kSplitRows && !half_prefill_;
+  // Binary16 prefill: after the first layer's input, the norms, attention,
+  // GeGLU and mixture write each projection input as binary16 themselves.
+  const bool half = n > kSplitRows && half_prefill_;
+  static_assert(kMaxGroupSlots == kSplitRows,
+                "binary16 prefill experts read the expert input the norm "
+                "writes past the grouped width");
+  // Whether the previous layer's mixture wrote this layer's binary16 input.
+  bool half_ready = false;
   for (std::uint32_t l = 0; l < c.num_layers; ++l) {
     const DeviceLayer& L = layers[l];
     const bool sliding = c.IsSliding(l);
     const std::uint32_t dim = c.HeadDim(l);
-    // Layer l > 0 of a prefill reads the Q8_1 rows the previous layer's
-    // post-FFN norm wrote.
-    const void* hq = prefill && l > 0 ? q8_ : Quantize(h_, n, d);
+    // Layer l > 0 of a prefill reads the rows the previous layer's post-FFN
+    // norm wrote (Q8_1 or binary16).
+    const void* hq = l == 0       ? Quantize(h_, n, d)
+                     : half_ready ? x_half_
+                     : prefill    ? q8_
+                                  : Quantize(h_, n, d);
     // A fused projection leaves [q | k | v] rows in k_; QkvPost reads them
     // strided and writes packed queries to q_.
     const std::uint32_t qkv_stride = L.attn_qkv.empty() ? 0 : L.attn_qkv.rows;
@@ -622,19 +635,24 @@ void Executor::Forward(std::span<const Segment> segments,
       att.window = sliding ? c.sliding_window : 0;
       att.ring = sliding ? cache.ring : 0;
       att.key_ends = sliding ? key_ends : nullptr;
+      att.out_half =
+          half ? static_cast<__half*>(x_half_) + std::size_t{row0} * c.QDim(l)
+               : nullptr;
       DeriveKeys(att, l);
       Attention(att, stream_);
       row0 += seg.rows;
     }
 
-    Project(L.attn_output, attn_, Quantize(attn_, n, c.QDim(l)), n, o_);
+    Project(L.attn_output, attn_,
+            half ? x_half_ : Quantize(attn_, n, c.QDim(l)), n, o_);
     // Expert layers also normalize the attention residual for the experts.
     const bool moe = !L.gate_up_exps.empty();
     PostAttentionNorm(o_, L.post_attn_norm.f32(), x_, L.ffn_norm.f32(), h_, n,
                       d, eps, stream_, prefill ? q8_ : nullptr,
                       moe ? L.pre_ffn_norm_2.f32() : nullptr,
-                      moe ? moe_h_ : nullptr);
-    const void* fq = prefill ? q8_ : Quantize(h_, n, d);
+                      moe ? moe_h_ : nullptr, half ? x_half_ : nullptr,
+                      half && moe ? moe_x_half_ : nullptr);
+    const void* fq = prefill ? q8_ : half ? x_half_ : Quantize(h_, n, d);
     // At grouped widths the experts run beside the dense MLP on their own
     // stream: routing is latency bound, the projections bandwidth bound.
     const bool concurrent = moe && n <= kMaxGroupSlots;
@@ -649,9 +667,10 @@ void Executor::Forward(std::span<const Segment> segments,
     if (!L.ffn_gate_up.empty() && !prefill) {
       // One projection writes [gate | up] rows.
       Project(L.ffn_gate_up, h_, fq, n, gate_);
-      GeGluPacked(gate_, act_, n, c.ffn_size, stream_);
+      GeGluPacked(gate_, act_, n, c.ffn_size, stream_,
+                  half ? x_half_ : nullptr);
       down_in = act_;
-      gq = Quantize(act_, n, c.ffn_size);
+      gq = half ? x_half_ : Quantize(act_, n, c.ffn_size);
     } else {
       Project(L.ffn_gate, h_, fq, n, gate_);
       Project(L.ffn_up, h_, fq, n, up_);
@@ -690,11 +709,14 @@ void Executor::Forward(std::span<const Segment> segments,
       finish.hidden = d;
       finish.used = c.experts_used;
       finish.eps = eps;
+      finish.h_half = half && !last ? x_half_ : nullptr;
       MoeFinish(finish, stream_);
+      half_ready = finish.h_half != nullptr;
     } else {
       PostFeedForwardNorm(o_, L.post_ffn_norm.f32(), L.output_scale, x_, next,
                           h_, n, d, eps, stream_,
                           prefill && !last ? q8_ : nullptr);
+      half_ready = false;
     }
     if (tap_sink_) {
       tap_sink_(l, x_, n, stream_);
@@ -863,17 +885,18 @@ bool Executor::PrefillExperts(const DeviceLayer& l, std::uint32_t n,
   fn::RoutedCompact(moe_ids_, moe_counts_, moe_bounds_, moe_cursors_,
                     moe_rows_token_, moe_rows_slot_, n, used, c.num_experts,
                     stream);
-  fn::NarrowActivations(moe_h_, x_half_, false, std::size_t{n} * d, stream);
+  // PostAttentionNorm wrote the binary16 expert input.
+  const void* x_half = moe_x_half_;
   auto* gu = static_cast<__half*>(moe_gu_);
   auto* act = static_cast<__half*>(moe_act_);
   const bool gate_up_ok =
       own_gate_up
-          ? LaunchRoutedHalfGemm(*own_format, l.gate_up_exps.data, x_half_,
+          ? LaunchRoutedHalfGemm(*own_format, l.gate_up_exps.data, x_half,
                                  moe_tiles_, tiles, gate_up_rows, moe_bounds_,
                                  moe_rows_token_, moe_rows_slot_, nullptr, gu,
                                  2 * width, d, stream)
           : fn::RoutedF16Gemm(l.gate_up_exps.data, *gate_up,
-                              static_cast<const __half*>(x_half_), moe_tiles_,
+                              static_cast<const __half*>(x_half), moe_tiles_,
                               tiles, kRoutedTileRows, moe_bounds_,
                               moe_rows_token_, moe_rows_slot_, nullptr, nullptr,
                               gu, 2 * width, d, stream);

@@ -14,6 +14,7 @@
 #include <stdexcept>
 
 #include "src/models/gemma4/kernels/rocm/gemv_tasks.hpp"
+#include "src/models/gemma4/kernels/rocm/half_store.hpp"
 
 namespace gufo::models::gemma4::rocm {
 namespace {
@@ -563,7 +564,11 @@ __global__ void __launch_bounds__(kFinishThreads)
   for (std::uint32_t j = 0; j < kFinishRegisters; ++j) {
     const std::uint32_t i = threadIdx.x + j * kFinishThreads;
     if (i < a.hidden) {
-      a.h[base + i] = mv[j] * rx * a.next_norm[i];
+      const float v = mv[j] * rx * a.next_norm[i];
+      a.h[base + i] = v;
+      if (a.h_half != nullptr) {
+        static_cast<__half*>(a.h_half)[base + i] = HalfOf(v);
+      }
     }
   }
 }

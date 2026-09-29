@@ -9,6 +9,7 @@
 #include <utility>
 
 #include "src/models/gemma4/kernels/rocm/attention_wmma.hpp"
+#include "src/models/gemma4/kernels/rocm/half_store.hpp"
 #include "src/models/qwen/hip/kernels/prefill_quant_gemm.hpp"
 
 namespace gufo::models::gemma4::rocm {
@@ -195,7 +196,8 @@ template<int kBlock>
 __device__ inline void StoreNormedRow(const float (&xv)[RowRegisters<kBlock>()],
                                       float r, const float* next_norm, float* h,
                                       void* q8, std::uint32_t rows,
-                                      std::uint32_t dim) {
+                                      std::uint32_t dim,
+                                      __half* h_half = nullptr) {
   const std::size_t base = static_cast<std::size_t>(blockIdx.x) * dim;
 #pragma unroll
   for (std::uint32_t j = 0; j < RowRegisters<kBlock>(); ++j) {
@@ -204,6 +206,9 @@ __device__ inline void StoreNormedRow(const float (&xv)[RowRegisters<kBlock>()],
     if (q8 == nullptr) {
       if (i < dim) {
         h[base + i] = v;
+        if (h_half != nullptr) {
+          h_half[base + i] = HalfOf(v);
+        }
       }
     } else if (i - threadIdx.x % kWave < dim) {
       QuantizeQ8Lane(q8, rows, dim / 32, blockIdx.x, i / 32, v);
@@ -226,7 +231,8 @@ __global__ void __launch_bounds__(kBlock)
     PostAttentionNormKernel(const float* o, const float* post_norm, float* x,
                             const float* next_norm, float* h, std::uint32_t dim,
                             float eps, void* q8, std::uint32_t rows,
-                            const float* second_norm, float* h2) {
+                            const float* second_norm, float* h2, __half* h_half,
+                            __half* h2_half) {
   constexpr std::uint32_t kRegs = RowRegisters<kBlock>();
   __shared__ float scratch[kBlock / kWave];
   const std::size_t base = static_cast<std::size_t>(blockIdx.x) * dim;
@@ -256,13 +262,17 @@ __global__ void __launch_bounds__(kBlock)
     }
   }
   const float r2 = RmsScale(BlockSumOf<kBlock>(ss2, scratch), dim, eps);
-  StoreNormedRow<kBlock>(xv, r2, next_norm, h, q8, rows, dim);
+  StoreNormedRow<kBlock>(xv, r2, next_norm, h, q8, rows, dim, h_half);
   if (h2 != nullptr) {
 #pragma unroll
     for (std::uint32_t j = 0; j < kRegs; ++j) {
       const std::uint32_t i = threadIdx.x + j * kBlock;
       if (i < dim) {
-        h2[base + i] = xv[j] * r2 * second_norm[i];
+        const float v = xv[j] * r2 * second_norm[i];
+        h2[base + i] = v;
+        if (h2_half != nullptr) {
+          h2_half[base + i] = HalfOf(v);
+        }
       }
     }
   }
@@ -1255,6 +1265,15 @@ void LaunchSplitAttention(const AttentionArgs& a, hipStream_t stream) {
           a.partials, a.out, a.heads, splits);
 }
 
+/// out = binary16(x), round to nearest (NarrowActivations' rounding).
+__global__ void NarrowKernel(const float* x, __half* out, std::size_t count) {
+  const std::size_t i =
+      static_cast<std::size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+  if (i < count) {
+    out[i] = HalfOf(x[i]);
+  }
+}
+
 template<int D>
 void LaunchAttention(const AttentionArgs& a, hipStream_t stream) {
   if (a.rows > kSplitRows) {
@@ -1263,6 +1282,12 @@ void LaunchAttention(const AttentionArgs& a, hipStream_t stream) {
         throw std::invalid_argument("derived keys need the WMMA prefill path");
       }
       AttentionKernel<D><<<dim3(1, a.heads, a.rows), kThreads, 0, stream>>>(a);
+      if (a.out_half != nullptr) {
+        const std::size_t count = std::size_t{a.rows} * a.heads * D;
+        NarrowKernel<<<static_cast<unsigned>((count + kThreads - 1) / kThreads),
+                       kThreads, 0, stream>>>(
+            a.out, static_cast<__half*>(a.out_half), count);
+      }
     }
     return;
   }
@@ -1299,14 +1324,19 @@ __global__ void GeGluKernel(const float* gate, const float* up, float* out,
 
 /// GeGlu over fused gate/up rows ([slots][2 * width]).
 __global__ void GeGluPackedKernel(const float* gu, float* out,
-                                  std::uint32_t width, std::size_t count) {
+                                  std::uint32_t width, std::size_t count,
+                                  __half* out_half) {
   const std::size_t i =
       static_cast<std::size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
   if (i < count) {
     const std::size_t slot = i / width;
     const std::size_t col = i % width;
     const float* row = gu + slot * 2 * width;
-    out[i] = GeGluValue(row[col], row[width + col]);
+    const float v = GeGluValue(row[col], row[width + col]);
+    out[i] = v;
+    if (out_half != nullptr) {
+      out_half[i] = HalfOf(v);
+    }
   }
 }
 
@@ -1449,19 +1479,24 @@ std::size_t AttentionPartialFloats(std::uint32_t rows, std::uint32_t heads,
 void PostAttentionNorm(const float* o, const float* post_norm, float* x,
                        const float* next_norm, float* h, std::uint32_t rows,
                        std::uint32_t dim, float eps, hipStream_t stream,
-                       void* q8, const float* second_norm, float* h2) {
+                       void* q8, const float* second_norm, float* h2,
+                       void* h_half, void* h2_half) {
   if (dim > kRowElements) {
     throw std::invalid_argument("PostAttentionNorm row is too wide");
   }
+  auto* hh = static_cast<__half*>(h_half);
+  auto* hh2 = static_cast<__half*>(h2_half);
   if (q8 == nullptr && rows <= kSplitRows) {
     PostAttentionNormKernel<kWideNormThreads>
-        <<<rows, kWideNormThreads, 0, stream>>>(
-            o, post_norm, x, next_norm, h, dim, eps, q8, rows, second_norm, h2);
+        <<<rows, kWideNormThreads, 0, stream>>>(o, post_norm, x, next_norm, h,
+                                                dim, eps, q8, rows, second_norm,
+                                                h2, hh, hh2);
     return;
   }
   PostAttentionNormKernel<kThreads>
       <<<q8 != nullptr ? Q8Rows(rows) : rows, kThreads, 0, stream>>>(
-          o, post_norm, x, next_norm, h, dim, eps, q8, rows, second_norm, h2);
+          o, post_norm, x, next_norm, h, dim, eps, q8, rows, second_norm, h2,
+          hh, hh2);
 }
 
 void PostFeedForwardNorm(const float* f, const float* post_norm, float scale,
@@ -1491,10 +1526,10 @@ void GeGluQuantize(const float* gate, const float* up, void* q8,
 }
 
 void GeGluPacked(const float* gu, float* out, std::uint32_t slots,
-                 std::uint32_t width, hipStream_t stream) {
+                 std::uint32_t width, hipStream_t stream, void* out_half) {
   const std::size_t count = std::size_t{slots} * width;
-  GeGluPackedKernel<<<Blocks(count), kThreads, 0, stream>>>(gu, out, width,
-                                                            count);
+  GeGluPackedKernel<<<Blocks(count), kThreads, 0, stream>>>(
+      gu, out, width, count, static_cast<__half*>(out_half));
 }
 
 void GeGluPackedHalf(const void* gu, void* out, std::uint32_t slots,

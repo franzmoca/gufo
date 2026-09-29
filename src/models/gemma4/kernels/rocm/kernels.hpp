@@ -107,6 +107,8 @@ struct AttentionArgs {
   std::uint32_t ring;
   std::uint32_t rope_pairs;  ///< rotated pairs of derived keys, or 0
   const std::uint32_t* key_ends;
+  /// Optional binary16 copy of `out` (the WMMA prefill path writes it).
+  void* out_half;
 };
 inline constexpr std::uint32_t kSplitRows = 16;
 /// Derived keys: rope_pairs must be a multiple of 16 and at most this.
@@ -123,11 +125,14 @@ void Attention(const AttentionArgs& args, hipStream_t stream);
 /// hip::LaunchQuantizeActivationQ8_1FromFp32 (same layout and rounding; a
 /// block scale may differ by one ulp). With `h2`, also
 /// h2[r] = rms(x[r]) * second_norm (the expert input of a MoE layer).
+/// `h_half` / `h2_half` receive binary16 copies of h / h2 (round to
+/// nearest, as NarrowActivations) for the binary16 prefill GEMMs.
 void PostAttentionNorm(const float* o, const float* post_norm, float* x,
                        const float* next_norm, float* h, std::uint32_t rows,
                        std::uint32_t dim, float eps, hipStream_t stream,
                        void* q8 = nullptr, const float* second_norm = nullptr,
-                       float* h2 = nullptr);
+                       float* h2 = nullptr, void* h_half = nullptr,
+                       void* h2_half = nullptr);
 
 /// x[r] = (x[r] + rms(f[r]) * post_norm) * scale;
 /// h[r] = rms(x[r]) * next_norm (next_norm null skips h); with `q8`, h is
@@ -147,9 +152,11 @@ void GeGluQuantize(const float* gate, const float* up, void* q8,
                    std::uint32_t rows, std::uint32_t cols, hipStream_t stream);
 
 /// out[s][i] = gelu_tanh(gu[s][i]) * gu[s][width + i] over [slots][2 * width]
-/// fused gate/up rows (routed experts), rounding like GeGlu.
+/// fused gate/up rows, rounding like GeGlu; `out_half` receives a binary16
+/// copy (round to nearest, as NarrowActivations).
 void GeGluPacked(const float* gu, float* out, std::uint32_t slots,
-                 std::uint32_t width, hipStream_t stream);
+                 std::uint32_t width, hipStream_t stream,
+                 void* out_half = nullptr);
 /// GeGluPacked over binary16 rows (the prefill expert route); results
 /// saturate at the binary16 range.
 void GeGluPackedHalf(const void* gu, void* out, std::uint32_t slots,
