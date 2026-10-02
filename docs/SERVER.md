@@ -696,6 +696,15 @@ requirements. Qwen wildcard fields and ambiguous string/null unions use JSON
 to preserve types. Constrained JSON keys follow schema order, with additional
 keys last. Impossible non-strict schemas fall back to JSON-object arguments;
 impossible strict schemas are rejected before generation.
+Gemma 4 calls are constrained in its own `call:NAME{key:value}` syntax at
+every depth: `<|"|>`-delimited strings and bare keys in sorted order, as its
+template renders them. A key Gemma 4 cannot read bare (one containing
+`:{}[],`, starting with `<` or with surrounding whitespace) is `<|"|>`-quoted.
+Such a key containing `<|"|>`, or a fixed string value containing it, leaves
+non-strict arguments open and rejects a strict schema; there is no JSON
+fallback. With
+thinking on, constrained output may open the thought channel before a call or
+JSON answer.
 `tool_choice: "required"` and named choices constrain decoding to a declared
 call. Extended schemas retain compact JSON on this path, avoiding extra
 native framing tokens; ordinary native calls keep their existing format. Where
@@ -735,8 +744,8 @@ Constraints apply before target sampling in AR, DFlash2, MTP and DSpark, includi
 streaming, images and concurrent requests. Reasoning stays separate from JSON
 and counts toward the output budget. Changing the schema changes the cache prefix.
 
-For constrained tool or JSON output, only `</think>` ends the initial reasoning
-phase. Literal tool markers such as `<tool_call>` quoted during reasoning remain
+For constrained tool or JSON output, only `</think>` (Gemma 4: `<channel|>`)
+ends the initial reasoning phase. Literal tool markers such as `<tool_call>` quoted during reasoning remain
 reasoning data; they do not start a call or move reasoning into visible content.
 This boundary is identical for buffered responses and SSE deltas in Chat
 Completions and Responses. Tool parsing starts after the reasoning delimiter,

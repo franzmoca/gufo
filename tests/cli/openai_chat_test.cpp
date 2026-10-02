@@ -2796,67 +2796,94 @@ void TestResponsesOutput() {
 
 // A model that opens reasoning itself (initial state auto): a buffered
 // result arrives whole, and its reasoning must still be separated.
-void TestGemmaToolCallsKeepNativeSyntax() {
+void TestGemmaNativeToolCalls() {
+  using Backend = gufo::server::TextGenerationBackend;
   FakeBackend backend;
   backend.markup = {
       .reasoning_start = "<|channel>thought\n",
       .reasoning_end = "<channel|>",
-      .tool_syntax = gufo::server::TextGenerationBackend::OutputMarkup::
-          ToolSyntax::kGemma4,
+      .tool_syntax = Backend::OutputMarkup::ToolSyntax::kGemma4,
   };
-  backend.pieces = {"<|tool_call>call:get_weather{city:<|\"|>Rome<|\"|>}",
-                    "<tool_call|>"};
-  const auto body = [](std::string_view strict, std::string_view parallel) {
-    return std::string(R"({
+  const std::string body = R"({
         "model":"test-model",
         "messages":[{"role":"user","content":"weather in Rome"}],
         "tools":[{
           "type":"function",
           "function":{
             "name":"get_weather",
-            "strict":)") +
-           std::string(strict) + R"(,
             "parameters":{
               "type":"object",
               "properties":{"city":{"type":"string"}},
-              "required":["city"],
-              "additionalProperties":false
+              "required":["city"]
             }
           }
-        }],
-        "parallel_tool_calls":)" +
-           std::string(parallel) + R"(,
-        "stream":false
+        }]
       })";
+  const auto expect_call = [](const gufo::server::HttpResponse& response,
+                              std::string_view message) {
+    Expect(
+        response.status == 200 &&
+            response.body.find("tool_calls") != std::string::npos &&
+            response.body.find(R"(\"city\":\"Rome\")") != std::string::npos &&
+            response.body.find("call:") == std::string::npos,
+        message);
   };
-  auto response =
-      gufo::server::HandleOpenAiChat(Request(body("false", "true")), backend);
-  Expect(response.status == 200 && !backend.last_request.constrained_tools,
-         "Ordinary Gemma 4 calls are not forced into the JSON call grammar");
-  Expect(response.body.find(R"("finish_reason":"tool_calls")") !=
-                 std::string::npos &&
-             response.body.find(R"(\"city\":\"Rome\")") != std::string::npos,
-         "Native Gemma 4 calls are parsed");
-  backend.pieces.push_back(
-      "<|tool_call>call:get_weather{city:<|\"|>Oslo<|\"|>}<tool_call|>");
-  response =
-      gufo::server::HandleOpenAiChat(Request(body("false", "false")), backend);
-  Expect(!backend.last_request.constrained_tools &&
-             response.body.find("Rome") != std::string::npos &&
-             response.body.find("Oslo") == std::string::npos,
-         "A non-parallel Gemma 4 call stays native and executes once");
-  (void)gufo::server::HandleOpenAiChat(Request(body("true", "true")), backend);
+  backend.pieces = {"<|tool_call>call:get_weather{city:<|\"|>Rome<|\"|>}",
+                    "<tool_call|>"};
+  auto response = gufo::server::HandleOpenAiChat(Request(body), backend);
   Expect(backend.last_request.constrained_tools,
-         "Strict Gemma 4 tools keep the call grammar");
-  backend.pieces = {
-      "<tool_call>{\"name\":\"get_weather\",\"arguments\":"
-      "{\"city\":\"Rome\"}}</tool_call>"};
-  auto required = gufo::json::parse(body("false", "true"));
-  required["tool_choice"] = "required";
-  response = gufo::server::HandleOpenAiChat(Request(required.dump()), backend);
-  Expect(backend.last_request.constrained_tools &&
-             response.body.find(R"(\"city\":\"Rome\")") != std::string::npos,
-         "Required Gemma 4 calls keep the call grammar");
+         "Gemma 4 calls are constrained like other models' native calls");
+  expect_call(response, "Constrained native Gemma 4 calls are parsed");
+
+  // With thinking on, the output may open the thought channel before a call.
+  backend.initial_state = Backend::InitialOutputState::kAuto;
+  backend.pieces = {"<|channel>thought\nUse the tool.<channel|>",
+                    "<|tool_call>call:get_weather{city:<|\"|>Rome<|\"|>}",
+                    "<tool_call|>"};
+  for (const bool stream : {false, true}) {
+    auto request = gufo::json::parse(body);
+    request["stream"] = stream;
+    request["tool_choice"] = "required";
+    response = gufo::server::HandleOpenAiChat(Request(request.dump()), backend);
+    const auto output = stream ? std::string() : response.body;
+    std::string streamed;
+    if (stream)
+      response.streaming_body([&](std::string_view chunk) {
+        streamed += chunk;
+        return true;
+      });
+    const auto& text = stream ? streamed : output;
+    Expect(text.find("Use the tool.") != std::string::npos &&
+               text.find(R"("reasoning_content")") != std::string::npos &&
+               text.find("<|channel>") == std::string::npos &&
+               text.find("call:") == std::string::npos &&
+               text.find(R"(\"city\":\"Rome\")") != std::string::npos,
+           "A Gemma 4 thought before a required call stays reasoning");
+  }
+
+  // An agent turn: automatic, non-parallel, streamed token by token. Gemma 4
+  // opens an empty thought channel after tool responses even without thinking.
+  backend.initial_state = Backend::InitialOutputState::kAuto;
+  const std::string call =
+      "<|channel>thought\n<channel|><|tool_call>call:get_weather{city:<|\"|>"
+      "Rome<|\"|>,note:<|\"|>a, "
+      "{b}: \"c\"\n<|\"|>}<tool_call|>";
+  backend.pieces.clear();
+  for (std::size_t i = 0; i < call.size(); i += 3)
+    backend.pieces.push_back(call.substr(i, 3));
+  auto request = gufo::json::parse(body);
+  request["stream"] = true;
+  request["parallel_tool_calls"] = false;
+  response = gufo::server::HandleOpenAiChat(Request(request.dump()), backend);
+  std::string streamed;
+  response.streaming_body([&](std::string_view chunk) {
+    streamed += chunk;
+    return true;
+  });
+  Expect(streamed.find("error") == std::string::npos &&
+             streamed.find("channel") == std::string::npos &&
+             streamed.find(R"(\"city\":\"Rome\")") != std::string::npos,
+         "A streamed non-parallel Gemma 4 call is parsed: " + streamed);
 }
 
 void TestResponsesAutoReasoning() {
@@ -3020,7 +3047,7 @@ int main() {
   TestStopInsideToolArguments();
   TestResponsesOutput();
   TestResponsesAutoReasoning();
-  TestGemmaToolCallsKeepNativeSyntax();
+  TestGemmaNativeToolCalls();
   TestNativeToolTransports();
   TestNativeReferencedArgumentTypes();
   TestWildcardToolTypes();

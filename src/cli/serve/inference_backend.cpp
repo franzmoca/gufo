@@ -67,11 +67,6 @@ std::optional<ChatRequest> ConstrainChatRequest(
       (request.tools.empty() ||
        request.tool_choice == ChatRequest::ToolChoice::kNone))
     return std::nullopt;
-  // Without a native call grammar, ordinary calls keep the model's own syntax;
-  // the HTTP adapter marks the requests that need the JSON call grammar.
-  if (!request.response_format && !request.constrained_tools &&
-      runner.ToolFormat() == sampling::JsonConstraint::ToolFormat::kJson)
-    return std::nullopt;
   auto constrained = request;
   auto instruction = request.response_format ? request.response_format->prompt()
                                              : std::string();
@@ -134,10 +129,15 @@ std::optional<ChatRequest> ConstrainChatRequest(
         tokenization::ChatMessage{tokenization::ChatRole::kSystem,
                                   instruction});
   }
-  if (runner.InitialOutputState(request) ==
-      TextGenerationBackend::InitialOutputState::kReasoning)
+  const auto initial = runner.InitialOutputState(request);
+  if (initial == TextGenerationBackend::InitialOutputState::kReasoning)
     grammar = sampling::JsonConstraint::WithReasoning(
         grammar, runner.Markup().reasoning_end);
+  else if (initial == TextGenerationBackend::InitialOutputState::kAuto)
+    // Output that may open reasoning itself keeps that choice.
+    grammar = sampling::JsonConstraint::WithReasoning(
+        grammar, runner.Markup().reasoning_end,
+        runner.Markup().reasoning_start);
   sampling->constraint = runner.BindConstraint(grammar);
   return constrained;
 }
@@ -3168,7 +3168,8 @@ public:
       const ChatRequest& request) const override {
     const auto options = ChatOptions(request);
     if (!options.enable_thinking) {
-      return TextGenerationBackend::InitialOutputState::kContent;
+      // Gemma 4 still opens an empty thought channel after tool responses.
+      return TextGenerationBackend::InitialOutputState::kAuto;
     }
     // After a tool response the prompt already opened the thought channel.
     std::string error;
@@ -3188,6 +3189,10 @@ public:
           return sampling::ConstraintVocabulary::Piece{
               model_->Decode(std::span(&token, 1)), model_->IsStopToken(token)};
         });
+  }
+
+  sampling::JsonConstraint::ToolFormat ToolFormat() const override {
+    return sampling::JsonConstraint::ToolFormat::kGemma4;
   }
 
   [[nodiscard]] TextGenerationBackend::OutputMarkup Markup() const override {

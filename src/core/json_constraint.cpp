@@ -59,6 +59,20 @@ bool ClosedProperties(const json::Value& schema, bool best_effort) {
          !unevaluated->as_bool();
 }
 
+// Gemma 4 call arguments: `<|"|>`-delimited raw strings, bare keys.
+constexpr std::string_view kGemmaQuote = "<|\"|>";
+
+// A bare Gemma 4 key ends at its first ':' and may not hold structure bytes;
+// its parser trims surrounding whitespace and reads `<|"|>` as a quoted key.
+// Other names use the quoted form.
+bool BareGemmaKey(std::string_view name) {
+  constexpr std::string_view kSpace = " \t\r\n\f\v";
+  return !name.empty() && name.find_first_of(":{}[],") == std::string::npos &&
+         kSpace.find(name.front()) == std::string_view::npos &&
+         kSpace.find(name.back()) == std::string_view::npos &&
+         !name.starts_with(kGemmaQuote.substr(0, 1));
+}
+
 std::string RegexLiteral(std::string_view text) {
   std::string result;
   for (unsigned char byte : text) {
@@ -123,9 +137,14 @@ class JsonConstraintCompiler {
 public:
   using Sequence = JsonConstraint::Sequence;
   using Rule = JsonConstraint::Rule;
+  // `gemma` compiles values in the Gemma 4 call-argument syntax instead of
+  // JSON: the same schema semantics with the spelling its chat template uses.
   explicit JsonConstraintCompiler(const json::Value& schema, bool strict,
-                                  bool tool = false)
-      : schema_(schema), strict_(strict), open_objects_(tool && !strict) {
+                                  bool tool = false, bool gemma = false)
+      : schema_(schema),
+        strict_(strict),
+        open_objects_(tool && !strict),
+        gemma_(gemma) {
     // Literal bytes occupy the first 256 terminal classes.
     for (unsigned i = 0; i < 256; ++i) {
       std::bitset<256> bits;
@@ -168,6 +187,13 @@ public:
     number_ = Seq({integer_, Optional(fraction), Optional(exponent)});
     bool_ = Alt({Literal("true"), Literal("false")});
     null_ = Literal("null");
+    key_ = string_;
+    if (gemma_) {
+      // The template renders arguments compactly; keep the model on it.
+      ws_ = Seq({});
+      string_ = GemmaString(json::Value::object());
+      key_ = GemmaKey({});
+    }
   }
 
   std::shared_ptr<const JsonConstraint> Compile(
@@ -569,7 +595,7 @@ private:
   }
   std::uint32_t GenericObject(std::size_t depth) {
     const auto value = GenericValue(depth - 1);
-    const auto member = Seq({string_, ws_, Byte(':'), ws_, value});
+    const auto member = Seq({key_, ws_, Byte(':'), ws_, value});
     const auto members =
         Seq({member, Repeat(Seq({ws_, Byte(','), ws_, member}))});
     return Seq({Byte('{'), ws_, Optional(members), ws_, Byte('}')});
@@ -879,6 +905,12 @@ private:
     return result;
   }
   std::uint32_t ValueLiteral(const json::Value& value) {
+    if (gemma_ && value.is_string()) {
+      if (value.str().find(kGemmaQuote) != std::string::npos)
+        Invalid("string value cannot be a Gemma 4 string");
+      return Literal(std::string(kGemmaQuote) + value.str() +
+                     std::string(kGemmaQuote));
+    }
     if (!value.is_object() && !value.is_array())
       return Literal(value.dump());
     Sequence parts{Byte(value.is_object() ? '{' : '['), ws_};
@@ -889,10 +921,10 @@ private:
       comma = true;
     };
     if (value.is_object()) {
-      for (const auto& [name, item] : value.members()) {
+      for (const auto& [name, item] : Members(value)) {
         separator();
-        parts.insert(parts.end(), {Literal(json::Value(name).dump()), ws_,
-                                   Byte(':'), ws_, ValueLiteral(item)});
+        parts.insert(parts.end(), {KeyLiteral(name), ws_, Byte(':'), ws_,
+                                   ValueLiteral(*item)});
       }
     } else {
       for (const auto& item : value.items()) {
@@ -920,6 +952,55 @@ private:
     const auto symbol = kLexeme | grammar_->lexemes_.size();
     grammar_->lexemes_.push_back(std::move(lexeme));
     return static_cast<std::uint32_t>(symbol);
+  }
+  // A Gemma 4 string satisfying the JSON string predicate. Its raw text cannot
+  // contain the closing quote, which the parser takes at its first occurrence.
+  std::uint32_t GemmaString(const json::Value& predicate) {
+    const auto raw =
+        JsonSchemaLexeme::RawString(predicate, std::string(kGemmaQuote));
+    auto text = Lexeme(raw);
+    if (raw->Check("").complete)
+      text = Optional(text);
+    return Seq({Literal(kGemmaQuote), text, Literal(kGemmaQuote)});
+  }
+  // A dynamic bare key other than the declared names.
+  std::uint32_t GemmaKey(const std::set<std::string>& excluded) {
+    std::string pattern = "^";
+    if (!excluded.empty()) {
+      pattern += "(?!(?:";
+      bool separator = false;
+      for (const auto& name : excluded) {
+        if (separator)
+          pattern += '|';
+        separator = true;
+        pattern += RegexLiteral(name);
+      }
+      pattern += ")$)";
+    }
+    pattern += "[^:{}\\[\\],<\\s](?:[^:{}\\[\\],]*[^:{}\\[\\],\\s])?$";
+    auto predicate = json::Value::object();
+    predicate["pattern"] = std::move(pattern);
+    return Lexeme(JsonSchemaLexeme::RawString(predicate, ":"));
+  }
+  std::uint32_t KeyLiteral(const std::string& name) {
+    if (!gemma_)
+      return Literal(json::Value(name).dump());
+    if (BareGemmaKey(name))
+      return Literal(name);
+    // The parser also reads `<|"|>`-quoted keys, as declarations render them.
+    if (name.find(kGemmaQuote) != std::string::npos)
+      Invalid("property name cannot be a Gemma 4 key");
+    return Literal(std::string(kGemmaQuote) + name + std::string(kGemmaQuote));
+  }
+  // Gemma 4 renders object keys in sorted order at every depth.
+  std::vector<std::pair<std::string, const json::Value*>> Members(
+      const json::Value& object) const {
+    std::vector<std::pair<std::string, const json::Value*>> members;
+    for (const auto& [name, value] : object.members())
+      members.emplace_back(name, &value);
+    if (gemma_)
+      std::ranges::sort(members, {}, &decltype(members)::value_type::first);
+    return members;
   }
   // Compile an unsigned interval using shared digit prefixes. Work grows with
   // the number of digits, not the number of integers between the bounds.
@@ -1284,7 +1365,8 @@ private:
                (schema.contains("pattern") || schema.contains("format") ||
                 schema.contains("minLength") || schema.contains("maxLength")))
         alternatives.push_back(
-            Lexeme(JsonSchemaLexeme::String(StringPredicate(schema))));
+            gemma_ ? GemmaString(StringPredicate(schema))
+                   : Lexeme(JsonSchemaLexeme::String(StringPredicate(schema))));
       else if (name == "integer")
         alternatives.push_back(Integer(schema));
       else
@@ -1335,7 +1417,14 @@ private:
       // could overwrite the validated field. Match decoded Unicode so JSON
       // escapes cannot bypass the exclusion.
       std::uint32_t key = string_;
-      if (!properties->empty()) {
+      if (gemma_) {
+        std::set<std::string> declared;
+        for (const auto& [name, value] : properties->members()) {
+          (void)value;
+          declared.insert(name);
+        }
+        key = GemmaKey(declared);
+      } else if (!properties->empty()) {
         std::string pattern = "^(?!(?:";
         bool separator = false;
         for (const auto& [name, value] : properties->members()) {
@@ -1359,12 +1448,12 @@ private:
       const auto tail = Repeat(Seq({ws_, Byte(','), ws_, member}));
       suffix = {Optional(Seq({member, tail})), tail};
     }
-    for (auto it = properties->members().rbegin();
-         it != properties->members().rend(); ++it) {
+    const auto members = Members(*properties);
+    for (auto it = members.rbegin(); it != members.rend(); ++it) {
       const auto& [key, value] = *it;
       CountStrings(key);
-      const auto member = Seq({Literal(json::Value(key).dump()), ws_, Byte(':'),
-                               ws_, Visit(value, depth + 1)});
+      const auto member =
+          Seq({KeyLiteral(key), ws_, Byte(':'), ws_, Visit(*value, depth + 1)});
       std::array<std::uint32_t, 2> next;
       for (unsigned comma = 0; comma < 2; ++comma) {
         Sequence sequence;
@@ -1415,9 +1504,10 @@ private:
   const json::Value& schema_;
   bool strict_;
   bool open_objects_;
+  bool gemma_;
   bool ignore_unknown_keys_{false};
   std::shared_ptr<JsonConstraint> grammar_{new JsonConstraint};
-  std::uint32_t ws_, string_, integer_, number_, bool_, null_;
+  std::uint32_t ws_, string_, key_, integer_, number_, bool_, null_;
   std::map<std::size_t, std::uint32_t> generic_values_;
   std::map<const json::Value*, std::uint32_t> compiled_;
   std::deque<json::Value> derived_;
@@ -1490,8 +1580,10 @@ std::shared_ptr<const JsonConstraint> JsonConstraint::ToolParameters(
   }
   std::shared_ptr<const JsonConstraint> grammar;
   bool best_effort = false;
-  const bool extended_native =
-      !required || format == ToolFormat::kJson || untyped;
+  // Gemma 4 values are a complete JSON dialect; nested open objects need no
+  // JSON fallback.
+  const bool extended_native = !required || format == ToolFormat::kJson ||
+                               format == ToolFormat::kGemma4 || untyped;
   try {
     // Validation-only on the native route; JSON fallback keeps this grammar.
     grammar = JsonConstraintCompiler(normalized, strict, extended_native)
@@ -1524,6 +1616,16 @@ std::shared_ptr<const JsonConstraint> JsonConstraint::ToolParameters(
       !(format == ToolFormat::kQwen && HasPropertySchemas(schema));
   if (open_untyped) {
     grammar = OpenToolParameters(format);
+  } else if (grammar && format == ToolFormat::kGemma4) {
+    try {
+      grammar = JsonConstraintCompiler(normalized, strict, true, true)
+                    .Compile(false, best_effort);
+    } catch (const std::invalid_argument&) {
+      if (strict)
+        throw;
+      grammar.reset();
+      best_effort = true;
+    }
   } else if (grammar && format != ToolFormat::kJson) {
     try {
       grammar = JsonConstraintCompiler(normalized, strict, true)
@@ -1537,6 +1639,10 @@ std::shared_ptr<const JsonConstraint> JsonConstraint::ToolParameters(
   }
   if (!grammar && format == ToolFormat::kJson && !strict)
     grammar = Object();
+  // Gemma 4 has no second call syntax to fall back to: a best-effort tool keeps
+  // its native envelope with arbitrary arguments.
+  if (!grammar && format == ToolFormat::kGemma4 && !strict)
+    grammar = OpenToolParameters(format);
   if (!grammar && best_effort) {
     // Only untyped tools can use arbitrary native parameters. A typed schema
     // may have failed native compilation because literal delimiters or unions
@@ -1554,6 +1660,13 @@ std::shared_ptr<const JsonConstraint> JsonConstraint::OpenToolParameters(
     ToolFormat format) {
   if (format == ToolFormat::kJson)
     return Object();
+  if (format == ToolFormat::kGemma4) {
+    static const auto gemma = [] {
+      const auto schema = json::Value::object();
+      return JsonConstraintCompiler(schema, false, true, true).Compile(true);
+    }();
+    return gemma;
+  }
   static const auto qwen = [] {
     const auto schema = json::Value::object();
     return JsonConstraintCompiler(schema, false)
@@ -1568,16 +1681,18 @@ std::shared_ptr<const JsonConstraint> JsonConstraint::OpenToolParameters(
 }
 
 std::shared_ptr<const JsonConstraint> JsonConstraint::WithReasoning(
-    std::shared_ptr<const JsonConstraint> answer, std::string_view end) {
+    std::shared_ptr<const JsonConstraint> answer, std::string_view end,
+    std::string_view start) {
   if (end.empty())
     throw std::invalid_argument("reasoning end marker is empty");
   // Cache separately from schema compilation. No mutable phase belongs to the
   // model or cache: the normal grammar stack carries it through sampler copies,
   // draft rejection and request restart.
-  using Key = std::pair<std::shared_ptr<const JsonConstraint>, std::string>;
+  using Key = std::tuple<std::shared_ptr<const JsonConstraint>, std::string,
+                         std::string>;
   static std::mutex mutex;
   static std::map<Key, std::shared_ptr<const JsonConstraint>> cache;
-  Key key{answer, std::string(end)};
+  Key key{answer, std::string(end), std::string(start)};
   {
     const std::lock_guard lock(mutex);
     if (const auto found = cache.find(key); found != cache.end())
@@ -1612,6 +1727,14 @@ std::shared_ptr<const JsonConstraint> JsonConstraint::WithReasoning(
     }
   }
   grammar->root_ = base;
+  if (!start.empty()) {
+    JsonConstraint::Sequence opened;
+    for (const unsigned char byte : start)
+      opened.push_back(kTerminal | byte);
+    opened.push_back(base);
+    grammar->root_ = static_cast<std::uint32_t>(grammar->rules_.size());
+    grammar->rules_.push_back({{answer->root_}, std::move(opened)});
+  }
   const std::lock_guard lock(mutex);
   if (const auto found = cache.find(key); found != cache.end())
     return found->second;
@@ -1663,11 +1786,14 @@ std::shared_ptr<const JsonConstraint> JsonConstraint::WithTools(
     return id;
   };
   const bool deepseek = format == ToolFormat::kDeepSeek;
-  const std::string_view marker =
-      deepseek ? "<｜DSML｜tool_calls>" : "<tool_call>";
+  const bool gemma = format == ToolFormat::kGemma4;
+  const std::string_view marker = deepseek ? "<｜DSML｜tool_calls>"
+                                  : gemma  ? "<|tool_call>"
+                                           : "<tool_call>";
   const auto end = literal(format == ToolFormat::kJson ? "}</tool_call>"
                            : deepseek                  ? "</｜DSML｜invoke>"
-                                      : "</function>\n</tool_call>");
+                           : gemma                     ? "<tool_call|>"
+                                   : "</function>\n</tool_call>");
   const auto calls = static_cast<std::uint32_t>(grammar->rules_.size());
   grammar->rules_.push_back({});
   // In tool-only mode ordinary text remains unconstrained until a canonical
@@ -1726,10 +1852,14 @@ std::shared_ptr<const JsonConstraint> JsonConstraint::WithTools(
   if (answer)
     imported.emplace(answer.get(), answer->root_);
   for (const auto& [name, arguments] : tools) {
+    // Gemma 4 ends a function name at its first brace.
+    if (gemma && name.find('{') != std::string::npos)
+      Invalid("function name cannot be a Gemma 4 call name: " + name);
     const auto begin = literal(
         format == ToolFormat::kJson
             ? "{\"name\":" + json::Value(name).dump() + ",\"arguments\":"
         : deepseek ? "\n<｜DSML｜invoke name=\"" + name + "\">\n"
+        : gemma    ? "call:" + name
                    : "\n<function=" + name + ">\n");
     if (const auto found = imported.find(arguments.get());
         found != imported.end()) {
