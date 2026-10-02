@@ -107,7 +107,12 @@ omitted, preserved and explicitly discarded reasoning, plus thinking off.
 `--sessions 1` to verify retention is independent of execution slots. It also
 checks the startup RAM cap; byte/record pressure is covered by CPU tests.
 
-Unchanged retries must reproduce the complete output with zero prefill. After a
+Unchanged retries must reproduce the complete output with zero prefill. Once
+the RAM cache's 128 snapshot records are full, the cache deliberately keeps
+other conversations' last checkpoints instead of new exact-retry copies. The
+runner therefore restarts the server before a suite after its cache logged that
+pressure, and before `sampling-defaults`, `progress`, `cache-edits` and
+`cache-growth`. `report.json` maps each suite to its server log in `server_logs`. After a
 restart, disk restores may re-prefill less than one 2048-token disk step;
 greedy and zero-prefill restores must still reproduce their output. Edited
 histories must retain a useful earlier prefix and match their cold answer;

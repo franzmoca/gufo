@@ -272,7 +272,26 @@ def check_tool_agent_json(client, model, checks, chat_result):
         assert json.loads(result["text"]) == expected, result
 
 
-def check_mixed_tool_schemas(client, model, checks, chat_result, vision, image_content):
+# Gemma 4's chat template declares only description, type, enum, items,
+# properties, required and nullable. It never shows patternProperties, if/then
+# or dependencies, so Gemma omits the fields they add although its call grammar
+# admits them; it includes them once a declaration mentions them.
+UNDECLARED_SCHEMA_KEYWORDS = {"gemma4"}
+# Gemma 4 strings are <|"|>-delimited, not JSON-quoted.
+JSON_QUOTED_STRINGS = {"qwen38", "deepseek4", None}
+UNDECLARED_CASES = {"pattern_root": "template omits patternProperties",
+                    "wildcard": "template omits patternProperties",
+                    "conditional": "template omits if/then",
+                    "dependency": "template omits dependencies"}
+
+
+def skip_check(checks, name, reason):
+    checks[name] = {"skipped": reason}
+    print(f"SKIP {name}: {reason}", file=sys.stderr, flush=True)
+
+
+def check_mixed_tool_schemas(client, model, checks, chat_result, vision, image_content,
+                             preset=None):
     """Mixed native/JSON tool sets retain arguments, types and continuation."""
     def record(name, result, expected):
         checks[f"mixed_{name}"] = result
@@ -389,20 +408,25 @@ def check_mixed_tool_schemas(client, model, checks, chat_result, vision, image_c
         ("nullable_string", {"type": "object", "properties": {
             "value": {"type": ["string", "null"]}}, "required": ["value"]}, {"value": "null"}),
     ):
+        if name in UNDECLARED_CASES and preset in UNDECLARED_SCHEMA_KEYWORDS:
+            skip_check(checks, f"mixed_{name}", UNDECLARED_CASES[name])
+            continue
         prompt = ("Call record exactly once with these exact arguments: " +
                   json.dumps(arguments) + ". Preserve every JSON type. No explanation.")
         if name == "nullable_string":
             # Both alternatives are valid schema values; explicitly select
             # the string rather than measuring the model's default choice.
-            prompt += (" The value is the four-letter STRING null, not the JSON null value. "
-                       "Put the four letters inside JSON quotation marks.")
+            prompt += " The value is the four-letter STRING null, not the JSON null value."
+            if preset in JSON_QUOTED_STRINGS:
+                prompt += " Put the four letters inside JSON quotation marks."
         body = {**common, "tools": [*agent_tools(), {"type": "function", "function": {
             "name": "record", "parameters": parameters}}],
             "messages": [{"role": "user", "content": prompt}]}
         record(name, chat_result(client, body, True), arguments)
 
 
-def check_tool_schema_edges(client, model, checks, chat_result, vision, image_content):
+def check_tool_schema_edges(client, model, checks, chat_result, vision, image_content,
+                            preset=None):
     """Admitted arguments preserve JSON types; invalid schemas cannot dead-end."""
     wildcard = {"type": "object", "properties": {"value": {"type": "string"}},
                 "required": ["value"], "patternProperties": {"^x_": {}}}
@@ -448,6 +472,10 @@ def check_tool_schema_edges(client, model, checks, chat_result, vision, image_co
         return result
 
     for index, (name, schema, arguments, choice) in enumerate(cases):
+        if name in UNDECLARED_CASES and preset in UNDECLARED_SCHEMA_KEYWORDS:
+            for endpoint in ("chat", "responses"):
+                skip_check(checks, f"schema_edges_{name}_{endpoint}", UNDECLARED_CASES[name])
+            continue
         prompt = ("Call record exactly once with these exact JSON arguments: " +
                   json.dumps(arguments) + ". Preserve every key and JSON type. No explanation.")
         if name in ("empty_interval", "recursive"):

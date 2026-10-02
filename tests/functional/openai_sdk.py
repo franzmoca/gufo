@@ -1347,7 +1347,7 @@ def check_strict_tools(client, model, checks):
     record("strict_tool_invalid_schema", {"status": 400})
 
 
-def check_native_tools(client, model, checks, vision=False):
+def check_native_tools(client, model, checks, vision=False, preset=None):
     """Shared function semantics over both SDK transports and concurrent users."""
     from concurrent.futures import ThreadPoolExecutor
 
@@ -1452,6 +1452,8 @@ def check_native_tools(client, model, checks, vision=False):
     signature(result, value=nested)
     record("responses_literal_call_argument", result.to_dict())
 
+    # Gemma 4 has no reasoning effort levels: "low" enables full-length
+    # thinking, which does not reach the call within this 256-token budget.
     thinking_function = json.loads(json.dumps(function))
     thinking_function["parameters"]["properties"]["value"] = {
         "type": "string", "const": "alpha"}
@@ -1647,7 +1649,7 @@ def check_state_edges(client, model, checks, speculative, vision=False):
     checks["schema_error_did_not_poison_cache"] = replay
 
 
-def check_auto_tools(client, model, checks, vision=False):
+def check_auto_tools(client, model, checks, vision=False, preset=None):
     """Automatic calls retain prose, loose schemas, replay and both transports."""
     from concurrent.futures import ThreadPoolExecutor
 
@@ -1688,6 +1690,8 @@ def check_auto_tools(client, model, checks, vision=False):
         assert signature(first) == signature(replay), (first, replay)
         assert replay["usage"]["cached_tokens"] > 0, replay
         record(f"auto_chat_sampled{sampled}_cache_replay", replay)
+        if not sampled:
+            call_tokens = replay["usage"]["completion_tokens"]
     prose = {**common, "messages": [{"role": "user", "content":
              "Do not call any tools. Reply with the single word Hello."}]}
     for thinking in (False, True):
@@ -1704,7 +1708,9 @@ def check_auto_tools(client, model, checks, vision=False):
         "extra_body": {"presence_penalty": 0}}, True)
     signature(thought)
     record("auto_chat_thinking_high", thought)
-    for limit in (2, 12):
+    # Stop inside the call. Compact call syntaxes (Gemma 4: 12 tokens here)
+    # can finish within 12 tokens, so cut one token before the complete call.
+    for limit in (2, min(12, call_tokens - 1)):
         result = chat_result(client, {**common, "max_completion_tokens": limit}, True)
         assert result["finish"] == "length" and not result["tools"], result
         record(f"auto_chat_limit{limit}", result)
@@ -1724,8 +1730,9 @@ def check_auto_tools(client, model, checks, vision=False):
         # Parallel auto permits more than one call; cardinality is enforced
         # separately by the nonparallel suite, not by prompt obedience.
         assert result.status == "completed" and calls, result
-        assert all(call.name == "record" and json.loads(call.arguments) == {"value": value}
-                   for call in calls), result
+        values = value if isinstance(value, tuple) else (value,)
+        assert all(call.name == "record" and json.loads(call.arguments)["value"] in values
+                   and len(json.loads(call.arguments)) == 1 for call in calls), result
         return [(call.name, call.arguments) for call in calls]
 
     result = client.responses.create(**response_request)
@@ -1784,17 +1791,23 @@ def check_auto_tools(client, model, checks, vision=False):
                  "Call record with value equal to the image color. Omit optional."},
                 {"type": "input_image", "image_url":
                  image_content("blue")["image_url"]["url"]}]}]})
-        response_signature(result, value="blue")
+        # Either spelling shows the image reached the call (Gemma 4: hex).
+        response_signature(result, value=("blue", "#0000FF"))
         record("auto_image_tool", result.to_dict())
         image_request = {**common, "messages": [{"role": "user", "content": [
             image_content("blue"), {"type": "text", "text":
             "Call record with value equal to the image color. Omit optional."}]}]}
-        stopped = chat_result(client, {**image_request, "stop": "blue"}, True)
+        # Stop inside the arguments this prompt produces; its image-first
+        # order may spell the color differently from the Responses prompt.
+        chosen = chat_result(client, image_request)
+        color = json.loads(chosen["tools"][0]["function"]["arguments"])["value"]
+        assert color in ("blue", "#0000FF"), chosen
+        stopped = chat_result(client, {**image_request, "stop": color}, True)
         assert stopped["finish"] == "stop" and not stopped["tools"], stopped
         retry = chat_result(client, image_request, True)
         assert retry["usage"]["cached_tokens"] > 0 and retry["tools"], retry
         assert all(call["function"]["name"] == "record"
-                   and json.loads(call["function"]["arguments"]) == {"value": "blue"}
+                   and json.loads(call["function"]["arguments"]) == {"value": color}
                    for call in retry["tools"]), retry
         record("auto_image_argument_stop_retry", {"stopped": stopped, "retry": retry})
 
@@ -2428,10 +2441,13 @@ def main():
                 client, args.model, checks, image_content, chat_result, response_result),
             "structured": lambda: check_structured_outputs(client, args.model, checks, args.vision),
             "structured-limits": lambda: check_structured_limits(client, args.model, checks, args.vision),
-            "native-tools": lambda: check_native_tools(client, args.model, checks, args.vision),
-            "auto-tools": lambda: check_auto_tools(client, args.model, checks, args.vision),
+            "native-tools": lambda: check_native_tools(
+                client, args.model, checks, args.vision, args.sampling_preset),
+            "auto-tools": lambda: check_auto_tools(
+                client, args.model, checks, args.vision, args.sampling_preset),
             "tool-edges": lambda: check_tool_edges(client, args.model, checks),
-            "tool-reasoning": lambda: check_tool_reasoning(client, args.model, checks, chat_result),
+            "tool-reasoning": lambda: check_tool_reasoning(
+                client, args.model, checks, chat_result, args.sampling_preset),
             "tool-agent": lambda: check_tool_agent(
                 client, args.model, checks, chat_result, args.vision, image_content),
             "tool-agent-loop": lambda: check_tool_agent_loop(client, args.model, checks, chat_result),
@@ -2440,9 +2456,11 @@ def main():
             "tool-untyped": lambda: check_untyped_agent_tools(
                 client, args.model, checks, chat_result, args.vision, image_content),
             "tool-mixed": lambda: check_mixed_tool_schemas(
-                client, args.model, checks, chat_result, args.vision, image_content),
+                client, args.model, checks, chat_result, args.vision, image_content,
+                args.sampling_preset),
             "tool-schema-edges": lambda: check_tool_schema_edges(
-                client, args.model, checks, chat_result, args.vision, image_content),
+                client, args.model, checks, chat_result, args.vision, image_content,
+                args.sampling_preset),
             "state-edges": lambda: check_state_edges(
                 client, args.model, checks, args.speculative, args.vision),
             "sampling-defaults": lambda: check_sampling_defaults(
