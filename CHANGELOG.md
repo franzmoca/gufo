@@ -4,6 +4,68 @@ Notable user-facing changes are recorded here. Gufo follows
 [Semantic Versioning](https://semver.org/) under the compatibility policy in
 [the release guide](docs/RELEASING.md).
 
+## [0.5.0](https://github.com/gufo-org/gufo/compare/v0.4.0...v0.5.0) (2026-10-02)
+
+
+### Features
+
+* **server:** accept WebP and other spellings of image data URLs ([#352](https://github.com/gufo-org/gufo/issues/352)) ([d707143](https://github.com/gufo-org/gufo/commit/d707143223c52b91da3f0fb231ba85ac3eab247c))
+
+
+### Bug Fixes
+
+* **cache:** keep cache reuse advancing as conversations grow ([#358](https://github.com/gufo-org/gufo/issues/358)) ([9afdd48](https://github.com/gufo-org/gufo/commit/9afdd4802fbe4f4afeb5607a8cc4da905f8e4d70))
+* **cache:** keep cached conversations independent of execution sessions ([#369](https://github.com/gufo-org/gufo/issues/369)) ([d7cf7ee](https://github.com/gufo-org/gufo/commit/d7cf7ee4b8e3a506ee1ec9c301e8a3efd10c6c94))
+* **cache:** retain prefixes across conversation history edits ([#362](https://github.com/gufo-org/gufo/issues/362)) ([68e8475](https://github.com/gufo-org/gufo/commit/68e8475dbdf9dcddbe0a3ea645646b453b0bb89c))
+* **qwen-image:** prevent source-noise reuse in image edits ([#377](https://github.com/gufo-org/gufo/issues/377)) ([1071b36](https://github.com/gufo-org/gufo/commit/1071b361eb69e561125543382ebbf3f212c2cc5a))
+* **server:** advertise loaded model input modalities ([#367](https://github.com/gufo-org/gufo/issues/367)) ([5451525](https://github.com/gufo-org/gufo/commit/54515255300de99a8cbbae192d25b42959b5c973))
+* **server:** keep literal tool markers inside constrained reasoning ([#361](https://github.com/gufo-org/gufo/issues/361)) ([2ab0c4b](https://github.com/gufo-org/gufo/commit/2ab0c4b70ffec6be8c306a6ed299acef76c903e7))
+* **server:** preserve native tool schemas and historical calls ([#373](https://github.com/gufo-org/gufo/issues/373)) ([594a623](https://github.com/gufo-org/gufo/commit/594a623913b4109e4499885e9f73ed4d4ad3698e))
+
+
+### Performance
+
+* **serve:** skip checkpoints that barely advance a prefix ([#348](https://github.com/gufo-org/gufo/issues/348)) ([93af45d](https://github.com/gufo-org/gufo/commit/93af45d48a712d2c14105ef5a9347942e2260f14))
+
+## [0.4.0](https://github.com/gufo-org/gufo/compare/v0.3.0...v0.4.0) (2026-10-01)
+
+
+### Features
+
+* **serve:** expose live token and request metrics ([#351](https://github.com/gufo-org/gufo/issues/351)) ([03d7c72](https://github.com/gufo-org/gufo/commit/03d7c727c48c62960549ef5f27cd2ea9897c873e))
+* **serve:** report cache eviction and retained snapshot capacity ([#353](https://github.com/gufo-org/gufo/issues/353)) ([bda078c](https://github.com/gufo-org/gufo/commit/bda078c3c3b087bd4bf5a9b09f4fd38653eb2e94))
+* **server:** make log verbosity configurable with --log-level ([#319](https://github.com/gufo-org/gufo/issues/319)) ([6a32726](https://github.com/gufo-org/gufo/commit/6a32726068f21f94db0761edba1da00eefe99c4b))
+* **server:** support llama-server return_progress on streaming completions ([#344](https://github.com/gufo-org/gufo/issues/344)) ([741722b](https://github.com/gufo-org/gufo/commit/741722b04eb474b3d75c7e2c0a4d727ae21f6577))
+
+
+### Bug Fixes
+
+* **qwen-flash:** preserve seeded MTP replay across cache reuse ([#330](https://github.com/gufo-org/gufo/issues/330)) ([a917b79](https://github.com/gufo-org/gufo/commit/a917b790df8d5fd98205abddd3b7c1afd0ca9458))
+* **serve:** preserve native tool calls during constrained decoding ([#324](https://github.com/gufo-org/gufo/issues/324)) ([b26de0d](https://github.com/gufo-org/gufo/commit/b26de0d30caa363cc6694bddd094af9bd88ec62b))
+* **server:** keep SSE streams alive during generation ([#334](https://github.com/gufo-org/gufo/issues/334)) ([c6e1069](https://github.com/gufo-org/gufo/commit/c6e10690c7532a99257b58319ca619a52351ddca))
+
+
+### Performance
+
+* **qwen-flash:** accelerate greedy penalties and fix sampling ranges ([#332](https://github.com/gufo-org/gufo/issues/332)) ([7e450e8](https://github.com/gufo-org/gufo/commit/7e450e8c0bc5458d056b34675e6d7f844d0ef23f))
+
+
+### Documentation
+
+* explain how the KV cache works in gufo ([#360](https://github.com/gufo-org/gufo/issues/360)) ([446cb14](https://github.com/gufo-org/gufo/commit/446cb141f8b312befdbfb58945c01db3897ba09a))
+
+## [0.3.0](https://github.com/gufo-org/gufo/compare/v0.2.0...v0.3.0) (2026-09-30)
+
+
+### Features
+
+* **cli:** print startup banner on interactive commands ([#323](https://github.com/gufo-org/gufo/issues/323)) ([f783fed](https://github.com/gufo-org/gufo/commit/f783fedb9bea2ec7de941f6da4e02f4a4596b29e))
+
+
+### Documentation
+
+* update readme with link to gufo forks ([#327](https://github.com/gufo-org/gufo/issues/327)) ([8eedee6](https://github.com/gufo-org/gufo/commit/8eedee6fd904b8e6812f740f777fe84940f341c5))
+
 ## [0.2.0](https://github.com/gufo-org/gufo/compare/v0.1.1...v0.2.0) (2026-09-29)
 
 

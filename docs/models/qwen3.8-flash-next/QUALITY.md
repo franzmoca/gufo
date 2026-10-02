@@ -11,8 +11,10 @@ September 27–28.
 | --- | --- |
 | MTP versus scalar CPU formulas, eight text/image states | Fusion/attention relative RMS <0.0008 (limit 0.002); full-width normalization, split projections, recursive carry and full Q8 head checked |
 | Batched MTP/AR, C2/C4/C6/C8 | Logits, tokens, acceptance, RNG and every 1–8-token rollback prefix match isolated execution |
-| Sampling | 23 AR/MTP configurations; shared FP64 target filtering/CDF, p/q acceptance and residual correction pass |
+| Sampling | 25 AR/MTP configurations, including top-p zero; FP64 target filtering/CDF, p/q acceptance, residual correction, seeded replay and short token budgets pass |
+| Greedy penalties | GPU selection matches CPU at every 1–7-row verification width, including FP32-sensitive ties; native tool/JSON constraints remain active. C2/4/6/8 outputs match the previous implementation; image/tool cancellation, RAM/disk restore and OpenAI SDK checks pass. [Evidence](artifacts/penalty-verification.json). |
 | Prefill and cache | Full logits match across tested chunk boundaries, short tails and restored state through 4096 tokens |
+| Seeded MTP cache rebuilding | Two seeds × 200 tokens replay exactly after different prefill splits, cache bypass and replacement. K/V-only prefill and compact catch-up preserve full-head candidates across 1/8/9/32/33-row chunks. [Evidence](artifacts/mtp-cache-replay.json). |
 | Scalar versus bulk prefill, 2176 tokens | Same top-1; logit RMSE 0.18, not bit-identical |
 | Serving | Cancellation, three-turn continuation, reasoning/tool history, concurrent image/text isolation and disk restart pass |
 | Sparse attention | Independent FP64 operator error ≤2.83e-7 (limit 1e-6). At 32K/128K, 256 fixed-token code/prose rows: mean KL 5.82e-4 and 256/256 top-1 agreement with an FP64-attention diagnostic. [Evidence](artifacts/attention-tiles-review.json). |
@@ -26,6 +28,8 @@ Sampled MTP can consume different RNG draws from AR. Seeded replay requires
 the same build, request budget, capacity and sampling configuration; live cost
 timings only steer greedy decoding. Draft sampling uses the full Q8 head's
 top 64 logits; upstream draft-sampler equivalence is not claimed.
+MTP cache projections now keep the same arithmetic across prompt splits.
+Older Flash-Next disk checkpoints are rejected and rebuilt once.
 
 ## Vision
 
@@ -39,7 +43,8 @@ embedding bytes but do not resolve this gap. [Evidence](artifacts/vision-parity.
 ## Reproduce
 
 Tests live in [`tests/models/qwen38_flash_next`](../../../tests/models/qwen38_flash_next).
-Use `--batch-only`, `--sampling-only` or `--prefill-only` on the session test;
+Use `--batch-only`, `--sampling-only`, `--prefill-only` or `--cache-only` on the
+session test;
 the snapshot test covers persistent image/text state. For independent MTP checks:
 
 ```sh

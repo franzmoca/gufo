@@ -7,6 +7,7 @@
 #include <cstddef>
 #include <cstdint>
 
+#include "src/core/sampling.hpp"
 #include "src/models/qwen/vision/rope.hpp"
 
 /// Model-private HIP launchers for everything outside the quantized GEMM
@@ -349,6 +350,7 @@ void UnpackQGate(const float* qg, std::uint32_t qg_stride, float* q,
 
 /// Unpacks a stacked Q/gate/K/V projection, normalizes and rotates Q/K,
 /// and writes the F16 caches. Returns false for heads wider than 256.
+/// With zero query heads, packed contains only K/V and q/gate may be null.
 bool PrepareAttention(const float* packed, std::uint32_t stride,
                       const float* q_gamma, const float* k_gamma, float* q,
                       float* gate, __half* k_cache, __half* v_cache,
@@ -484,6 +486,22 @@ void Argmax(const float* logits, ArgmaxCandidate* scratch, std::int32_t* out,
 
 /// Gather selected IDs and their original logits from independent rows.
 /// The caller checks finite values only for the verification prefix it visits.
+// Sorted sparse histories, one per verification row. Penalty arithmetic is
+// FP64, matching SamplerState; output values remain the original logits.
+struct GreedyPenaltyRows {
+  const sampling::TokenPenalty* penalties;
+  std::uint32_t offsets[8]{};
+};
+struct PenaltyArgmaxCandidate {
+  double value;
+  std::int32_t index;
+};
+void PenalizedArgmax(const float* logits, GreedyPenaltyRows penalties,
+                     float repeat, float frequency, float presence,
+                     PenaltyArgmaxCandidate* partial, ArgmaxCandidate* out,
+                     std::uint32_t rows, std::uint32_t vocab,
+                     hipStream_t stream);
+
 void GatherArgmaxCandidates(const float* logits, const std::uint32_t* ids,
                             ArgmaxCandidate* out, std::uint32_t rows,
                             std::uint32_t vocab, hipStream_t stream);

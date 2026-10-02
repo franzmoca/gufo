@@ -1,6 +1,8 @@
 #ifndef GUFO_SERVER_GENERATION_METRICS_HPP_
 #define GUFO_SERVER_GENERATION_METRICS_HPP_
 
+#include <atomic>
+#include <cstdint>
 #include <iomanip>
 #include <sstream>
 
@@ -8,6 +10,37 @@
 #include "src/core/json.hpp"
 
 namespace gufo::server {
+
+// Process-wide `/metrics` values. Token counters advance per prefill chunk and
+// per generated token, so scrapes see work while requests are still running.
+namespace detail {
+inline std::atomic<std::uint64_t>& TotalPromptTokens() {
+  static std::atomic<std::uint64_t> count{0};
+  return count;
+}
+inline std::atomic<std::uint64_t>& TotalGenTokens() {
+  static std::atomic<std::uint64_t> count{0};
+  return count;
+}
+inline std::atomic<double>& LastPromptSpeed() {
+  static std::atomic<double> val{0.0};
+  return val;
+}
+inline std::atomic<double>& LastGenSpeed() {
+  static std::atomic<double> val{0.0};
+  return val;
+}
+// Schedulers add their own deltas, so a draining scheduler and its
+// replacement can both contribute during a model reload.
+inline std::atomic<std::int64_t>& RequestsProcessing() {
+  static std::atomic<std::int64_t> count{0};
+  return count;
+}
+inline std::atomic<std::int64_t>& RequestsDeferred() {
+  static std::atomic<std::int64_t> count{0};
+  return count;
+}
+}  // namespace detail
 
 inline double PrefillTokensPerSecond(
     const TextGenerationBackend::Result& result) {
@@ -89,6 +122,17 @@ inline json::Value GenerationTimings(
   timings["draft_n"] = result.draft_tokens;
   timings["draft_n_accepted"] = result.draft_accepted_tokens;
   return timings;
+}
+
+/// llama-server `prompt_progress` object for streamed `return_progress`.
+inline json::Value PromptProgressJson(
+    const TextGenerationBackend::PromptProgress& progress) {
+  json::Value value = json::Value::object();
+  value["total"] = progress.total;
+  value["cache"] = progress.cache;
+  value["processed"] = progress.processed;
+  value["time_ms"] = progress.time_ms;
+  return value;
 }
 
 }  // namespace gufo::server

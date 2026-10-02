@@ -470,13 +470,16 @@ public:
   std::function<void()> before_serialize;
   PersistentSnapshotRunner(std::shared_ptr<FakeStats> stats,
                            std::string identity,
-                           std::size_t retained_snapshot_capacity_bytes = 256)
+                           std::size_t retained_snapshot_capacity_bytes = 256,
+                           std::size_t max_context = 64)
       : SnapshotRunner(std::move(stats), 64, 256,
                        retained_snapshot_capacity_bytes),
-        identity_(identity.begin(), identity.end()) {}
+        identity_(identity.begin(), identity.end()),
+        max_context_(max_context) {}
 
   [[nodiscard]] TextRunnerDescriptor Descriptor() const override {
     auto descriptor = SnapshotRunner::Descriptor();
+    descriptor.max_context = max_context_;
     descriptor.persistence = gufo::server::TextRunnerPersistenceDescriptor{
         .compatibility_identity = identity_,
         .payload_version = 1,
@@ -549,6 +552,7 @@ private:
   }
 
   std::vector<std::uint8_t> identity_;
+  std::size_t max_context_;
 };
 
 class TemporaryDirectory {
@@ -750,10 +754,12 @@ void TestGeneratedFrontierForksBeforeMutation() {
 }
 
 void TestGeneratedFrontierPersistsForForks() {
+  // Persist every frontier; spacing is checked below and by the disk store.
   TemporaryDirectory directory;
   const TextRunnerDiskCacheOptions disk{.directory = directory.path(),
                                         .capacity_bytes = 4096,
-                                        .staging_capacity_bytes = 4096};
+                                        .staging_capacity_bytes = 4096,
+                                        .min_checkpoint_step_tokens = 0};
   auto stats = std::make_shared<FakeStats>();
   auto runner = std::make_shared<PersistentSnapshotRunner>(stats, "artifact-A");
   {
@@ -774,6 +780,26 @@ void TestGeneratedFrontierPersistsForForks() {
          "disk forks restore the generated checkpoint before suffix prefill");
   Expect(restored.Prefill(16).consumed_tokens == 1,
          "disk restoration does not re-prefill known generated tokens");
+
+  // With the default step, the generated frontier one token past the prompt
+  // is not written; a restart resumes from the prompt and re-prefills it.
+  TemporaryDirectory spaced_directory;
+  const TextRunnerDiskCacheOptions spaced{.directory = spaced_directory.path(),
+                                          .capacity_bytes = 4096,
+                                          .staging_capacity_bytes = 4096};
+  {
+    TextRunnerPool pool(runner, 2, spaced);
+    auto root = pool.Acquire({1, 2, 3});
+    root.Prefill(3);
+    (void)root.SelectNext();
+    root.Advance();
+    root.Commit();
+  }
+  TextRunnerPool spaced_restart(runner, 1, spaced);
+  auto resumed = spaced_restart.Acquire({1, 2, 3, 90, 5});
+  Expect(resumed.cache_disk_hit() && resumed.cached_prompt_tokens() == 3 &&
+             resumed.Prefill(16).consumed_tokens == 2,
+         "spaced disk checkpoints resume from the nearest stored prefix");
 }
 
 void TestCancellationRetainsOnlyCompletedWork() {
@@ -950,7 +976,7 @@ void TestStableChatPrefixSurvivesInterruptedFraming() {
   next.Invalidate();
 }
 
-void TestWarmChatCheckpointsDoNotSplitPrefill() {
+void TestWarmChatCheckpointsStopAtTheStableBoundary() {
   auto stats = std::make_shared<FakeStats>();
   TextRunnerPool pool(std::make_shared<SnapshotRunner>(stats), 1);
   Expect(pool.capacity() == 1 && stats->states_created == 1,
@@ -968,9 +994,15 @@ void TestWarmChatCheckpointsDoNotSplitPrefill() {
   Expect(continuation.cached_prompt_tokens() == 6 &&
              continuation.cache_restore_bytes() == 0,
          "retained reasoning reuses generated tokens without a restore");
+  // The warm turn stops once at its own stable boundary so that boundary is
+  // checkpointed. Without that stop the conversation keeps falling back to
+  // this turn's frontier for every later turn that rewrites the assistant.
   const auto step = continuation.Prefill(64);
-  Expect(step.consumed_tokens == 3 && step.decode_ready,
-         "warm prefill processes user and assistant framing in one pass");
+  Expect(step.consumed_tokens == 1 && !step.decode_ready,
+         "warm prefill stops at the stable boundary before assistant framing");
+  const auto framing = continuation.Prefill(64);
+  Expect(framing.consumed_tokens == 2 && framing.decode_ready,
+         "assistant framing completes in the following pass");
   const auto second = continuation.SelectNext().token;
   continuation.Advance();
   continuation.Commit();
@@ -987,11 +1019,196 @@ void TestWarmChatCheckpointsDoNotSplitPrefill() {
   // Empty reasoning changes 40,41 into 50,51 in the replayed assistant.
   auto dropped = pool.Acquire({1, 2, 3, 40, 41, first, 7, 50, 51, 8, 40, 41},
                               {}, {}, {}, true, 10);
-  Expect(dropped.cached_prompt_tokens() == 6,
-         "the exact retry did not replace the earlier branching fallback");
+  Expect(dropped.cached_prompt_tokens() == 7,
+         "omitted reasoning resumes from the previous turn's stable boundary "
+         "rather than the frontier before it");
+  Expect(!dropped.Prefill(64).decode_ready,
+         "the rewritten turn stops at its own boundary in turn");
   Expect(dropped.Prefill(64).decode_ready,
-         "omitted reasoning prefills only the remaining suffix, in one pass");
+         "omitted reasoning prefills the remaining suffix");
   dropped.Cancel();
+}
+
+void TestHistoryEditsRestoreIntermediateCheckpoints() {
+  class LongSnapshotRunner final : public SnapshotRunner {
+  public:
+    using SnapshotRunner::SnapshotRunner;
+    TextRunnerDescriptor Descriptor() const override {
+      auto descriptor = SnapshotRunner::Descriptor();
+      descriptor.max_context = 32768;
+      return descriptor;
+    }
+  };
+  auto stats = std::make_shared<FakeStats>();
+  auto runner = std::make_shared<LongSnapshotRunner>(stats, 64, 256, 4096);
+  TextRunnerPool pool(runner, 1);
+  std::vector<TextRunnerToken> prompt(10000, 1);
+  auto original = pool.Acquire(prompt, {}, {}, {}, true, 9900);
+  while (!original.prefill_complete())
+    (void)original.Prefill(32768);
+  original.Commit();
+  const auto captures = stats->snapshot_captures;
+
+  auto unchanged = pool.Acquire(prompt, {}, {}, {}, true, 9900);
+  Expect(unchanged.prefill_complete() &&
+             unchanged.cached_prompt_tokens() == prompt.size(),
+         "complete prompt retries still reuse every token");
+  unchanged.Commit();
+  Expect(stats->snapshot_captures == captures,
+         "an unchanged retry does not recapture intermediate state");
+
+  prompt[9000] = 2;
+  auto late_edit = pool.Acquire(prompt, {}, {}, {}, true, 9900);
+  Expect(late_edit.cache_hit() && late_edit.cached_prompt_tokens() == 8192,
+         "late edits resume from the nearest earlier intermediate checkpoint");
+  while (!late_edit.prefill_complete())
+    (void)late_edit.Prefill(32768);
+  late_edit.Commit();
+
+  prompt[4500] = 3;
+  auto earlier_edit = pool.Acquire(prompt, {}, {}, {}, true, 9900);
+  Expect(
+      earlier_edit.cache_hit() && earlier_edit.cached_prompt_tokens() == 4096,
+      "committing a late edit preserves earlier usable checkpoints");
+  earlier_edit.Invalidate();
+  Expect(stats->states_created == 1,
+         "intermediate checkpoint entries allocate no extra execution states");
+
+  auto limited_stats = std::make_shared<FakeStats>();
+  TextRunnerPool limited_pool(
+      std::make_shared<LongSnapshotRunner>(limited_stats, 64, 256,
+                                           3 * sizeof(FakeSnapshot)),
+      1);
+  std::vector<TextRunnerToken> root_prompt(1000, 1);
+  auto root = limited_pool.Acquire(root_prompt);
+  (void)root.Prefill(32768);
+  root.Commit();
+  std::vector<TextRunnerToken> extension(10000, 1);
+  auto continued = limited_pool.Acquire(extension, {}, {}, {}, true, 9900);
+  while (!continued.prefill_complete())
+    (void)continued.Prefill(32768);
+  continued.Commit();
+  extension[1500] = 2;
+  auto branched = limited_pool.Acquire(extension, {}, {}, {}, true, 9900);
+  Expect(branched.cached_prompt_tokens() == root_prompt.size(),
+         "intermediate admission never evicts the reused branching fallback");
+  branched.Invalidate();
+
+  auto cancel_stats = std::make_shared<FakeStats>();
+  TextRunnerPool cancel_pool(
+      std::make_shared<LongSnapshotRunner>(cancel_stats, 64, 256, 4096), 1);
+  auto interrupted =
+      cancel_pool.Acquire(std::vector<TextRunnerToken>(10000, 1));
+  (void)interrupted.Prefill(32768);
+  (void)interrupted.Prefill(1024);
+  interrupted.Cancel();
+  auto resumed = cancel_pool.Acquire(std::vector<TextRunnerToken>(10000, 1));
+  Expect(resumed.cached_prompt_tokens() == 2048,
+         "cancellation retains completed intermediate state, not partial work");
+  resumed.Invalidate();
+
+  auto short_stats = std::make_shared<FakeStats>();
+  TextRunnerPool short_pool(
+      std::make_shared<LongSnapshotRunner>(short_stats, 64, 256, 4096), 1);
+  std::vector<TextRunnerToken> short_prompt(7900, 1);
+  auto short_root = short_pool.Acquire(short_prompt);
+  while (!short_root.prefill_complete())
+    (void)short_root.Prefill(32768);
+  short_root.Commit();
+  const auto before_short = short_stats->snapshot_captures;
+  short_stats->prefill_spans.clear();
+  short_prompt.resize(8400, 1);
+  auto short_turn = short_pool.Acquire(short_prompt);
+  Expect(short_turn.cached_prompt_tokens() == 7900,
+         "short continuation starts from the previous frontier");
+  Expect(short_turn.Prefill(32768).decode_ready,
+         "crossing a nearby grid point does not split a short continuation");
+  short_turn.Commit();
+  Expect(short_stats->prefill_spans == std::vector<std::size_t>{500} &&
+             short_stats->snapshot_captures == before_short + 1,
+         "short continuation captures only its completed prompt");
+  short_prompt[7800] = 2;
+  auto short_edit = short_pool.Acquire(short_prompt);
+  Expect(short_edit.cached_prompt_tokens() == 6144,
+         "skipping a redundant warm checkpoint retains earlier edit recovery");
+  short_edit.Invalidate();
+
+  auto aligned_stats = std::make_shared<FakeStats>();
+  TextRunnerPool aligned_pool(
+      std::make_shared<LongSnapshotRunner>(aligned_stats, 64, 256, 4096), 1);
+  auto aligned_root =
+      aligned_pool.Acquire(std::vector<TextRunnerToken>(1000, 1));
+  (void)aligned_root.Prefill(32768);
+  aligned_root.Commit();
+  std::vector<TextRunnerToken> aligned_prompt(5000, 1);
+  auto aligned = aligned_pool.Acquire(aligned_prompt, {}, {}, {}, true, 4096);
+  while (!aligned.prefill_complete())
+    (void)aligned.Prefill(32768);
+  aligned.Commit();
+  Expect(aligned_stats->snapshot_captures == 3,
+         "a nearby grid point is skipped and the stable boundary is captured "
+         "only once");
+  aligned_prompt[4096] = 2;
+  auto aligned_next =
+      aligned_pool.Acquire(aligned_prompt, {}, {}, {}, true, 4096);
+  Expect(aligned_next.cached_prompt_tokens() == 4096,
+         "an aligned stable boundary remains reusable after assistant changes");
+  aligned_next.Invalidate();
+}
+
+/// A client that rewrites the assistant turn, as one that drops reasoning
+/// does, diverges after the previous turn's stable boundary. Each warm turn
+/// must therefore checkpoint its own boundary: if only the reused frontier is
+/// retained, every later turn falls back to the same early position and the
+/// re-prefilled tail grows for the rest of the conversation.
+void TestWarmHitAdvancesTheStableCheckpoint() {
+  auto stats = std::make_shared<FakeStats>();
+  TextRunnerPool pool(std::make_shared<SnapshotRunner>(stats), 1);
+
+  // Cold turn. The stable boundary is 3; 40,41 is the assistant framing.
+  auto first = pool.Acquire({1, 2, 3, 40, 41}, {}, {}, {}, true, 3);
+  Expect(!first.Prefill(64).decode_ready, "cold chat stops at its boundary");
+  Expect(first.Prefill(64).decode_ready, "cold chat completes its suffix");
+  const auto reply = first.SelectNext().token;
+  first.Advance();
+  first.Commit();
+
+  // Warm turn replaying the assistant verbatim, then a new user turn. Its
+  // stable boundary is 7, past the frontier of 6 that it reuses.
+  auto second =
+      pool.Acquire({1, 2, 3, 40, 41, reply, 7, 40, 41}, {}, {}, {}, true, 7);
+  Expect(second.cached_prompt_tokens() == 6,
+         "the warm turn resumes from the generated frontier");
+  Expect(!second.Prefill(64).decode_ready,
+         "the warm turn stops to checkpoint its stable boundary");
+  Expect(second.Prefill(64).decode_ready, "the warm turn prefills its suffix");
+  (void)second.SelectNext();
+  second.Advance();
+  second.Commit();
+
+  // The client now drops the reasoning from that assistant turn, so 40,41
+  // becomes 50,51 and the prompt diverges at token 7 -- exactly the previous
+  // turn's stable boundary.
+  auto third = pool.Acquire({1, 2, 3, 40, 41, reply, 7, 50, 51, 8, 40, 41}, {},
+                            {}, {}, true, 10);
+  Expect(third.cached_prompt_tokens() == 7,
+         "a warm turn checkpoints its own stable boundary, not only the "
+         "frontier it reused");
+  Expect(!third.Prefill(64).decode_ready,
+         "the rewritten turn stops at its own boundary in turn");
+  Expect(third.Prefill(64).decode_ready, "the rewritten turn prefills");
+  (void)third.SelectNext();
+  third.Advance();
+  third.Commit();
+
+  // Dropping reasoning again must keep advancing rather than falling back to
+  // the original frontier for a third time.
+  auto fourth =
+      pool.Acquire({1, 2, 3, 40, 41, reply, 7, 50, 51, 8, 60, 61, 11, 40, 41},
+                   {}, {}, {}, true, 13);
+  Expect(fourth.cached_prompt_tokens() == 10,
+         "successive rewritten turns resume from the latest boundary");
+  fourth.Cancel();
 }
 
 void TestChatFallbackSurvivesSnapshotBudgetPressure() {
@@ -1018,7 +1235,8 @@ void TestFullChatCheckpointRestoresWithoutSuffixPrefill() {
   TemporaryDirectory directory;
   const TextRunnerDiskCacheOptions disk_cache{.directory = directory.path(),
                                               .capacity_bytes = 8192,
-                                              .staging_capacity_bytes = 4096};
+                                              .staging_capacity_bytes = 4096,
+                                              .min_checkpoint_step_tokens = 0};
   auto stats = std::make_shared<FakeStats>();
   auto runner = std::make_shared<PersistentSnapshotRunner>(stats, "artifact-A");
   {
@@ -1054,7 +1272,8 @@ void TestFullChatCheckpointRestoresWithoutSuffixPrefill() {
   const TextRunnerDiskCacheOptions legacy_disk{
       .directory = legacy_directory.path(),
       .capacity_bytes = 8192,
-      .staging_capacity_bytes = 4096};
+      .staging_capacity_bytes = 4096,
+      .min_checkpoint_step_tokens = 0};
   {
     TextRunnerPool writer(runner, 1, legacy_disk);
     auto old = writer.Acquire({1, 2, 3, 40, 41});
@@ -1112,8 +1331,10 @@ void TestNewImageGetsAStableCheckpoint() {
                                  {}, image, true, 9);
     Expect(followup.cached_prompt_tokens() == 7,
            "rewritten assistant framing does not reprocess the earlier image");
+    Expect(!followup.Prefill(64).decode_ready,
+           "the warm turn stops to checkpoint its own stable boundary");
     Expect(followup.Prefill(64).decode_ready,
-           "unchanged images keep the single-pass warm prefill path");
+           "assistant framing completes after the boundary is saved");
     followup.Commit();
   }
 }
@@ -1163,6 +1384,11 @@ void TestSharedPrefixIsLearnedAndRestoredAcrossConversations() {
   // Conversation C restores the shared prefix and prefills only its turn.
   {
     TextRunnerPool pool(runner, 1, disk_cache);
+    auto exact = pool.Acquire({7, 7, 7});
+    Expect(exact.cache_disk_hit() && exact.prefill_complete() &&
+               exact.SelectNext().token == 90,
+           "an exact shared-prefix restore has a current decode frontier");
+    exact.Invalidate();
     auto request = pool.Acquire({7, 7, 7, 9});
     Expect(request.cache_hit() && request.cache_disk_hit() &&
                request.cached_prompt_tokens() == 3,
@@ -1173,6 +1399,52 @@ void TestSharedPrefixIsLearnedAndRestoredAcrossConversations() {
     const auto commit = request.Commit();
     Expect(commit.shared_prefix_snapshots == 0,
            "a restored prefix is not written again");
+  }
+}
+
+void TestCoincidentCacheBoundariesShareOneCopy() {
+  for (const bool stable : {false, true}) {
+    TemporaryDirectory directory;
+    const TextRunnerDiskCacheOptions disk_cache{
+        .directory = directory.path(),
+        .capacity_bytes = 1024 * 1024,
+        .staging_capacity_bytes = 64 * 1024,
+        .shared_prefix_min_tokens = 2048,
+    };
+    auto stats = std::make_shared<FakeStats>();
+    auto runner = std::make_shared<PersistentSnapshotRunner>(
+        stats, "artifact-A", 1024, 4096);
+    std::vector<TextRunnerToken> prompt(2050, 7);
+    prompt[2048] = 1;
+    {
+      TextRunnerPool pool(runner, 1, disk_cache);
+      auto source = pool.Acquire(prompt);
+      while (!source.prefill_complete())
+        (void)source.Prefill(4096);
+      source.Commit();
+    }
+    prompt[2048] = 2;
+    {
+      TextRunnerPool pool(runner, 1, disk_cache);
+      auto branch = pool.Acquire(prompt, {}, {}, {}, true, stable ? 2048 : 0);
+      const auto before = stats->snapshot_captures;
+      Expect(branch.Prefill(4096).consumed_tokens == 2048,
+             "disk boundary coincides with a history or stable checkpoint");
+      Expect(branch.Prefill(4096).consumed_tokens == 2 &&
+                 stats->snapshot_captures == before + 1,
+             "one immutable copy serves both coincident boundaries");
+      branch.Commit();
+    }
+    prompt[2048] = 3;
+    {
+      TextRunnerPool pool(runner, 1, disk_cache);
+      auto restored = pool.Acquire(prompt);
+      Expect(restored.cache_disk_hit() &&
+                 restored.cached_prompt_tokens() == 2048 &&
+                 restored.Prefill(4096).consumed_tokens == 2,
+             "the shared copy survives a restart with its exact position");
+      restored.Commit();
+    }
   }
 }
 
@@ -1307,16 +1579,93 @@ void TestSnapshotCaptureFailureReleasesReservationAndKeepsRequestSuccessful() {
   extension.Invalidate();
 }
 
+/// Evicting a retained prefix because the entry table is full is not routine:
+/// it means the server is configured below its workload and is doing avoidable
+/// full re-prefills. It must be visible, unlike exact replacement.
+void TestEntryCapacityEvictionIsLogged() {
+  auto stats = std::make_shared<FakeStats>();
+  auto runner = std::make_shared<SnapshotRunner>(stats, 64, 256, 8192);
+  // Checkpoint records are bounded independently of execution sessions.
+  TextRunnerPool pool(runner, 1);
+
+  for (std::size_t i = 0;
+       i <= gufo::server::TextRunnerRamCacheOptions::kMaxEntries; ++i) {
+    const std::vector<TextRunnerToken> prefix{
+        static_cast<TextRunnerToken>(i + 1), 0};
+    auto request = pool.Acquire(prefix);
+    Expect(request.Prefill(prefix.size()).decode_ready,
+           "each distinct prefix reaches its snapshot boundary");
+    (void)request.SelectNext();
+    request.Advance();
+    Expect(request.Commit().snapshot_bytes == sizeof(FakeSnapshot),
+           "each distinct prefix retains a snapshot");
+  }
+
+  // The first prefix was evicted, so it can no longer be reused.
+  auto evicted = pool.Acquire({1, 0});
+  Expect(!evicted.cache_hit(),
+         "the oldest retained prefix is gone once the entries are full");
+  evicted.Invalidate();
+}
+
+void TestSnapshotCacheCapacityIsReportedAtStartup() {
+  for (const std::size_t budget :
+       {std::size_t{0}, std::size_t{256}, std::size_t{64} << 30}) {
+    for (const std::size_t requested :
+         {std::size_t{0}, std::size_t{64}, std::size_t{48} << 30}) {
+      for (const std::size_t sessions : {1U, 2U}) {
+        auto stats = std::make_shared<FakeStats>();
+        auto runner = std::make_shared<SnapshotRunner>(stats, 64, 256, budget);
+        std::ostringstream startup_log;
+        auto* previous = std::clog.rdbuf(startup_log.rdbuf());
+        {
+          TextRunnerPool pool(runner, sessions, std::nullopt,
+                              {.capacity_bytes = requested});
+        }
+        std::clog.rdbuf(previous);
+        const auto output = startup_log.str();
+        const std::string expected =
+            "event=snapshot_cache_configured sessions=" +
+            std::to_string(sessions) +
+            " snapshot_entries=128 "
+            "capacity_bytes=" +
+            std::to_string(
+                std::min(budget, requested == 0
+                                     ? gufo::server::TextRunnerRamCacheOptions::
+                                           kAutomaticMaxBytes
+                                     : requested)) +
+            "\n";
+        const auto position = output.find(expected);
+        Expect(position != std::string::npos &&
+                   output.find(expected, position + expected.size()) ==
+                       std::string::npos,
+               "startup reports actual session, entry and byte limits once");
+        Expect(
+            output.find("retained_conversations") == std::string::npos,
+            "startup does not present session count as conversation capacity");
+        Expect(
+            stats->states_created == sessions,
+            "checkpoint record capacity never creates extra execution states");
+      }
+    }
+  }
+}
+
 }  // namespace
 
 int main() {
+  // The cache warning assertion in this binary matches the plain "[WARN]
+  // [cache]" text captured from a redirected sink; a TTY stderr tints it.
+  ::setenv("NO_COLOR", "1", 1);
   TestNewImageGetsAStableCheckpoint();
   TestGeneratedFrontierForksBeforeMutation();
   TestGeneratedFrontierPersistsForForks();
   TestCancellationRetainsOnlyCompletedWork();
   TestPromptReuseCanBeDisabledPerRequest();
   TestStableChatPrefixSurvivesInterruptedFraming();
-  TestWarmChatCheckpointsDoNotSplitPrefill();
+  TestWarmChatCheckpointsStopAtTheStableBoundary();
+  TestWarmHitAdvancesTheStableCheckpoint();
+  TestHistoryEditsRestoreIntermediateCheckpoints();
   TestChatFallbackSurvivesSnapshotBudgetPressure();
   TestFullChatCheckpointRestoresWithoutSuffixPrefill();
   TestDiskOnlyCaptureReservesBudgetBeforeCommit();
@@ -1332,9 +1681,23 @@ int main() {
   auto* previous = std::clog.rdbuf(normal_log.rdbuf());
   TestSnapshotRetentionUsesPromptBoundary();
   std::clog.rdbuf(previous);
-  Expect(normal_log.str().empty(), "routine cache replacement stays quiet");
+  Expect(normal_log.str().find("action=removed") == std::string::npos &&
+             normal_log.str().find("action=skipped") == std::string::npos,
+         "routine cache replacement stays quiet");
+
+  std::ostringstream eviction_log;
+  previous = std::clog.rdbuf(eviction_log.rdbuf());
+  TestEntryCapacityEvictionIsLogged();
+  std::clog.rdbuf(previous);
+  Expect(
+      eviction_log.str().find("action=removed") != std::string::npos &&
+          eviction_log.str().find("reason=entry_capacity") != std::string::npos,
+      "evicting a retained prefix for entry capacity is reported");
+
+  TestSnapshotCacheCapacityIsReportedAtStartup();
   TestPersistentSnapshotRestoresAcrossPools();
   TestSharedPrefixIsLearnedAndRestoredAcrossConversations();
+  TestCoincidentCacheBoundariesShareOneCopy();
   TestMeasuredStateIsReconciledWithClaim();
   TestSnapshotBudgetRefusalDoesNotFailCompletedRequest();
   std::ostringstream failure_log;

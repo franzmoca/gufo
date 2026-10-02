@@ -1,8 +1,10 @@
 #ifndef GUFO_SERVER_HTTP_SERVER_HPP_
 #define GUFO_SERVER_HTTP_SERVER_HPP_
 
+#include <algorithm>
 #include <atomic>
 #include <cctype>
+#include <chrono>
 #include <functional>
 #include <memory>
 #include <mutex>
@@ -86,6 +88,7 @@ struct HttpServerOptions {
   std::size_t max_request_body_bytes{static_cast<std::size_t>(8) * 1024 * 1024};
   std::size_t max_connections{16};
   std::string api_key;
+  std::chrono::milliseconds sse_heartbeat_interval{std::chrono::seconds(15)};
 };
 
 /// Minimal bounded HTTP/1.1 server for trusted-LAN model serving.
@@ -142,31 +145,22 @@ private:
   std::vector<std::pair<std::pair<std::string, std::string>, Handler>> routes_;
 };
 
-namespace detail {
-inline std::atomic<std::uint64_t>& TotalPromptTokens() {
-  static std::atomic<std::uint64_t> count{0};
-  return count;
-}
-inline std::atomic<std::uint64_t>& TotalGenTokens() {
-  static std::atomic<std::uint64_t> count{0};
-  return count;
-}
-inline std::atomic<double>& LastPromptSpeed() {
-  static std::atomic<double> val{0.0};
-  return val;
-}
-inline std::atomic<double>& LastGenSpeed() {
-  static std::atomic<double> val{0.0};
-  return val;
-}
-}  // namespace detail
-
+/// Scheduled requests already counted tokens live. Other backends contribute
+/// at completion; both update the last-request speed gauges.
 inline void RecordServerMetrics(const TextGenerationBackend::Result& result) {
-  detail::TotalPromptTokens().fetch_add(result.prompt_tokens,
-                                        std::memory_order_relaxed);
-  detail::TotalGenTokens().fetch_add(result.completion_tokens,
-                                     std::memory_order_relaxed);
-
+  if (!result.token_metrics_recorded) {
+    // Older backends may only report prompt/cache totals. Infer their completed
+    // uncached prompt, but never infer work for a partially cancelled request.
+    const auto prompt_tokens =
+        result.prefill_tokens > 0 || result.cancelled
+            ? result.prefill_tokens
+            : result.prompt_tokens -
+                  std::min(result.prompt_tokens, result.cached_prompt_tokens);
+    detail::TotalPromptTokens().fetch_add(prompt_tokens,
+                                          std::memory_order_relaxed);
+    detail::TotalGenTokens().fetch_add(result.completion_tokens,
+                                       std::memory_order_relaxed);
+  }
   const double prompt_per_second = PrefillTokensPerSecond(result);
   const double tok_per_sec =
       (result.decode_ms > 0.0 && result.completion_tokens > 0)

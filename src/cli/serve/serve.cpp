@@ -32,6 +32,7 @@
 #include "src/cli/serve/image_api.hpp"
 #include "src/cli/serve/inference_backend.hpp"
 #include "src/cli/serve/logging.hpp"
+#include "src/cli/serve/sampling_request.hpp"
 #include "src/core/diagnostics/gpu_queues.h"
 
 #if defined(ENGINE_ENABLE_HIP)
@@ -190,11 +191,27 @@ std::optional<ReasoningEffort> ParseReasoningEffort(std::string_view value) {
 // subcommand. Registering them from one place keeps `gufo serve --help`, every
 // `gufo serve <modality> --help`, and the parser that actually consumes them
 // from drifting apart.
+
+/// `--log-level` and its `-v/--verbose` shorthand share one sink. `level`
+/// holds the canonical spelling when given and stays empty otherwise; the two
+/// spellings together are a conflict, reported where the level is armed.
+struct ServerLogOptions {
+  bool verbose = false;
+  std::optional<server::LogLevel> level;
+};
+
+// Verbosity help text. `gufo serve --help` lists these options by hand while
+// every modality help registers them through the parser, so both readings share
+// one source for the wording.
+constexpr std::string_view kLogLevelHelp =
+    "Log verbosity: error, warn, info or debug (default: info)";
+constexpr std::string_view kVerboseHelp = "Shorthand for --log-level=debug";
+
 void AddServerOptions(gufo::cli::ArgParser& parser, std::string* host,
                       int* port, std::size_t* session_count,
                       std::size_t* max_connections,
                       std::size_t* max_request_body_bytes, std::string* api_key,
-                      bool* verbose) {
+                      ServerLogOptions* log) {
   parser.AddOption("-i", "--host", "IP", "Bind address", "Server", host);
   parser.AddOption("-p", "--port", "N", "Port to listen on", "Server", port);
   if (session_count != nullptr)
@@ -208,7 +225,18 @@ void AddServerOptions(gufo::cli::ArgParser& parser, std::string* host,
                    "Maximum HTTP request body bytes", "Server",
                    max_request_body_bytes);
   parser.AddOption("", "--api-key", "KEY", "API key", "Server", api_key);
-  parser.AddFlag("-v", "--verbose", "Verbose logging", "General", verbose);
+  parser.AddCustomOption(
+      "", "--log-level", "LEVEL", kLogLevelHelp, "Logging",
+      [log](std::string_view flag, std::string_view value, std::string* error) {
+        const auto level = server::LogLevelFromName(value);
+        if (!level.has_value()) {
+          *error = std::string(flag) + " must be error, warn, info or debug";
+          return false;
+        }
+        log->level = *level;
+        return true;
+      });
+  parser.AddFlag("-v", "--verbose", kVerboseHelp, "Logging", &log->verbose);
 }
 
 // Help-only sinks for AddServerOptions, so subcommand help can list the
@@ -221,7 +249,7 @@ struct ServerOptionHelpTargets {
   std::size_t max_request_body_bytes =
       static_cast<std::size_t>(8) * 1024 * 1024;
   std::string api_key;
-  bool verbose = false;
+  ServerLogOptions log;
 };
 
 void AddServerOptionsForHelp(gufo::cli::ArgParser& parser,
@@ -230,7 +258,7 @@ void AddServerOptionsForHelp(gufo::cli::ArgParser& parser,
   AddServerOptions(parser, &targets->host, &targets->port,
                    include_sessions ? &targets->session_count : nullptr,
                    &targets->max_connections, &targets->max_request_body_bytes,
-                   &targets->api_key, &targets->verbose);
+                   &targets->api_key, &targets->log);
 }
 
 // Split a `NAME=VALUE` CLI spec. Returns false when either side is empty.
@@ -545,6 +573,7 @@ void PrintServeHelp(std::string_view program_name,
         server::kDefaultMaxBufferedOutputBytes;
     std::size_t max_buffered_output_bytes_total =
         server::kDefaultMaxBufferedOutputBytesTotal;
+    std::size_t cache_ram_bytes = 0;
     std::filesystem::path cache_disk_directory;
     std::size_t cache_disk_bytes =
         server::TextRunnerDiskCacheOptions::kDefaultCapacityBytes;
@@ -651,6 +680,10 @@ void PrintServeHelp(std::string_view program_name,
         "", "--max-buffered-output-total", "N",
         "Maximum queued stream bytes across requests (default: 262144)",
         "Scheduling", &max_buffered_output_bytes_total);
+    parser.AddOption(
+        "", "--cache-ram-bytes", "N",
+        "Retained RAM-cache byte budget (default: 0 = auto, at most 32 GiB)",
+        "Cache", &cache_ram_bytes);
     parser.AddOption("", "--cache-disk", "DIR",
                      "Opt-in restart-safe continuation cache directory",
                      "Cache", &cache_disk_directory);
@@ -662,7 +695,9 @@ void PrintServeHelp(std::string_view program_name,
                      "RAM limit for queued snapshots and each disk read "
                      "(default: 0 = auto, at most 1 GiB and 1/8 available RAM)",
                      "Cache", &cache_disk_staging_bytes);
-    parser.AddFlag("", "--log-progress", "Log live prefill and decode progress",
+    parser.AddFlag("", "--log-progress",
+                   "Log live prefill and decode progress (needs "
+                   "--log-level=info or debug)",
                    "Logging", &log_progress);
     ServerOptionHelpTargets server_help;
     AddServerOptionsForHelp(parser, &server_help);
@@ -685,7 +720,7 @@ void PrintServeHelp(std::string_view program_name,
       << "  tts       Serve Qwen3-TTS speech synthesis (/v1/audio/speech)\n"
       << "  asr       Serve Qwen3-ASR transcription "
          "(/v1/audio/transcriptions)\n\n"
-      << "Server Options:\n"
+      << "Server:\n"
       << "  -i, --host <IP>        Bind address (default: 127.0.0.1)\n"
       << "  -p, --port <N>         Port to listen on (default: 8080)\n"
       << "  -j, --sessions <N>     Preallocated GPU request sessions (default: "
@@ -697,8 +732,11 @@ void PrintServeHelp(std::string_view program_name,
       << "                         Maximum HTTP request body bytes (default: "
          "8388608)\n"
       << "      --api-key <KEY>    Require Bearer authorization for requests\n"
-      << "  -v, --verbose          Print detailed server metrics and request "
-         "traces\n"
+      << "\nLogging:\n"
+      << "      --log-level <LEVEL>\n"
+      << "                         " << kLogLevelHelp << "\n"
+      << "  -v, --verbose          " << kVerboseHelp << "\n"
+      << "\nGeneral:\n"
       << "  -h, --help             Print help\n";
 }
 
@@ -749,7 +787,7 @@ int RunServe(std::span<const char* const> args) {
   std::size_t max_request_body_bytes =
       static_cast<std::size_t>(8) * 1024 * 1024;
   std::string api_key;
-  bool verbose = false;
+  ServerLogOptions log_options;
 
   // Identify the modality only after leading server options. The selected
   // parser consumes every option together, so --served-model-name -v and
@@ -759,7 +797,7 @@ int RunServe(std::span<const char* const> args) {
                                       bool include_sessions = true) {
     AddServerOptions(
         parser, &host, &port, include_sessions ? &session_count : nullptr,
-        &max_connections, &max_request_body_bytes, &api_key, &verbose);
+        &max_connections, &max_request_body_bytes, &api_key, &log_options);
   };
   add_server_options(server_parser);
   std::string subcommand = "llm";
@@ -792,31 +830,13 @@ int RunServe(std::span<const char* const> args) {
     break;
   }
   // Hardware queues are claimed on the first HIP dispatch and held for the
-  // lifetime of the process, so the budget is decided here, once, before any
-  // model loads. Help output loads nothing and is left alone.
-  const auto wants_help = [&] {
-    return std::any_of(sub_args.begin(), sub_args.end(), [](const char* arg) {
-      const std::string_view value(arg);
-      return value == "--help" || value == "-h" || value == "help";
-    });
-  };
-  if (!wants_help()) {
-    const auto profile = subcommand == "llm" ? diagnostics::QueueProfile::kText
-                         : (subcommand == "tts" || subcommand == "asr")
-                             ? diagnostics::QueueProfile::kAudio
-                             : diagnostics::QueueProfile::kUnmeasured;
-    const auto plan =
-        diagnostics::PlanQueues(profile, diagnostics::QueryQueueCensus(),
-                                std::getenv("GPU_MAX_HW_QUEUES"));
-    diagnostics::ApplyQueuePlan(plan);
-    server::Logger::Info("gpu",
-                         diagnostics::DescribeQueuePlan(subcommand, plan));
-    if (plan.may_exceed_budget) {
-      server::Logger::Warn("gpu", diagnostics::DescribeQueuePressure(plan));
-    }
-  }
+  // lifetime of the process, so the budget is decided once per invocation,
+  // after the modality parser has armed the log threshold and before any
+  // model loads. It lives in `prepare_server_options` so the emitted
+  // `queue_budget` line already obeys `--log-level`. Help output loads nothing
+  // and returns before that point.
 
-  const auto valid_server_options = [&] {
+  const auto prepare_server_options = [&] {
     in_addr address{};
     if (::inet_pton(AF_INET, host.c_str(), &address) != 1) {
       std::cerr << "Error: --host must be an IPv4 address\n";
@@ -831,6 +851,51 @@ int RunServe(std::span<const char* const> args) {
       std::cerr << "Error: server limits must be positive\n";
       return false;
     }
+    // Arm verbosity here: this runs after every server option is parsed and
+    // before the first loader, cache or HTTP line is written, so one call sets
+    // the level for all modalities. `-v/--verbose` is shorthand for
+    // `--log-level=debug`, so the two spellings together are a conflict to
+    // report, not a precedence to resolve silently.
+    if (log_options.verbose && log_options.level.has_value()) {
+      std::cerr << "Error: --verbose is shorthand for --log-level=debug, so "
+                   "it cannot combine with --log-level\n";
+      return false;
+    }
+    const server::LogLevel resolved =
+        log_options.verbose
+            ? server::LogLevel::kDebug
+            : log_options.level.value_or(server::LogLevel::kInfo);
+    server::Logger::SetLevel(resolved);
+    // The queue plan is applied only after a valid invocation is established,
+    // and the `queue_budget` line is emitted now so an absolute threshold
+    // (`--log-level=error`) suppresses this INFO startup diagnostic with the
+    // rest of the boot sequence instead of leaking it before SetLevel ran.
+    const auto profile = subcommand == "llm" ? diagnostics::QueueProfile::kText
+                         : (subcommand == "tts" || subcommand == "asr")
+                             ? diagnostics::QueueProfile::kAudio
+                             : diagnostics::QueueProfile::kUnmeasured;
+    const auto plan =
+        diagnostics::PlanQueues(profile, diagnostics::QueryQueueCensus(),
+                                std::getenv("GPU_MAX_HW_QUEUES"));
+    diagnostics::ApplyQueuePlan(plan);
+    server::Logger::Info("gpu",
+                         diagnostics::DescribeQueuePlan(subcommand, plan));
+    if (plan.may_exceed_budget) {
+      server::Logger::Warn("gpu", diagnostics::DescribeQueuePressure(plan));
+    }
+    // Deliberately emitted before the model opens: a load that fails or hangs
+    // never reaches the INFO `event=listening` banner in HttpServer::run, so
+    // this is the only record of the resolved options and the armed threshold.
+    // The overlap on the listener limits is intentional: the two lines mark
+    // different points in the lifecycle at different tiers, so neither can
+    // replace the other.
+    const std::string options_line =
+        "event=options host=" + host + " port=" + std::to_string(port) +
+        " max_connections=" + std::to_string(max_connections) +
+        " max_request_bytes=" + std::to_string(max_request_body_bytes) +
+        " api_key=" + (api_key.empty() ? "unset" : "set") +
+        " log_level=" + std::string(server::LogLevelName(resolved));
+    server::Logger::Debug("server", options_line);
     return true;
   };
   std::string parse_err;
@@ -859,7 +924,7 @@ int RunServe(std::span<const char* const> args) {
       PrintServeHelp("gufo", "image");
       return 0;
     }
-    if (!valid_server_options())
+    if (!prepare_server_options())
       return 2;
     if (model.empty()) {
       std::cerr << "Error: --model <DIR> is required for image server\n";
@@ -904,7 +969,7 @@ int RunServe(std::span<const char* const> args) {
       PrintServeHelp("gufo", "video");
       return 0;
     }
-    if (!valid_server_options()) {
+    if (!prepare_server_options()) {
       return 2;
     }
 
@@ -958,7 +1023,7 @@ int RunServe(std::span<const char* const> args) {
       PrintServeHelp("gufo", subcommand);
       return 0;
     }
-    if (!valid_server_options())
+    if (!prepare_server_options())
       return 2;
     if (options.model.empty()) {
       std::cerr << "Error: --model <DIR> is required for " << subcommand
@@ -1053,6 +1118,7 @@ int RunServe(std::span<const char* const> args) {
         server::kDefaultMaxBufferedOutputBytes;
     std::size_t max_buffered_output_bytes_total =
         server::kDefaultMaxBufferedOutputBytesTotal;
+    std::size_t cache_ram_bytes = 0;
     std::filesystem::path cache_disk_directory;
     std::size_t cache_disk_bytes =
         server::TextRunnerDiskCacheOptions::kDefaultCapacityBytes;
@@ -1154,6 +1220,10 @@ int RunServe(std::span<const char* const> args) {
         "", "--max-buffered-output-total", "N",
         "Maximum queued stream bytes across requests (default: 262144)",
         "Scheduling", &max_buffered_output_bytes_total);
+    llm_parser.AddOption(
+        "", "--cache-ram-bytes", "N",
+        "Retained RAM-cache byte budget (default: 0 = auto, at most 32 GiB)",
+        "Cache", &cache_ram_bytes);
     llm_parser.AddOption("", "--cache-disk", "DIR",
                          "Opt-in restart-safe continuation cache directory",
                          "Cache", &cache_disk_directory);
@@ -1167,8 +1237,9 @@ int RunServe(std::span<const char* const> args) {
         "(default: 0 = auto, at most 1 GiB and 1/8 available RAM)",
         "Cache", &cache_disk_staging_bytes);
     llm_parser.AddFlag("", "--log-progress",
-                       "Log live prefill and decode progress", "Logging",
-                       &log_progress);
+                       "Log live prefill and decode progress (needs "
+                       "--log-level=info or debug)",
+                       "Logging", &log_progress);
 
     add_server_options(llm_parser);
     if (!llm_parser.Parse(sub_args, &parse_err)) {
@@ -1180,15 +1251,20 @@ int RunServe(std::span<const char* const> args) {
       PrintServeHelp("gufo", "llm");
       return 0;
     }
-    if (!valid_server_options()) {
+    if (!prepare_server_options()) {
       return 2;
     }
-    bool sampling_valid = true;
-    try {
-      sampling_config.Validate();
-    } catch (const std::invalid_argument&) {
-      sampling_valid = false;
+    // Progress lines are INFO-tier. Under a quieter threshold `--log-progress`
+    // would be accepted and then silently discarded, so reject the combination
+    // instead of ignoring an option the caller asked for.
+    if (log_progress && !server::Logger::Enabled(server::LogLevel::kInfo)) {
+      std::cerr << "Error: --log-progress needs --log-level=info or "
+                   "--log-level=debug\n";
+      return 2;
     }
+    sampling::SamplingConfig validated_sampling;
+    const bool sampling_valid = !server::ParseSamplingConfig(
+        json::Value::object(), sampling_config, &validated_sampling);
     if (max_tokens < -1 || max_tokens == 0 ||
         max_tokens > std::numeric_limits<std::uint32_t>::max() ||
         prefill_chunk_tokens == 0 || max_pending_requests == 0 ||
@@ -1199,7 +1275,7 @@ int RunServe(std::span<const char* const> args) {
         (!cache_disk_directory.empty() && cache_disk_bytes == 0) ||
         request_timeout_ms > static_cast<std::uint64_t>(
                                  std::chrono::milliseconds::max().count()) ||
-        !sampling_valid || sampling_config.temperature > 2.0F) {
+        !sampling_valid) {
       std::cerr << "Error: sampling and scheduling limits are invalid\n";
       return 2;
     }
@@ -1304,7 +1380,9 @@ int RunServe(std::span<const char* const> args) {
                            .staging_capacity_bytes = cache_disk_staging_bytes,
                            .model_artifact_fingerprint = {},
                        },
-                       vision_model_path, image_tokens)) {
+                       vision_model_path, image_tokens,
+                       server::TextRunnerRamCacheOptions{
+                           .capacity_bytes = cache_ram_bytes})) {
       std::cerr << "Error loading model '" << model << "': " << err << "\n";
       return 1;
     }

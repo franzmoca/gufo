@@ -743,6 +743,754 @@ void TestReasoningConstraint() {
   }
 }
 
+void TestAutomaticTools() {
+  using Format = JsonConstraint::ToolFormat;
+  const auto schema = parse(R"({"type":"object","properties":{
+    "text":{"type":"string"},"optional":{"type":"integer"}},
+    "required":["text"],"additionalProperties":false})");
+  for (const auto format : {Format::kQwen, Format::kDeepSeek}) {
+    const std::string opener =
+        format == Format::kQwen ? "<tool_call>" : "<｜DSML｜tool_calls>";
+    const std::string call =
+        format == Format::kQwen
+            ? "\n<function=f>\n<parameter=text>\nalpha\n</parameter>\n"
+              "</function>\n</tool_call>"
+            : "\n<｜DSML｜invoke name=\"f\">\n"
+              "<｜DSML｜parameter name=\"text\" string=\"true\">alpha"
+              "</｜DSML｜parameter>\n</｜DSML｜invoke>\n"
+              "</｜DSML｜tool_calls>";
+    const auto automatic = JsonConstraint::WithTools(
+        nullptr, {{"f", JsonConstraint::ToolParameters(schema, false, format)}},
+        false, true, format);
+    for (const bool thinking : {false, true}) {
+      const auto grammar =
+          thinking ? JsonConstraint::WithReasoning(automatic) : automatic;
+      auto binding = std::make_shared<TokenConstraint>();
+      binding->grammar = grammar;
+      binding->vocabulary =
+          std::make_shared<ConstraintVocabulary>(259, [&](std::uint32_t i) {
+            return ConstraintVocabulary::Piece{
+                i < 256    ? std::string(1, static_cast<char>(i))
+                : i == 258 ? opener
+                           : "",
+                i == 256};
+          });
+      for (const float temperature : {0.0F, 0.7F, 1.4F}) {
+        gufo::sampling::SamplingConfig config{.temperature = temperature,
+                                              .top_k = 20,
+                                              .top_p = .8F,
+                                              .min_p = .05F,
+                                              .seed = 41,
+                                              .frequency_penalty = .2F,
+                                              .presence_penalty = .3F,
+                                              .constraint = binding};
+        SamplerState sampler(config);
+        auto plain = sampler.WithoutConstraint();
+        assert(!sampler.NeedsConstraintMask());
+        assert(!sampler.CanSelectArgmax('a'));
+        assert(sampler.CanSelectArgmax('a', /*penalties_applied=*/true) ==
+               (temperature == 0.0F));
+        std::vector<float> logits(259, -INFINITY);
+        logits['a'] = 1;
+        logits['b'] = .8F;
+        for (int i = 0; i < 8; ++i) {
+          const auto expected = plain.Sample(logits);
+          const auto actual = sampler.Sample(logits);
+          assert(actual == expected &&
+                 sampler.rng_state() == plain.rng_state());
+          sampler.Accept(actual);
+          plain.Accept(expected);
+          assert(!sampler.NeedsConstraintMask());
+        }
+        auto accept = [&](std::string_view text) {
+          for (const unsigned char byte : text)
+            sampler.Accept(byte);
+        };
+        if (thinking) {
+          accept("</thi");
+          auto saved = sampler;
+          accept("nk>");
+          assert(!sampler.NeedsConstraintMask());
+          sampler = saved;
+          accept("nk>");
+        }
+        auto before_call = sampler;
+        sampler.Accept(258);
+        assert(sampler.NeedsConstraintMask());
+        assert(!sampler.CanSelectArgmax('!', /*penalties_applied=*/true));
+        assert(!sampler.CanSelectArgmax(256, /*penalties_applied=*/true));
+        accept(call);
+        assert(!sampler.NeedsConstraintMask());
+        sampler.Accept(257);  // Empty pieces preserve the ordinary path.
+        sampler.Accept(256);  // Natural EOS is allowed without another call.
+        sampler = before_call;
+        assert(!sampler.NeedsConstraintMask());
+        sampler.ResetHistory({});
+        assert(!sampler.NeedsConstraintMask());
+      }
+    }
+    // A token can span the trigger and an invalid name. Such a vocabulary
+    // must never take the unrestricted sampling fast path.
+    auto crossing = std::make_shared<TokenConstraint>();
+    crossing->grammar = automatic;
+    crossing->vocabulary =
+        std::make_shared<ConstraintVocabulary>(2, [&](std::uint32_t i) {
+          return ConstraintVocabulary::Piece{
+              i == 0 ? "text" : opener + "\n<unknown>", false};
+        });
+    SamplerState sampler({.constraint = crossing});
+    assert(sampler.NeedsConstraintMask());
+    const std::vector<float> logits{0, 100};
+    assert(sampler.Sample(logits) == 0);
+  }
+}
+
+void TestNativeTools() {
+  using Format = JsonConstraint::ToolFormat;
+  const auto schema = parse(R"({
+    "type":"object","properties":{
+      "text":{"type":"string","minLength":1,"maxLength":256},
+      "n":{"type":"integer","minimum":1,"maximum":5}},
+    "required":["text","n"],"additionalProperties":false})");
+  for (const auto format : {Format::kQwen, Format::kDeepSeek}) {
+    const auto parameters =
+        JsonConstraint::ToolParameters(schema, true, format);
+    assert(parameters);
+    const auto wrap = [&](std::string_view text, int n, bool reverse = false) {
+      const bool qwen = format == Format::kQwen;
+      auto argument = [&](std::string name, std::string value, bool string) {
+        return qwen ? "<parameter=" + name + ">\n" + value + "\n</parameter>\n"
+                    : "<｜DSML｜parameter name=\"" + name + "\" string=\"" +
+                          (string ? "true" : "false") + "\">" + value +
+                          "</｜DSML｜parameter>\n";
+      };
+      const auto a = argument("text", std::string(text), true);
+      const auto b = argument("n", std::to_string(n), false);
+      return (qwen ? "<tool_call>\n<function=f>\n"
+                   : "<｜DSML｜tool_calls>\n<｜DSML｜invoke name=\"f\">\n") +
+             (reverse ? b + a : a + b) +
+             (qwen ? "</function>\n</tool_call>"
+                   : "</｜DSML｜invoke>\n</｜DSML｜tool_calls>");
+    };
+    const auto grammar = JsonConstraint::WithTools(nullptr, {{"f", parameters}},
+                                                   true, false, format);
+    const auto call = wrap(" <think>literal</think> \"42\" \\\nπ🦉\n ", 3);
+    assert(Accepts(*grammar, call));
+    assert(Accepts(*grammar, wrap("</tool_call><tool_call>", 3, true)));
+    assert(!Accepts(*grammar, wrap("", 3)));
+    assert(!Accepts(*grammar, wrap("value", 6)));
+    assert(!Accepts(*grammar, "ordinary text"));
+    assert(!Accepts(*grammar, call + call));
+    assert(Accepts(*JsonConstraint::WithTools(nullptr, {{"f", parameters}},
+                                              true, true, format),
+                   call + call));
+    assert(Accepts(*JsonConstraint::WithReasoning(grammar),
+                   "Thinking.</think>" + call));
+    // Vocabulary masks and speculative copies must agree with byte matching,
+    // including at UTF-8, literal-markup and raw-string escape boundaries.
+    std::vector<std::string> pieces{"\"42\"", "<think>",      "🦉", "\n",
+                                    "\\",     "</parameter>", "",   "abc"};
+    for (unsigned byte = 0; byte < 256; ++byte)
+      pieces.emplace_back(1, static_cast<char>(byte));
+    for (unsigned byte = 0; byte < 256; ++byte)
+      pieces.push_back("shared-prefix" +
+                       std::string(1, static_cast<char>(byte)));
+    const gufo::sampling::ConstraintVocabulary vocabulary(
+        pieces.size(), [&](std::uint32_t i) {
+          return gufo::sampling::ConstraintVocabulary::Piece{pieces[i], i == 6};
+        });
+    auto binding = std::make_shared<gufo::sampling::TokenConstraint>();
+    binding->grammar = grammar;
+    binding->vocabulary =
+        std::make_shared<gufo::sampling::ConstraintVocabulary>(vocabulary);
+    auto state = grammar->Start();
+    for (const unsigned char byte : call) {
+      const auto mask = vocabulary.Allowed(*grammar, state);
+      assert(*binding->Allowed(state) == mask);
+      for (std::uint32_t token = 0; token < pieces.size(); ++token)
+        assert(vocabulary.Allows(*grammar, state, token) == bool(mask[token]));
+      state = grammar->Advance(state, byte);
+    }
+    assert(grammar->Complete(state));
+  }
+  const auto finite = parse(R"({"type":"object",
+    "properties":{"text":{"type":"string","enum":["<think>literal</think>"]}},
+    "required":["text"],"additionalProperties":false})");
+  assert(JsonConstraint::ToolParameters(finite, true, Format::kQwen));
+  const auto ambiguous = parse(R"({"type":"object",
+    "properties":{"text":{"type":["string","null"]}},
+    "required":["text"],"additionalProperties":false})");
+  assert(!JsonConstraint::ToolParameters(ambiguous, true, Format::kQwen));
+  assert(!JsonConstraint::ToolParameters(ambiguous, true, Format::kDeepSeek));
+  const auto delimiter_pattern = parse(R"({"type":"object",
+    "properties":{"text":{"type":"string","pattern":"^\\n</parameter>$"}},
+    "required":["text"],"additionalProperties":false})");
+  assert(Accepts(*JsonConstraint::Compile(delimiter_pattern, true),
+                 R"({"text":"\n</parameter>"})"));
+  assert(
+      !JsonConstraint::ToolParameters(delimiter_pattern, true, Format::kQwen));
+  for (const std::string name : {" text", "text ", "\ttext", "text\f"}) {
+    auto unusual = gufo::json::Value::object();
+    unusual["type"] = "object";
+    unusual["properties"][name]["type"] = "string";
+    unusual["required"] = gufo::json::Value::array();
+    unusual["required"].push_back(name);
+    unusual["additionalProperties"] = false;
+    auto value = gufo::json::Value::object();
+    value[name] = "literal";
+    assert(Accepts(*JsonConstraint::Compile(unusual, true), value.dump()));
+    assert(!JsonConstraint::ToolParameters(unusual, true, Format::kQwen));
+    assert(JsonConstraint::ToolParameters(unusual, true, Format::kDeepSeek));
+  }
+}
+
+void TestOpenNativeTools() {
+  using Format = JsonConstraint::ToolFormat;
+  for (const auto format : {Format::kQwen, Format::kDeepSeek}) {
+    const auto parameters = JsonConstraint::OpenToolParameters(format);
+    assert(parameters == JsonConstraint::OpenToolParameters(format));
+    const bool qwen = format == Format::kQwen;
+    const std::string begin = qwen ? "<tool_call>\n<function=f>\n"
+                                   : "<｜DSML｜tool_calls>\n"
+                                     "<｜DSML｜invoke name=\"f\">\n";
+    const std::string end = qwen ? "</function>\n</tool_call>"
+                                 : "</｜DSML｜invoke>\n</｜DSML｜tool_calls>";
+    const auto parameter = [&](std::string_view name, std::string_view value) {
+      return qwen ? "<parameter=" + std::string(name) + ">\n" +
+                        std::string(value) + "\n</parameter>\n"
+                  : "<｜DSML｜parameter name=\"" + std::string(name) +
+                        "\" string=\"true\">" + std::string(value) +
+                        "</｜DSML｜parameter>\n";
+    };
+    const auto grammar = JsonConstraint::WithTools(nullptr, {{"f", parameters}},
+                                                   false, true, format);
+    assert(Accepts(*grammar, "No tool is necessary."));
+    assert(Accepts(*grammar, begin + end));
+    const auto call = begin + parameter("value", "42") +
+                      parameter("city name", " é🦉\n\\path\n</tool_call> ") +
+                      end;
+    assert(Accepts(*grammar, call));
+    assert(Accepts(*grammar, call + "\n" + call));
+    assert(!Accepts(*grammar, begin + parameter(" value", "x") + end));
+    assert(!Accepts(*grammar, begin + parameter("value ", "x") + end));
+    assert(!Accepts(*grammar, begin + parameter("", "x") + end));
+    assert(!Accepts(*grammar, begin + parameter("v>evil", "x") + end));
+    assert(!Accepts(*grammar, begin + parameter("value", "\xff") + end));
+    if (!qwen) {
+      const std::string typed =
+          "<｜DSML｜parameter name=\"value\" string=\"false\">";
+      assert(Accepts(*grammar, begin + typed +
+                                   "{\"count\":7,\"ok\":true,\"values\":[null]}"
+                                   "</｜DSML｜parameter>\n" +
+                                   end));
+      assert(!Accepts(*grammar, begin + typed +
+                                    "not JSON"
+                                    "</｜DSML｜parameter>\n" +
+                                    end));
+    }
+    auto state = grammar->Start();
+    const auto prefix = begin + parameter("value", "alpha");
+    for (const unsigned char byte : prefix)
+      state = grammar->Advance(state, byte);
+    auto replay = state;
+    for (const unsigned char byte : end) {
+      state = grammar->Advance(state, byte);
+      replay = grammar->Advance(replay, byte);
+    }
+    assert(state == replay && grammar->Complete(state));
+  }
+}
+
+void TestNonStrictAgentTools() {
+  // Pi's ordinary edit schema leaves nested objects open. This must not switch
+  // the entire tool set to JSON or alter the model's native chat template.
+  const auto schema = parse(R"({"type":"object","properties":{
+    "path":{"type":"string"},
+    "edits":{"type":"array","items":{"type":"object","properties":{
+      "oldText":{"type":"string"},"newText":{"type":"string"}},
+      "required":["oldText","newText"]}}},
+    "required":["path","edits"],"additionalProperties":false})");
+  using Format = JsonConstraint::ToolFormat;
+  for (const auto format : {Format::kQwen, Format::kDeepSeek}) {
+    const auto parameters =
+        JsonConstraint::ToolParameters(schema, false, format);
+    assert(parameters);
+    const std::string edits =
+        R"([{"oldText":"return a - b","newText":"return a + b"}])";
+    const std::string call =
+        format == Format::kQwen
+            ? "<tool_call>\n<function=edit>\n<parameter=path>\ncalc.py\n"
+              "</parameter>\n<parameter=edits>\n" +
+                  edits + "\n</parameter>\n</function>\n</tool_call>"
+            : "<｜DSML｜tool_calls>\n<｜DSML｜invoke name=\"edit\">\n"
+              "<｜DSML｜parameter name=\"path\" string=\"true\">calc.py"
+              "</｜DSML｜parameter>\n"
+              "<｜DSML｜parameter name=\"edits\" string=\"false\">" +
+                  edits +
+                  "</｜DSML｜parameter>\n</｜DSML｜invoke>\n"
+                  "</｜DSML｜tool_calls>";
+    for (const bool required : {false, true}) {
+      const auto grammar = JsonConstraint::WithTools(
+          nullptr, {{"edit", parameters}}, required, false, format);
+      assert(Accepts(*grammar, call));
+      assert(!Accepts(*grammar, call.substr(0, call.size() - 1)));
+      assert(Accepts(*grammar, "No edit is needed.") == !required);
+      const std::string empty =
+          format == Format::kQwen
+              ? "<tool_call>\n<function=edit>\n</function>\n</tool_call>"
+              : "<｜DSML｜tool_calls>\n<｜DSML｜invoke name=\"edit\">\n"
+                "</｜DSML｜invoke>\n</｜DSML｜tool_calls>";
+      assert(!Accepts(*grammar, empty));
+      auto wrong_type = call;
+      wrong_type.replace(wrong_type.find(edits), edits.size(), "false");
+      assert(!Accepts(*grammar, wrong_type));
+      for (const char* invalid :
+           {R"([{}])", R"([{"oldText":"a"}])",
+            R"([{"oldText":"a","newText":42}])",
+            R"([{"oldText":"a","newText":"b","oldText":42}])",
+            R"([{"oldText":"a","newText":"b","\u006fldText":42}])"}) {
+        auto nested = call;
+        nested.replace(nested.find(edits), edits.size(), invalid);
+        assert(!Accepts(*grammar, nested));
+      }
+      // #304: preserve multiline edits through JSON escapes. Raw controls in
+      // an array's string must be excluded during generation, before parsing.
+      auto multiline = call;
+      multiline.replace(
+          multiline.find(edits), edits.size(),
+          R"([{"oldText":"a,\n  b","newText":"a,\n\tJSX,\n  b"}])");
+      assert(Accepts(*grammar, multiline));
+      auto raw_controls = call;
+      raw_controls.replace(
+          raw_controls.find(edits), edits.size(),
+          "[{\"oldText\":\"a,\n  b\",\"newText\":\"a,\n\tJSX,\n  b\"}]");
+      assert(!Accepts(*grammar, raw_controls));
+      auto extra = call;
+      extra.replace(extra.find(edits), edits.size(),
+                    R"([{"oldText":"a","newText":"b","note":{"line":3}}])");
+      assert(Accepts(*grammar, extra));
+      auto missing = call;
+      const auto edits_begin = missing.find(
+          format == Format::kQwen ? "<parameter=edits>"
+                                  : "<｜DSML｜parameter name=\"edits\"");
+      const std::string close =
+          format == Format::kQwen ? "</parameter>\n" : "</｜DSML｜parameter>\n";
+      missing.erase(edits_begin, missing.find(close, edits_begin) +
+                                     close.size() - edits_begin);
+      assert(!Accepts(*grammar, missing));
+      auto unknown = call;
+      unknown.replace(unknown.find("edit"), 4, "undeclared");
+      assert(!Accepts(*grammar, unknown));
+    }
+    bool rejected = false;
+    try {
+      (void)JsonConstraint::ToolParameters(schema, true, format);
+    } catch (const std::invalid_argument&) {
+      rejected = true;
+    }
+    assert(rejected);
+    // Open nested objects must not bypass the existing exact JSON fallback
+    // for a scalar whose literal value contains the native closing delimiter.
+    auto ambiguous = schema;
+    ambiguous["properties"]["path"]["const"] =
+        format == Format::kQwen ? "a\n</parameter>b" : "a</｜DSML｜parameter>b";
+    assert(!JsonConstraint::ToolParameters(ambiguous, false, format));
+    // Unsupported root annotations do not relax supported nested requirements.
+    auto annotated = schema;
+    annotated["unevaluatedProperties"] = true;
+    annotated["properties"]["edits"]["x-client-extension"] = true;
+    annotated["properties"]["edits"]["items"]["unevaluatedProperties"] = true;
+    const auto annotated_parameters =
+        JsonConstraint::ToolParameters(annotated, false, format);
+    // Root wildcards cannot preserve arbitrary JSON types in Qwen's tags.
+    assert(bool(annotated_parameters) == (format == Format::kDeepSeek));
+    const auto annotated_call =
+        annotated_parameters ? JsonConstraint::WithTools(
+                                   nullptr, {{"edit", annotated_parameters}},
+                                   true, false, format)
+                             : nullptr;
+    if (annotated_call)
+      assert(Accepts(*annotated_call, call));
+    const auto annotated_json =
+        JsonConstraint::ToolParameters(annotated, false, Format::kJson);
+    assert(Accepts(*annotated_json,
+                   R"({"path":"a","edits":[{"oldText":"a","newText":"b"}]})"));
+    auto referenced = parse(R"({"$ref":"#/$defs/edit","$defs":{}})");
+    referenced["$defs"]["edit"] = schema;
+    const auto referenced_parameters =
+        JsonConstraint::ToolParameters(referenced, false, format);
+    assert(referenced_parameters);
+    const auto referenced_call = JsonConstraint::WithTools(
+        nullptr, {{"edit", referenced_parameters}}, true, false, format);
+    assert(Accepts(*referenced_call, call));
+    for (const char* invalid : {R"([{}])", R"([{"oldText":"a"}])",
+                                R"([{"oldText":"a","newText":42}])"}) {
+      auto nested = call;
+      nested.replace(nested.find(edits), edits.size(), invalid);
+      if (annotated_call)
+        assert(!Accepts(*annotated_call, nested));
+      assert(!Accepts(*annotated_json,
+                      std::string(R"({"path":"a","edits":)") + invalid + "}"));
+      assert(!Accepts(*referenced_call, nested));
+    }
+  }
+  // Best-effort reference handling must remain bounded too.
+  const auto cyclic = parse(R"({"$ref":"#","type":"object"})");
+  assert(!JsonConstraint::ToolParameters(cyclic, false, Format::kQwen));
+  assert(JsonConstraint::ToolParameters(cyclic, false, Format::kJson));
+
+  // Open-object support belongs to non-strict tools, never strict response
+  // schemas. Both native and JSON fallback arguments retain nested schemas.
+  const auto json =
+      JsonConstraint::ToolParameters(schema, false, Format::kJson);
+  assert(Accepts(*json,
+                 R"({"path":"a","edits":[{"oldText":"a","newText":"b"}]})"));
+  assert(!Accepts(*json, R"({"path":"a","edits":[{}]})"));
+  bool rejected = false;
+  try {
+    (void)JsonConstraint::Compile(schema, false);
+  } catch (const std::invalid_argument&) {
+    rejected = true;
+  }
+  assert(rejected);
+
+  // Additional-property schemas and escaped/metacharacter keys must not
+  // weaken the declared property rules. The key matcher sees decoded Unicode.
+  const auto extras = parse(R"({
+    "type":"object","properties":{"value":{"type":"object",
+      "properties":{"a.b":{"type":"integer"},"😀":{"type":"string"}},
+      "required":["a.b","😀"],"additionalProperties":{"type":"boolean"}}},
+    "required":["value"],"additionalProperties":false})");
+  const auto extra_json =
+      JsonConstraint::ToolParameters(extras, false, Format::kJson);
+  assert(Accepts(*extra_json, R"({"value":{"a.b":3,"😀":"x","other":true}})"));
+  assert(Accepts(*extra_json, R"({"value":{"a.b":3,"😀":"x","aXb":false}})"));
+  for (const char* invalid :
+       {R"({"value":{"a.b":3,"😀":"x","other":1}})",
+        R"({"value":{"a.b":3,"😀":"x","a.b":false}})",
+        R"({"value":{"a.b":3,"😀":"x","a\u002eb":false}})",
+        R"({"value":{"a.b":3,"😀":"x","\ud83d\ude00":false}})"})
+    assert(!Accepts(*extra_json, invalid));
+  auto finite = extras;
+  finite["properties"]["value"]["enum"] = parse(
+      R"([{"a.b":3,"😀":"x","other":true},{"a.b":3,"😀":"x","other":42}])");
+  const auto finite_json =
+      JsonConstraint::ToolParameters(finite, false, Format::kJson);
+  assert(Accepts(*finite_json, R"({"value":{"a.b":3,"😀":"x","other":true}})"));
+  assert(!Accepts(*finite_json, R"({"value":{"a.b":3,"😀":"x","other":42}})"));
+}
+
+void TestUntypedNonStrictTools() {
+  using Format = JsonConstraint::ToolFormat;
+  for (const auto format : {Format::kQwen, Format::kDeepSeek}) {
+    const bool qwen = format == Format::kQwen;
+    const std::string begin =
+        qwen ? "<tool_call>\n<function=record>\n"
+             : "<｜DSML｜tool_calls>\n<｜DSML｜invoke name=\"record\">\n";
+    const std::string end = qwen ? "</function>\n</tool_call>"
+                                 : "</｜DSML｜invoke>\n</｜DSML｜tool_calls>";
+    const std::string value =
+        qwen ? "<parameter=value>\nalpha\n</parameter>\n"
+             : "<｜DSML｜parameter name=\"value\" string=\"true\">alpha"
+               "</｜DSML｜parameter>\n";
+    for (
+        const auto text :
+        {R"({"type":"object","additionalProperties":true})",
+         R"({"type":"object","unevaluatedProperties":true})",
+         R"({"type":"object","additionalProperties":true,"dependentRequired":{"a":["b"]}})",
+         R"({"type":"object","properties":{},"additionalProperties":true})",
+         R"({"type":"object","properties":{},"additionalProperties":false,"unevaluatedProperties":true})"}) {
+      const auto parameters =
+          JsonConstraint::ToolParameters(parse(text), false, format);
+      assert(parameters);
+      const auto grammar = JsonConstraint::WithTools(
+          nullptr, {{"record", parameters}}, false, false, format);
+      assert(Accepts(*grammar, begin + value + end));
+      assert(Accepts(*grammar, begin + end));
+      const auto final_answer = JsonConstraint::Compile(
+          parse(
+              R"({"type":"object","properties":{"done":{"type":"boolean","const":true}},
+                    "required":["done"],"additionalProperties":false})"),
+          false);
+      const auto combined = JsonConstraint::WithTools(
+          final_answer, {{"record", parameters}}, false, false, format);
+      assert(Accepts(*combined, R"({"done":true})"));
+      assert(!Accepts(*combined, R"({"done":false})"));
+      assert(!Accepts(*combined, R"({"other":true})"));
+      assert(Accepts(*combined, begin + value + end));
+    }
+    // A genuinely closed empty schema still describes a zero-argument tool.
+    for (const auto text :
+         {R"({"type":"object","properties":{},"additionalProperties":false})",
+          R"({"type":"object","unevaluatedProperties":false})", R"({})"}) {
+      const auto parameters =
+          JsonConstraint::ToolParameters(parse(text), false, format);
+      assert(parameters);
+      const auto grammar = JsonConstraint::WithTools(
+          nullptr, {{"record", parameters}}, true, false, format);
+      assert(Accepts(*grammar, begin + end));
+      assert(!Accepts(*grammar, begin + value + end));
+      const auto json =
+          JsonConstraint::ToolParameters(parse(text), false, Format::kJson);
+      assert(Accepts(*json, "{}"));
+      assert(!Accepts(*json, R"({"value":"alpha"})"));
+    }
+    // Open properties do not erase exact finite values or typed extras.
+    for (
+        const auto text :
+        {R"({"type":"object","additionalProperties":true,"const":{"value":"alpha"}})",
+         R"({"type":"object","const":{"value":"alpha"}})",
+         R"({"type":"object","enum":[{"value":"alpha"}],"unevaluatedProperties":true})",
+         R"({"type":"object","additionalProperties":true,"const":{"value":"alpha"},"unevaluatedProperties":true})",
+         R"({"type":"object","additionalProperties":true,"enum":[{"value":"alpha"}]})",
+         R"({"type":"object","additionalProperties":{"type":"string"}})"}) {
+      const auto schema = parse(text);
+      assert(!JsonConstraint::ToolParameters(schema, false, format));
+      const auto json =
+          JsonConstraint::ToolParameters(schema, false, Format::kJson);
+      assert(Accepts(*json, R"({"value":"alpha"})"));
+      assert(!Accepts(*json, R"({"value":42})"));
+    }
+  }
+}
+
+void TestMixedBestEffortToolRoutes() {
+  using Format = JsonConstraint::ToolFormat;
+  const auto call = [](Format format, std::string_view name,
+                       std::string_view value, bool string = true) {
+    return format == Format::kQwen
+               ? "<tool_call>\n<function=record>\n<parameter=" +
+                     std::string(name) + ">\n" + std::string(value) +
+                     "\n</parameter>\n</function>\n</tool_call>"
+               : "<｜DSML｜tool_calls>\n<｜DSML｜invoke name=\"record\">\n"
+                 "<｜DSML｜parameter name=\"" +
+                     std::string(name) + "\" string=\"" +
+                     (string ? "true" : "false") + "\">" + std::string(value) +
+                     "</｜DSML｜parameter>\n</｜DSML｜invoke>\n"
+                     "</｜DSML｜tool_calls>";
+  };
+  for (
+      const auto text :
+      {R"({"type":"object","unevaluatedProperties":true})",
+       R"({"type":"object","oneOf":[{"properties":{"a":{"type":"string"}},"required":["a"]}]})",
+       R"({"type":"object","allOf":[{"properties":{"a":{"type":"string"}},"required":["a"]}]})"}) {
+    const auto json =
+        JsonConstraint::ToolParameters(parse(text), false, Format::kJson);
+    assert(json && Accepts(*json, R"({"a":"x"})"));
+  }
+  for (
+      const auto text :
+      {R"({"$schema":"http://json-schema.org/draft-07/schema#","$id":"urn:record","$comment":"annotation",
+            "$ref":"#/definitions/A","definitions":{"A":{"type":"object",
+            "properties":{"a":{"type":"string"}},"required":["a"],"additionalProperties":false}}})",
+       R"({"type":"object","$ref":"#/$defs/A","$defs":{"A":{"type":"object",
+            "properties":{"a":{"type":"string"}},"required":["a"]}}})",
+       R"({"$ref":"#/$defs/A","default":{"a":"x"},"examples":[{"a":"x"}],
+            "$defs":{"A":{"type":"object","properties":{"a":{"type":"string"}},"required":["a"]}}})",
+       R"({"type":"object","properties":{"a":{"type":"string","format":"uri","minLength":1}},
+            "required":["a"],"additionalProperties":false})"}) {
+    for (const auto format :
+         {Format::kQwen, Format::kDeepSeek, Format::kJson}) {
+      const auto parameters =
+          JsonConstraint::ToolParameters(parse(text), false, format);
+      assert(parameters);
+      if (format == Format::kJson) {
+        assert(Accepts(*parameters, R"({"a":"x"})"));
+        assert(!Accepts(*parameters, "{}"));
+      } else {
+        const auto grammar = JsonConstraint::WithTools(
+            nullptr, {{"record", parameters}}, true, false, format);
+        assert(Accepts(*grammar, call(format, "a", "x")));
+        assert(!Accepts(*grammar, call(format, "other", "x")));
+      }
+    }
+  }
+  const auto nested =
+      parse(R"({"type":"object","properties":{"m":{"type":"object",
+    "patternProperties":{"^k":{"type":"integer"}},"additionalProperties":false}},
+    "required":["m"]})");
+  for (const auto format : {Format::kQwen, Format::kDeepSeek, Format::kJson}) {
+    const auto parameters =
+        JsonConstraint::ToolParameters(nested, false, format);
+    assert(parameters);
+    if (format == Format::kJson) {
+      assert(Accepts(*parameters, R"({"m":{"k1":1}})"));
+      assert(!Accepts(*parameters, "{}"));
+    } else {
+      const auto grammar = JsonConstraint::WithTools(
+          nullptr, {{"record", parameters}}, true, false, format);
+      assert(Accepts(*grammar, call(format, "m", R"({"k1":1})", false)));
+    }
+  }
+  auto finite = nested;
+  finite["const"] = parse(R"({"m":{"k1":1}})");
+  const auto finite_json =
+      JsonConstraint::ToolParameters(finite, false, Format::kJson);
+  assert(Accepts(*finite_json, R"({"m":{"k1":1}})"));
+  assert(!Accepts(*finite_json, R"({"m":{}})"));
+  for (
+      const auto text :
+      {R"({"type":"object","properties":{"a":{"type":"string"}},"required":["a"],
+            "patternProperties":{"^x_":{"type":"string"}}})",
+       R"({"type":"object","properties":{"a":{"type":"string"}},"required":["a"],
+            "dependentSchemas":{"a":{"properties":{"x_b":{"type":"string"}}}}})",
+       R"({"type":"object","properties":{"a":{"type":"string"}},"required":["a"],
+            "additionalProperties":true})"}) {
+    for (const auto format :
+         {Format::kQwen, Format::kDeepSeek, Format::kJson}) {
+      const auto parameters =
+          JsonConstraint::ToolParameters(parse(text), false, format);
+      if (format == Format::kQwen) {
+        assert(!parameters);
+        continue;
+      }
+      assert(parameters);
+      if (format == Format::kJson) {
+        assert(Accepts(*parameters, R"({"a":"1","x_b":"2"})"));
+        assert(!Accepts(*parameters, R"({"a":1,"x_b":"2"})"));
+        assert(!Accepts(*parameters, R"({"x_b":"2"})"));
+        assert(!Accepts(*parameters, R"({"a":"1","a":2})"));
+      } else {
+        const auto grammar = JsonConstraint::WithTools(
+            nullptr, {{"record", parameters}}, true, false, format);
+        auto both = call(format, "a", "1");
+        const auto extra =
+            format == Format::kQwen
+                ? "<parameter=x_b>\n2\n</parameter>\n"
+                : "<｜DSML｜parameter name=\"x_b\" string=\"true\">2"
+                  "</｜DSML｜parameter>\n";
+        const auto offset = both.find(
+            format == Format::kQwen ? "</function>" : "</｜DSML｜invoke>");
+        both.insert(offset, extra);
+        assert(Accepts(*grammar, both));
+        assert(!Accepts(*grammar, call(format, "x_b", "2")));
+        auto duplicate = both;
+        duplicate.replace(duplicate.find("x_b"), 3, "a");
+        assert(!Accepts(*grammar, duplicate));
+      }
+    }
+  }
+  // Ambiguous raw strings must still use JSON: Qwen cannot distinguish
+  // the string "null" from null without a JSON representation.
+  for (const auto format : {Format::kQwen, Format::kDeepSeek}) {
+    const auto nullable = parse(R"({"type":"object","properties":{"a":{
+      "anyOf":[{"type":"string"},{"type":"null"}]}},"required":["a"]})");
+    assert(!JsonConstraint::ToolParameters(nullable, false, format));
+    const auto json =
+        JsonConstraint::ToolParameters(nullable, false, Format::kJson);
+    assert(Accepts(*json, R"({"a":null})"));
+    assert(Accepts(*json, R"({"a":"null"})"));
+  }
+  // Ignoring a numeric format annotation must retain supported bounds.
+  const auto integer = parse(R"({"type":"object","properties":{"a":{
+    "type":"integer","format":"int32","minimum":5,"maximum":10}},
+    "required":["a"]})");
+  for (const auto format : {Format::kQwen, Format::kDeepSeek, Format::kJson}) {
+    const auto parameters =
+        JsonConstraint::ToolParameters(integer, false, format);
+    assert(parameters);
+    if (format == Format::kJson) {
+      assert(Accepts(*parameters, R"({"a":5})"));
+      assert(!Accepts(*parameters, R"({"a":4})"));
+    } else {
+      const auto grammar = JsonConstraint::WithTools(
+          nullptr, {{"record", parameters}}, true, false, format);
+      assert(Accepts(*grammar, call(format, "a", "5", false)));
+      assert(!Accepts(*grammar, call(format, "a", "4", false)));
+    }
+  }
+}
+
+void TestToolSchemaSafety() {
+  using Format = JsonConstraint::ToolFormat;
+  const auto ordinary = parse(R"({"type":"object","properties":{
+    "value":{"type":"string","const":"alpha"}},"required":["value"],
+    "additionalProperties":false})");
+  const auto uri = parse(R"({"type":"object","properties":{
+    "url":{"type":"string","format":"uri"}},"required":["url"]})");
+  for (const auto format : {Format::kQwen, Format::kDeepSeek}) {
+    // Keep established native calls and automatic agent framing. Forced
+    // extended calls use the shorter JSON representation they had on main.
+    assert(JsonConstraint::ToolParameters(ordinary, false, format, true));
+    assert(JsonConstraint::ToolParameters(uri, false, format));
+    assert(!JsonConstraint::ToolParameters(uri, false, format, true));
+  }
+  for (
+      const auto text :
+      {R"({"type":"object","properties":{"x":{"type":"integer","minimum":5,"maximum":2}},"required":["x"]})",
+       R"({"type":"object","properties":{"x":{"$ref":"#"}},"required":["x"]})",
+       R"({"$ref":"#"})"}) {
+    const auto schema = parse(text);
+    for (const auto format : {Format::kQwen, Format::kDeepSeek})
+      assert(!JsonConstraint::ToolParameters(schema, false, format));
+    const auto json =
+        JsonConstraint::ToolParameters(schema, false, Format::kJson);
+    assert(json && Accepts(*json, R"({"x":5})"));
+  }
+
+  // Optional impossible branches are pruned rather than admitting dead
+  // prefixes. The remaining native call must still have a finite completion.
+  const auto optional = parse(R"({"type":"object","properties":{
+    "x":{"type":"integer","minimum":5,"maximum":2},
+    "y":{"type":"string","const":"ok"}},"required":["y"],
+    "additionalProperties":false})");
+  const auto parameters =
+      JsonConstraint::ToolParameters(optional, false, Format::kQwen);
+  assert(parameters);
+  const auto native = JsonConstraint::WithTools(
+      nullptr, {{"record", parameters}}, true, false, Format::kQwen);
+  assert(Accepts(
+      *native,
+      "<tool_call>\n<function=record>\n<parameter=y>\nok\n</parameter>\n"
+      "</function>\n</tool_call>"));
+  auto state = native->Start();
+  for (unsigned char byte :
+       std::string("<tool_call>\n<function=record>\n<parameter=x>\n"))
+    state = native->Advance(state, byte);
+  assert(state.empty());
+
+  for (
+      const auto extension :
+      {R"({"patternProperties":{"^payload$":{"type":"integer"}}})",
+       R"({"if":{"properties":{"kind":{"const":"x"}}},"then":{"properties":{"payload":{"type":"integer"}},"required":["payload"]}})",
+       R"({"if":{"properties":{"kind":{"const":"y"}}},"else":{"properties":{"payload":{"type":"integer"}},"required":["payload"]}})",
+       R"({"dependencies":{"kind":{"properties":{"payload":{"type":"integer"}},"required":["payload"]}}})"}) {
+    auto schema = parse(extension);
+    schema["type"] = "object";
+    schema["properties"] = parse(R"({"kind":{"type":"string"}})");
+    schema["required"] = parse(R"(["kind"])");
+    assert(!JsonConstraint::ToolParameters(schema, false, Format::kQwen));
+    const auto json =
+        JsonConstraint::ToolParameters(schema, false, Format::kJson);
+    for (const auto value : {"1", "true", "null", "[1]", R"({"x":1})"}) {
+      // Unsupported branches remain guidance. Types that the model chooses
+      // must reach the HTTP parser intact, rather than becoming raw strings.
+      assert(Accepts(*json,
+                     std::string(R"({"kind":"x","payload":)") + value + "}"));
+    }
+    assert(!Accepts(*json, R"({"kind":1,"payload":1})"));
+    assert(!Accepts(*json, R"({"payload":1})"));
+    const auto ds =
+        JsonConstraint::ToolParameters(schema, false, Format::kDeepSeek);
+    assert(ds);
+  }
+  const auto metadata = parse(R"({"type":"object","properties":{
+    "edits":{"type":"array","items":{"type":"object","properties":{
+      "oldText":{"type":"string"},"newText":{"type":"string"},"metadata":{}},
+      "required":["oldText","newText"]}}},"required":["edits"]})");
+  const auto json =
+      JsonConstraint::ToolParameters(metadata, false, Format::kJson);
+  assert(Accepts(
+      *json,
+      R"({"edits":[{"oldText":"a","newText":"b","metadata":{"x":1}}]})"));
+  assert(!Accepts(*json, R"({"edits":[{}]})"));
+  assert(!Accepts(*json, R"({"edits":[{"oldText":1,"newText":"b"}]})"));
+  for (const auto format : {Format::kQwen, Format::kDeepSeek})
+    assert(JsonConstraint::ToolParameters(metadata, false, format));
+  for (const auto format : {Format::kQwen, Format::kDeepSeek})
+    assert(!JsonConstraint::ToolParameters(metadata, false, format, true));
+}
+
 int main(int argc, char** argv) {
   // Batch probes for the independent Python JSON Schema validator. This
   // exercises the production byte matcher without requiring model weights.
@@ -783,6 +1531,13 @@ int main(int argc, char** argv) {
   TestStringMaskCache();
   TestUnsupportedPatterns();
   TestReasoningConstraint();
+  TestAutomaticTools();
+  TestNativeTools();
+  TestOpenNativeTools();
+  TestNonStrictAgentTools();
+  TestUntypedNonStrictTools();
+  TestMixedBestEffortToolRoutes();
+  TestToolSchemaSafety();
   std::cout << "JSON constraints: language, schema, Unicode and sampler checks "
                "passed\n";
 }

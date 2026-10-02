@@ -1,4 +1,5 @@
 #include <arpa/inet.h>
+#include <webp/encode.h>
 
 #include <algorithm>
 #include <array>
@@ -74,11 +75,18 @@ void TestPreprocessing() {
   input = {256, 256, std::vector<std::uint8_t>(256 * 256 * 3, 42)};
   assert(ResizeImage(input).pixels == input.pixels);
   const std::vector<std::uint8_t> payload{0xff, 0xd8, 0, 1, 2};
-  assert(gufo::core::ReadImageUrl("data:image/jpeg;base64,/9gAAQI=") ==
+  for (const auto* accepted :
+       {"data:image/jpeg;base64,/9gAAQI=", "data:image/jpg;base64,/9gAAQI=",
+        "data:IMAGE/JPEG;BASE64,/9gAAQI=",
+        "data:image/jpeg;name=photo.jpg;base64,/9gAAQI="})
+    assert(gufo::core::ReadImageUrl(accepted) == payload);
+  assert(gufo::core::ReadImageUrl("data:image/webp;base64,/9gAAQI=") ==
          payload);
   for (const auto* invalid :
        {"data:image/png;base64,A===", "data:image/png;base64,AB==",
-        "data:image/png;base64,AAAA=", "file:///tmp/image.png"}) {
+        "data:image/png;base64,AAAA=", "file:///tmp/image.png",
+        "data:image/gif;base64,/9gAAQI=", "data:image/png,/9gAAQI=",
+        "data:image/png;base64"}) {
     bool rejected = false;
     try {
       (void)gufo::core::ReadImageUrl(invalid);
@@ -87,6 +95,54 @@ void TestPreprocessing() {
     }
     assert(rejected);
   }
+}
+
+// Clients such as chat front ends often re-encode uploads as WebP.
+void TestWebpDecoding() {
+  const std::vector<std::uint8_t> rgb{255, 0,  0,  0,  255, 0,  0,  0,  255,
+                                      10,  20, 30, 40, 50,  60, 70, 80, 90};
+  std::uint8_t* encoded = nullptr;
+  const auto size = WebPEncodeLosslessRGB(rgb.data(), 3, 2, 9, &encoded);
+  assert(size > 0);
+  const std::vector<std::uint8_t> bytes(encoded, encoded + size);
+  WebPFree(encoded);
+  const auto image = gufo::core::DecodeImage(bytes);
+  assert(image.width == 3 && image.height == 2 && image.pixels == rgb);
+
+  // Dropping alpha must retain RGB, not blend it onto a background.
+  std::vector<std::uint8_t> rgba;
+  for (std::size_t i = 0; i < rgb.size(); i += 3) {
+    rgba.insert(rgba.end(), rgb.begin() + i, rgb.begin() + i + 3);
+    rgba.push_back(128);
+  }
+  const auto alpha_size =
+      WebPEncodeLosslessRGBA(rgba.data(), 3, 2, 12, &encoded);
+  assert(alpha_size > 0);
+  const std::vector<std::uint8_t> alpha_bytes(encoded, encoded + alpha_size);
+  WebPFree(encoded);
+  assert(gufo::core::DecodeImage(alpha_bytes).pixels == rgb);
+
+  const auto rejects = [](const std::vector<std::uint8_t>& input,
+                          std::string_view message) {
+    bool rejected = false;
+    try {
+      (void)gufo::core::DecodeImage(input);
+    } catch (const std::invalid_argument& error) {
+      rejected = std::string_view(error.what()).find(message) !=
+                 std::string_view::npos;
+    }
+    assert(rejected);
+  };
+  auto truncated = bytes;
+  truncated.resize(24);
+  rejects(truncated, "invalid WebP");
+  // VP8L's packed dimensions: 8192x8192 exceeds the decoded pixel budget.
+  auto oversized = bytes;
+  assert(oversized[20] == 0x2f);
+  const std::uint32_t dimensions = 8191U | (8191U << 14);
+  for (std::size_t i = 0; i < 4; ++i)
+    oversized[21 + i] = static_cast<std::uint8_t>(dimensions >> (8 * i));
+  rejects(oversized, "decoded pixel limit");
 }
 
 void TestImageTransportLimits() {
@@ -230,6 +286,7 @@ int main(int argc, char** argv) {
     TestRendering();
     TestToolReasoningCheckpoint();
     TestImageTransportLimits();
+    TestWebpDecoding();
     if (argc == 1) {
       std::cout << "vision input, layout and rendering: passed\n";
       return 0;

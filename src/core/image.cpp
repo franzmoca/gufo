@@ -5,6 +5,7 @@
 #include <netinet/in.h>
 #include <png.h>
 #include <sys/socket.h>
+#include <webp/decode.h>
 
 #include <algorithm>
 #include <array>
@@ -431,6 +432,25 @@ std::uint8_t Pixel(std::int64_t value, unsigned precision) {
       std::clamp<std::int64_t>(value >> precision, 0, 255));
 }
 
+// WebP, lossy or lossless; like PNG, alpha is dropped rather than blended.
+Image DecodeWebp(std::span<const std::uint8_t> bytes) {
+  int width = 0;
+  int height = 0;
+  if (WebPGetInfo(bytes.data(), bytes.size(), &width, &height) == 0)
+    throw std::invalid_argument("invalid WebP image");
+  ValidateDimensions(static_cast<std::uint32_t>(width),
+                     static_cast<std::uint32_t>(height));
+  Image image{static_cast<std::uint32_t>(width),
+              static_cast<std::uint32_t>(height),
+              {}};
+  image.pixels.resize(std::size_t{image.width} * image.height * 3);
+  if (WebPDecodeRGBInto(bytes.data(), bytes.size(), image.pixels.data(),
+                        image.pixels.size(),
+                        static_cast<int>(image.width) * 3) == nullptr)
+    throw std::invalid_argument("invalid WebP image");
+  return image;
+}
+
 }  // namespace
 
 Image ResizeBicubic(const Image& image, std::uint32_t width,
@@ -491,7 +511,11 @@ Image DecodeImage(std::span<const std::uint8_t> bytes) {
   if (bytes.size() >= 2 && bytes[0] == 0xff && bytes[1] == 0xd8) {
     return Orient(DecodeJpeg(bytes), JpegOrientation(bytes));
   }
-  throw std::invalid_argument("image must be PNG or JPEG");
+  if (bytes.size() >= 12 && std::memcmp(bytes.data(), "RIFF", 4) == 0 &&
+      std::memcmp(bytes.data() + 8, "WEBP", 4) == 0) {
+    return DecodeWebp(bytes);
+  }
+  throw std::invalid_argument("image must be PNG, JPEG or WebP");
 }
 
 std::vector<std::uint8_t> ReadImageFile(const std::filesystem::path& path) {
@@ -554,11 +578,22 @@ std::vector<std::uint8_t> ReadImageUrl(std::string_view url,
   --budget.remaining_images;
   if (url.starts_with("data:")) {
     const auto comma = url.find(',');
-    if (comma == std::string_view::npos ||
-        !(url.substr(0, comma) == "data:image/png;base64" ||
-          url.substr(0, comma) == "data:image/jpeg;base64")) {
-      throw std::invalid_argument("image data URL must use base64 PNG or JPEG");
-    }
+    if (comma == std::string_view::npos || comma > 256)
+      throw std::invalid_argument("image data URL has no data");
+    // A media type, parameters and ";base64", case-insensitive (RFC 2397).
+    // Clients differ in case, "image/jpg" and parameters such as a file
+    // name; the decoder tells the formats apart by their bytes anyway.
+    std::string header(url.substr(5, comma - 5));
+    std::ranges::transform(header, header.begin(), [](unsigned char c) {
+      return static_cast<char>(c >= 'A' && c <= 'Z' ? c - 'A' + 'a' : c);
+    });
+    if (!header.ends_with(";base64"))
+      throw std::invalid_argument("image data URL must be base64-encoded");
+    const std::string media = header.substr(0, header.find(';'));
+    if (media != "image/png" && media != "image/jpeg" && media != "image/jpg" &&
+        media != "image/webp")
+      throw std::invalid_argument("image data URL type \"" + media +
+                                  "\" is not supported; use PNG, JPEG or WebP");
     const auto encoded = url.substr(comma + 1);
     // Check the decoded size before allocating, including base64 padding.
     const auto padding = encoded.ends_with("==")  ? 2U

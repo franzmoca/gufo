@@ -42,6 +42,14 @@ struct TextPreparedPrompt {
   std::size_t cache_prefix_tokens{0};
 };
 
+struct TextRunnerRamCacheOptions {
+  static constexpr std::size_t kAutomaticMaxBytes = std::size_t{32} << 30;
+  static constexpr std::size_t kMaxEntries = 128;
+  /// Zero selects min(model snapshot budget, 32 GiB), after session allocation.
+  /// Explicit limits are still clamped to the model's snapshot budget.
+  std::size_t capacity_bytes{0};
+};
+
 struct TextRunnerDiskCacheOptions {
   static constexpr std::size_t kDefaultCapacityBytes =
       std::size_t{8} * 1024U * 1024U * 1024U;
@@ -56,6 +64,13 @@ struct TextRunnerDiskCacheOptions {
   std::size_t shared_prefix_min_tokens{128};
   /// Bound on shared-prefix snapshots written while prefilling one request.
   std::size_t shared_prefix_max_boundaries{4};
+  /// Minimum token advance before a checkpoint is worth persisting.
+  ///
+  /// Continuations advance by a few hundred tokens per turn, so persisting
+  /// every turn rewrites a largely identical snapshot. The tokens between two
+  /// checkpoints are cheaper to re-prefill than that write. Zero disables the
+  /// gate.
+  std::size_t min_checkpoint_step_tokens{2048};
 };
 
 /// Host snapshot budget after accounting for cgroup limits and headroom.
@@ -225,6 +240,10 @@ public:
   [[nodiscard]] virtual std::shared_ptr<const sampling::ConstraintVocabulary>
   BuildConstraintVocabulary() const {
     throw std::invalid_argument("model does not support structured output");
+  }
+  [[nodiscard]] virtual sampling::JsonConstraint::ToolFormat ToolFormat()
+      const {
+    return sampling::JsonConstraint::ToolFormat::kJson;
   }
   [[nodiscard]] std::shared_ptr<const sampling::TokenConstraint> BindConstraint(
       std::shared_ptr<const sampling::JsonConstraint> grammar) const;
@@ -424,7 +443,8 @@ public:
 
   TextRunnerPool(
       std::shared_ptr<TextModelRunner> runner, std::size_t state_count,
-      std::optional<TextRunnerDiskCacheOptions> disk_cache = std::nullopt);
+      std::optional<TextRunnerDiskCacheOptions> disk_cache = std::nullopt,
+      TextRunnerRamCacheOptions ram_cache = {});
   ~TextRunnerPool();
 
   TextRunnerPool(const TextRunnerPool&) = delete;

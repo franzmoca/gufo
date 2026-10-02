@@ -92,7 +92,8 @@ public:
             const TextSpeculativeConfig& speculative_config = {},
             const TextDiskCacheConfig& disk_cache_config = {},
             const std::string& vision_model_path = {},
-            std::uint32_t image_tokens = 0);
+            std::uint32_t image_tokens = 0,
+            TextRunnerRamCacheOptions ram_cache_config = {});
 
 #if defined(ENGINE_ENABLE_HIP)
   /// Installs a previously loaded model without duplicating mapped weights.
@@ -101,7 +102,8 @@ public:
             TextPrefillPolicy prefill_policy = {},
             TextSchedulerPolicy scheduler_policy = {},
             TextSpeculativeConfig speculative_config = {},
-            TextDiskCacheConfig disk_cache_config = {});
+            TextDiskCacheConfig disk_cache_config = {},
+            TextRunnerRamCacheOptions ram_cache_config = {});
 
   /// Installs a previously loaded DeepSeek model with request-owned sessions.
   bool load(std::shared_ptr<models::deepseek_v4_flash::Model> model,
@@ -110,7 +112,8 @@ public:
             TextPrefillPolicy prefill_policy = {},
             TextSchedulerPolicy scheduler_policy = {},
             TextSpeculativeConfig speculative_config = {},
-            TextDiskCacheConfig disk_cache_config = {});
+            TextDiskCacheConfig disk_cache_config = {},
+            TextRunnerRamCacheOptions ram_cache_config = {});
 
   /// Installs a previously loaded Qwen3.8-Flash-Next model with
   /// request-owned sessions, the model's tokenizer, and host-memory
@@ -121,7 +124,8 @@ public:
             TextPrefillPolicy prefill_policy = {},
             TextSchedulerPolicy scheduler_policy = {},
             TextSpeculativeConfig speculative_config = {},
-            TextDiskCacheConfig disk_cache_config = {});
+            TextDiskCacheConfig disk_cache_config = {},
+            TextRunnerRamCacheOptions ram_cache_config = {});
 
   /// Installs a previously loaded Gemma 4 model with request-owned sessions
   /// and host/disk continuation snapshots.
@@ -134,12 +138,14 @@ public:
             TextSpeculativeConfig speculative_config = {},
             TextDiskCacheConfig disk_cache_config = {},
             std::shared_ptr<models::gemma4::vision::Encoder> vision = {},
-            std::uint32_t image_tokens = 0);
+            std::uint32_t image_tokens = 0,
+            TextRunnerRamCacheOptions ram_cache_config = {});
 #endif
 
   /// Stable model identifier used in API responses.
   [[nodiscard]] std::string model_id() const override;
   [[nodiscard]] bool ready() const override;
+  [[nodiscard]] bool supports_images() const override;
   [[nodiscard]] SamplingDefaults sampling_defaults() const override;
   [[nodiscard]] std::uint32_t max_context() const override;
   [[nodiscard]] ReasoningOptions reasoning_defaults() const override;
@@ -178,7 +184,8 @@ public:
       const sampling::SamplingConfig& sampling,
       const CancellationCheck& is_cancelled = {}, bool stream_output = false,
       bool ignore_eos = false, std::string_view client_id = "anonymous",
-      const std::vector<std::string>& stop_sequences = {}) override;
+      const std::vector<std::string>& stop_sequences = {},
+      bool return_progress = false) override;
 
   Result chat(const std::vector<tokenization::ChatMessage>& messages,
               std::size_t max_tokens, const sampling::SamplingConfig& sampling,

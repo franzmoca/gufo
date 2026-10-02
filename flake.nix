@@ -288,12 +288,14 @@
               pkgsSys.clang-tools
               pkgsSys.cmake
               pkgsSys.ninja
+              pkgsSys.pkg-config
               pkgsSys.python3
               pkgsSys.findutils
               pkgsSys.icu
               pkgsSys.curl
               pkgsSys.libpng
               pkgsSys.libjpeg
+              pkgsSys.libwebp
               pkgsSys.openssl
             ];
             src = staticAnalysisSource;
@@ -403,11 +405,13 @@
               pkgsSys.ccache
               pkgsSys.cmake
               pkgsSys.ninja
+              pkgsSys.pkg-config
               (if full then pkgsSys.python3.withPackages (ps: [ ps.numpy ]) else pkgsSys.python3)
               pkgsSys.icu
               pkgsSys.curl
               pkgsSys.libpng
               pkgsSys.libjpeg
+              pkgsSys.libwebp
               pkgsSys.openssl
             ];
             src = testSource;

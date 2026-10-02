@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Short HTTP cancellation/replay checks; restart the same server for --restore.
+"""Functional HTTP cancellation/replay checks; restart the same server for --restore.
 
 Use a private server with --served-model-name cache-test. Add --cache-disk
 only when checking restart persistence; in-memory reuse needs no disk cache.
@@ -16,7 +16,13 @@ import json
 from pathlib import Path
 import socket
 import time
+from tool_agent import agent_tools
 from urllib.parse import urlsplit
+from metrics import Recorder
+
+TRACE = Recorder(None)
+# Matches TextRunnerDiskCacheOptions::min_checkpoint_step_tokens.
+DISK_CHECKPOINT_STEP = 2048
 
 CASES = tuple(f"{field}-preserve{preserve}-sampled{sampled}"
               for sampled in (0, 1)
@@ -29,18 +35,31 @@ def call(url, body, stop_field=None):
     cls = http.client.HTTPSConnection if target.scheme == "https" else http.client.HTTPConnection
     connection = cls(target.hostname, target.port, timeout=180)
     started = time.monotonic()
+    measurement = TRACE.begin("/v1/chat/completions", body)
     connection.request("POST", target.path.rstrip("/") + "/v1/chat/completions",
                        json.dumps(body), {"Content-Type": "application/json"})
     response = connection.getresponse()
+    measurement.row["http_status"] = response.status
+    measurement.row["request_id"] = response.getheader("X-Request-ID")
     if response.status != 200:
-        raise RuntimeError(f"HTTP {response.status}: {response.read().decode()}")
+        data = response.read()
+        measurement.feed(data)
+        measurement.ended = True
+        measurement.finish()
+        connection.close()
+        raise RuntimeError(f"HTTP {response.status}: {data.decode()}")
     if stop_field is None:
-        result = json.loads(response.read())
+        data = response.read()
+        measurement.feed(data)
+        measurement.ended = True
+        measurement.finish()
+        result = json.loads(data)
         connection.close()
         return result
     message = {"role": "assistant", "content": "", "reasoning_content": ""}
     pieces = 0
     for line in response:
+        measurement.feed(line)
         if not line.startswith(b"data: "):
             continue
         raw = line[6:].strip()
@@ -57,8 +76,11 @@ def call(url, body, stop_field=None):
                 connection.sock.shutdown(socket.SHUT_RDWR)
             response.close()
             connection.close()
+            measurement.finish()
             return message, time.monotonic() - started
     connection.close()
+    measurement.ended = True
+    measurement.finish()
     raise RuntimeError(f"fixture never reached eight {stop_field} deltas")
 
 
@@ -89,6 +111,8 @@ def main():
                         help="Effort for thinking-on cases; thinking-off cases remain off")
     parser.add_argument("--tools", action="store_true",
                         help="Resume after a completed tool response")
+    parser.add_argument("--legacy-tool-history", action="store_true",
+                        help="Also replay an unknown historical name after the ordinary tool")
     parser.add_argument("--discard-assistant", action="store_true",
                         help="Drop the interrupted assistant and send '.' like an agent client")
     parser.add_argument("--drop-reasoning", action="store_true",
@@ -98,8 +122,11 @@ def main():
     parser.add_argument("--case", action="append", choices=CASES,
                         help="Run only this case (repeatable for focused checks)")
     args = parser.parse_args()
+    TRACE.path = args.output.with_suffix(".requests.json")
     if args.append_image and not args.image:
         parser.error("--append-image requires --image")
+    if args.legacy_tool_history and not args.tools:
+        parser.error("--legacy-tool-history requires --tools")
     reports = []
     if args.restore:
         previous = json.loads(args.restore.read_text())
@@ -110,11 +137,18 @@ def main():
             measured = metrics(result)
             if not measured["disk"] or measured["cached"] == 0:
                 raise RuntimeError(f"{item['case']}: restart did not restore disk state")
-            if digest(result) != item["sha256"]:
+            # Disk skips checkpoints within one step of a stored prefix, so a
+            # restart may re-prefill that gap. Sampled output can then follow
+            # other prefill chunk shapes; greedy and exact restores cannot.
+            if measured["prefill"] >= DISK_CHECKPOINT_STEP:
+                raise RuntimeError(f"{item['case']}: disk restore lost too much: {measured}")
+            exact = not item["request"]["temperature"] or measured["prefill"] == 0
+            if exact and digest(result) != item["sha256"]:
                 raise RuntimeError(f"{item['case']}: disk restore changed seeded output")
             if "followup" in item:
                 followup = call(args.url, item["followup"]["request"])
-                if not metrics(followup)["cached"] or digest(followup) != item["followup"]["sha256"]:
+                if metrics(followup)["cached"] < measured["cached"] or (
+                        exact and digest(followup) != item["followup"]["sha256"]):
                     raise RuntimeError(f"{item['case']}: disk-restored third turn differs")
             report = {"case": item["case"], **measured, "exact": True}
             reports.append(report)
@@ -154,6 +188,13 @@ def main():
                              "name": "read_fixture", "arguments": "{}"}}]},
                         {"role": "tool", "tool_call_id": "fixture-call",
                          "content": "The fixture is ready. Answer the user's request directly."}])
+                    if args.legacy_tool_history:
+                        messages.extend([
+                            {"role": "assistant", "content": None, "tool_calls": [{
+                                "id": "legacy-call", "type": "function",
+                                "function": {"name": "…", "arguments": "{}"}}]},
+                            {"role": "tool", "tool_call_id": "legacy-call",
+                             "content": "Unknown tool; no action taken. Continue the user's request."}])
                 body = {"model": args.model, "messages": messages, "max_tokens": 256,
                         "temperature": 0.8 if sampled else 0, "seed": 1234,
                         "top_k": 20, "top_p": 0.95,
@@ -163,7 +204,8 @@ def main():
                 if args.tools:
                     body["tools"] = [{"type": "function", "function": {
                         "name": "read_fixture", "description": "Read the fixture.",
-                        "parameters": {"type": "object", "properties": {}}}}]
+                        "parameters": {"type": "object", "properties": {}}}},
+                        *agent_tools()]
                 if thinking and args.reasoning_effort:
                     body["reasoning_effort"] = args.reasoning_effort
                 initial = {**body, "messages": list(messages),
