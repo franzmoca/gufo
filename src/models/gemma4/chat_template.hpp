@@ -39,8 +39,10 @@ struct RenderedPrompt {
 ///
 /// Known, documented approximations of the Jinja source: message content
 /// parts arrive flattened by the HTTP layer, JSON numbers render as Python
-/// ints when integral (Python would print 5.0 for a float literal), and
-/// text parts between two images are trimmed as one segment.
+/// ints when integral (Python would print 5.0 for a float literal), text
+/// parts between two images are trimmed as one segment, and a string `const`
+/// in a tool schema is shown as the equivalent one-value `enum` (the Jinja
+/// source drops `const`).
 class ChatTemplate {
 public:
   [[nodiscard]] static constexpr std::string_view

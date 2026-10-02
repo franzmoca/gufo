@@ -380,6 +380,37 @@ void QuotedList(const Value& list, std::string* out) {
   }
 }
 
+// The template shows a string's allowed values only through `enum` and drops
+// `const`. A single-value enum is the same constraint in the form it shows;
+// without it Gemma 4 does not know the required value (gufo tool grammar).
+Value ShowConstants(const Value& schema) {
+  if (!schema.is_object()) {
+    return schema;
+  }
+  Value shown = Value::object();
+  for (const auto& [key, value] : schema.members()) {
+    if (key == "properties" && value.is_object()) {
+      Value properties = Value::object();
+      for (const auto& [name, property] : value.members()) {
+        properties.append_member(name, ShowConstants(property));
+      }
+      shown.append_member(key, std::move(properties));
+    } else if (key == "items" || key == "parameters") {
+      shown.append_member(key, ShowConstants(value));
+    } else {
+      shown.append_member(key, value);
+    }
+  }
+  const Value* constant = schema.find("const");
+  if (constant != nullptr && constant->is_string() &&
+      !schema.contains("enum") && Upper(schema.find("type")) == "STRING") {
+    Value values = Value::array();
+    values.push_back(*constant);
+    shown["enum"] = std::move(values);
+  }
+  return shown;
+}
+
 void FormatParameters(const Value& properties, bool filter_keys,
                       std::string* out) {
   static constexpr std::array<std::string_view, 5> kStandardKeys = {
@@ -678,6 +709,10 @@ std::optional<RenderedPrompt> ChatTemplate::Render(
     }
     if (!tool_data.back().is_object()) {
       return fail("tool definitions must be objects");
+    }
+    if (const Value* function = tool_data.back().find("function");
+        function != nullptr && function->is_object()) {
+      tool_data.back()["function"] = ShowConstants(*function);
     }
   }
 

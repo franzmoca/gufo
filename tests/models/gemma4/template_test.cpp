@@ -113,6 +113,26 @@ void CheckRejections() {
           "dotted tool name rendered: " + error);
 }
 
+void CheckShownConstants() {
+  gufo::tokenization::ChatTool tool;
+  tool.name = "record";
+  tool.definition_json = R"({"type":"function","function":{"name":"record",
+    "parameters":{"type":"object","properties":{
+      "value":{"type":"string","const":"alpha"},
+      "items":{"type":"array","items":{"type":"object","properties":{
+        "kind":{"type":"string","const":"x"}}}},
+      "n":{"type":"integer","const":3}},"required":["value"]}}})";
+  std::string error;
+  const auto rendered =
+      g4::ChatTemplate::Render({}, std::span(&tool, 1), {}, &error);
+  Require(rendered.has_value(), "const tool rendered: " + error);
+  const auto& text = rendered->text;
+  Require(text.find("value:{enum:[<|\"|>alpha<|\"|>]") != std::string::npos &&
+              text.find("kind:{enum:[<|\"|>x<|\"|>]") != std::string::npos &&
+              text.find("n:{type:") != std::string::npos,
+          "a string const is shown as a one-value enum: " + text);
+}
+
 }  // namespace
 
 int main() {
@@ -120,5 +140,6 @@ int main() {
     CheckGoldens();
     CheckOptions();
     CheckRejections();
+    CheckShownConstants();
   });
 }
