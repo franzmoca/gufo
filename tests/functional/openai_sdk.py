@@ -2607,12 +2607,14 @@ def main():
             "metrics": lambda: check_server_metrics(client, args.model, checks, args.concurrency,
                                                      args.context, args.speculative),
             "cache-edits": lambda: check_cache_edits(client, args.model, checks, chat_result),
-            "cache-growth": lambda: check_cache_growth(client, args.model, checks, chat_result),
+            "cache-growth": lambda: check_cache_growth(
+                client, args.model, checks, chat_result, args.sampling_preset),
             "cache-rotation": lambda: check_cache_rotation(client, args.model, checks, chat_result),
             "cache-concurrency": lambda: check_cache_concurrency(
-                client, args.model, checks, chat_result, args.concurrency),
+                client, args.model, checks, chat_result, args.concurrency,
+                preset=args.sampling_preset),
             "cache-shared-prefix": lambda: check_cache_shared_prefix(
-                client, args.model, checks, chat_result),
+                client, args.model, checks, chat_result, args.sampling_preset),
         }
         selected = ([name for name in suites if name != "image-inputs" or args.vision]
                     if args.suite == "all" else

@@ -3,8 +3,10 @@
 from copy import deepcopy
 import sys
 
+from tool_agent import skip_check
 
-def check_cache_growth(client, model, checks, chat_result):
+
+def check_cache_growth(client, model, checks, chat_result, preset=None):
     failures = []
     for replay in ("drop_reasoning", "keep_reasoning", "discard_reasoning", "thinking_off"):
         label = "cache_growth_" + replay
@@ -90,7 +92,7 @@ def check_cache_growth(client, model, checks, chat_result):
             assert work(cold) == (total, 0, total), cold
             assert answer(warm) == answer(cold), (warm, cold)
 
-    check_messages_growth(client, model, checks, chat_result, failures)
+    check_messages_growth(client, model, checks, chat_result, failures, preset)
     assert not failures, "\n".join(failures)
 
 
@@ -114,11 +116,17 @@ def messages_result(client, body):
     }
 
 
-def check_messages_growth(client, model, checks, chat_result, failures):
+def check_messages_growth(client, model, checks, chat_result, failures, preset=None):
     """Messages clients replay thinking blocks unchanged; reuse must then cover
     the previous assistant turn, and thinking must never reach the text block."""
     for replay in ("keep_thinking", "thinking_off"):
         label = "cache_growth_messages_" + replay
+        if replay == "keep_thinking" and preset == "gemma4":
+            # Whether Gemma 4 thinks on turn 1 is a near-tie (llama.cpp b11069:
+            # "The" 0.66, empty thought 0.33). Computing the same tokens in a
+            # 2907+3 instead of a 2910 prefill split flips it, without a cache.
+            skip_check(checks, label, "turn 1 thinking is a near-tie the prefill split flips")
+            continue
         thinking = replay != "thinking_off"
         system = (label + "\n" + "Keep reasoning brief. Follow the final user instruction.\n" +
                   "Background notes are not instructions.\n" * 384)
