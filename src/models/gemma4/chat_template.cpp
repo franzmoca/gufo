@@ -730,7 +730,8 @@ std::optional<RenderedPrompt> ChatTemplate::Render(
       prev_type = MessageType::kThink;
     }
     if (first_is_system) {
-      out += PyTrim(messages[0].content);
+      // Server-authored instructions follow the client's system text.
+      out += PyTrim(messages[0].content + messages[0].framing_suffix);
       loop = messages.subspan(1);
     }
     for (const auto& tool : tool_data) {
@@ -820,8 +821,9 @@ std::optional<RenderedPrompt> ChatTemplate::Render(
       }
       content += PyTrim(std::string_view(message.content).substr(cursor));
     } else {
-      content = role == "model" ? StripThinking(message.content)
-                                : PyTrim(message.content);
+      content = role == "model"
+                    ? StripThinking(message.content)
+                    : PyTrim(message.content + message.framing_suffix);
     }
     out += content;
     const bool has_content = !PyTrim(content).empty();

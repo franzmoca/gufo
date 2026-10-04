@@ -1579,6 +1579,39 @@ def check_tool_edges(client, model, checks, sampling_preset=None):
         checks[f"foreign_marker_prose_stream{stream}"] = {
             **result, "foreign_marker_exercised": exercised}
 
+    # Parallel calls must survive the native framing. As in llama.cpp, a
+    # DeepSeek call block also ends the output, so no text streams after it.
+    prompt = ("Call read twice in parallel, with path a.txt and with path b.txt. "
+              "After the calls, write Done.")
+    for endpoint in ("chat", "responses"):
+        for stream in (False, True):
+            order = []
+            if endpoint == "chat":
+                result = chat_result(client, dict(
+                    **common, messages=[{"role": "user", "content": prompt}],
+                    tools=[{"type": "function", "function": read}], tool_choice="auto",
+                    parallel_tool_calls=True, reasoning_effort="none",
+                    max_completion_tokens=256), stream, on_chunk=lambda chunk: order.extend(
+                        "tool" if choice.delta.tool_calls else "text"
+                        for choice in chunk.choices
+                        if choice.delta.tool_calls or choice.delta.content))
+            else:
+                result = response_result(client, dict(
+                    **common, input=prompt, tools=[{"type": "function", **read}],
+                    tool_choice="auto", parallel_tool_calls=True,
+                    reasoning={"effort": "none"}, max_output_tokens=256, store=False), stream)
+            name = f"parallel_calls_{endpoint}_stream{stream}"
+            checks[name] = {**result, "delta_order": order}
+            print(f"CHECK {name}", file=sys.stderr, flush=True)
+            assert result["finish"] == "tool_calls", result
+            assert all(call["function"]["name"] == "read" for call in result["tools"]), result
+            paths = sorted(json.loads(call["function"]["arguments"])["path"]
+                           for call in result["tools"])
+            assert paths == ["a.txt", "b.txt"], result
+            assert "DSML" not in result["text"] and "<tool_call>" not in result["text"], result
+            if sampling_preset == "deepseek4" and "tool" in order:
+                assert "text" not in order[order.index("tool"):], result
+
 
 def check_state_edges(client, model, checks, speculative, vision=False):
     """Mode proof and request-local grammar state across limits, errors and reuse."""

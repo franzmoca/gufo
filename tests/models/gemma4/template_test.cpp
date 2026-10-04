@@ -174,6 +174,32 @@ void CheckReplayedThought() {
           "a replayed thought ends at <channel|>: " + rendered->text);
 }
 
+/// Server-authored framing such as a response-format instruction renders
+/// after the client's system text, including in a system turn it creates.
+void CheckFramingSuffix() {
+  using gufo::tokenization::ChatMessage;
+  using gufo::tokenization::ChatRole;
+  ChatMessage system(ChatRole::kSystem, "Be brief.");
+  system.framing_suffix = "\n\nAnswer in JSON.";
+  const std::vector<ChatMessage> with_system{
+      system, ChatMessage(ChatRole::kUser, "Hi")};
+  std::string error;
+  auto rendered = g4::ChatTemplate::Render(with_system, {}, {}, &error);
+  Require(rendered.has_value(), "framing rendered: " + error);
+  Require(rendered->text.find("<|turn>system\nBe brief.\n\nAnswer in JSON."
+                              "<turn|>") != std::string::npos,
+          "framing follows system text: " + rendered->text);
+  ChatMessage framing(ChatRole::kSystem, "");
+  framing.framing_suffix = "Answer in JSON.";
+  const std::vector<ChatMessage> created{framing,
+                                         ChatMessage(ChatRole::kUser, "Hi")};
+  rendered = g4::ChatTemplate::Render(created, {}, {}, &error);
+  Require(rendered.has_value(), "created framing rendered: " + error);
+  Require(rendered->text.find("<|turn>system\nAnswer in JSON.<turn|>") !=
+              std::string::npos,
+          "framing renders in a created system turn: " + rendered->text);
+}
+
 }  // namespace
 
 int main() {
@@ -183,5 +209,6 @@ int main() {
     CheckRejections();
     CheckShownConstants();
     CheckReplayedThought();
+    CheckFramingSuffix();
   });
 }
