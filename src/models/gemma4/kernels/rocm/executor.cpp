@@ -107,7 +107,8 @@ Layout Plan(const Config& c, const Config* draft, std::uint32_t vocab,
                   ? hip::QuantizedActivationBytes(q8_rows, max_cols)
                   : 0);
   // Binary16 activation rows: every prefill input of an expert model, the
-  // inputs of binary16 projections otherwise.
+  // inputs of binary16 projections otherwise (all of a binary16-prefill
+  // dense model's, whose max_half_cols is its widest projection).
   const std::size_t half_cols = c.HasExperts() ? max_cols : max_half_cols;
   l.x_half =
       take(q8_rows > kSplitRows ? std::size_t{q8_rows} * half_cols * 2 : 0);
@@ -272,9 +273,9 @@ Executor::Executor(const DeviceModel& model, std::uint32_t max_rows,
   partials_ = reinterpret_cast<float*>(base + l.partials);
   q8_ = base + l.q8;
   x_half_ = base + l.x_half;
+  half_prefill_ = model.half_prefill();
   if (model.config().HasExperts()) {
     const Config& c = model.config();
-    half_prefill_ = true;
     moe_x_half_ = base + l.moe_x_half;
     moe_h_ = reinterpret_cast<float*>(base + l.moe_h);
     moe_logits_ = reinterpret_cast<float*>(base + l.moe_logits);
@@ -426,6 +427,20 @@ qwen38_flash_next::rocm::DenseF16Plan HalfPlan(std::uint32_t m,
   return k == 2112 ? DenseF16Plan::kRowGroups8 : DenseF16Plan::kAuto;
 }
 
+/// The K-quant formats of the dense binary16 prefill GEMM.
+std::optional<ExpertFormat> KQuantHalfFormat(core::GgmlType type) {
+  switch (type) {
+    case core::GgmlType::kQ4_K:
+      return ExpertFormat::kQ4_K;
+    case core::GgmlType::kQ5_K:
+      return ExpertFormat::kQ5_K;
+    case core::GgmlType::kQ6_K:
+      return ExpertFormat::kQ6_K;
+    default:
+      return std::nullopt;
+  }
+}
+
 }  // namespace
 
 void Executor::Project(const DeviceTensor& w, const float* x, const void* xq,
@@ -436,12 +451,18 @@ void Executor::Project(const DeviceTensor& w, const float* x, const void* xq,
   }
   if (rows > kSplitRows) {
     if (half_prefill_) {
-      // Binary16 activations: Q8_0 weights decode to binary16 in the WMMA
-      // GEMM; other formats keep the W8A8 route on their own Q8_1 rows.
+      // Binary16 activations: Q8_0 and K-quant weights decode to binary16
+      // in the WMMA GEMMs; other formats keep the W8A8 route on their own
+      // Q8_1 rows.
       if (w.type == core::GgmlType::kQ8_0 &&
           qwen38_flash_next::rocm::DenseF16Gemm(
               w.data, static_cast<const __half*>(xq), y, rows, w.rows, w.cols,
               stream_, HalfPlan(w.rows, w.cols))) {
+        return;
+      }
+      if (const auto format = KQuantHalfFormat(w.type);
+          format && LaunchDenseHalfGemm(*format, w.data, xq, y, nullptr, rows,
+                                        w.rows, w.cols, stream_)) {
         return;
       }
       hip::LaunchQuantizeActivationQ8_1FromFp32(x, q8_, rows, w.cols, stream_);
@@ -635,8 +656,7 @@ void Executor::Forward(std::span<const Segment> segments,
   // (the binary16 GEMMs) needs no FP32 row.
   const auto half_only = [&](std::initializer_list<const DeviceTensor*> ws) {
     return half && std::all_of(ws.begin(), ws.end(), [](const DeviceTensor* w) {
-             return w->empty() || w->type == core::GgmlType::kQ8_0 ||
-                    w->type == core::GgmlType::kF16;
+             return w->empty() || HalfPrefillFormat(w->type);
            });
   };
   const auto qkv_half_only = [&](const DeviceLayer& L) {
@@ -770,7 +790,16 @@ void Executor::Forward(std::span<const Segment> segments,
     }
     const void* gq = nullptr;
     const float* down_in = gate_;
-    if (!L.ffn_gate_up.empty() && !prefill) {
+    const auto gate_up_half = KQuantHalfFormat(L.ffn_gate_up.type);
+    if (!L.ffn_gate_up.empty() && half && gate_up_half &&
+        half_only({&L.ffn_down}) &&
+        LaunchDenseHalfGemm(*gate_up_half, L.ffn_gate_up.data, fq, nullptr,
+                            gate_, n, L.ffn_gate_up.rows, L.ffn_gate_up.cols,
+                            stream_, true)) {
+      // The GEMM writes GeGLU of each binary16 [gate | up] pair into the
+      // (free) gate rows as the down projection's binary16 input.
+      gq = gate_;
+    } else if (!L.ffn_gate_up.empty() && !prefill) {
       // One projection writes [gate | up] rows.
       Project(L.ffn_gate_up, h_, fq, n, gate_);
       GeGluPacked(gate_, half_only({&L.ffn_down}) ? nullptr : act_, n,
@@ -820,11 +849,15 @@ void Executor::Forward(std::span<const Segment> segments,
       MoeFinish(finish, stream_);
       half_ready = finish.h_half != nullptr;
     } else {
+      // Binary16 prefill: the norm also writes the next layer's binary16
+      // input (and only that when every consumer reads binary16).
+      const bool next_half = half && !last;
       PostFeedForwardNorm(
-          o_, L.post_ffn_norm.f32(), L.output_scale, x_, next, h_, n, d, eps,
-          stream_,
-          prefill && !last && !qkv_fp32(layers[l + 1]) ? q8_ : nullptr);
-      half_ready = false;
+          o_, L.post_ffn_norm.f32(), L.output_scale, x_, next,
+          next_half && qkv_half_only(layers[l + 1]) ? nullptr : h_, n, d, eps,
+          stream_, prefill && !last && !qkv_fp32(layers[l + 1]) ? q8_ : nullptr,
+          next_half ? x_half_ : nullptr);
+      half_ready = next_half;
     }
     if (tap_sink_) {
       tap_sink_(l, x_, n, stream_);

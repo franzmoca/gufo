@@ -107,6 +107,17 @@ void MoeRoute(const MoeRouteArgs& args, hipStream_t stream);
     const std::int32_t* rows_out, float* out, void* out_half, std::uint32_t m,
     std::uint32_t k, hipStream_t stream, bool geglu = false);
 
+/// Dense prefill projection over binary16 activation rows `x` ([rows][k])
+/// for K-quant W (Q4_K, Q5_K, Q6_K): the routed GEMM's arithmetic over an
+/// identity routing. `out` (FP32) or `out_half` (binary16, saturated) is
+/// [rows][m]; `geglu` as in LaunchRoutedHalfGemm. Returns false for other
+/// formats or k not a multiple of 256.
+[[nodiscard]] bool LaunchDenseHalfGemm(ExpertFormat format, const void* w,
+                                       const void* x, float* out,
+                                       void* out_half, std::uint32_t rows,
+                                       std::uint32_t m, std::uint32_t k,
+                                       hipStream_t stream, bool geglu = false);
+
 /// Entries of a routed tile map of `rows`-row tiles that any routing of
 /// `slots` assignments over `experts` 16-padded buckets fits in.
 [[nodiscard]] constexpr std::uint32_t RoutedTileCapacity(

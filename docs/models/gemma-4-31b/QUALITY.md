@@ -11,9 +11,9 @@ not unquantized-model or GGUF-conversion checks. Measured September 26, 2026.
 | --- | --- |
 | GPU decode (FP32 activations, split-K attention) vs scalar reference, 22-token chat prompt | Mean KL 9.7e-7 (limit 1e-5), top-1 22/22 |
 | Eight-row verification vs scalar reference | Mean KL 1.5e-6, top-1 22/22; verification rows reproduce single-token decode bit for bit (projection widths 2–16, attention rows ≤16) |
-| GPU prefill (Q8_1 activations, binary16 WMMA attention) vs scalar reference | Mean KL 0.0055 (limit 0.015), max 0.048, top-1 22/22; llama.cpp b11069 on the same prompt: 0.038, top-1 21/22 |
-| Bulk prefill vs exact rows, 1542-token conversation past the window and ring (`tests/models/gemma4/fixtures/long_conversation.txt`) | Mean KL 0.056 (limit 0.15), top-1 1444/1542; 0.056–0.076 across rounding-only kernel changes |
-| Bulk prefill vs exact rows, 1353-token repetitive prompt (reported, not a gate) | Mean KL 1.64, top-1 1016/1353; llama.cpp prefill vs the same rows 2.93, 920/1353. Many near-tied predictions make this prompt ill-conditioned for any binary16/Q8_1 prefill: rounding-only changes moved it between 1.33 and 1.64, so it no longer gates changes (replaced by the conversation above on 2026-09-27; its former limit was 1.6). The exact rows match the reference (KL 3.5e-6 over the first 96 tokens). |
+| GPU prefill (binary16 activations and WMMA projections/attention) vs scalar reference | Mean KL 5.5e-5 (limit 0.015), max 5.4e-4, top-1 22/22 (Q8_1 activations until 2026-10-05: 0.0055); llama.cpp b11069 on the same prompt: 0.038, top-1 21/22 |
+| Bulk prefill vs exact rows, 1542-token conversation past the window and ring (`tests/models/gemma4/fixtures/long_conversation.txt`) | Mean KL 0.0045 (limit 0.15), top-1 1534/1542 (Q8_1 activations: 0.056–0.076, 1444/1542) |
+| Bulk prefill vs exact rows, 1353-token repetitive prompt (reported, not a gate) | Mean KL 0.124, top-1 1279/1353 with binary16 activations; with Q8_1 activations 1.64, top-1 1016/1353; llama.cpp prefill vs the same rows 2.93, 920/1353. Many near-tied predictions make this prompt ill-conditioned for any binary16/Q8_1 prefill: rounding-only changes moved it between 1.33 and 1.64, so it no longer gates changes (replaced by the conversation above on 2026-09-27; its former limit was 1.6). The exact rows match the reference (KL 3.5e-6 over the first 96 tokens). |
 | Long context vs llama.cpp, 16K templated turn (15.3K-token prose prompt, 640-token model reply) | KL(llama.cpp ‖ Gufo) 0.0092, top-1 628/641, true-token NLL 0.097 (llama.cpp 0.112); with the full global K cache: 0.0093, 628/641, 0.097 |
 | Greedy MTP vs single-token decode with the drafter loaded, three prompts × 64 tokens, four drafts | Identical token IDs |
 | Greedy MTP vs an AR-only server | Not equal in general: AR-only decode uses the faster split-K GEMV, whose FP32 summation order differs from the verification kernels, so long greedy completions can diverge (the pp2048 prose completion does). Both are FP32 decodes within the KL limits above. |
@@ -50,17 +50,18 @@ prompt that copies a paragraph, with accepted copies.
 ## Q8 quant
 
 UD-Q8_K_XL, measured September 30, 2026 with `gemma4.target` (same prompts
-and limits as above, Q8_0 drafter). Its F16 projections run on the binary16 kernels
-(decode FP32 activations; prefill binary16 activations with FP32
-accumulation, the Q8_0 projections keeping Q8_1 activations).
+and limits as above, Q8_0 drafter); prefill rows remeasured October 5 after
+every projection moved to binary16 prefill activations. Its F16 projections
+run on the binary16 kernels (decode FP32 activations; prefill binary16
+activations with FP32 accumulation).
 
 | Check | Result |
 | --- | --- |
 | GPU decode vs scalar reference | Mean KL 6.3e-7 (limit 1e-5), max 6.2e-6, top-1 22/22 |
 | Eight-row verification | Bit-identical to single-token decode; the binary16 GEMV rounds every width from 1 to 16 rows identically (`gemma4.projection_ops`) |
-| GPU prefill vs scalar reference | Mean KL 0.0025 (limit 0.015), max 0.017, top-1 22/22 |
-| Bulk prefill vs exact rows, 1542-token conversation | Mean KL 0.029 (limit 0.15), top-1 1474/1542 |
-| Bulk prefill vs exact rows, 1353-token repetitive prompt (reported) | Mean KL 1.41, top-1 1018/1353 |
+| GPU prefill vs scalar reference | Mean KL 4.7e-6 (limit 0.015), max 2.7e-5, top-1 22/22 (Q8_1 Q8_0 inputs: 0.0025) |
+| Bulk prefill vs exact rows, 1542-token conversation | Mean KL 0.00012 (limit 0.15), top-1 1539/1542 (before: 0.029, 1474/1542) |
+| Bulk prefill vs exact rows, 1353-token repetitive prompt (reported) | Mean KL 0.19, top-1 1249/1353 (before: 1.41, 1018/1353) |
 | Greedy MTP vs single-token decode, batched sessions, session state | Identical token IDs; bit-for-bit continuation (`gemma4.target`) |
 | Image sessions | `gemma4.vision_session` passes |
 

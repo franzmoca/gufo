@@ -138,11 +138,13 @@ void PostAttentionNorm(const float* o, const float* post_norm, float* x,
 
 /// x[r] = (x[r] + rms(f[r]) * post_norm) * scale;
 /// h[r] = rms(x[r]) * next_norm (next_norm null skips h); with `q8`, h is
-/// written as the Q8_1 prefill activation instead (see PostAttentionNorm).
+/// written as the Q8_1 prefill activation instead, and `h_half` receives a
+/// binary16 copy (a null h then skips the FP32 row; see PostAttentionNorm).
 void PostFeedForwardNorm(const float* f, const float* post_norm, float scale,
                          float* x, const float* next_norm, float* h,
                          std::uint32_t rows, std::uint32_t dim, float eps,
-                         hipStream_t stream, void* q8 = nullptr);
+                         hipStream_t stream, void* q8 = nullptr,
+                         void* h_half = nullptr);
 
 /// out = gelu_tanh(gate) * up, elementwise over `count` values.
 void GeGlu(const float* gate, const float* up, float* out, std::size_t count,

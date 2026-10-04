@@ -763,6 +763,75 @@ void CheckRoutedPrefill(const Format& f, std::uint32_t m, std::uint32_t k,
   }
 }
 
+/// The dense binary16 prefill GEMM (dense models' K-quant projections)
+/// against the routed GEMM over an identity routing, bit for bit, with FP32
+/// and fused-GeGLU outputs, at row counts that end inside a token tile and
+/// an m whose last row block is partial.
+void CheckDensePrefill(const Format& f, std::uint32_t m, std::uint32_t k,
+                       std::mt19937& rng) {
+  constexpr std::uint32_t kTile = 96;
+  const auto w = RandomMatrix(f, m, k, rng);
+  auto* dw = Device(w.data(), w.size());
+  for (const std::uint32_t rows : {1U, 97U, 300U}) {
+    const auto x = Normal(std::size_t{rows} * k, 1.0F, rng);
+    std::vector<__half> xh(x.size());
+    for (std::size_t i = 0; i < x.size(); ++i) {
+      xh[i] = __float2half(x[i]);
+    }
+    // One expert whose 16-padded bucket holds every row in order.
+    const std::uint32_t padded = (rows + 15) / 16 * 16;
+    std::vector<std::int32_t> ids(padded, -1);
+    std::iota(ids.begin(), ids.begin() + rows, 0);
+    std::vector<std::int32_t> tiles;
+    for (std::uint32_t j = 0; j * kTile < padded; ++j) {
+      tiles.push_back(static_cast<std::int32_t>(j << 16));
+    }
+    const std::vector<std::int32_t> bounds = {
+        0, static_cast<std::int32_t>(padded)};
+    auto* dx = Device(xh.data(), xh.size());
+    auto* dids = Device(ids.data(), ids.size());
+    auto* dtiles = Device(tiles.data(), tiles.size());
+    auto* dbounds = Device(bounds.data(), bounds.size());
+    const auto n_tiles = static_cast<std::uint32_t>(tiles.size());
+    float *routed = nullptr, *dense = nullptr;
+    __half *routed_half = nullptr, *dense_half = nullptr;
+    HIP_CHECK(hipMalloc(&routed, std::size_t{rows} * m * 4));
+    HIP_CHECK(hipMalloc(&dense, std::size_t{rows} * m * 4));
+    HIP_CHECK(hipMalloc(&routed_half, std::size_t{rows} * m));
+    HIP_CHECK(hipMalloc(&dense_half, std::size_t{rows} * m));
+    Require(g4k::LaunchRoutedHalfGemm(f.format, dw, dx, dtiles, n_tiles, kTile,
+                                      dbounds, dids, dids, routed, nullptr, m,
+                                      k, nullptr) &&
+                g4k::LaunchDenseHalfGemm(f.format, dw, dx, dense, nullptr, rows,
+                                         m, k, nullptr) &&
+                g4k::LaunchRoutedHalfGemm(f.format, dw, dx, dtiles, n_tiles,
+                                          kTile, dbounds, dids, dids, nullptr,
+                                          routed_half, m, k, nullptr, true) &&
+                g4k::LaunchDenseHalfGemm(f.format, dw, dx, nullptr, dense_half,
+                                         rows, m, k, nullptr, true),
+            "dense prefill GEMM rejected " + std::string(f.name));
+    const auto a = Host(routed, std::size_t{rows} * m);
+    const auto b = Host(dense, std::size_t{rows} * m);
+    Require(std::memcmp(a.data(), b.data(), a.size() * 4) == 0,
+            std::string(f.name) + ": dense prefill differs from routed at " +
+                std::to_string(rows) + " rows");
+    const auto ah = Host(routed_half, std::size_t{rows} * m / 2);
+    const auto bh = Host(dense_half, std::size_t{rows} * m / 2);
+    Require(std::memcmp(ah.data(), bh.data(), ah.size() * 2) == 0,
+            std::string(f.name) + ": dense GeGLU differs from routed at " +
+                std::to_string(rows) + " rows");
+    for (void* p :
+         {static_cast<void*>(dx), static_cast<void*>(dids),
+          static_cast<void*>(dtiles), static_cast<void*>(dbounds),
+          static_cast<void*>(routed), static_cast<void*>(dense),
+          static_cast<void*>(routed_half), static_cast<void*>(dense_half)}) {
+      HIP_CHECK(hipFree(p));
+    }
+  }
+  std::cout << "dense prefill " << f.name << ": equals routed\n";
+  HIP_CHECK(hipFree(dw));
+}
+
 }  // namespace
 
 int main() {
@@ -801,6 +870,10 @@ int main() {
     }
     for (const Format& f : {q51, q80, f16}) {
       CheckRoutedPrefill(f, kHidden, kWidth, false, rng);
+    }
+    // A fused gate/up of 2 x 1000 rows: partial row blocks both ways.
+    for (const Format& f : {q4k, q5k, q6k}) {
+      CheckDensePrefill(f, 2000, kHidden, rng);
     }
   });
 }

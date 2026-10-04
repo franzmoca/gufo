@@ -189,7 +189,8 @@ __device__ __forceinline__ __half SaturatedHalf(float v) {
 /// 64 gate rows and the last four the matching up rows (m / 2 further), and
 /// the block writes GeGLU of the binary16-rounded pair, as the separate
 /// GeGluPackedHalf pass would, into `out_half` rows of width m / 2.
-template<ExpertFormat F, int kTileTokens, bool kGeGlu = false>
+template<ExpertFormat F, int kTileTokens, bool kGeGlu = false,
+         bool kDense = false>
 __global__ void __launch_bounds__(kThreads)
     RoutedHalfKQuantKernel(const std::uint8_t* __restrict__ w,
                            const __half* __restrict__ x,
@@ -199,7 +200,8 @@ __global__ void __launch_bounds__(kThreads)
                            const std::int32_t* __restrict__ rows_out,
                            float* __restrict__ out,
                            __half* __restrict__ out_half, std::uint32_t m,
-                           std::uint32_t k) {
+                           std::uint32_t k, std::uint32_t dense_rows = 0,
+                           std::uint32_t dense_group = 0) {
   constexpr bool kQ6 = F == ExpertFormat::kQ6_K;
   constexpr bool kQ4 = F == ExpertFormat::kQ4_K;
   constexpr int kStride = kRowStride<F>;
@@ -212,11 +214,38 @@ __global__ void __launch_bounds__(kThreads)
       __attribute__((aligned(16))) std::uint8_t s_rows[kRowsPerBlock * kStride];
   __shared__
       __attribute__((aligned(16))) __half s_act[kTileTokens * kActStride];
-  const std::int32_t tile = tiles[blockIdx.y];
-  const int expert = tile & 0xFFFF;
-  const int t_local = (tile >> 16) * kTileTokens;
-  const int bucket_begin = pad_bounds[expert];
-  const int bucket_rows = pad_bounds[expert + 1] - bucket_begin;
+  int expert = 0;
+  int t_local = 0;
+  int bucket_begin = 0;
+  int bucket_rows = 0;
+  unsigned row_block = blockIdx.x;
+  if constexpr (kDense) {
+    // One matrix over rows 0..dense_rows of x and out, on a 1-D grid that
+    // takes `dense_group` token tiles for one row block, then the next row
+    // block: the blocks running together share a weight tile and a few
+    // activation tiles.
+    const unsigned token_tiles = (dense_rows + kTileTokens - 1) / kTileTokens;
+    const unsigned span = dense_group * (gridDim.x / token_tiles);
+    const unsigned first = blockIdx.x / span * dense_group;
+    const unsigned width = min(dense_group, token_tiles - first);
+    const unsigned within = blockIdx.x % span;
+    t_local = static_cast<int>(first + within % width) * kTileTokens;
+    row_block = within / width;
+    bucket_rows = static_cast<int>(dense_rows);
+  } else {
+    const std::int32_t tile = tiles[blockIdx.y];
+    expert = tile & 0xFFFF;
+    t_local = (tile >> 16) * kTileTokens;
+    bucket_begin = pad_bounds[expert];
+    bucket_rows = pad_bounds[expert + 1] - bucket_begin;
+  }
+  // Bucket row t's activation and output rows (the identity when dense).
+  const auto source_row = [&](int t) {
+    return kDense ? t : rows_in[bucket_begin + t];
+  };
+  const auto dest_row = [&](int t) {
+    return kDense ? t : rows_out[bucket_begin + t];
+  };
   if (t_local >= bucket_rows) {
     return;
   }
@@ -239,14 +268,14 @@ __global__ void __launch_bounds__(kThreads)
   const auto matrix_row = [&](int l) -> std::uint32_t {
     if constexpr (kGeGlu) {
       return (l >= kRowsPerBlock / 2 ? half_m : 0U) +
-             blockIdx.x * (kRowsPerBlock / 2) + l % (kRowsPerBlock / 2);
+             row_block * (kRowsPerBlock / 2) + l % (kRowsPerBlock / 2);
     } else {
-      return blockIdx.x * kRowsPerBlock + l;
+      return row_block * kRowsPerBlock + l;
     }
   };
   const std::uint32_t f_global = matrix_row(f_row);
   const bool f_live =
-      kGeGlu ? blockIdx.x * (kRowsPerBlock / 2) + f_row % (kRowsPerBlock / 2) <
+      kGeGlu ? row_block * (kRowsPerBlock / 2) + f_row % (kRowsPerBlock / 2) <
                    half_m
              : f_global < m;
   const std::uint8_t* f_ptr =
@@ -344,7 +373,7 @@ __global__ void __launch_bounds__(kThreads)
     const int t = chunk / 16;
     a_src[i] = -1;
     if (chunk < kActChunks && t_local + t < bucket_rows) {
-      const std::int32_t src = rows_in[bucket_begin + t_local + t];
+      const std::int32_t src = source_row(t_local + t);
       if (src >= 0) {
         a_src[i] = src * static_cast<std::int32_t>(k) + (chunk % 16) * 8;
       }
@@ -450,7 +479,7 @@ __global__ void __launch_bounds__(kThreads)
       if (t >= bucket_rows) {
         continue;
       }
-      const std::int32_t dst = rows_out[bucket_begin + t];
+      const std::int32_t dst = dest_row(t);
       if (dst < 0) {
         continue;
       }
@@ -459,7 +488,7 @@ __global__ void __launch_bounds__(kThreads)
 #pragma unroll
       for (int i = 0; i < 8; ++i) {
         const std::uint32_t r =
-            blockIdx.x * (kRowsPerBlock / 2) +
+            row_block * (kRowsPerBlock / 2) +
             static_cast<std::uint32_t>(wave * 16 + 2 * i + half);
         if (r < half_m) {
           const __half up =
@@ -478,7 +507,7 @@ __global__ void __launch_bounds__(kThreads)
     if (t >= bucket_rows) {
       continue;
     }
-    const std::int32_t dst = rows_out[bucket_begin + t];
+    const std::int32_t dst = dest_row(t);
     if (dst < 0) {
       continue;
     }
@@ -486,7 +515,7 @@ __global__ void __launch_bounds__(kThreads)
 #pragma unroll
     for (int i = 0; i < 8; ++i) {
       const std::uint32_t r =
-          blockIdx.x * kRowsPerBlock +
+          row_block * kRowsPerBlock +
           static_cast<std::uint32_t>(wave * 16 + 2 * i + half);
       if (r < m) {
         if (out_half != nullptr) {
@@ -930,6 +959,52 @@ __global__ void __launch_bounds__(kThreads)
 }
 
 }  // namespace
+
+bool LaunchDenseHalfGemm(ExpertFormat format, const void* w, const void* x,
+                         float* out, void* out_half, std::uint32_t rows,
+                         std::uint32_t m, std::uint32_t k, hipStream_t stream,
+                         bool geglu) {
+  if (rows == 0 || k % 256 != 0 || (out == nullptr) == (out_half == nullptr) ||
+      (geglu && (out_half == nullptr || m % 2 != 0))) {
+    return false;
+  }
+  constexpr int kTile = 96;
+  // Token tiles per row-block sweep (cold 2048-row Gemma 31B shapes: 2 or 4
+  // beat both one and every tile).
+  constexpr std::uint32_t kGroup = 2;
+  const std::uint32_t token_tiles = (rows + kTile - 1) / kTile;
+  const std::uint32_t row_blocks =
+      geglu ? (m / 2 + kRowsPerBlock / 2 - 1) / (kRowsPerBlock / 2)
+            : (m + kRowsPerBlock - 1) / kRowsPerBlock;
+  const dim3 grid(token_tiles * row_blocks);
+  const auto* wb = static_cast<const std::uint8_t*>(w);
+  const auto* xh = static_cast<const __half*>(x);
+  auto* oh = static_cast<__half*>(out_half);
+  const auto launch = [&]<ExpertFormat F>() {
+    if (geglu) {
+      RoutedHalfKQuantKernel<F, kTile, true, true>
+          <<<grid, kThreads, 0, stream>>>(wb, xh, nullptr, nullptr, nullptr,
+                                          nullptr, out, oh, m, k, rows, kGroup);
+    } else {
+      RoutedHalfKQuantKernel<F, kTile, false, true>
+          <<<grid, kThreads, 0, stream>>>(wb, xh, nullptr, nullptr, nullptr,
+                                          nullptr, out, oh, m, k, rows, kGroup);
+    }
+  };
+  switch (format) {
+    case ExpertFormat::kQ4_K:
+      launch.template operator()<ExpertFormat::kQ4_K>();
+      return true;
+    case ExpertFormat::kQ5_K:
+      launch.template operator()<ExpertFormat::kQ5_K>();
+      return true;
+    case ExpertFormat::kQ6_K:
+      launch.template operator()<ExpertFormat::kQ6_K>();
+      return true;
+    default:
+      return false;
+  }
+}
 
 bool LaunchRoutedHalfGemm(ExpertFormat format, const void* w, const void* x,
                           const std::int32_t* tiles, std::uint32_t n_tiles,

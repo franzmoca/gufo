@@ -50,6 +50,13 @@ struct DeviceDraft {
 };
 
 /// The target (and optionally its MTP drafter) resident on the GPU.
+/// Projection formats with a binary16-activation prefill GEMM.
+[[nodiscard]] constexpr bool HalfPrefillFormat(core::GgmlType type) noexcept {
+  return type == core::GgmlType::kQ4_K || type == core::GgmlType::kQ5_K ||
+         type == core::GgmlType::kQ6_K || type == core::GgmlType::kQ8_0 ||
+         type == core::GgmlType::kF16;
+}
+
 class DeviceModel {
 public:
   ~DeviceModel();
@@ -92,6 +99,9 @@ public:
   [[nodiscard]] std::size_t max_half_cols() const noexcept {
     return max_half_cols_;
   }
+  /// Whether prefill runs on binary16 activations: expert models, and dense
+  /// models whose every projection has a binary16 prefill GEMM.
+  [[nodiscard]] bool half_prefill() const noexcept { return half_prefill_; }
 
 private:
   DeviceModel() = default;
@@ -108,6 +118,7 @@ private:
   std::size_t bytes_{0};
   std::size_t max_cols_{0};
   std::size_t max_half_cols_{0};
+  bool half_prefill_{false};
 };
 
 }  // namespace gufo::models::gemma4::rocm

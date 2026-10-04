@@ -298,6 +298,27 @@ std::unique_ptr<DeviceModel> DeviceModel::Upload(
     return nullptr;
   }
   m->max_half_cols_ = up.max_half_cols;
+  m->half_prefill_ = m->config_.HasExperts();
+  if (!m->half_prefill_) {
+    // A dense model takes binary16 prefill when every projection has its
+    // GEMM; each projection input is then staged as binary16.
+    bool all = true;
+    std::size_t widest = 0;
+    for (const DeviceLayer& l : m->layers_) {
+      for (const DeviceTensor* t :
+           {&l.attn_qkv, &l.attn_q, &l.attn_k, &l.attn_v, &l.attn_output,
+            &l.ffn_gate_up, &l.ffn_gate, &l.ffn_up, &l.ffn_down}) {
+        if (!t->empty()) {
+          all = all && HalfPrefillFormat(t->type);
+          widest = std::max<std::size_t>(widest, t->cols);
+        }
+      }
+    }
+    m->half_prefill_ = all;
+    if (all) {
+      m->max_half_cols_ = std::max(m->max_half_cols_, widest);
+    }
+  }
   if (!up.halves.empty()) {
     // Every BF16 weight from 2^-17 to 65504 in magnitude is a binary16 value;
     // one past the binary16 range would become infinite.

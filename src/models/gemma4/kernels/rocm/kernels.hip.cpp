@@ -287,7 +287,7 @@ __global__ void __launch_bounds__(kBlock)
     PostFeedForwardNormKernel(const float* f, const float* post_norm,
                               float scale, float* x, const float* next_norm,
                               float* h, std::uint32_t dim, float eps, void* q8,
-                              std::uint32_t rows) {
+                              std::uint32_t rows, __half* h_half) {
   constexpr std::uint32_t kRegs = RowRegisters<kBlock>();
   __shared__ float scratch[kBlock / kWave];
   const std::size_t base = static_cast<std::size_t>(blockIdx.x) * dim;
@@ -320,7 +320,7 @@ __global__ void __launch_bounds__(kBlock)
     return;
   }
   const float r2 = RmsScale(BlockSumOf<kBlock>(ss2, scratch), dim, eps);
-  StoreNormedRow<kBlock>(xv, r2, next_norm, h, q8, rows, dim);
+  StoreNormedRow<kBlock>(xv, r2, next_norm, h, q8, rows, dim, h_half);
 }
 
 // ---------------------------------------------------------------------------
@@ -1511,19 +1511,20 @@ void PostAttentionNorm(const float* o, const float* post_norm, float* x,
 void PostFeedForwardNorm(const float* f, const float* post_norm, float scale,
                          float* x, const float* next_norm, float* h,
                          std::uint32_t rows, std::uint32_t dim, float eps,
-                         hipStream_t stream, void* q8) {
+                         hipStream_t stream, void* q8, void* h_half) {
   if (dim > kRowElements) {
     throw std::invalid_argument("PostFeedForwardNorm row is too wide");
   }
+  auto* hh = static_cast<__half*>(h_half);
   if (q8 == nullptr && rows <= kSplitRows) {
     PostFeedForwardNormKernel<kWideNormThreads>
         <<<rows, kWideNormThreads, 0, stream>>>(
-            f, post_norm, scale, x, next_norm, h, dim, eps, q8, rows);
+            f, post_norm, scale, x, next_norm, h, dim, eps, q8, rows, hh);
     return;
   }
   PostFeedForwardNormKernel<kThreads>
       <<<q8 != nullptr ? Q8Rows(rows) : rows, kThreads, 0, stream>>>(
-          f, post_norm, scale, x, next_norm, h, dim, eps, q8, rows);
+          f, post_norm, scale, x, next_norm, h, dim, eps, q8, rows, hh);
 }
 
 void GeGluQuantize(const float* gate, const float* up, void* q8,
