@@ -47,10 +47,10 @@ copies are verified like drafts (sampled: as point-mass proposals under the
 same rule); `gemma4.target` checks greedy equality and seeded replay on a
 prompt that copies a paragraph, with accepted copies.
 
-## UD-Q8_K_XL
+## Q8 quant
 
-Measured September 30, 2026 with `gemma4.target` (same prompts and limits as
-above, Q8_0 drafter). Its F16 projections run on the binary16 kernels
+UD-Q8_K_XL, measured September 30, 2026 with `gemma4.target` (same prompts
+and limits as above, Q8_0 drafter). Its F16 projections run on the binary16 kernels
 (decode FP32 activations; prefill binary16 activations with FP32
 accumulation, the Q8_0 projections keeping Q8_1 activations).
 
