@@ -220,6 +220,7 @@ public:
 
   struct SpeculativeStats {
     std::uint64_t cycles{0};
+    std::uint64_t verified{0};  ///< cycles that verified at least one draft
     std::uint64_t drafted{0};   ///< MTP drafts and copied tokens
     std::uint64_t accepted{0};  ///< MTP drafts and copied tokens
     std::uint64_t copied{0};    ///< prompt-lookup tokens among `drafted`

@@ -3424,6 +3424,7 @@ public:
                                  .piece = model_->TokenText(token)});
     }
     const auto after = session.Statistics();
+    step.draft_rounds = after.verified - before.verified;
     step.draft_tokens = after.drafted - before.drafted;
     step.draft_accepted_tokens = after.accepted - before.accepted;
     return step;
@@ -3515,6 +3516,7 @@ public:
                                    .piece = model_->TokenText(token)});
       }
       const auto after = batch[k].session->Statistics();
+      step.draft_rounds = after.verified - before[i].verified;
       step.draft_tokens = after.drafted - before[i].drafted;
       step.draft_accepted_tokens = after.accepted - before[i].accepted;
       step.execution_plan = plan;

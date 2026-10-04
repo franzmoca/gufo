@@ -801,6 +801,7 @@ void Session::FinishCycle(Cycle& cycle, std::span<const float> logits,
   valid_ = true;
   pending_ = result->tokens.back();
   stats_.cycles += 1;
+  stats_.verified += rows.size() > 1 ? 1 : 0;
   stats_.drafted += rows.size() - 1;
   stats_.accepted += accepted;
   // Copies trail the MTP drafts.
