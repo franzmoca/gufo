@@ -3,7 +3,7 @@
 from copy import deepcopy
 import sys
 
-from tool_agent import skip_check
+from cache_concurrency import skip_check
 
 
 def check_cache_growth(client, model, checks, chat_result, preset=None):

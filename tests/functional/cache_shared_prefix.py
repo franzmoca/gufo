@@ -9,8 +9,7 @@ grid checkpoint, and must answer as uncached controls do.
 from copy import deepcopy
 import sys
 
-from cache_concurrency import background, system_prompt
-from tool_agent import skip_check
+from cache_concurrency import background, skip_check, system_prompt
 
 CODES = ("ALPHA", "BETA", "GAMMA", "DELTA")
 # Tokens around the divergence point a restore may still miss: template

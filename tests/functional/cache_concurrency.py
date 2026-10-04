@@ -15,12 +15,15 @@ import threading
 import time
 from urllib.parse import urlsplit
 
-from tool_agent import skip_check
-
 CODES = ("ALPHA", "BETA", "GAMMA", "DELTA")
 # Tokens after the point where two prompts diverge that a follower may still
 # prefill: the scheduler's checkpoint slack plus tokenizer merges at the split.
 TAIL_ALLOWANCE = 96
+
+
+def skip_check(checks, name, reason):
+    checks[name] = {"skipped": reason}
+    print(f"SKIP {name}: {reason}", file=sys.stderr, flush=True)
 
 
 def system_prompt(label, lines):
