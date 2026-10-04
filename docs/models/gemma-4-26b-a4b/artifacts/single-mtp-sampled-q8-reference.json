@@ -14,15 +14,15 @@
       "gpuName": "AMD Radeon 8060S Graphics",
       "gpuPciId": "1002:1586",
       "kernelRelease": "7.2.7-200.fc44.x86_64",
-      "memoryTotalBytes": 133616873472,
+      "memoryTotalBytes": 133610651648,
       "memoryType": "LPDDR5X (Unified)",
       "rocmVersion": "7.2.3",
       "schemaVersion": "1.0.0"
     },
-    "fingerprintId": "f94b1af68c1490af59badc77b6ee2b002119985fa41fd820f3db1d38a94eb12a",
+    "fingerprintId": "daef66fd95bad8dddd2baaad4893b28692eff13447c073eaae38eff2dd3bbfa4",
     "schemaVersion": "1.0.0"
   },
-  "measuredOn": "2026-09-29",
+  "measuredOn": "2026-10-04",
   "mode": "mtp",
   "model": {
     "id": "Gemma-4-26B-A4B-It",
@@ -36,17 +36,17 @@
   "referenceName": "llama.cpp",
   "rows": {
     "0": {
-      "acceptance": 28.84,
-      "acceptance_sd": 1.95,
-      "accepted_per_step": 1.12,
-      "accepted_per_step_sd": 0.07,
-      "command": "llama-server -m gemma-4-26B-A4B-it-UD-Q8_K_XL.gguf -c 133760 -np 1 --port 46383 --host 127.0.0.1 --alias bench -ngl 999 -fa on --cache-reuse 0 --jinja --reasoning off --cache-ram 0 --spec-type draft-mtp --spec-draft-model mtp-gemma-4-26B-A4B-it.gguf --spec-draft-ngl 999 --spec-draft-n-max 4",
+      "acceptance": 30.45,
+      "acceptance_sd": 5.22,
+      "accepted_per_step": 1.17,
+      "accepted_per_step_sd": 0.19,
+      "command": "llama-server -m gemma-4-26B-A4B-it-UD-Q8_K_XL.gguf -c 133760 -np 1 --port 59309 --host 127.0.0.1 --alias bench -ngl 999 -fa on --cache-reuse 0 --jinja --reasoning off --cache-ram 0 --spec-type draft-mtp --spec-draft-model mtp-gemma-4-26B-A4B-it.gguf --spec-draft-ngl 999 --spec-draft-n-max 4",
       "counts": [
         {
           "cache_n": 1,
-          "completion_sha256": "6b8bff7b7956794112bc81391c56b5e072e75d71abcb7c8582f8845414b0b981",
-          "draft_n": 236,
-          "draft_n_accepted": 67,
+          "completion_sha256": "e79bec061ef15cdd50f0dad707ee637645210d5be8d427f4f7d69f8ee017cf9c",
+          "draft_n": 251,
+          "draft_n_accepted": 63,
           "predicted_n": 128,
           "prompt_n": 2037
         },
@@ -65,13 +65,29 @@
           "draft_n_accepted": 66,
           "predicted_n": 128,
           "prompt_n": 2050
+        },
+        {
+          "cache_n": 1,
+          "completion_sha256": "a267b602ba74c2b9121549317845d0f3007f64ba1c9e7d0b668935b8abe3e637",
+          "draft_n": 228,
+          "draft_n_accepted": 69,
+          "predicted_n": 128,
+          "prompt_n": 2034
+        },
+        {
+          "cache_n": 1,
+          "completion_sha256": "298ca4849e1d47e0ada8404de756562c86e283d34bd467b58dfbdad8c4de045c",
+          "draft_n": 196,
+          "draft_n_accepted": 76,
+          "predicted_n": 128,
+          "prompt_n": 2038
         }
       ],
-      "pp": 1360.7,
-      "pp_sd": 13.47,
-      "samples": 3,
-      "tg": 38.41,
-      "tg_sd": 1.34,
+      "pp": 1364.58,
+      "pp_sd": 5.04,
+      "samples": 5,
+      "tg": 39.46,
+      "tg_sd": 3.53,
       "workload": "story"
     }
   },
@@ -86,7 +102,7 @@
       "-np",
       "1",
       "--port",
-      "46383",
+      "59309",
       "--host",
       "127.0.0.1",
       "--alias",
@@ -115,7 +131,7 @@
   "source": {
     "buildMode": "nix-release",
     "dirty": true,
-    "revision": "beeb28a4309f6ab2d4aac14cfe635a6ff4e2d064"
+    "revision": "7b88d9439002c608cfcf69b63323e012f9c2b5d7"
   },
   "table": "single-mtp-sampled-q8",
   "target": "reference"

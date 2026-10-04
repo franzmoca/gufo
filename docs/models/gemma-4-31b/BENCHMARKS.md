@@ -82,14 +82,14 @@ text.
 
 The sampler of a typical chat front end: temperature 1, top-k 64, top-p 0.95,
 repeat penalty 1.05; a story-writing turn after the cached prefix (the prefix
-turn itself is greedy). Mean of three requests with seeds 1–3; sampled text
+turn itself is greedy). Mean of five requests with seeds 1–5; sampled text
 differs between engines and runs, so acceptance varies more than in the
 greedy tables.
 
 <!-- bench:single-mtp-sampled -->
 | Gemma 4 31B Q4 MTP<br>Depth (tokens) | Gufo pp (tok/s) | llama.cpp pp (tok/s) | Gain | Gufo tg (tok/s) | llama.cpp tg (tok/s) | Gain |
 | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| 0 | 417.56 ± 3.50 | 293.21 ± 0.96 | +42.4% | 21.42 ± 0.31 | 18.12 ± 1.97 | +18.2% |
+| 0 | 429.62 ± 8.49 | 291.19 ± 2.26 | +47.5% | 21.98 ± 0.71 | 17.77 ± 1.56 | +23.7% |
 <!-- /bench -->
 
 ![Single user, sampled MTP](artifacts/charts/single-mtp-sampled.svg)
@@ -99,7 +99,7 @@ greedy tables.
 <!-- bench:single-mtp-sampled-q8 -->
 | Gemma 4 31B Q8 MTP<br>Depth (tokens) | Gufo pp (tok/s) | llama.cpp pp (tok/s) | Gain | Gufo tg (tok/s) | llama.cpp tg (tok/s) | Gain |
 | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| 0 | 428.11 ± 4.65 | 297.12 ± 4.39 | +44.1% | 14.18 ± 0.36 | 12.70 ± 0.51 | +11.7% |
+| 0 | 425.52 ± 12.93 | 294.38 ± 2.39 | +44.5% | 14.37 ± 0.73 | 12.28 ± 0.77 | +17.0% |
 <!-- /bench -->
 
 ![Single user, sampled MTP](artifacts/charts/single-mtp-sampled-q8.svg)

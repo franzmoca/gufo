@@ -113,12 +113,14 @@ differ per depth (artifacts). Over the same HTTP path Gufo's AR decodes at
 ## Single user, sampled MTP
 
 Temperature 1, top-k 64, top-p 0.95, repeat penalty 1.05; a story-writing turn
-after the cached prefix. Mean of three requests with seeds 1–3.
+after the cached prefix. Mean of five requests with seeds 1–5. Seed 3's prompt
+is 2051 tokens; a prefill chunk past 2048 tokens runs about 5% slower, which
+widens Gufo's prefill spread.
 
 <!-- bench:single-mtp-sampled-q4 -->
 | Gemma 4 26B-A4B UD-Q4_K_XL MTP<br>Depth (tokens) | Gufo pp (tok/s) | llama.cpp pp (tok/s) | Gain | Gufo tg (tok/s) | llama.cpp tg (tok/s) | Gain |
 | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| 0 | 3544.21 ± 5.34 | 1604.71 ± 6.23 | +120.9% | 63.43 ± 1.99 | 46.41 ± 1.54 | +36.7% |
+| 0 | 3566.83 ± 147.91 | 1580.72 ± 16.34 | +125.6% | 71.07 ± 4.88 | 51.02 ± 3.74 | +39.3% |
 <!-- /bench -->
 
 ![Single user, sampled MTP](artifacts/charts/single-mtp-sampled-q4.svg)
@@ -128,7 +130,7 @@ after the cached prefix. Mean of three requests with seeds 1–3.
 <!-- bench:single-mtp-sampled-q6 -->
 | Gemma 4 26B-A4B UD-Q6_K_XL MTP<br>Depth (tokens) | Gufo pp (tok/s) | llama.cpp pp (tok/s) | Gain | Gufo tg (tok/s) | llama.cpp tg (tok/s) | Gain |
 | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| 0 | 3422.19 ± 5.80 | 1383.68 ± 1.03 | +147.3% | 58.20 ± 1.72 | 45.17 ± 3.99 | +28.8% |
+| 0 | 3409.56 ± 143.67 | 1360.32 ± 10.89 | +150.6% | 61.71 ± 1.67 | 45.05 ± 2.29 | +37.0% |
 <!-- /bench -->
 
 ![Single user, sampled MTP](artifacts/charts/single-mtp-sampled-q6.svg)
@@ -138,7 +140,7 @@ after the cached prefix. Mean of three requests with seeds 1–3.
 <!-- bench:single-mtp-sampled-q8 -->
 | Gemma 4 26B-A4B UD-Q8_K_XL MTP<br>Depth (tokens) | Gufo pp (tok/s) | llama.cpp pp (tok/s) | Gain | Gufo tg (tok/s) | llama.cpp tg (tok/s) | Gain |
 | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| 0 | 3373.53 ± 20.25 | 1360.70 ± 13.47 | +147.9% | 60.02 ± 1.35 | 38.41 ± 1.34 | +56.3% |
+| 0 | 3352.23 ± 139.99 | 1364.58 ± 5.04 | +145.7% | 62.63 ± 3.16 | 39.46 ± 3.53 | +58.7% |
 <!-- /bench -->
 
 ![Single user, sampled MTP](artifacts/charts/single-mtp-sampled-q8.svg)

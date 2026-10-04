@@ -52,16 +52,15 @@ per depth (artifacts); llama.cpp's repetitive acceptance collapses past 32K.
 ## Single user, sampled MTP
 
 Temperature 1, top-k 64, top-p 0.95, repeat penalty 1.05; a story-writing turn
-after the cached prefix. Mean of three requests with seeds 1–3. At 0–4K
-Gufo's cycle is cheaper (105–109 vs 114–122 ms) but its confidence floor
-proposes 2.4 drafts per cycle against llama.cpp's fixed four, so it accepts
-fewer per cycle (1.0–1.3 vs 1.5); the floor was tuned on the standard 31B's
-Q8_0 drafter. The 4K gap is within one standard deviation.
+after the cached prefix. Mean of five requests with seeds 1–5. Both engines
+accept about as many drafts per request (70–78 vs 69–76), but Gufo's calibrated
+draft length proposes fewer (160–190 vs 198–225; 43% vs 34% accepted), so less
+of each cycle verifies drafts that are rejected.
 
 <!-- bench:single-mtp-sampled -->
 | Gemma 4 31B QAT MTP<br>Depth (tokens) | Gufo pp (tok/s) | llama.cpp pp (tok/s) | Gain | Gufo tg (tok/s) | llama.cpp tg (tok/s) | Gain |
 | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| 0 | 458.80 ± 5.36 | 313.73 ± 2.00 | +46.2% | 22.05 ± 1.05 | 21.79 ± 0.63 | +1.2% |
+| 0 | 452.89 ± 7.28 | 317.38 ± 2.46 | +42.7% | 24.29 ± 1.47 | 19.84 ± 1.03 | +22.4% |
 <!-- /bench -->
 
 ![Single user, sampled MTP](artifacts/charts/single-mtp-sampled.svg)
