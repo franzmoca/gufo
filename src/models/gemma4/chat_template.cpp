@@ -768,7 +768,7 @@ std::optional<RenderedPrompt> ChatTemplate::Render(
         static_cast<std::ptrdiff_t>(index) > last_user ||
         (options.preserve_thinking && !message.tool_calls.empty());
     if (!message.thought.empty() && thinking_gate) {
-      out += std::string(kThoughtStart) + message.thought + "\n" +
+      out += std::string(kThoughtStart) + message.thought +
              std::string(kThoughtEnd);
     }
 

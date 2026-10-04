@@ -19,7 +19,24 @@ std::string Sha256(const std::string& text) {
       reinterpret_cast<const std::uint8_t*>(text.data()), text.size()));
 }
 
-/// Every case must render byte-identically to the Jinja source.
+/// The renderer ends a replayed thought at <channel|>, where the Jinja source
+/// adds a newline Gemma does not generate. Restores it for Jinja parity.
+std::string WithJinjaThoughtNewlines(
+    std::string text,
+    std::span<const gufo::tokenization::ChatMessage> messages) {
+  for (const auto& message : messages) {
+    if (message.thought.empty())
+      continue;
+    const auto replayed = std::string(g4::kThoughtStart) + message.thought +
+                          std::string(g4::kThoughtEnd);
+    if (const auto at = text.find(replayed); at != std::string::npos)
+      text.insert(at + g4::kThoughtStart.size() + message.thought.size(), "\n");
+  }
+  return text;
+}
+
+/// Every case must render byte-identically to the Jinja source, apart from
+/// the documented end of a replayed thought.
 void CheckGoldens() {
   const auto goldens = gemma4_test::ReadJson(GUFO_CHAT_TEMPLATE_HF_GOLDENS);
   const auto* gemma = goldens.find("gemma4");
@@ -49,7 +66,8 @@ void CheckGoldens() {
     }
     const auto* golden = expected->find(c.name);
     Require(golden != nullptr, c.name + ": no golden");
-    if (Sha256(rendered->text) != golden->member_str("rendered_sha256")) {
+    if (Sha256(WithJinjaThoughtNewlines(rendered->text, c.messages)) !=
+        golden->member_str("rendered_sha256")) {
       std::cerr << "---- " << c.name << " rendered ----\n"
                 << rendered->text << "\n----\n";
       throw std::runtime_error(c.name + ": rendering differs from Jinja");
@@ -133,6 +151,29 @@ void CheckShownConstants() {
           "a string const is shown as a one-value enum: " + text);
 }
 
+/// A replayed thought renders as Gemma generates it, so a continuation's
+/// prompt reproduces the reasoning and call tokens of the previous turn.
+void CheckReplayedThought() {
+  using gufo::tokenization::ChatMessage;
+  using gufo::tokenization::ChatRole;
+  ChatMessage call(ChatRole::kAssistant, "", "", "Read the file first.");
+  call.tool_calls.push_back(
+      {.id = "c", .name = "read", .arguments = {{"path", "a.py", true}}});
+  ChatMessage result(ChatRole::kTool, "x = 1");
+  result.tool_call_id = "c";
+  const std::vector<ChatMessage> messages{
+      ChatMessage(ChatRole::kUser, "Read a.py."), call, result};
+  g4::ChatOptions options;
+  options.enable_thinking = true;
+  std::string error;
+  const auto rendered = g4::ChatTemplate::Render(messages, {}, options, &error);
+  Require(rendered.has_value(), "replayed thought rendered: " + error);
+  Require(rendered->text.find("<|channel>thought\nRead the file first."
+                              "<channel|><|tool_call>call:read{") !=
+              std::string::npos,
+          "a replayed thought ends at <channel|>: " + rendered->text);
+}
+
 }  // namespace
 
 int main() {
@@ -141,5 +182,6 @@ int main() {
     CheckOptions();
     CheckRejections();
     CheckShownConstants();
+    CheckReplayedThought();
   });
 }

@@ -40,9 +40,11 @@ struct RenderedPrompt {
 /// Known, documented approximations of the Jinja source: message content
 /// parts arrive flattened by the HTTP layer, JSON numbers render as Python
 /// ints when integral (Python would print 5.0 for a float literal), text
-/// parts between two images are trimmed as one segment, and a string `const`
+/// parts between two images are trimmed as one segment, a string `const`
 /// in a tool schema is shown as the equivalent one-value `enum` (the Jinja
-/// source drops `const`).
+/// source drops `const`), and a replayed thought ends directly at
+/// `<channel|>`. The Jinja source adds a newline there that Gemma does not
+/// generate, so a replayed tool turn could not reuse its cached tokens.
 class ChatTemplate {
 public:
   [[nodiscard]] static constexpr std::string_view
