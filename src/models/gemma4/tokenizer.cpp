@@ -22,6 +22,18 @@ std::uint64_t PairKey(TokenId left, TokenId right) noexcept {
          static_cast<std::uint32_t>(right);
 }
 
+// Pre-split words from this length on are cached (shorter ones encode faster
+// than a lookup pays off), within this many bytes of text and ids.
+constexpr std::size_t kCachedWordBytes = 64;
+constexpr std::size_t kWordCacheBytes = std::size_t{64} << 20;
+
+// No valid pair has this key: token ids stay below 2^31.
+constexpr std::uint64_t kEmptyPair = ~std::uint64_t{0};
+
+std::size_t PairSlot(std::uint64_t key, std::uint32_t shift) noexcept {
+  return static_cast<std::size_t>((key * 0x9E3779B97F4A7C15ULL) >> shift);
+}
+
 void AppendUtf8(std::uint32_t cpt, std::string* out) {
   if (cpt <= 0x7F) {
     out->push_back(static_cast<char>(cpt));
@@ -235,7 +247,14 @@ std::unique_ptr<Tokenizer> Tokenizer::Create(Vocabulary v,
                      return t->tokens_[a].size() > t->tokens_[b].size();
                    });
 
-  t->merge_ranks_.reserve(v.merges.size());
+  // A power-of-two table at most half full.
+  std::uint32_t bits = 4;
+  while ((std::size_t{1} << bits) < v.merges.size() * 2) {
+    ++bits;
+  }
+  t->merge_shift_ = 64 - bits;
+  t->merges_.assign(std::size_t{1} << bits, {kEmptyPair, 0, -1});
+  const std::size_t mask = t->merges_.size() - 1;
   for (std::size_t rank = 0; rank < v.merges.size(); ++rank) {
     const std::string& merge = v.merges[rank];
     const std::size_t split = merge.find(' ', 1);
@@ -251,8 +270,22 @@ std::unique_ptr<Tokenizer> Tokenizer::Create(Vocabulary v,
       return fail("tokenizer merge " + std::to_string(rank) +
                   " references text outside the vocabulary");
     }
-    t->merge_ranks_.emplace(PairKey(*left, *right),
-                            static_cast<std::uint32_t>(rank));
+    const std::uint64_t key = PairKey(*left, *right);
+    for (std::size_t slot = PairSlot(key, t->merge_shift_);;
+         slot = (slot + 1) & mask) {
+      MergeSlot& entry = t->merges_[slot];
+      if (entry.key == key) {
+        break;  // an earlier rank already holds this pair
+      }
+      if (entry.key == kEmptyPair) {
+        entry = {key, static_cast<std::uint32_t>(rank), *merged};
+        break;
+      }
+    }
+  }
+  for (std::size_t byte = 0; byte < t->char_tokens_.size(); ++byte) {
+    const char c = static_cast<char>(byte);
+    t->char_tokens_[byte] = t->FindToken(std::string_view(&c, 1)).value_or(-1);
   }
   return t;
 }
@@ -277,12 +310,23 @@ bool Tokenizer::IsEndOfGeneration(TokenId token) const noexcept {
   return std::binary_search(eog_.begin(), eog_.end(), token);
 }
 
-std::int64_t Tokenizer::Rank(TokenId left, TokenId right) const noexcept {
+Tokenizer::Merge Tokenizer::FindMerge(TokenId left,
+                                      TokenId right) const noexcept {
   if (left < 0 || right < 0) {
-    return -1;
+    return {-1, -1};
   }
-  const auto it = merge_ranks_.find(PairKey(left, right));
-  return it == merge_ranks_.end() ? -1 : static_cast<std::int64_t>(it->second);
+  const std::uint64_t key = PairKey(left, right);
+  const std::size_t mask = merges_.size() - 1;
+  for (std::size_t slot = PairSlot(key, merge_shift_);;
+       slot = (slot + 1) & mask) {
+    const MergeSlot& entry = merges_[slot];
+    if (entry.key == key) {
+      return {entry.rank, entry.merged};
+    }
+    if (entry.key == kEmptyPair) {
+      return {-1, -1};
+    }
+  }
 }
 
 std::vector<TokenId> Tokenizer::Encode(std::string_view text, bool add_bos,
@@ -363,8 +407,43 @@ void Tokenizer::EncodeText(std::string_view raw,
     while (end < text.size() && (text[end] == '\n') == newline) {
       ++end;
     }
-    EncodeWord(std::string_view(text).substr(start, end - start), out);
+    const std::string_view word =
+        std::string_view(text).substr(start, end - start);
     start = end;
+    if (word.size() < kCachedWordBytes) {
+      EncodeWord(word, out);
+      continue;
+    }
+    {
+      std::lock_guard lock(word_cache_mutex_);
+      if (const auto it = word_index_.find(word); it != word_index_.end()) {
+        word_cache_.splice(word_cache_.end(), word_cache_, it->second);
+        out->insert(out->end(), it->second->ids.begin(), it->second->ids.end());
+        continue;
+      }
+    }
+    CachedWord entry{std::string(word), {}};
+    EncodeWord(word, &entry.ids);
+    out->insert(out->end(), entry.ids.begin(), entry.ids.end());
+    const std::size_t bytes =
+        entry.text.size() + entry.ids.size() * sizeof(TokenId);
+    if (bytes > kWordCacheBytes) {
+      continue;
+    }
+    std::lock_guard lock(word_cache_mutex_);
+    if (word_index_.contains(word)) {
+      continue;  // another request encoded it meanwhile
+    }
+    word_cache_.push_back(std::move(entry));
+    word_index_.emplace(word_cache_.back().text, std::prev(word_cache_.end()));
+    word_cache_bytes_ += bytes;
+    while (word_cache_bytes_ > kWordCacheBytes) {
+      const CachedWord& oldest = word_cache_.front();
+      word_cache_bytes_ -=
+          oldest.text.size() + oldest.ids.size() * sizeof(TokenId);
+      word_index_.erase(oldest.text);
+      word_cache_.pop_front();
+    }
   }
 }
 
@@ -389,9 +468,11 @@ void Tokenizer::EncodeWord(std::string_view word,
   for (std::size_t offset = 0; offset < word.size();) {
     const std::size_t length =
         std::min(word.size() - offset, Utf8Length(word[offset]));
-    const auto id = FindToken(word.substr(offset, length));
+    const TokenId id =
+        length == 1 ? char_tokens_[static_cast<std::uint8_t>(word[offset])]
+                    : FindToken(word.substr(offset, length)).value_or(-1);
     const int index = static_cast<int>(symbols.size());
-    symbols.push_back({offset, length, id.value_or(-1), index - 1,
+    symbols.push_back({offset, length, id, index - 1,
                        offset + length == word.size() ? -1 : index + 1});
     offset += length;
   }
@@ -402,6 +483,7 @@ void Tokenizer::EncodeWord(std::string_view word,
     int right;
     TokenId left_id;
     TokenId right_id;
+    TokenId merged;
   };
   // Lowest rank first, then the leftmost pair (llama.cpp's comparator).
   const auto later = [](const Bigram& a, const Bigram& b) {
@@ -413,9 +495,10 @@ void Tokenizer::EncodeWord(std::string_view word,
     if (left < 0 || right < 0) {
       return;
     }
-    const std::int64_t rank = Rank(symbols[left].id, symbols[right].id);
-    if (rank >= 0) {
-      queue.push({rank, left, right, symbols[left].id, symbols[right].id});
+    const Merge merge = FindMerge(symbols[left].id, symbols[right].id);
+    if (merge.rank >= 0) {
+      queue.push({merge.rank, left, right, symbols[left].id, symbols[right].id,
+                  merge.merged});
     }
   };
   for (int i = 1; i < static_cast<int>(symbols.size()); ++i) {
@@ -432,7 +515,7 @@ void Tokenizer::EncodeWord(std::string_view word,
       continue;
     }
     left.length += right.length;
-    left.id = *FindToken(word.substr(left.offset, left.length));
+    left.id = b.merged;
     right.length = 0;
     left.next = right.next;
     if (right.next >= 0) {

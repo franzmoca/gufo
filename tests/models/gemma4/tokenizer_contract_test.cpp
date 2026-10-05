@@ -101,6 +101,30 @@ void CheckNewlines(const Fixture& f) {
   Expect(f, "\n", false, {f.Id("\n")}, "single newline");
 }
 
+/// Long lines are cached across calls: a line encodes the same whether it is
+/// new, repeated alone, or repeated inside other text.
+void CheckWordCache(const Fixture& f) {
+  std::string line;
+  std::vector<TokenId> expected;
+  for (int i = 0; i < 20; ++i) {
+    line += i % 3 == 0 ? " user" : " hello";
+    expected.push_back(f.Id(i % 3 == 0 ? "\xE2\x96\x81" : "\xE2\x96\x81hello"));
+    if (i % 3 == 0) {
+      expected.push_back(f.Id("user"));
+    }
+  }
+  Expect(f, line, false, expected, "long line, first encode");
+  Expect(f, line, false, expected, "long line, cached");
+  std::vector<TokenId> twice = expected;
+  twice.push_back(f.Id("\n\n"));
+  twice.insert(twice.end(), expected.begin(), expected.end());
+  Expect(f, line + "\n\n" + line, false, twice, "cached line inside text");
+  // A line differing only at its end is its own entry.
+  std::vector<TokenId> longer = expected;
+  longer.push_back(f.Id("\xE2\x96\x81hello"));
+  Expect(f, line + " hello", false, longer, "extended long line");
+}
+
 void CheckByteFallback(const Fixture& f) {
   Expect(f, "\xC3\xA9", false, {f.Id("<0xC3>"), f.Id("<0xA9>")},
          "UTF-8 character outside the vocabulary");
@@ -179,6 +203,7 @@ int main() {
     const Fixture f = Build();
     CheckMerges(f);
     CheckNewlines(f);
+    CheckWordCache(f);
     CheckByteFallback(f);
     CheckSpecials(f);
     CheckDecode(f);

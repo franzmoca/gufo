@@ -4,7 +4,9 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <list>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <span>
 #include <string>
@@ -91,12 +93,40 @@ private:
 
   void EncodeText(std::string_view text, std::vector<TokenId>* out) const;
   void EncodeWord(std::string_view word, std::vector<TokenId>* out) const;
-  [[nodiscard]] std::int64_t Rank(TokenId left, TokenId right) const noexcept;
+  /// A pair's merge: its rank (-1 when the pair never merges) and the token
+  /// of the concatenated text.
+  struct Merge {
+    std::int64_t rank;
+    TokenId merged;
+  };
+  [[nodiscard]] Merge FindMerge(TokenId left, TokenId right) const noexcept;
 
   std::vector<std::string> tokens_;
   std::vector<TokenType> types_;
   std::unordered_map<std::string_view, TokenId> token_to_id_;
-  std::unordered_map<std::uint64_t, std::uint32_t> merge_ranks_;
+  /// Open-addressing merge table keyed by the (left, right) id pair; the
+  /// lowest rank wins for a repeated pair.
+  struct MergeSlot {
+    std::uint64_t key;
+    std::uint32_t rank;
+    TokenId merged;
+  };
+  std::vector<MergeSlot> merges_;
+  std::uint32_t merge_shift_{64};
+  /// Token of each single byte that is itself a vocabulary entry, else -1.
+  std::array<TokenId, 256> char_tokens_{};
+
+  /// Recently encoded long pre-split words (whole lines), least recently
+  /// used first: a conversation resends every earlier line with each turn.
+  struct CachedWord {
+    std::string text;
+    std::vector<TokenId> ids;
+  };
+  mutable std::mutex word_cache_mutex_;
+  mutable std::list<CachedWord> word_cache_;
+  mutable std::unordered_map<std::string_view, std::list<CachedWord>::iterator>
+      word_index_;
+  mutable std::size_t word_cache_bytes_{0};
   std::vector<TokenId> special_;  ///< Partition order: longest text first.
   std::vector<TokenId> eog_;
   std::array<TokenId, 256> byte_tokens_{};
