@@ -902,6 +902,12 @@ bool Session::BeginCycle(Cycle& cycle, std::uint32_t draft_limit,
       cycle.draft.reset();
       return true;
     }
+    if (cycle.draft->Copy()) {
+      // The context continues an earlier passage: verify the copies
+      // without running the drafter.
+      FinishDraft(cycle);
+      return true;
+    }
     if (share == nullptr) {
       CycleDraft& draft = *cycle.draft;
       model_->executor_->DraftChain(
