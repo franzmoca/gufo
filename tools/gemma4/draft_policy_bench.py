@@ -82,7 +82,7 @@ def run_policy(args: argparse.Namespace, server_args: list[str]) -> dict:
     log_dir.mkdir(parents=True, exist_ok=True)
     command = [str(args.gufo), "serve", "--port", str(args.port), "--sessions", "1", "llm",
                "--model", args.model, "--served-model-name", "bench", "--think", "off",
-               "--speculative", "mtp", "--mtp-model", args.mtp, "--draft-tokens", "7",
+               "--speculative", "mtp", "--mtp-model", args.mtp,
                "--context", str(16384 + args.depth), *server_args]
     with open(log_dir / "draft-policy-bench-server.log", "w") as log:
         server = subprocess.Popen(command, stdout=log, stderr=subprocess.STDOUT)

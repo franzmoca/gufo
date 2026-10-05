@@ -262,7 +262,7 @@ private:
 
 /// Longest draft chain one cycle may request; verification then carries
 /// kMaxDraftTokens + 1 rows, within the batch-invariant projection width.
-inline constexpr std::uint32_t kMaxDraftTokens = 7;
+inline constexpr std::uint32_t kMaxDraftTokens = 15;
 /// Sessions whose drafter chains share one forward per step.
 inline constexpr std::uint32_t kMaxDraftSessions = 8;
 

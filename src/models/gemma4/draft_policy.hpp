@@ -51,7 +51,7 @@ enum class DraftCalibrationScope : std::uint8_t {
 /// `draft[n]` for n drafter steps and `verify[r]` for r verified rows, for
 /// the dense 31B family or the mixture-of-experts 26B-A4B (`experts`).
 struct DraftCosts {
-  std::array<float, 9> draft{};
+  std::array<float, 16> draft{};
   /// Up to kSplitRows rows plus the next one a decision looks at.
   std::array<float, 18> verify{};
 };

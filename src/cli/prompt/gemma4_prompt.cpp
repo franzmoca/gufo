@@ -47,7 +47,9 @@ std::shared_ptr<g4::Model> LoadModel(
   }
   g4::ModelOptions options{.max_context = kDefaultContext,
                            .mtp_model_path = mtp ? opt.mtp_model_path : "",
-                           .draft_tokens = opt.draft_tokens,
+                           .draft_tokens = opt.draft_tokens_given
+                                               ? opt.draft_tokens
+                                               : g4::kDefaultDraftTokens,
                            .min_draft_tokens = opt.min_draft_tokens};
   try {
     options.draft_policy = g4::ParseDraftPolicy(opt.draft_policy);

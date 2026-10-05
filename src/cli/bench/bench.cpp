@@ -214,7 +214,8 @@ void RegisterBenchOptions(ArgParser& parser, BenchOptions& opt,
                    "Speculative", &opt.mtp_model_path);
   parser.AddCustomOption(
       "", "--draft-tokens", "N",
-      "Maximum speculative draft tokens per verification step (default: 7)",
+      "Maximum speculative draft tokens per verification step (default: 7; "
+      "Gemma 4: 15)",
       "Speculative",
       [&opt](std::string_view, std::string_view value,
              std::string* error) -> bool {
@@ -229,6 +230,7 @@ void RegisterBenchOptions(ArgParser& parser, BenchOptions& opt,
           return false;
         }
         opt.draft_tokens = count;
+        opt.draft_tokens_given = true;
         return true;
       });
 
@@ -1279,7 +1281,8 @@ int RunGemma4Benchmark(const BenchOptions& options,
   g4::ModelOptions model_options{
       .max_context = static_cast<std::uint32_t>(required_context),
       .mtp_model_path = mtp ? options.mtp_model_path : "",
-      .draft_tokens = options.draft_tokens,
+      .draft_tokens = options.draft_tokens_given ? options.draft_tokens
+                                                 : g4::kDefaultDraftTokens,
       .min_draft_tokens = options.min_draft_tokens};
   try {
     model_options.draft_policy = g4::ParseDraftPolicy(options.draft_policy);

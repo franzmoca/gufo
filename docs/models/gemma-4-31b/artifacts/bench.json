@@ -68,9 +68,7 @@
       "--speculative",
       "mtp",
       "--mtp-model",
-      "{mtp}",
-      "--draft-tokens",
-      "7"
+      "{mtp}"
     ],
     "reference": {
       "args": [

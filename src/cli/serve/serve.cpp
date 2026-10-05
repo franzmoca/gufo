@@ -678,7 +678,8 @@ void PrintServeHelp(std::string_view program_name,
                      "Speculative", &mtp_model_path);
     parser.AddOption(
         "-d", "--draft-tokens", "N",
-        "Maximum speculative draft tokens evaluated per step (default: 7)",
+        "Maximum speculative draft tokens evaluated per step (default: 7; "
+        "Gemma 4: 15)",
         "Speculative", &draft_tokens);
 
     parser.AddOption("", "--min-draft-tokens", "N",
@@ -1136,6 +1137,8 @@ int RunServe(std::span<const char* const> args) {
     std::string vision_model_path;
     std::uint32_t image_tokens = 0;
     std::size_t draft_tokens = 7;
+    // Without --draft-tokens each model picks its own default (Gemma 4: 15).
+    bool draft_tokens_given = false;
     std::size_t min_draft_tokens = 1;
     std::size_t prefill_chunk_tokens =
         server::kDefaultDecodeActivePrefillTokens;
@@ -1215,10 +1218,24 @@ int RunServe(std::span<const char* const> args) {
         "Path to the Qwen MTP draft GGUF (Qwen3.8-Flash-Next: the "
         "mtp-...-shared-*.gguf sidecar)",
         "Speculative", &mtp_model_path);
-    llm_parser.AddOption(
+    llm_parser.AddCustomOption(
         "-d", "--draft-tokens", "N",
-        "Maximum speculative draft tokens evaluated per step (default: 7)",
-        "Speculative", &draft_tokens);
+        "Maximum speculative draft tokens evaluated per step (default: 7; "
+        "Gemma 4: 15)",
+        "Speculative",
+        [&](std::string_view flag, std::string_view value, std::string* error) {
+          std::size_t count = 0;
+          const auto [ptr, ec] =
+              std::from_chars(value.data(), value.data() + value.size(), count);
+          if (ec != std::errc{} || ptr != value.data() + value.size() ||
+              count == 0) {
+            *error = std::string(flag) + " must be a positive integer";
+            return false;
+          }
+          draft_tokens = count;
+          draft_tokens_given = true;
+          return true;
+        });
 
     llm_parser.AddOption("", "--min-draft-tokens", "N",
                          "Adaptive draft floor (default: 1)", "Speculative",
@@ -1309,8 +1326,7 @@ int RunServe(std::span<const char* const> args) {
       std::cerr << "Error: sampling and scheduling limits are invalid\n";
       return 2;
     }
-    if (draft_tokens == 0 || min_draft_tokens == 0 ||
-        min_draft_tokens > draft_tokens ||
+    if (min_draft_tokens == 0 || min_draft_tokens > draft_tokens ||
         draft_tokens > std::numeric_limits<std::uint32_t>::max()) {
       std::cerr << "Error: speculative draft limits are invalid\n";
       return 2;
@@ -1375,6 +1391,7 @@ int RunServe(std::span<const char* const> args) {
             : dflash_model_path;
     speculative_config.max_draft_tokens =
         static_cast<std::uint32_t>(draft_tokens);
+    speculative_config.max_draft_tokens_given = draft_tokens_given;
     speculative_config.min_draft_tokens =
         static_cast<std::uint32_t>(min_draft_tokens);
     if (model.empty()) {
@@ -1457,9 +1474,12 @@ int RunServe(std::span<const char* const> args) {
             : "off";
     load_log.Complete(
         "model=" + backend->model_id() +
-        " sessions=" + std::to_string(session_count) + " context_tokens=" +
-        std::to_string(backend->max_context()) + " speculative=" + speculation +
-        " draft_limit=" + std::to_string(speculative_config.max_draft_tokens) +
+        " sessions=" + std::to_string(session_count) +
+        " context_tokens=" + std::to_string(backend->max_context()) +
+        " speculative=" + speculation + " draft_limit=" +
+        (speculative_config.max_draft_tokens_given
+             ? std::to_string(speculative_config.max_draft_tokens)
+             : std::string("model")) +
         " disk_cache=" + (cache_disk_directory.empty() ? "off" : "enabled"));
   }
 

@@ -3786,7 +3786,9 @@ bool InferenceBackend::load(const std::string& model_path, std::string* error,
         .max_context = max_context,
         .mtp_model_path =
             mtp ? speculative_config.draft_model_path : std::string{},
-        .draft_tokens = speculative_config.max_draft_tokens,
+        .draft_tokens = speculative_config.max_draft_tokens_given
+                            ? speculative_config.max_draft_tokens
+                            : models::gemma4::kDefaultDraftTokens,
         .min_draft_tokens = speculative_config.min_draft_tokens,
     };
     try {

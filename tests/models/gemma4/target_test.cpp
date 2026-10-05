@@ -17,6 +17,7 @@
 #include "src/core/sampling.hpp"
 #include "src/models/gemma4/chat_template.hpp"
 #include "src/models/gemma4/engine.hpp"
+#include "src/models/gemma4/kernels/rocm/executor.hpp"
 #include "src/models/gemma4/reference.hpp"
 #include "tests/models/gemma4/check.hpp"
 
@@ -354,7 +355,8 @@ int main() {
     }
     model.reset();
     options.mtp_model_path = draft;
-    options.draft_tokens = 4;
+    // The longest chain the engine allows: 16-row verification.
+    options.draft_tokens = g4::rocm::kMaxDraftTokens;
     // Seeded sampled replay is exact when the calibrated policy restarts its
     // calibration with every request; the shared default learns across
     // requests, which changes later draft counts and so their random draws.
@@ -362,7 +364,9 @@ int main() {
     auto mtp = g4::Model::Load(path, options, &error);
     Require(mtp != nullptr, error);
     // With a drafter, verification rows round exactly like decode...
-    Require(GpuLogits(*mtp, tokens, 1) == GpuLogits(*mtp, tokens, 5),
+    const auto single = GpuLogits(*mtp, tokens, 1);
+    Require(single == GpuLogits(*mtp, tokens, 5) &&
+                single == GpuLogits(*mtp, tokens, 16),
             "verification rows differ from single-token decode");
     // ...so greedy speculation reproduces autoregressive output.
     for (const char* text :

@@ -19,6 +19,9 @@
 #include "src/models/qwen38_flash_next/mtp_sampling.hpp"
 
 namespace gufo::models::gemma4 {
+
+static_assert(kDefaultDraftTokens == rocm::kMaxDraftTokens,
+              "the default draft chain is the longest one");
 namespace {
 
 constexpr std::array<char, 8> kSnapshotMagic = {'G', '4', 'S', 'N',

@@ -34,6 +34,10 @@ class Executor;
 struct KvCache;
 }  // namespace rocm
 
+/// Draft tokens per cycle when the caller sets none: the longest chain, which
+/// the calibrated policy shortens by itself (rows cost little up to 16).
+inline constexpr std::uint32_t kDefaultDraftTokens = 15;
+
 struct ModelOptions {
   /// Largest context any session may use.
   std::uint32_t max_context = 4096;
@@ -45,7 +49,7 @@ struct ModelOptions {
   /// Optional `gemma4-assistant` MTP drafter; empty leaves speculation off.
   std::string mtp_model_path;
   /// Draft tokens per cycle (at most rocm::kMaxDraftTokens).
-  std::uint32_t draft_tokens = 4;
+  std::uint32_t draft_tokens = kDefaultDraftTokens;
   /// How many of them a cycle verifies.
   DraftPolicy draft_policy = DraftPolicy::kCalibrated;
   /// Drafts every cycle verifies before a policy may stop the chain.

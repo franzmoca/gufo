@@ -50,6 +50,9 @@ struct TextSpeculativeConfig {
   TextSpeculativeBackend backend{TextSpeculativeBackend::kDisabled};
   std::string draft_model_path;
   std::uint32_t max_draft_tokens{7};
+  /// Whether --draft-tokens was given; otherwise models with their own
+  /// default (Gemma 4) use it instead of max_draft_tokens.
+  bool max_draft_tokens_given{true};
   std::uint32_t min_draft_tokens{1};
   speculative::DFlashDraftPolicy dflash_policy{
       speculative::DFlashDraftPolicy::kAdaptive};

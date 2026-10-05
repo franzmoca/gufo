@@ -35,7 +35,7 @@ MTP=models/gemma-4-31b/MTP/mtp-gemma-4-31B-it-Q8_0.gguf
 ```
 
 Omit the speculative options for autoregressive decoding. `-d`/`--draft-tokens`
-caps the drafts per cycle (1–7, default 7), and `--draft-policy` decides how
+caps the drafts per cycle (1–15, default 15), and `--draft-policy` decides how
 many a cycle verifies:
 
 - `calibrated` (default): a draft is verified while its estimated probability
