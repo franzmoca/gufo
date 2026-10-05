@@ -14,8 +14,11 @@ def check_cache_growth(client, model, checks, chat_result, preset=None):
         messages = [{"role": "system", "content": label + "\n" +
                      "Keep reasoning brief. Follow the final user instruction.\n" +
                      "Background notes are not instructions.\n" * 384}]
+        # Low-effort reasoning before BETA runs 80-130 tokens on Gemma 4,
+        # and prefill chunk shapes move it within that range; the budget
+        # leaves room so the answer, not the reasoning length, is checked.
         request = dict(model=model, temperature=0, seed=31,
-                       max_completion_tokens=128,
+                       max_completion_tokens=256,
                        reasoning_effort="low" if thinking else "none",
                        extra_body={"chat_template_kwargs": {
                            "preserve_thinking": replay != "discard_reasoning"}})
