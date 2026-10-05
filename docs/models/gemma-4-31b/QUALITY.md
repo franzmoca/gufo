@@ -18,7 +18,7 @@ not unquantized-model or GGUF-conversion checks. Measured September 26, 2026.
 | Greedy MTP vs single-token decode with the drafter loaded, three prompts × 64 tokens, four drafts | Identical token IDs |
 | Greedy MTP with sibling drafts vs single-token decode with the drafter loaded | After every cycle of three 96-token prompts the session's logits (a chain row's or an accepted sibling's) equal decode's bit for bit, 23 of 189 siblings accepted; the keys an accepted sibling leaves behind continue identically (`gemma4.target`) |
 | Greedy MTP vs an AR-only server | Not equal in general: AR-only decode uses the faster split-K GEMV, whose FP32 summation order differs from the verification kernels, so long greedy completions can diverge (the pp2048 prose completion does). Both are FP32 decodes within the KL limits above. |
-| Batched decoding | Up to eight sessions share a forward; with the drafter loaded each row reproduces its own session's decode bit for bit (`gemma4.target`: three sessions, plain and speculative greedy steps equal AR). Without the drafter, batches use the verification kernels while one session uses the faster AR GEMV, so a greedy completion can depend on concurrency (the multi-user AR table matched its C1 outputs). Multi-user MTP tables check every completion against Gufo's own MTP C1 (`exactness_reference: self` in bench.json), since greedy MTP does not equal an AR-only server |
+| Batched decoding | Up to eight sessions share a forward; with the drafter loaded each row reproduces its own session's decode bit for bit (`gemma4.target`: three sessions, plain and speculative greedy steps equal AR). Without the drafter, batches use the verification kernels while one session uses the faster AR GEMV, so a greedy completion can depend on concurrency (the multi-user AR tables matched their C1 outputs; bench.json's `"ar_exactness": "reported"` records a near-tie's count instead of failing the table, as on the [26B-A4B UD-Q6_K_XL](../gemma-4-26b-a4b/QUALITY.md#benchmark-method)). Multi-user MTP tables check every completion against Gufo's own MTP C1 (`exactness_reference: self` in bench.json), since greedy MTP does not equal an AR-only server |
 | Session state | Prefix extension, rewind and snapshot restore after a sliding-ring wrap (typed and serialized) continue bit for bit; truncated snapshots are rejected |
 | Tokenizer | Hugging Face `tokenizers` and llama.cpp agree on the 19 valid-UTF-8 entries of a 20-entry corpus (whitespace/newline runs, CJK, emoji, special tokens, 20k-character line); Gufo matches llama.cpp on all 20 |
 | Chat template | Compiled renderer byte-identical to Jinja2 on 19 cases (system, thinking on/off, tools, tool history, reasoning history) |
@@ -93,10 +93,10 @@ them.
 
 ## Benchmark method
 
-Gufo September 29, 2026 (revision c7e3ad7; sampled MTP at depth 0), llama.cpp
-September 26–27; one warmed sample per point, greedy, thinking off. MTP drafts
-up to seven tokens under Gufo's calibrated policy (`--draft-tokens 7`) and up
-to four on llama.cpp and the fork. Single-user uses pp2048/tg128 after a cached
+Gufo October 5, 2026 (revision 276f963, `nix build`, binary SHA-256 prefix
+17b35d541a4e5178), llama.cpp September 26–27; one warmed sample per point,
+greedy, thinking off. MTP drafts up to 15 tokens under Gufo's calibrated
+policy (the default) and up to four on llama.cpp and the fork. Single-user uses pp2048/tg128 after a cached
 prefix of the stated depth. Loading: cold files (page cache dropped with
 `echo 3 > /proc/sys/vm/drop_caches`), C1, MTP, capacity 262144. Memory: C1, AR,
 capacity 133121, peak device-global HIP allocation. The llama.cpp reference is
@@ -106,8 +106,7 @@ halo-box/strix-llama.cpp (`8c1c282ec`, Vulkan RADV,
 are in [artifacts/fork](artifacts/fork). Commands, counts and server flags are
 recorded per row in the artifacts.
 
-UD-Q8_K_XL tables: Gufo and llama.cpp September 30, 2026 (Gufo revision
-beeb28a, `nix build`, binary SHA-256 prefix b69774722d0a30d1), a reduced grid
+UD-Q8_K_XL tables: Gufo October 5 (same build), llama.cpp September 30, 2026, a reduced grid
 under the same driver, workloads and server flags: single-user depths 0, 4096,
 16384 and 32768, sampled MTP at depth 0 (three seeds), one and two users,
 memory and loading. Gufo drafts under its calibrated policy. Every Gufo

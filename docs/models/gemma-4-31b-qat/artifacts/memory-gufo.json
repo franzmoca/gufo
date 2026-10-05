@@ -14,15 +14,15 @@
       "gpuName": "AMD Radeon 8060S Graphics",
       "gpuPciId": "1002:1586",
       "kernelRelease": "7.2.7-200.fc44.x86_64",
-      "memoryTotalBytes": 133616873472,
+      "memoryTotalBytes": 133610651648,
       "memoryType": "LPDDR5X (Unified)",
       "rocmVersion": "7.2.3",
       "schemaVersion": "1.0.0"
     },
-    "fingerprintId": "f94b1af68c1490af59badc77b6ee2b002119985fa41fd820f3db1d38a94eb12a",
+    "fingerprintId": "daef66fd95bad8dddd2baaad4893b28692eff13447c073eaae38eff2dd3bbfa4",
     "schemaVersion": "1.0.0"
   },
-  "measuredOn": "2026-09-29",
+  "measuredOn": "2026-10-05",
   "mode": null,
   "model": {
     "id": "Gemma-4-31B-It-QAT",
@@ -35,14 +35,14 @@
   "referenceName": "llama.cpp",
   "rows": {
     "16K prefix, pp4096 + tg128": {
-      "command": "gufo serve --port 37393 --sessions 1 llm --model gemma-4-31B-it-qat-UD-Q4_K_XL.gguf --context 133121 --served-model-name bench --think off --max-pending-per-client 8",
-      "gib": 34.44,
-      "idle_gib": 3.01
+      "command": "gufo serve --port 49235 --sessions 1 llm --model gemma-4-31B-it-qat-UD-Q4_K_XL.gguf --context 133121 --served-model-name bench --think off --max-pending-per-client 8",
+      "gib": 44.38,
+      "idle_gib": 3.02
     },
     "pp2048 + tg128": {
-      "command": "gufo serve --port 37393 --sessions 1 llm --model gemma-4-31B-it-qat-UD-Q4_K_XL.gguf --context 133121 --served-model-name bench --think off --max-pending-per-client 8",
-      "gib": 31.52,
-      "idle_gib": 3.01
+      "command": "gufo serve --port 49235 --sessions 1 llm --model gemma-4-31B-it-qat-UD-Q4_K_XL.gguf --context 133121 --served-model-name bench --think off --max-pending-per-client 8",
+      "gib": 31.6,
+      "idle_gib": 3.02
     }
   },
   "schemaVersion": 1,
@@ -51,7 +51,7 @@
       "gufo",
       "serve",
       "--port",
-      "37393",
+      "49235",
       "--sessions",
       "1",
       "llm",
@@ -70,7 +70,7 @@
   "source": {
     "buildMode": "nix-release",
     "dirty": true,
-    "revision": "c8a978443c69ca4845819de5a1467171ed3353ab"
+    "revision": "276f9637340ed47549db24784066290a07443baf"
   },
   "table": "memory",
   "target": "gufo"

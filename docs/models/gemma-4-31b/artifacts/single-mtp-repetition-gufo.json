@@ -14,19 +14,19 @@
       "gpuName": "AMD Radeon 8060S Graphics",
       "gpuPciId": "1002:1586",
       "kernelRelease": "7.2.7-200.fc44.x86_64",
-      "memoryTotalBytes": 133616873472,
+      "memoryTotalBytes": 133610651648,
       "memoryType": "LPDDR5X (Unified)",
       "rocmVersion": "7.2.3",
       "schemaVersion": "1.0.0"
     },
-    "fingerprintId": "f94b1af68c1490af59badc77b6ee2b002119985fa41fd820f3db1d38a94eb12a",
+    "fingerprintId": "daef66fd95bad8dddd2baaad4893b28692eff13447c073eaae38eff2dd3bbfa4",
     "schemaVersion": "1.0.0"
   },
-  "measuredOn": "2026-09-29",
+  "measuredOn": "2026-10-05",
   "mode": "mtp",
   "model": {
     "id": "Gemma-4-31B-It",
-    "variant": null
+    "variant": "default"
   },
   "notes": [
     "pp2048/tg128; depth is a cached conversation prefix of synthetic text (8-token reply); measured turn task is recorded per row; tolerance max(32, 0.500%) on cache_n and prompt_n; actual counts per sample in rows",
@@ -35,186 +35,186 @@
   "referenceName": "llama.cpp",
   "rows": {
     "0": {
-      "acceptance": 100.0,
+      "acceptance": 99.16,
       "acceptance_sd": null,
-      "accepted_per_step": 6.53,
+      "accepted_per_step": 11.8,
       "accepted_per_step_sd": null,
-      "command": "gufo serve --port 48043 --sessions 1 llm --model gemma-4-31B-it-UD-Q4_K_XL.gguf --context 133760 --served-model-name bench --think off --max-pending-per-client 8 --speculative mtp --mtp-model mtp-gemma-4-31B-it-Q8_0.gguf --draft-tokens 7",
+      "command": "gufo serve --port 59669 --sessions 1 llm --model gemma-4-31B-it-UD-Q4_K_XL.gguf --context 133760 --served-model-name bench --think off --max-pending-per-client 8 --speculative mtp --mtp-model mtp-gemma-4-31B-it-Q8_0.gguf",
       "counts": [
         {
           "cache_n": 0,
           "completion_sha256": "f398696ed27917b618fa6d8daf288e5aaa26cabc725caccebaa8339cc8fcbec2",
-          "draft_n": 111,
-          "draft_n_accepted": 111,
+          "draft_n": 119,
+          "draft_n_accepted": 118,
           "predicted_n": 128,
           "prompt_n": 2034
         }
       ],
-      "pp": 426.52,
+      "pp": 536.56,
       "pp_sd": null,
       "samples": 1,
-      "tg": 60.85,
+      "tg": 112.32,
       "tg_sd": null,
       "workload": "repetition"
     },
     "12288": {
       "acceptance": 100.0,
       "acceptance_sd": null,
-      "accepted_per_step": 6.53,
+      "accepted_per_step": 11.8,
       "accepted_per_step_sd": null,
-      "command": "gufo serve --port 48043 --sessions 1 llm --model gemma-4-31B-it-UD-Q4_K_XL.gguf --context 133760 --served-model-name bench --think off --max-pending-per-client 8 --speculative mtp --mtp-model mtp-gemma-4-31B-it-Q8_0.gguf --draft-tokens 7",
+      "command": "gufo serve --port 59669 --sessions 1 llm --model gemma-4-31B-it-UD-Q4_K_XL.gguf --context 133760 --served-model-name bench --think off --max-pending-per-client 8 --speculative mtp --mtp-model mtp-gemma-4-31B-it-Q8_0.gguf",
       "counts": [
         {
           "cache_n": 12258,
           "completion_sha256": "3b75676416480fb9461e102a5bc932e3923937762d4fc0139ab47d89f34c094c",
-          "draft_n": 111,
-          "draft_n_accepted": 111,
+          "draft_n": 118,
+          "draft_n_accepted": 118,
           "predicted_n": 128,
           "prompt_n": 2065
         }
       ],
-      "pp": 361.3,
+      "pp": 420.32,
       "pp_sd": null,
       "samples": 1,
-      "tg": 54.82,
+      "tg": 96.96,
       "tg_sd": null,
       "workload": "repetition"
     },
     "131072": {
-      "acceptance": 98.21,
+      "acceptance": 99.16,
       "acceptance_sd": null,
-      "accepted_per_step": 6.11,
+      "accepted_per_step": 11.8,
       "accepted_per_step_sd": null,
-      "command": "gufo serve --port 48043 --sessions 1 llm --model gemma-4-31B-it-UD-Q4_K_XL.gguf --context 133760 --served-model-name bench --think off --max-pending-per-client 8 --speculative mtp --mtp-model mtp-gemma-4-31B-it-Q8_0.gguf --draft-tokens 7",
+      "command": "gufo serve --port 59669 --sessions 1 llm --model gemma-4-31B-it-UD-Q4_K_XL.gguf --context 133760 --served-model-name bench --think off --max-pending-per-client 8 --speculative mtp --mtp-model mtp-gemma-4-31B-it-Q8_0.gguf",
       "counts": [
         {
           "cache_n": 131309,
           "completion_sha256": "863825807579c48004a4978cdc2c7427fb6f2b4962ed1d230b2914f4d7df4c39",
-          "draft_n": 112,
-          "draft_n_accepted": 110,
+          "draft_n": 119,
+          "draft_n_accepted": 118,
           "predicted_n": 128,
           "prompt_n": 2073
         }
       ],
-      "pp": 162.58,
+      "pp": 169.74,
       "pp_sd": null,
       "samples": 1,
-      "tg": 30.89,
+      "tg": 43.76,
       "tg_sd": null,
       "workload": "repetition"
     },
     "16384": {
-      "acceptance": 99.1,
+      "acceptance": 90.7,
       "acceptance_sd": null,
-      "accepted_per_step": 6.11,
+      "accepted_per_step": 10.64,
       "accepted_per_step_sd": null,
-      "command": "gufo serve --port 48043 --sessions 1 llm --model gemma-4-31B-it-UD-Q4_K_XL.gguf --context 133760 --served-model-name bench --think off --max-pending-per-client 8 --speculative mtp --mtp-model mtp-gemma-4-31B-it-Q8_0.gguf --draft-tokens 7",
+      "command": "gufo serve --port 59669 --sessions 1 llm --model gemma-4-31B-it-UD-Q4_K_XL.gguf --context 133760 --served-model-name bench --think off --max-pending-per-client 8 --speculative mtp --mtp-model mtp-gemma-4-31B-it-Q8_0.gguf",
       "counts": [
         {
           "cache_n": 16390,
           "completion_sha256": "da67a060aad469cb6ee70152e5de4eef29d97af9791880c64a057476499c1ebb",
-          "draft_n": 111,
-          "draft_n_accepted": 110,
+          "draft_n": 129,
+          "draft_n_accepted": 117,
           "predicted_n": 128,
           "prompt_n": 2049
         }
       ],
-      "pp": 354.14,
+      "pp": 412.16,
       "pp_sd": null,
       "samples": 1,
-      "tg": 51.49,
+      "tg": 82.36,
       "tg_sd": null,
       "workload": "repetition"
     },
     "32768": {
-      "acceptance": 95.65,
+      "acceptance": 99.16,
       "acceptance_sd": null,
-      "accepted_per_step": 6.11,
+      "accepted_per_step": 11.8,
       "accepted_per_step_sd": null,
-      "command": "gufo serve --port 48043 --sessions 1 llm --model gemma-4-31B-it-UD-Q4_K_XL.gguf --context 133760 --served-model-name bench --think off --max-pending-per-client 8 --speculative mtp --mtp-model mtp-gemma-4-31B-it-Q8_0.gguf --draft-tokens 7",
+      "command": "gufo serve --port 59669 --sessions 1 llm --model gemma-4-31B-it-UD-Q4_K_XL.gguf --context 133760 --served-model-name bench --think off --max-pending-per-client 8 --speculative mtp --mtp-model mtp-gemma-4-31B-it-Q8_0.gguf",
       "counts": [
         {
           "cache_n": 32809,
           "completion_sha256": "40cc3ed51554cddc4e959bb485208b3f9fde8beaed496981e2a32fefc1181af0",
-          "draft_n": 115,
-          "draft_n_accepted": 110,
+          "draft_n": 119,
+          "draft_n_accepted": 118,
           "predicted_n": 128,
           "prompt_n": 2048
         }
       ],
-      "pp": 310.37,
+      "pp": 346.78,
       "pp_sd": null,
       "samples": 1,
-      "tg": 46.49,
+      "tg": 79.83,
       "tg_sd": null,
       "workload": "repetition"
     },
     "4096": {
-      "acceptance": 97.35,
+      "acceptance": 96.72,
       "acceptance_sd": null,
-      "accepted_per_step": 6.11,
+      "accepted_per_step": 11.8,
       "accepted_per_step_sd": null,
-      "command": "gufo serve --port 48043 --sessions 1 llm --model gemma-4-31B-it-UD-Q4_K_XL.gguf --context 133760 --served-model-name bench --think off --max-pending-per-client 8 --speculative mtp --mtp-model mtp-gemma-4-31B-it-Q8_0.gguf --draft-tokens 7",
+      "command": "gufo serve --port 59669 --sessions 1 llm --model gemma-4-31B-it-UD-Q4_K_XL.gguf --context 133760 --served-model-name bench --think off --max-pending-per-client 8 --speculative mtp --mtp-model mtp-gemma-4-31B-it-Q8_0.gguf",
       "counts": [
         {
           "cache_n": 4073,
           "completion_sha256": "70f01c8a1a920ca9c30ddef093a4310e91f347f23175fca73a2b613ea0183e14",
-          "draft_n": 113,
-          "draft_n_accepted": 110,
+          "draft_n": 122,
+          "draft_n_accepted": 118,
           "predicted_n": 128,
           "prompt_n": 2051
         }
       ],
-      "pp": 404.86,
+      "pp": 493.79,
       "pp_sd": null,
       "samples": 1,
-      "tg": 54.54,
+      "tg": 103.96,
       "tg_sd": null,
       "workload": "repetition"
     },
     "65536": {
-      "acceptance": 97.32,
+      "acceptance": 99.15,
       "acceptance_sd": null,
-      "accepted_per_step": 5.74,
+      "accepted_per_step": 10.64,
       "accepted_per_step_sd": null,
-      "command": "gufo serve --port 48043 --sessions 1 llm --model gemma-4-31B-it-UD-Q4_K_XL.gguf --context 133760 --served-model-name bench --think off --max-pending-per-client 8 --speculative mtp --mtp-model mtp-gemma-4-31B-it-Q8_0.gguf --draft-tokens 7",
+      "command": "gufo serve --port 59669 --sessions 1 llm --model gemma-4-31B-it-UD-Q4_K_XL.gguf --context 133760 --served-model-name bench --think off --max-pending-per-client 8 --speculative mtp --mtp-model mtp-gemma-4-31B-it-Q8_0.gguf",
       "counts": [
         {
           "cache_n": 65660,
           "completion_sha256": "2fbd750881fee31657d3e86da5e67b32b1c5ca56e9919d396e2126a3b3444df1",
-          "draft_n": 112,
-          "draft_n_accepted": 109,
+          "draft_n": 118,
+          "draft_n_accepted": 117,
           "predicted_n": 128,
           "prompt_n": 2074
         }
       ],
-      "pp": 240.69,
+      "pp": 259.48,
       "pp_sd": null,
       "samples": 1,
-      "tg": 38.72,
+      "tg": 59.49,
       "tg_sd": null,
       "workload": "repetition"
     },
     "8192": {
       "acceptance": 100.0,
       "acceptance_sd": null,
-      "accepted_per_step": 6.53,
+      "accepted_per_step": 13.22,
       "accepted_per_step_sd": null,
-      "command": "gufo serve --port 48043 --sessions 1 llm --model gemma-4-31B-it-UD-Q4_K_XL.gguf --context 133760 --served-model-name bench --think off --max-pending-per-client 8 --speculative mtp --mtp-model mtp-gemma-4-31B-it-Q8_0.gguf --draft-tokens 7",
+      "command": "gufo serve --port 59669 --sessions 1 llm --model gemma-4-31B-it-UD-Q4_K_XL.gguf --context 133760 --served-model-name bench --think off --max-pending-per-client 8 --speculative mtp --mtp-model mtp-gemma-4-31B-it-Q8_0.gguf",
       "counts": [
         {
           "cache_n": 8177,
           "completion_sha256": "17239a4d4a9958d370253146378b955161b629e70e5cd7fb723dd49d64e4ddf3",
-          "draft_n": 111,
-          "draft_n_accepted": 111,
+          "draft_n": 119,
+          "draft_n_accepted": 119,
           "predicted_n": 128,
           "prompt_n": 2059
         }
       ],
-      "pp": 378.22,
+      "pp": 449.22,
       "pp_sd": null,
       "samples": 1,
-      "tg": 56.15,
+      "tg": 109.82,
       "tg_sd": null,
       "workload": "repetition"
     }
@@ -225,7 +225,7 @@
       "gufo",
       "serve",
       "--port",
-      "48043",
+      "59669",
       "--sessions",
       "1",
       "llm",
@@ -242,15 +242,13 @@
       "--speculative",
       "mtp",
       "--mtp-model",
-      "mtp-gemma-4-31B-it-Q8_0.gguf",
-      "--draft-tokens",
-      "7"
+      "mtp-gemma-4-31B-it-Q8_0.gguf"
     ]
   },
   "source": {
     "buildMode": "nix-release",
     "dirty": true,
-    "revision": "c8a978443c69ca4845819de5a1467171ed3353ab"
+    "revision": "276f9637340ed47549db24784066290a07443baf"
   },
   "table": "single-mtp-repetition",
   "target": "gufo"

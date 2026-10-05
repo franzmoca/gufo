@@ -22,7 +22,7 @@
     "fingerprintId": "daef66fd95bad8dddd2baaad4893b28692eff13447c073eaae38eff2dd3bbfa4",
     "schemaVersion": "1.0.0"
   },
-  "measuredOn": "2026-10-04",
+  "measuredOn": "2026-10-05",
   "mode": "mtp",
   "model": {
     "id": "Gemma-4-26B-A4B-It",
@@ -35,58 +35,42 @@
   "referenceName": "llama.cpp",
   "rows": {
     "0": {
-      "acceptance": 50.59,
-      "acceptance_sd": 2.7,
-      "accepted_per_step": 1.06,
-      "accepted_per_step_sd": 0.1,
-      "command": "gufo serve --port 37781 --sessions 1 llm --model gemma-4-26B-A4B-it-UD-Q6_K_XL.gguf --context 133760 --served-model-name bench --think off --max-pending-per-client 8 --speculative mtp --mtp-model mtp-gemma-4-26B-A4B-it.gguf --draft-tokens 7",
+      "acceptance": 55.54,
+      "acceptance_sd": 0.36,
+      "accepted_per_step": 1.23,
+      "accepted_per_step_sd": 0.15,
+      "command": "gufo serve --port 48263 --sessions 1 llm --model gemma-4-26B-A4B-it-UD-Q6_K_XL.gguf --context 133760 --served-model-name bench --think off --max-pending-per-client 8 --speculative mtp --mtp-model mtp-gemma-4-26B-A4B-it.gguf",
       "counts": [
         {
           "cache_n": 0,
-          "completion_sha256": "e15f73e3874e9d4bfff3e86c0027f18bf72b41b6b421a04b0c4fe602b587784f",
-          "draft_n": 144,
-          "draft_n_accepted": 69,
+          "completion_sha256": "d5ec16180ab917fc86bdc026ad34353e449a4e7583f19c2694927220972708ab",
+          "draft_n": 134,
+          "draft_n_accepted": 74,
           "predicted_n": 128,
           "prompt_n": 2038
         },
         {
           "cache_n": 0,
-          "completion_sha256": "c9ad69ec7cf784ca53bde73ccefbe630c2814fcd6b92a59dd6d94f76f0d8396f",
+          "completion_sha256": "6310b2c8a09c7bc56ff56fb4cc855d5ae951006e523ec7805d82120c5a5c9470",
+          "draft_n": 118,
+          "draft_n_accepted": 66,
+          "predicted_n": 128,
+          "prompt_n": 2038
+        },
+        {
+          "cache_n": 0,
+          "completion_sha256": "572a0ed8be227c24c5a5f7d9d9b5a18edb7d5734e5d5f2a3ae3f990fc61d992e",
           "draft_n": 128,
-          "draft_n_accepted": 69,
-          "predicted_n": 128,
-          "prompt_n": 2038
-        },
-        {
-          "cache_n": 0,
-          "completion_sha256": "165391bc79fa3ac51a284be531a44060afcce6b16b229eae5e6ea229e2d7df08",
-          "draft_n": 129,
-          "draft_n_accepted": 64,
+          "draft_n_accepted": 71,
           "predicted_n": 128,
           "prompt_n": 2051
-        },
-        {
-          "cache_n": 0,
-          "completion_sha256": "14a914547a8414d99301d6cc2b15cb12061c7a7f0944240f6d6f08f33dd7a902",
-          "draft_n": 117,
-          "draft_n_accepted": 62,
-          "predicted_n": 128,
-          "prompt_n": 2035
-        },
-        {
-          "cache_n": 0,
-          "completion_sha256": "9fea3fc90abc4835d729b0923b6b578acf5e35ae9244f1fa54dcdfd9581f2362",
-          "draft_n": 134,
-          "draft_n_accepted": 65,
-          "predicted_n": 128,
-          "prompt_n": 2039
         }
       ],
-      "pp": 3409.56,
-      "pp_sd": 143.67,
-      "samples": 5,
-      "tg": 61.71,
-      "tg_sd": 1.67,
+      "pp": 3413.76,
+      "pp_sd": 185.85,
+      "samples": 3,
+      "tg": 68.07,
+      "tg_sd": 0.8,
       "workload": "story"
     }
   },
@@ -96,7 +80,7 @@
       "gufo",
       "serve",
       "--port",
-      "37781",
+      "48263",
       "--sessions",
       "1",
       "llm",
@@ -113,15 +97,13 @@
       "--speculative",
       "mtp",
       "--mtp-model",
-      "mtp-gemma-4-26B-A4B-it.gguf",
-      "--draft-tokens",
-      "7"
+      "mtp-gemma-4-26B-A4B-it.gguf"
     ]
   },
   "source": {
     "buildMode": "nix-release",
     "dirty": true,
-    "revision": "7b88d9439002c608cfcf69b63323e012f9c2b5d7"
+    "revision": "276f9637340ed47549db24784066290a07443baf"
   },
   "table": "single-mtp-sampled-q6",
   "target": "gufo"

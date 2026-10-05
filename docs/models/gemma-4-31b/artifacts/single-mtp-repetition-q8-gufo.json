@@ -14,15 +14,15 @@
       "gpuName": "AMD Radeon 8060S Graphics",
       "gpuPciId": "1002:1586",
       "kernelRelease": "7.2.7-200.fc44.x86_64",
-      "memoryTotalBytes": 133616873472,
+      "memoryTotalBytes": 133610651648,
       "memoryType": "LPDDR5X (Unified)",
       "rocmVersion": "7.2.3",
       "schemaVersion": "1.0.0"
     },
-    "fingerprintId": "f94b1af68c1490af59badc77b6ee2b002119985fa41fd820f3db1d38a94eb12a",
+    "fingerprintId": "daef66fd95bad8dddd2baaad4893b28692eff13447c073eaae38eff2dd3bbfa4",
     "schemaVersion": "1.0.0"
   },
-  "measuredOn": "2026-09-29",
+  "measuredOn": "2026-10-05",
   "mode": "mtp",
   "model": {
     "id": "Gemma-4-31B-It",
@@ -35,94 +35,94 @@
   "referenceName": "llama.cpp",
   "rows": {
     "0": {
-      "acceptance": 100.0,
+      "acceptance": 99.16,
       "acceptance_sd": null,
-      "accepted_per_step": 6.53,
+      "accepted_per_step": 11.8,
       "accepted_per_step_sd": null,
-      "command": "gufo serve --port 40413 --sessions 1 llm --model gemma-4-31B-it-UD-Q8_K_XL.gguf --context 133760 --served-model-name bench --think off --max-pending-per-client 8 --speculative mtp --mtp-model mtp-gemma-4-31B-it-Q8_0.gguf --draft-tokens 7",
+      "command": "gufo serve --port 59881 --sessions 1 llm --model gemma-4-31B-it-UD-Q8_K_XL.gguf --context 133760 --served-model-name bench --think off --max-pending-per-client 8 --speculative mtp --mtp-model mtp-gemma-4-31B-it-Q8_0.gguf",
       "counts": [
         {
           "cache_n": 0,
           "completion_sha256": "f398696ed27917b618fa6d8daf288e5aaa26cabc725caccebaa8339cc8fcbec2",
-          "draft_n": 111,
-          "draft_n_accepted": 111,
+          "draft_n": 119,
+          "draft_n_accepted": 118,
           "predicted_n": 128,
           "prompt_n": 2034
         }
       ],
-      "pp": 430.83,
+      "pp": 492.37,
       "pp_sd": null,
       "samples": 1,
-      "tg": 43.42,
+      "tg": 61.0,
       "tg_sd": null,
       "workload": "repetition"
     },
     "16384": {
       "acceptance": 100.0,
       "acceptance_sd": null,
-      "accepted_per_step": 6.53,
+      "accepted_per_step": 11.8,
       "accepted_per_step_sd": null,
-      "command": "gufo serve --port 40413 --sessions 1 llm --model gemma-4-31B-it-UD-Q8_K_XL.gguf --context 133760 --served-model-name bench --think off --max-pending-per-client 8 --speculative mtp --mtp-model mtp-gemma-4-31B-it-Q8_0.gguf --draft-tokens 7",
+      "command": "gufo serve --port 59881 --sessions 1 llm --model gemma-4-31B-it-UD-Q8_K_XL.gguf --context 133760 --served-model-name bench --think off --max-pending-per-client 8 --speculative mtp --mtp-model mtp-gemma-4-31B-it-Q8_0.gguf",
       "counts": [
         {
           "cache_n": 16365,
           "completion_sha256": "0b187b5a19b8e1f7931107b07a037ce5d75ad889797e7a0090cfcf11a8ce87e4",
-          "draft_n": 111,
-          "draft_n_accepted": 111,
+          "draft_n": 118,
+          "draft_n_accepted": 118,
           "predicted_n": 128,
           "prompt_n": 2064
         }
       ],
-      "pp": 355.78,
+      "pp": 385.32,
       "pp_sd": null,
       "samples": 1,
-      "tg": 39.82,
+      "tg": 53.78,
       "tg_sd": null,
       "workload": "repetition"
     },
     "32768": {
-      "acceptance": 94.02,
+      "acceptance": 95.12,
       "acceptance_sd": null,
-      "accepted_per_step": 6.11,
+      "accepted_per_step": 10.64,
       "accepted_per_step_sd": null,
-      "command": "gufo serve --port 40413 --sessions 1 llm --model gemma-4-31B-it-UD-Q8_K_XL.gguf --context 133760 --served-model-name bench --think off --max-pending-per-client 8 --speculative mtp --mtp-model mtp-gemma-4-31B-it-Q8_0.gguf --draft-tokens 7",
+      "command": "gufo serve --port 59881 --sessions 1 llm --model gemma-4-31B-it-UD-Q8_K_XL.gguf --context 133760 --served-model-name bench --think off --max-pending-per-client 8 --speculative mtp --mtp-model mtp-gemma-4-31B-it-Q8_0.gguf",
       "counts": [
         {
           "cache_n": 32762,
           "completion_sha256": "40cc3ed51554cddc4e959bb485208b3f9fde8beaed496981e2a32fefc1181af0",
-          "draft_n": 117,
-          "draft_n_accepted": 110,
+          "draft_n": 123,
+          "draft_n_accepted": 117,
           "predicted_n": 128,
           "prompt_n": 2045
         }
       ],
-      "pp": 318.5,
+      "pp": 334.56,
       "pp_sd": null,
       "samples": 1,
-      "tg": 34.85,
+      "tg": 45.68,
       "tg_sd": null,
       "workload": "repetition"
     },
     "4096": {
-      "acceptance": 97.35,
+      "acceptance": 91.47,
       "acceptance_sd": null,
-      "accepted_per_step": 6.11,
+      "accepted_per_step": 11.8,
       "accepted_per_step_sd": null,
-      "command": "gufo serve --port 40413 --sessions 1 llm --model gemma-4-31B-it-UD-Q8_K_XL.gguf --context 133760 --served-model-name bench --think off --max-pending-per-client 8 --speculative mtp --mtp-model mtp-gemma-4-31B-it-Q8_0.gguf --draft-tokens 7",
+      "command": "gufo serve --port 59881 --sessions 1 llm --model gemma-4-31B-it-UD-Q8_K_XL.gguf --context 133760 --served-model-name bench --think off --max-pending-per-client 8 --speculative mtp --mtp-model mtp-gemma-4-31B-it-Q8_0.gguf",
       "counts": [
         {
           "cache_n": 4073,
           "completion_sha256": "70f01c8a1a920ca9c30ddef093a4310e91f347f23175fca73a2b613ea0183e14",
-          "draft_n": 113,
-          "draft_n_accepted": 110,
+          "draft_n": 129,
+          "draft_n_accepted": 118,
           "predicted_n": 128,
           "prompt_n": 2051
         }
       ],
-      "pp": 408.01,
+      "pp": 466.16,
       "pp_sd": null,
       "samples": 1,
-      "tg": 39.64,
+      "tg": 55.59,
       "tg_sd": null,
       "workload": "repetition"
     }
@@ -133,7 +133,7 @@
       "gufo",
       "serve",
       "--port",
-      "40413",
+      "59881",
       "--sessions",
       "1",
       "llm",
@@ -150,15 +150,13 @@
       "--speculative",
       "mtp",
       "--mtp-model",
-      "mtp-gemma-4-31B-it-Q8_0.gguf",
-      "--draft-tokens",
-      "7"
+      "mtp-gemma-4-31B-it-Q8_0.gguf"
     ]
   },
   "source": {
     "buildMode": "nix-release",
     "dirty": true,
-    "revision": "beeb28a4309f6ab2d4aac14cfe635a6ff4e2d064"
+    "revision": "276f9637340ed47549db24784066290a07443baf"
   },
   "table": "single-mtp-repetition-q8",
   "target": "gufo"

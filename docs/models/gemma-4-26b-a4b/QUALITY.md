@@ -92,19 +92,24 @@ near Genoa." --half-kv --tokens-out T.i32 --logits-out R.g4lg`, then
 
 ## Benchmark method
 
-Gufo September 29, 2026 (revision c7e3ad7, every table; sampled MTP at depth
-0), llama.cpp September 28; one warmed sample per point (sampled MTP: three seeds),
+Gufo October 5, 2026 (revision 276f963, `nix build`, binary SHA-256 prefix
+17b35d541a4e5178, every table), llama.cpp September 28; one warmed sample per point (sampled MTP: three seeds),
 greedy, thinking off, the same driver workloads, server flags and table grid
 as the [31B](../gemma-4-31b/QUALITY.md#benchmark-method), per quant. Gufo
-drafts up to seven tokens under the calibrated policy (`--draft-tokens 7`),
-llama.cpp up to four. Loading drops the page cache
-(`sync; echo 3 > /proc/sys/vm/drop_caches`) before each launch. Every Gufo
-multi-user MTP completion (C1–C8, both workloads, both quants) matches its
-AR C1 hash; commands, counts and server flags are recorded per row in the
-artifacts.
+drafts up to 15 tokens under the calibrated policy (the default), llama.cpp up
+to four. Loading drops the
+page cache (`sync; echo 3 > /proc/sys/vm/drop_caches`) before each launch.
+Every Gufo multi-user MTP completion (C1–C8, both workloads, every quant)
+matches its MTP C1 hash, and every multi-user AR completion matches its AR C1
+hash except UD-Q6_K_XL C2–C8 (0 of 2, 4, 6 and 8). Without the drafter one
+session decodes with the faster AR GEMV and a batch with the small-batch or
+WMMA kernels, which round differently; this prompt sits on a greedy near-tie
+(neighbouring prompt lengths match at C1 and C2, and every batch width agrees
+with the others). `"ar_exactness": "reported"` in bench.json records the
+count instead of failing the table. Commands, counts and server flags are
+recorded per row in the artifacts.
 
-UD-Q8_K_XL tables: Gufo and llama.cpp September 30, 2026 (Gufo revision
-beeb28a, `nix build`, binary SHA-256 prefix b69774722d0a30d1), a reduced grid
+UD-Q8_K_XL tables: Gufo October 5 (same build), llama.cpp September 30, 2026, a reduced grid
 under the same driver, workloads and server flags: single-user depths 0, 4096,
 16384 and 32768, sampled MTP at depth 0 (three seeds), one and two users,
 memory and loading. Gufo drafts under its calibrated policy. Every Gufo
