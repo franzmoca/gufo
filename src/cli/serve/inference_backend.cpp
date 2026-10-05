@@ -3121,12 +3121,11 @@ public:
     }
     TextPreparedPrompt prepared;
     prepared.tokens = Tokenize(rendered->text);
-    // The prefix before the generation prompt is stable across turns; the
-    // generation prompt starts with a special token, so it tokenizes apart.
-    if (rendered->generation_prompt_offset < rendered->text.size()) {
-      const auto suffix =
-          Tokenize(std::string_view(rendered->text)
-                       .substr(rendered->generation_prompt_offset));
+    // The stable prefix is shared by the next turn; the text after it starts
+    // with a special token, so it tokenizes apart.
+    if (rendered->stable_prefix_offset < rendered->text.size()) {
+      const auto suffix = Tokenize(std::string_view(rendered->text)
+                                       .substr(rendered->stable_prefix_offset));
       if (suffix.size() < prepared.tokens.size() &&
           std::equal(suffix.begin(), suffix.end(),
                      prepared.tokens.end() -

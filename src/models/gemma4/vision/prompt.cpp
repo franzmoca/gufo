@@ -160,10 +160,10 @@ Prompt Prepare(const Tokenizer& tokenizer,
   }
   append(text.substr(cursor));
 
-  // The generation prompt opens with a special token, after every image.
-  if (rendered->generation_prompt_offset < text.size()) {
+  // The stable prefix ends before a special token, after every image.
+  if (rendered->stable_prefix_offset < text.size()) {
     const auto suffix = tokenizer.Encode(
-        text.substr(rendered->generation_prompt_offset), false, true);
+        text.substr(rendered->stable_prefix_offset), false, true);
     if (suffix.size() < prompt.tokens.size() &&
         std::ranges::equal(suffix,
                            std::span(prompt.tokens).last(suffix.size()))) {

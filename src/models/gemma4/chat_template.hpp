@@ -31,6 +31,13 @@ struct RenderedPrompt {
   /// Byte offset where the generation prompt starts; equals text.size()
   /// without one. Everything before it is the stable conversation prefix.
   std::size_t generation_prompt_offset{0};
+  /// Byte offset of the prefix the next request is expected to share: the
+  /// generation prompt, or, when the prompt ends with a text-only user turn
+  /// after a tool result or another user turn, the end of the turn before
+  /// it. Agent clients send per-turn context there and replace it on the
+  /// next request. A tool result stays inside its model turn, which the next
+  /// request continues, so the boundary precedes that turn's closing marker.
+  std::size_t stable_prefix_offset{0};
 };
 
 /// Compiled renderer of Unsloth's Gemma 4 chat template. The GGUF template

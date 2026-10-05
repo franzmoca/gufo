@@ -200,6 +200,82 @@ void CheckFramingSuffix() {
           "framing renders in a created system turn: " + rendered->text);
 }
 
+/// Agent clients may end each request with user context that the next
+/// request replaces. The stable boundary then precedes that turn, so it
+/// prefixes the next request; ordinary chat keeps it at the generation prompt.
+void CheckReplacedFinalUserTurn() {
+  using gufo::tokenization::ChatMessage;
+  using gufo::tokenization::ChatRole;
+  const auto render = [](const std::vector<ChatMessage>& messages) {
+    std::string error;
+    auto rendered = g4::ChatTemplate::Render(messages, {}, {}, &error);
+    Require(rendered.has_value(), "conversation rendered: " + error);
+    Require(
+        rendered->stable_prefix_offset <= rendered->generation_prompt_offset,
+        "boundary precedes the generation prompt");
+    return std::pair{rendered->text, rendered->stable_prefix_offset};
+  };
+  const auto prefixes = [](const std::string& text, const std::string& first,
+                           std::size_t stable) {
+    return text.starts_with(std::string_view(first).substr(0, stable));
+  };
+  ChatMessage call(ChatRole::kAssistant, "");
+  call.tool_calls.push_back(
+      {.id = "c", .name = "read", .arguments = {{"path", "a.py", true}}});
+  ChatMessage result(ChatRole::kTool, "x = 1");
+  result.tool_call_id = "c";
+  const std::vector<ChatMessage> history{
+      ChatMessage(ChatRole::kSystem, "You are an agent."),
+      ChatMessage(ChatRole::kUser, "Start the task."), call, result};
+
+  // After a tool result the model turn stays open on the next request.
+  auto first = history;
+  first.emplace_back(ChatRole::kUser, "Runtime context, turn 1.");
+  auto second = history;
+  second.emplace_back(ChatRole::kAssistant, "Done.");
+  second.emplace_back(ChatRole::kUser, "Runtime context, turn 2.");
+  const auto [first_text, first_stable] = render(first);
+  const auto [second_text, second_stable] = render(second);
+  Require(first_text.compare(first_stable, 7, "<turn|>") == 0 &&
+              first_text.substr(0, first_stable).ends_with("<tool_response|>"),
+          "boundary closes the tool result: " + first_text);
+  Require(prefixes(second_text, first_text, first_stable),
+          "boundary prefixes a request that replaces the final user turn");
+  Require(second_stable > first_stable, "boundary advances with the history");
+
+  // A client that keeps the user turn still finds the boundary as a prefix;
+  // a user turn after an assistant reply is ordinary chat.
+  auto kept = first;
+  kept.emplace_back(ChatRole::kAssistant, "Done.");
+  kept.emplace_back(ChatRole::kUser, "Next.");
+  const auto [kept_text, kept_stable] = render(kept);
+  Require(prefixes(kept_text, first_text, first_stable),
+          "boundary prefixes an appended conversation");
+  Require(kept_text.compare(kept_stable, std::string::npos,
+                            "<|turn>model\n<|channel>thought\n<channel|>") == 0,
+          "ordinary chat keeps the boundary at the generation prompt");
+
+  // Context sent as a second user message after the real query.
+  auto query = second;
+  query.back().content = "Real question.";
+  query.emplace_back(ChatRole::kUser, "Runtime context, turn 2.");
+  const auto [query_text, query_stable] = render(query);
+  Require(query_text.compare(query_stable, 12, "<|turn>user\n") == 0 &&
+              query_text.substr(query_stable).find("Runtime context") !=
+                  std::string::npos &&
+              query_text.substr(query_stable).find("Real question") ==
+                  std::string::npos,
+          "boundary precedes trailing context after the real query");
+
+  // The opening user turn has no earlier assistant: nothing to replace.
+  const auto [opening_text, opening_stable] =
+      render({ChatMessage(ChatRole::kUser, "Hello")});
+  Require(
+      opening_text.compare(opening_stable, std::string::npos,
+                           "<|turn>model\n<|channel>thought\n<channel|>") == 0,
+      "opening turn keeps the boundary at the generation prompt");
+}
+
 }  // namespace
 
 int main() {
@@ -210,5 +286,6 @@ int main() {
     CheckShownConstants();
     CheckReplayedThought();
     CheckFramingSuffix();
+    CheckReplacedFinalUserTurn();
   });
 }

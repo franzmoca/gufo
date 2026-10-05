@@ -748,10 +748,30 @@ std::optional<RenderedPrompt> ChatTemplate::Render(
     }
   }
 
+  // Per-turn context an agent replaces on every request follows a tool
+  // result or another user turn, never an assistant reply (that is ordinary
+  // chat, which the next request keeps).
+  const bool final_user_turn =
+      last_user >= 1 &&
+      static_cast<std::size_t>(last_user) + 1 == loop.size() &&
+      loop.back().images.empty() &&
+      (loop[static_cast<std::size_t>(last_user) - 1].role == ChatRole::kTool ||
+       loop[static_cast<std::size_t>(last_user) - 1].role == ChatRole::kUser);
+  bool seen_assistant = false;
+  std::optional<std::size_t> final_user_start;
+  std::size_t turn_end = 0;
+
   for (std::size_t index = 0; index < loop.size(); ++index) {
     const ChatMessage& message = loop[index];
     if (message.role == ChatRole::kTool) {
       continue;
+    }
+    if (message.role == ChatRole::kAssistant) {
+      seen_assistant = true;
+    } else if (final_user_turn && seen_assistant &&
+               static_cast<std::ptrdiff_t>(index) == last_user) {
+      final_user_start =
+          loop[index - 1].role == ChatRole::kTool ? turn_end : out.size();
     }
     prev_type = MessageType::kNone;
     const std::string_view raw_role = RoleName(message.role);
@@ -840,6 +860,7 @@ std::optional<RenderedPrompt> ChatTemplate::Render(
     const bool continues_into_next =
         role == "model" && next_role == "assistant" &&
         (message.tool_calls.empty() || tool_responses);
+    turn_end = out.size();
     if (prev_type == MessageType::kToolCall && !tool_responses) {
       out += "<|tool_response>";
     } else if (continues_into_next) {
@@ -851,6 +872,7 @@ std::optional<RenderedPrompt> ChatTemplate::Render(
 
   RenderedPrompt rendered;
   rendered.generation_prompt_offset = out.size();
+  rendered.stable_prefix_offset = final_user_start.value_or(out.size());
   if (options.add_generation_prompt) {
     if (prev_type != MessageType::kToolResponse &&
         prev_type != MessageType::kToolCall) {
