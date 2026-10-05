@@ -213,8 +213,10 @@ public:
     std::string error;  ///< set when this session failed
   };
   /// DecodeStep for several sessions of one model with a single verification
-  /// forward. Each session drafts at most 16 / sessions - 1 tokens, so every
-  /// row keeps the arithmetic of its own session's decode. Returns false if
+  /// forward of at most 16 rows, so every row keeps the arithmetic of its own
+  /// session's decode. Each session drafts at most 16 / sessions - 1 tokens,
+  /// and calibrated sessions share the rows that split leaves over. Returns
+  /// false if
   /// any session failed (see BatchDecode::error); the others completed.
   static bool DecodeBatch(std::span<BatchDecode> decodes);
   /// Evaluate for several sessions of one model in a single forward.
@@ -286,6 +288,12 @@ private:
     std::uint32_t sessions{0};
     std::uint32_t rows{0};
     float expected{0.0F};
+    /// Each session's even share of the forward (rows past its pending
+    /// one), and the rows the even split leaves over (16 - sessions x (share
+    /// + 1)): calibrated sessions draw drafts, copies and siblings past their
+    /// share from these.
+    std::uint32_t fair{0};
+    std::uint32_t spare{0};
   };
   /// One decode cycle: Begin emits the pending token if needed and drafts
   /// (rows = pending plus drafts), the caller verifies `rows` at `position`,

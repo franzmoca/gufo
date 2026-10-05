@@ -664,7 +664,10 @@ struct Session::CycleDraft {
   /// occurrence of the context (at least 12 tokens); they end the chain.
   bool Copy() {
     const auto match = session.lookup_.Find(session.tokens_, context);
-    const std::size_t room = max_drafts - (context.size() - 1);
+    std::size_t room = max_drafts - (context.size() - 1);
+    if (SharesSpare()) {
+      room = std::min<std::size_t>(room, FreeRows());
+    }
     if (match.length == 0 || room == 0) {
       return false;
     }
@@ -674,7 +677,31 @@ struct Session::CycleDraft {
         session.tokens_.begin() + static_cast<std::ptrdiff_t>(match.start),
         session.tokens_.begin() +
             static_cast<std::ptrdiff_t>(match.start + count));
+    for (std::size_t i = 0; i < count; ++i) {
+      TakeRow();
+    }
     return count != 0;
+  }
+
+  /// Whether this cycle may go past its even share into the batch's spare
+  /// rows (a calibrated cycle priced against the batch).
+  [[nodiscard]] bool SharesSpare() const {
+    return share != nullptr && share->spare + share->fair != 0 && !alone &&
+           policy == DraftPolicy::kCalibrated;
+  }
+  /// Rows this cycle may still add: what remains of its share, then spare.
+  [[nodiscard]] std::uint32_t FreeRows() const {
+    return (used < share->fair ? share->fair - used : 0) + share->spare;
+  }
+  /// Counts one more row, past the share from the spare rows.
+  void TakeRow() {
+    if (!SharesSpare()) {
+      return;
+    }
+    if (used >= share->fair && share->spare > 0) {
+      --share->spare;
+    }
+    ++used;
   }
 
   /// Whether the draft just proposed ends the chain unverified. `kept`
@@ -683,6 +710,9 @@ struct Session::CycleDraft {
             const qwen38_flash_next::MtpCandidateLogits& c) {
     switch (policy) {
       case DraftPolicy::kCalibrated: {
+        if (SharesSpare() && FreeRows() == 0) {
+          return true;
+        }
         const float signal = DraftSignal(c);
         const float before = calibrated.Expected();
         if (share != nullptr && !alone) {
@@ -698,6 +728,7 @@ struct Session::CycleDraft {
           share->rows += 1;
           share->expected += calibrated.Expected() - before;
         }
+        TakeRow();
         cycle.signals.push_back(signal);
         return false;
       }
@@ -747,6 +778,8 @@ struct Session::CycleDraft {
   CalibratedChain calibrated;
   DraftShare* share;
   float chain{1.0F};
+  /// Rows past the pending one taken from the batch (SharesSpare).
+  std::uint32_t used{0};
   /// The context the next token continues: pending plus kept drafts.
   std::vector<std::int32_t> context;
   std::vector<std::int32_t> copies;
@@ -842,9 +875,17 @@ bool Session::BeginCycle(Cycle& cycle, std::uint32_t draft_limit,
   cycle.sampled = steps > 0 && sampler.config().uses_random_sampling();
   // Prompt lookup may fill every slot; the policy may stop MTP drafts
   // earlier.
-  const std::uint32_t max_drafts = steps;
   const ModelOptions& options = model_->options_;
   const DraftPolicy policy = options.draft_policy;
+  // Past the even split only calibrated cycles priced against the batch
+  // (they may take its spare rows).
+  if (share != nullptr &&
+      (policy != DraftPolicy::kCalibrated ||
+       (cycle.sampled &&
+        options.draft_calibration == DraftCalibrationScope::kRequest))) {
+    steps = std::min(steps, share->fair);
+  }
+  const std::uint32_t max_drafts = steps;
   if (cycle.sampled && policy == DraftPolicy::kConfidence) {
     steps = std::min(steps, kSampledDraftCap);
   }
@@ -909,7 +950,8 @@ void Session::FinishDraft(Cycle& cycle) {
     }
     for (std::size_t i = 0;
          i < draft.drafts.size() && i < draft.alternatives.size() &&
-         rows < draft.max_drafts + 1;
+         rows < draft.max_drafts + 1 &&
+         (!draft.SharesSpare() || draft.FreeRows() > 0);
          ++i) {
       const Alternative& alt = draft.alternatives[i];
       const float before = draft.calibrated.Expected();
@@ -922,6 +964,7 @@ void Session::FinishDraft(Cycle& cycle) {
         draft.share->rows += 1;
         draft.share->expected += draft.calibrated.Expected() - before;
       }
+      draft.TakeRow();
       cycle.siblings.push_back(alt.token);
       cycle.sibling_signals.push_back(alt.signal);
       ++rows;
@@ -1040,9 +1083,15 @@ bool Session::DecodeBatch(std::span<BatchDecode> decodes) {
   std::lock_guard lock(model.mutex_);
   // One verification forward keeps its single-session arithmetic up to
   // kSplitRows rows, shared evenly.
-  const auto draft_limit = static_cast<std::uint32_t>(std::min<std::size_t>(
-      model.DraftTokens(),
-      std::max<std::size_t>(1, rocm::kSplitRows / decodes.size()) - 1));
+  // Every session takes its pending row and an even share of the rest;
+  // calibrated sessions may also take the rows that split leaves over.
+  const auto sessions_count = static_cast<std::uint32_t>(decodes.size());
+  const std::uint32_t fair =
+      std::max<std::uint32_t>(1, rocm::kSplitRows / sessions_count) - 1;
+  const std::uint32_t spare =
+      sessions_count > 1 ? rocm::kSplitRows - sessions_count * (fair + 1) : 0;
+  const auto draft_limit = static_cast<std::uint32_t>(
+      std::min<std::size_t>(model.DraftTokens(), fair + spare));
   std::vector<Cycle> cycles(decodes.size());
   std::vector<rocm::Executor::Segment> segments;
   std::vector<std::int32_t> tokens;
@@ -1055,7 +1104,9 @@ bool Session::DecodeBatch(std::span<BatchDecode> decodes) {
   const auto sessions = static_cast<std::uint32_t>(decodes.size());
   DraftShare share{.sessions = sessions,
                    .rows = sessions,
-                   .expected = static_cast<float>(sessions)};
+                   .expected = static_cast<float>(sessions),
+                   .fair = fair,
+                   .spare = spare};
   const DraftBatch others{.rows = sessions - 1,
                           .expected = static_cast<float>(sessions - 1)};
   std::vector<rocm::Executor::DraftJob> jobs;
