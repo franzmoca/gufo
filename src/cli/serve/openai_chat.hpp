@@ -13,18 +13,18 @@ HttpResponse HandleOpenAiChat(const HttpRequest& request,
                               TextGenerationBackend& backend);
 
 /// Responses nests output schema under text.format and effort under reasoning.
-/// Keep validation shared with Chat Completions instead of accepting fields
-/// that are subsequently ignored by the compatibility adapter.
+/// Shared controls stay validated as in Chat Completions, but the Responses
+/// adapter tolerates standard Responses fields with no native effect (hosted
+/// tool types, include, reasoning.summary, text.verbosity) rather than reject
+/// the whole request, because conforming Responses clients routinely send them.
 std::optional<HttpResponse> ParseOpenAiResponseControls(const json::Value& body,
                                                         ChatRequest* chat);
 bool ParseOpenAiResponseMessage(const json::Value& item,
                                 tokenization::ChatMessage* message,
                                 core::ImageReadBudget& budget,
                                 std::string* error);
-/// Messages carries effort in output_config.effort; other members are
-/// rejected.
-bool ParseMessagesOutputConfig(const json::Value& body,
-                               ReasoningOptions* options, std::string* error);
+/// Shared effort names; each API applies its own thinking and alias rules.
+std::optional<ReasoningEffort> ParseReasoningEffortName(std::string_view value);
 
 /// Reasoning and visible text of a generation without tools or schemas, split
 /// exactly as Chat Completions reports them.

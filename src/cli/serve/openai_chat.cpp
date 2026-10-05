@@ -31,6 +31,30 @@
 #include "src/models/gemma4/tool_syntax.hpp"
 
 namespace gufo::server {
+
+std::optional<ReasoningEffort> ParseReasoningEffortName(
+    std::string_view value) {
+  if (value == "minimal") {
+    return ReasoningEffort::kMinimal;
+  }
+  if (value == "low") {
+    return ReasoningEffort::kLow;
+  }
+  if (value == "medium") {
+    return ReasoningEffort::kMedium;
+  }
+  if (value == "high") {
+    return ReasoningEffort::kHigh;
+  }
+  if (value == "xhigh") {
+    return ReasoningEffort::kXHigh;
+  }
+  if (value == "max") {
+    return ReasoningEffort::kMax;
+  }
+  return std::nullopt;
+}
+
 namespace {
 
 struct ParsedChatRequest {
@@ -98,14 +122,6 @@ constexpr std::array<std::string_view, 4> kQwenClosers{
     // The client's envelope, whose block rules already strip it whole.
     "</invoke>",
 };
-constexpr std::array<std::string_view, 5> kDeepSeekClosers{
-    "</｜DSML｜parameter>",
-    "</｜DSML｜invoke>",
-    "</｜DSML｜tool_calls>",
-    // The client's envelope.
-    "</invoke>",
-    "</parameter>",
-};
 constexpr std::array<std::string_view, 9> kToolClosers{
     // Qwen family.
     "</parameter>",
@@ -135,12 +151,16 @@ ToolCloserSet ToolClosers(
     return gemma4;
   if (!format)
     return kToolClosers;
+  // As in llama.cpp, DeepSeek content is everything outside its native call
+  // block, which ends the output: there is no echo to strip, and client
+  // envelope syntax the model writes stays visible text.
+  if (*format == Format::kDeepSeek)
+    return {};
   // Mirror ToolMarkers: stripping follows the dialect the request admitted,
   // and another dialect's closing tags are ordinary prose like its openers —
   // the client's envelope excepted, which no dialect admits and every one of
   // them parses.
-  return *format == Format::kDeepSeek ? ToolCloserSet(kDeepSeekClosers)
-                                      : ToolCloserSet(kQwenClosers);
+  return kQwenClosers;
 }
 
 long long Now() {
@@ -425,8 +445,8 @@ bool ParseMessage(const json::Value& value, tokenization::ChatMessage* message,
 }
 
 bool ParseTools(const json::Value* tools,
-                std::vector<tokenization::ChatTool>* output,
-                std::string* error) {
+                std::vector<tokenization::ChatTool>* output, std::string* error,
+                bool allow_non_function = false) {
   if (tools == nullptr || tools->is_null()) {
     return true;
   }
@@ -434,16 +454,32 @@ bool ParseTools(const json::Value* tools,
     *error = "'tools' must be an array";
     return false;
   }
-  if (tools->size() > 128) {
-    *error = "'tools' supports at most 128 functions";
-    return false;
-  }
   for (const auto& item : tools->items()) {
     if (!item.is_object()) {
       *error = "'tools' entries must be objects";
       return false;
     }
+    if (allow_non_function && item.member_str("type") == "namespace") {
+      // A Responses namespace only groups client-executed function tools for
+      // organization; calls replay by the plain function name. Flatten the
+      // nested functions and let the uniqueness check reject ambiguous
+      // namespaces. Nested hosted tools skip like top-level hosted types.
+      const auto* nested = item.find("tools");
+      if (nested == nullptr || !nested->is_array()) {
+        *error = "namespace tools require a tools array";
+        return false;
+      }
+      if (!ParseTools(nested, output, error, allow_non_function))
+        return false;
+      continue;
+    }
     if (item.member_str("type") != "function") {
+      // The Responses API declares hosted tool types (web_search, file_search,
+      // code_interpreter, mcp, ...) that only the provider can execute.
+      // Skip them so the request still reaches the function tools the model can
+      // call; Chat Completions declares only functions and keeps its contract.
+      if (allow_non_function)
+        continue;
       *error = "only function tools are supported";
       return false;
     }
@@ -516,6 +552,12 @@ bool ParseTools(const json::Value* tools,
     definition["type"] = "function";
     definition["function"] = std::move(function_obj);
     tool.definition_json = definition.dump();
+    // Counted per flattened function, so namespace recursion cannot exceed
+    // the cap by ordering hosted-adjacent entries around a full namespace.
+    if (output->size() >= 128) {
+      *error = "'tools' supports at most 128 functions";
+      return false;
+    }
     output->push_back(std::move(tool));
   }
   return true;
@@ -561,29 +603,6 @@ bool ParseToolChoice(const json::Value* value, ParsedChatRequest* request,
   }
   *error = "'tool_choice' must be auto, none, required, or a declared function";
   return false;
-}
-
-std::optional<ReasoningEffort> ParseReasoningEffortName(
-    std::string_view value) {
-  if (value == "minimal") {
-    return ReasoningEffort::kMinimal;
-  }
-  if (value == "low") {
-    return ReasoningEffort::kLow;
-  }
-  if (value == "medium") {
-    return ReasoningEffort::kMedium;
-  }
-  if (value == "high") {
-    return ReasoningEffort::kHigh;
-  }
-  if (value == "xhigh") {
-    return ReasoningEffort::kXHigh;
-  }
-  if (value == "max") {
-    return ReasoningEffort::kMax;
-  }
-  return std::nullopt;
 }
 
 bool AssignReasoningEnabled(ReasoningOptions* options, bool enabled,
@@ -707,9 +726,11 @@ bool ParseReasoningOptions(const json::Value& body, ReasoningOptions* options,
 
 std::optional<HttpResponse> ParseToolControls(const json::Value& body,
                                               ParsedChatRequest* output,
-                                              bool nullable_parallel = false) {
+                                              bool nullable_parallel = false,
+                                              bool allow_non_function = false) {
   std::string parse_error;
-  if (!ParseTools(body.find("tools"), &output->chat.tools, &parse_error) ||
+  if (!ParseTools(body.find("tools"), &output->chat.tools, &parse_error,
+                  allow_non_function) ||
       !ParseToolChoice(body.find("tool_choice"), output, &parse_error)) {
     return Error(400, "Bad Request", std::move(parse_error), "invalid_tools");
   }
@@ -1184,6 +1205,7 @@ std::size_t EnvelopeBlockStart(std::string_view full, std::size_t stop,
 
 // Remove framing only with request context: a closer echo directly after a
 // parsed call, or a client envelope naming a declared tool. Other XML is data.
+// A dialect without closers removes nothing.
 std::string_view ContentBefore(std::string_view full, std::size_t begin,
                                std::size_t end, ToolCloserSet closers,
                                QuoteTracker& quotes,
@@ -1192,6 +1214,8 @@ std::string_view ContentBefore(std::string_view full, std::size_t begin,
   const auto stop = std::min(end, full.size());
   if (stop <= begin)
     return {};
+  if (closers.empty())
+    return full.substr(begin, stop - begin);
   if (after_call) {
     auto cursor = begin;
     bool removed = false;
@@ -1227,6 +1251,8 @@ std::size_t FramingHold(std::string_view full, std::size_t end,
                         std::size_t floor, ToolCloserSet closers,
                         QuoteTracker& quotes,
                         std::span<const tokenization::ChatTool> tools) {
+  if (closers.empty())
+    return 0;
   std::size_t hold = 0;
   if (end > 0) {
     // Hold only a suffix that can still become admitted framing. A bare
@@ -1801,7 +1827,8 @@ ParsedGeneration ParseGeneration(
       }
       parsed.text = std::string(content);
     }
-  } else {
+  } else if (initial_output_state ==
+             TextGenerationBackend::InitialOutputState::kAuto) {
     // Only the initial phase has reasoning markup semantics. A literal tag
     // inside an argument (or quoted ordinary text) must never be stripped.
     const auto leading = content.find_first_not_of(" \t\r\n");
@@ -1846,6 +1873,8 @@ ParsedGeneration ParseGeneration(
     } else {
       parsed.text = std::string(content);
     }
+  } else {
+    parsed.text = std::string(content);
   }
 
   quotes.Reset(parsed.text);
@@ -2471,7 +2500,7 @@ class ResponsesOutput {
 public:
   ResponsesOutput(std::string model, HttpResponse::BodyWriter writer,
                   const ChatRequest& chat)
-      : writer_(std::move(writer)) {
+      : writer_(std::move(writer)), namespaces_(chat.tool_namespaces) {
     response_ = json::Value::object();
     response_["id"] = RandomId("resp_");
     response_["object"] = "response";
@@ -2559,6 +2588,8 @@ public:
     item["type"] = "function_call";
     item["call_id"] = call.id;
     item["name"] = call.name;
+    if (const auto it = namespaces_.find(call.name); it != namespaces_.end())
+      item["namespace"] = it->second;
     item["arguments"] = "";
     item["status"] = "in_progress";
     auto added = IndexedEvent("response.output_item.added");
@@ -2689,6 +2720,7 @@ private:
   }
 
   HttpResponse::BodyWriter writer_;
+  std::map<std::string, std::string> namespaces_;
   json::Value response_;
   json::Value item_;
   std::string text_;
@@ -3026,8 +3058,23 @@ std::optional<HttpResponse> ParseOpenAiResponseControls(const json::Value& body,
                                                         ChatRequest* chat) {
   ParsedChatRequest parsed;
   parsed.chat = *chat;
-  if (auto error = ParseToolControls(body, &parsed, true))
+  // Responses declares host tools (namespace/web_search) that only OpenAI can
+  // execute; skip them rather than reject the whole request.
+  if (auto error = ParseToolControls(body, &parsed, true, true))
     return error;
+  // Clients route namespaced calls by namespace and name, so keep the
+  // namespace of each flattened function and echo it on its calls.
+  // ParseToolControls has validated the namespace tools arrays.
+  if (const auto* tools = body.find("tools"); tools && tools->is_array()) {
+    for (const auto& item : tools->items()) {
+      const auto name = item.member_str("name");
+      if (item.member_str("type") != "namespace" || name.empty())
+        continue;
+      for (const auto& tool : item.find("tools")->items())
+        if (tool.member_str("type") == "function")
+          parsed.chat.tool_namespaces[tool.member_str("name")] = name;
+    }
+  }
   // Responses attempts strict normalization when strict is omitted; Chat
   // Completions keeps its best-effort default. Explicit true/false wins.
   for (auto& tool : parsed.chat.tools) {
@@ -3070,6 +3117,8 @@ std::optional<HttpResponse> ParseOpenAiResponseControls(const json::Value& body,
       return Error(400, "Bad Request", "'reasoning' must be an object",
                    "invalid_reasoning");
     for (const auto& [key, value] : reasoning->members()) {
+      if (key == "summary")
+        continue;  // Requests reasoning text; local reasoning is always sent.
       if (key != "effort")
         return Error(400, "Bad Request", "unsupported reasoning member: " + key,
                      "invalid_reasoning");
@@ -3094,6 +3143,8 @@ std::optional<HttpResponse> ParseOpenAiResponseControls(const json::Value& body,
       return Error(400, "Bad Request", "'text' must be an object",
                    "invalid_response_format");
     for (const auto& [key, value] : text->members()) {
+      if (key == "verbosity")
+        continue;  // Verbosity has no native equivalent; accept and ignore.
       if (key != "format")
         return Error(400, "Bad Request", "unsupported text member: " + key,
                      "invalid_response_format");
@@ -3108,38 +3159,6 @@ std::optional<HttpResponse> ParseOpenAiResponseControls(const json::Value& body,
     }
   }
   return {};
-}
-
-bool ParseMessagesOutputConfig(const json::Value& body,
-                               ReasoningOptions* options, std::string* error) {
-  const auto* config = body.find("output_config");
-  if (config == nullptr || config->is_null())
-    return true;
-  if (!config->is_object()) {
-    *error = "'output_config' must be an object";
-    return false;
-  }
-  for (const auto& [key, value] : config->members()) {
-    if (key != "effort") {
-      *error = "unsupported output_config member: " + key;
-      return false;
-    }
-    if (value.is_null())
-      continue;
-    // Anthropic effort does not select thinking, so it never enables it;
-    // formatters apply it only while thinking is on. Anthropic has no minimal
-    // effort.
-    const auto effort = value.is_string() && value.str() != "minimal"
-                            ? ParseReasoningEffortName(value.str())
-                            : std::nullopt;
-    if (!effort.has_value()) {
-      *error =
-          "'output_config.effort' must be low, medium, high, xhigh, or max";
-      return false;
-    }
-    options->effort = effort;
-  }
-  return true;
 }
 
 GeneratedText SplitGeneratedText(

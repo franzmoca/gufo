@@ -13,6 +13,7 @@
 #include <iostream>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <semaphore>
 #include <sstream>
 #include <stdexcept>
@@ -118,6 +119,11 @@ public:
   gufo::ReasoningOptions reasoning_defaults() const override {
     return reasoning;
   }
+  InitialOutputState initial_output_state(
+      const gufo::server::ChatRequest& request) const override {
+    return initial_output_state_override.value_or(
+        TextGenerationBackend::initial_output_state(request));
+  }
   std::size_t count_tokens(std::string_view text) const override {
     return text.size();
   }
@@ -217,6 +223,7 @@ public:
   std::atomic<bool> lost{false};
   std::string forced_stop_sequence;
   gufo::ReasoningOptions reasoning;
+  std::optional<InitialOutputState> initial_output_state_override;
   bool wait_for_disconnect{false};
   std::atomic<bool> disconnected{false};
   std::binary_semaphore entered{0};
@@ -980,6 +987,98 @@ void TestCompatibilityRequests() {
          replay_messages[1].thought == "Thoughts" &&
          replay_messages[1].content == "Answer");
 
+  // Codex replays reasoning items with the null content and encrypted_content
+  // fields it serialized from the response; only non-null payload is rejected.
+  const auto null_replay = response_body(
+      server.Post("/v1/responses",
+                  R"({"input":[{"role":"user","content":"First question"},
+        {"type":"reasoning","id":"rs_1","status":"completed",
+         "summary":[{"type":"summary_text","text":"Thoughts"}],
+         "content":null,"encrypted_content":null},
+        {"type":"message","role":"assistant","content":[
+          {"type":"output_text","text":"Answer","annotations":[]}]}]})"));
+  assert(null_replay.member_str("status") == "completed");
+  const auto null_replay_messages = server.backend->LastCall().chat.messages;
+  assert(null_replay_messages.size() == 2 &&
+         null_replay_messages[1].thought == "Thoughts" &&
+         null_replay_messages[1].content == "Answer");
+  const auto opaque_replay =
+      server.Post("/v1/responses",
+                  R"({"input":[{"role":"user","content":"question"},
+        {"type":"reasoning","id":"rs_1",
+         "summary":[],"encrypted_content":"gAAAA"}]})");
+  ExpectStatus(opaque_replay, 400);
+
+  // The Responses API carries request-only fields with no native effect here
+  // (hosted tool types, include, reasoning.summary, text.verbosity). Accept
+  // them and keep every executable function tool, flattening the client-side
+  // namespace grouping. Codex is one such client.
+  const auto hosted = response_body(server.Post(
+      "/v1/responses",
+      R"({"model":"test","instructions":"You are a coding agent.","input":[
+          {"type":"message","role":"developer","content":[
+            {"type":"input_text","text":"AGENTS instructions"}]},
+          {"type":"message","role":"user","content":[
+            {"type":"input_text","text":"say hi"}]}],
+        "reasoning":{"effort":"medium","summary":"auto"},
+        "text":{"verbosity":"low"},
+        "tool_choice":"auto","parallel_tool_calls":true,
+        "store":false,"stream":false,
+        "include":["reasoning.encrypted_content"],
+        "prompt_cache_key":"cache-1","client_metadata":{"thread_id":"t-1"},
+        "tools":[
+          {"type":"function","name":"exec_command","strict":false,
+           "parameters":{"type":"object",
+             "properties":{"cmd":{"type":"string"}},"required":["cmd"]}},
+          {"type":"namespace","name":"multi_agent_v1","tools":[
+            {"type":"function","name":"close_agent","strict":false,
+             "parameters":{"type":"object","properties":{}}}]},
+          {"type":"web_search","external_web_access":false}]})"));
+  assert(hosted.member_str("status") == "completed");
+  const auto hosted_call = server.backend->LastCall();
+  assert(hosted_call.chat.tools.size() == 2 &&
+         hosted_call.chat.tools[0].name == "exec_command" &&
+         hosted_call.chat.tools[1].name == "close_agent");
+  assert(hosted_call.chat.reasoning.enabled == true &&
+         hosted_call.chat.reasoning.effort == gufo::ReasoningEffort::kMedium);
+  assert(hosted_call.chat.messages.size() == 3 &&
+         hosted_call.chat.messages[0].role ==
+             gufo::tokenization::ChatRole::kSystem &&
+         hosted_call.chat.messages[0].content == "You are a coding agent." &&
+         hosted_call.chat.messages[2].content == "say hi");
+
+  // Responses replays function calls and their outputs between turns under the
+  // same call_id; the adapter folds them back into the prompt.
+  const auto tool_replay = response_body(server.Post("/v1/responses",
+                                                     R"({"input":[
+          {"type":"message","role":"user","content":[
+            {"type":"input_text","text":"list files"}]},
+          {"type":"function_call","id":"fc_1","call_id":"call_1",
+           "name":"exec_command","arguments":"{\"cmd\":\"ls\"}",
+           "status":"completed"},
+          {"type":"function_call_output","call_id":"call_1","output":"file.txt"},
+          {"type":"message","role":"assistant","content":[
+            {"type":"output_text","text":"Here are the files.",
+             "annotations":[]}]}]})"));
+  assert(tool_replay.member_str("status") == "completed");
+  const auto tool_messages = server.backend->LastCall().chat.messages;
+  assert(tool_messages.size() == 4);
+  assert(tool_messages[1].role == gufo::tokenization::ChatRole::kAssistant &&
+         tool_messages[1].tool_calls.size() == 1 &&
+         tool_messages[1].tool_calls[0].id == "call_1" &&
+         tool_messages[1].tool_calls[0].name == "exec_command");
+  assert(tool_messages[2].content == "file.txt" &&
+         tool_messages[3].content == "Here are the files.");
+
+  // The include leniency is Responses-only: endpoints that run the shared
+  // compatibility validator (Messages) still reject it.
+  ExpectStatus(
+      server.Post(
+          "/v1/messages",
+          R"({"messages":[{"role":"user","content":"hi"}],"max_tokens":2,
+                      "include":["x"]})"),
+      400);
+
   const auto anthropic = response_body(
       server.Post("/v1/messages",
                   R"({"system":[{"type":"text","text":"Be concise."}],
@@ -1013,6 +1112,25 @@ void TestCompatibilityRequests() {
   assert(replayed.messages.size() == 3 &&
          replayed.messages[1].thought == "plan" &&
          replayed.messages[1].content == "answer");
+
+  // An explicit content phase preserves requested literal reasoning tags.
+  // The default automatic phase above still recognizes reasoning blocks.
+  server.backend->initial_output_state_override =
+      FakeBackend::InitialOutputState::kContent;
+  const std::string literal_thinking = "<think>literal example</think>";
+  server.backend->SetOutput(literal_thinking);
+  const auto literal = response_body(
+      server.Post("/v1/messages", R"({"messages":[{"role":"user","content":
+        "Copy this XML exactly: <think>literal example</think>"}],
+        "thinking":{"type":"disabled"}})"));
+  assert(server.backend->LastCall().chat.reasoning.enabled == false);
+  const auto literal_blocks = literal.find("content")->items();
+  assert(literal_blocks.size() == 1 &&
+         literal_blocks[0].member_str("type") == "text" &&
+         literal_blocks[0].member_str("text") == literal_thinking &&
+         "disabled thinking preserves literal tags as one text block");
+  server.backend->initial_output_state_override.reset();
+
   server.backend->SetOutput("answer");
   const auto plain = response_body(server.Post(
       "/v1/messages", R"({"messages":[{"role":"user","content":"hi"}]})"));
@@ -1683,7 +1801,9 @@ void TestAdmittedStreamHeaders() {
     ExpectStatus(response, 200);
     const auto ping = response.find(": ping\n\n");
     assert(ping != std::string::npos);
-    assert(ping < response.find("ok"));
+    const auto token = response.find(R"("ok")");
+    assert(token != std::string::npos);
+    assert(ping < token);
     assert(response.ends_with("0\r\n\r\n"));
   }
   // After admission, failures before any token are terminal SSE errors.

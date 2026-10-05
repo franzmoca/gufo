@@ -313,6 +313,11 @@ Use `--think off` or `chat_template_kwargs.enable_thinking=false` for direct
 answers. DeepSeek defaults to thinking with `high` effort. Quality comparisons
 must use the same reasoning mode and effort.
 
+Keep `reasoning_effort` (Chat) or `output_config.effort` (Messages) consistent
+across turns while thinking is enabled: Qwen and DeepSeek render the effort
+instruction into the prompt, so changing it changes the prompt prefix and can
+force a full conversation prefill.
+
 `POST /v1/chat/completions` accepts top-level `reasoning_effort` (`none`,
 `minimal`, `low`, `medium`, `high`, `xhigh`, or `max`) and Pi/llama.cpp-style
 `chat_template_kwargs`:
@@ -558,7 +563,18 @@ Image uploads accept PNG, JPEG and WebP. Base64 data URLs also accept
 Clients supply the complete conversation, including prior Gufo `output` items
 when retaining reasoning. Replay `function_call` items with their `call_id`,
 then supply `function_call_output` items using the same ID. Function tools use
-the flat `{type:"function",name,parameters,strict}` shape.
+the flat `{type:"function",name,parameters,strict}` shape. The Responses API
+also defines hosted tool types (`web_search`, `file_search`, `code_interpreter`,
+`mcp`, ...) that only OpenAI can execute; they are accepted and skipped so
+the function tools still reach the model. A `namespace` entry is not hosted:
+it groups client-executed function tools for organization only, and its
+functions are flattened into the function list. Their `function_call` items
+keep the plain `name` and add the owning `namespace`, so clients can route
+them. Function names that collide across namespaces or with top-level
+functions are rejected. Standard Responses request fields with
+no native effect are accepted and ignored so conforming clients interoperate
+(for example Codex): `include`, `reasoning.summary`, `text.verbosity`,
+`client_metadata` and `prompt_cache_key`.
 `store` and `background` must be false when present; server-side conversations
 and `previous_response_id` remain unsupported.
 
@@ -699,7 +715,8 @@ Tool calls are emitted only for declared functions when `tool_choice` allows
 calling tools. With `auto`, ordinary text and reasoning remain allowed; once a
 call starts, decoding constrains its name and argument format. As in llama.cpp,
 a DeepSeek call block ends the output: parallel calls share one block, and no
-text follows it. Non-strict tools
+text follows it. Other DeepSeek output, including client call markup written in
+place of a native call, is returned as content. Non-strict tools
 keep optional arguments optional. Open nested objects retain native syntax and
 declared requirements/types, including nested fields; unsupported schema
 keywords remain guidance. Unsupported property-admitting rules, including

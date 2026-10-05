@@ -5,6 +5,7 @@
 #include <condition_variable>
 #include <cstdlib>
 #include <iostream>
+#include <map>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -86,8 +87,8 @@ public:
   }
   [[nodiscard]] InitialOutputState initial_output_state(
       const gufo::server::ChatRequest& request) const override {
-    if (initial_state)
-      return *initial_state;
+    if (initial_output_state_override)
+      return *initial_output_state_override;
     return request.reasoning.enabled.value_or(false)
                ? InitialOutputState::kReasoning
                : InitialOutputState::kContent;
@@ -207,12 +208,12 @@ public:
   gufo::server::ChatRequest last_request;
   SamplingDefaults defaults;
   gufo::ReasoningOptions reasoning_defaults_value;
+  std::optional<InitialOutputState> initial_output_state_override;
   std::size_t last_max_tokens{0};
   std::size_t reasoning_tokens{0};
   float last_temperature{0.0F};
   gufo::sampling::SamplingConfig last_sampling;
   std::optional<gufo::server::TextGenerationErrorCode> reject_on_start;
-  std::optional<InitialOutputState> initial_state;
   OutputMarkup markup;
 
 private:
@@ -679,6 +680,185 @@ void TestInvalidToolsFailBeforeGeneration() {
                "Invalid tools fail before generation, including mixed lists");
       }
     }
+  }
+}
+
+void TestResponsesClientCompatTolerances() {
+  // Hosted tool types (Responses-only) are skipped, not rejected. Namespaces
+  // group client-executed functions and flatten to the function list, while a
+  // malformed function still fails the controls.
+  {
+    auto body = gufo::json::parse(R"({
+      "tools":[
+        {"type":"function","name":"exec","parameters":{"type":"object",
+          "properties":{"cmd":{"type":"string"}},"required":["cmd"]}},
+        {"type":"web_search","external_web_access":false},
+        {"type":"namespace","name":"agents","tools":[{"type":"function",
+          "name":"spawn"}]},
+        {"type":"code_interpreter"}]})");
+    gufo::server::ChatRequest chat;
+    Expect(!gufo::server::ParseOpenAiResponseControls(body, &chat),
+           "Responses skips hosted tool types without failing");
+    Expect(chat.tools.size() == 2 && chat.tools[0].name == "exec" &&
+               chat.tools[1].name == "spawn",
+           "Function tools survive, including those nested in namespaces");
+  }
+  {
+    // A namespace is a client-side grouping, not a hosted tool: its functions
+    // must reach the model with their schema and strictness intact.
+    gufo::server::ChatRequest chat;
+    Expect(!gufo::server::ParseOpenAiResponseControls(
+               gufo::json::parse(R"({"tools":[{"type":"namespace","name":"crm",
+                 "description":"Local customer tools","tools":[{"type":"function",
+                 "name":"lookup","parameters":{"type":"object","properties":{},
+                 "required":[],"additionalProperties":false},"strict":true}]}]})"),
+               &chat) &&
+               chat.tools.size() == 1 && chat.tools[0].name == "lookup" &&
+               chat.tools[0].definition_json.find("\"strict\":true") !=
+                   std::string::npos,
+           "Namespace function tools are flattened with their definitions");
+    // Rejected parses leave the request untouched, so every case parses into
+    // fresh state instead of inheriting tools from a previous parse.
+    gufo::server::ChatRequest ambiguous;
+    Expect(gufo::server::ParseOpenAiResponseControls(
+               gufo::json::parse(R"({"tools":[
+                 {"type":"function","name":"lookup"},
+                 {"type":"namespace","name":"crm","tools":[{"type":"function",
+                  "name":"lookup"}]}]})"),
+               &ambiguous)
+               .has_value(),
+           "Namespace routing is rejected when function names are ambiguous");
+    gufo::server::ChatRequest malformed;
+    Expect(gufo::server::ParseOpenAiResponseControls(
+               gufo::json::parse(R"({"tools":[{"type":"namespace",
+                 "name":"crm"}]})"),
+               &malformed)
+               .has_value(),
+           "A namespace without a tools array is rejected");
+  }
+  {
+    // The shared 128-function cap counts flattened functions at append time,
+    // so both orderings around a full namespace reject the 129th function.
+    std::string nested = R"({"type":"namespace","name":"crm","tools":[)";
+    for (int i = 0; i < 128; ++i) {
+      if (i != 0)
+        nested += ",";
+      nested += R"({"type":"function","name":"f)" + std::to_string(i) + "\"}";
+    }
+    nested += "]}";
+    const std::string outside = R"({"type":"function","name":"outside"})";
+    gufo::server::ChatRequest accepted;
+    Expect(!gufo::server::ParseOpenAiResponseControls(
+               gufo::json::parse(R"({"tools":[)" + nested + "]}"), &accepted) &&
+               accepted.tools.size() == 128,
+           "Exactly 128 functions flattened from a namespace are accepted");
+    for (const bool outside_first : {false, true}) {
+      const auto body = outside_first
+                            ? R"({"tools":[)" + outside + "," + nested + "]}"
+                            : R"({"tools":[)" + nested + "," + outside + "]}";
+      gufo::server::ChatRequest overflow;
+      Expect(gufo::server::ParseOpenAiResponseControls(gufo::json::parse(body),
+                                                       &overflow)
+                 .has_value(),
+             "Both boundary orderings reject the 129th flattened function");
+    }
+  }
+  {
+    gufo::server::ChatRequest chat;
+    Expect(
+        gufo::server::ParseOpenAiResponseControls(
+            gufo::json::parse(
+                R"({"tools":[{"type":"function","function":null,"name":"f"}]})"),
+            &chat)
+            .has_value(),
+        "Responses still rejects a malformed function tool");
+  }
+
+  // reasoning.summary is accepted and ignored; effort still applies; a
+  // genuinely unknown reasoning member still fails.
+  {
+    gufo::server::ChatRequest chat;
+    Expect(!gufo::server::ParseOpenAiResponseControls(
+               gufo::json::parse(
+                   R"({"reasoning":{"effort":"low","summary":"auto"}})"),
+               &chat) &&
+               chat.reasoning.enabled == true &&
+               chat.reasoning.effort == gufo::ReasoningEffort::kLow,
+           "reasoning.summary is accepted while effort still applies");
+    Expect(gufo::server::ParseOpenAiResponseControls(
+               gufo::json::parse(R"({"reasoning":{"effort":"low","bogus":1}})"),
+               &chat)
+               .has_value(),
+           "Unknown reasoning members are still rejected");
+  }
+
+  // text.verbosity is accepted and leaves the response format unset;
+  // text.format still applies beside it; an unknown text member still fails.
+  {
+    gufo::server::ChatRequest chat;
+    Expect(!gufo::server::ParseOpenAiResponseControls(
+               gufo::json::parse(R"({"text":{"verbosity":"low"}})"), &chat) &&
+               !chat.response_format,
+           "text.verbosity is accepted without forcing a response format");
+    gufo::server::ChatRequest formatted;
+    Expect(!gufo::server::ParseOpenAiResponseControls(
+               gufo::json::parse(R"({"text":{"format":{"type":"json_object"},
+                 "verbosity":"low"}})"),
+               &formatted) &&
+               formatted.response_format,
+           "text.format still applies alongside verbosity");
+    gufo::server::ChatRequest rejected;
+    Expect(gufo::server::ParseOpenAiResponseControls(
+               gufo::json::parse(R"({"text":{"bogus":1}})"), &rejected)
+               .has_value(),
+           "Unknown text members are still rejected");
+  }
+
+  // Codex routes calls by namespace and name: a flattened function call must
+  // carry its namespace, while a top-level function call carries none.
+  for (const bool stream : {false, true}) {
+    auto body = gufo::json::parse(R"({"input":"go","tools":[
+      {"type":"function","name":"exec","strict":false,
+       "parameters":{"type":"object","properties":{}}},
+      {"type":"namespace","name":"multi_agent_v1","tools":[
+        {"type":"function","name":"close_agent","strict":false,
+         "parameters":{"type":"object","properties":{}}}]}]})");
+    body["stream"] = stream;
+    gufo::server::ChatRequest chat;
+    Expect(!gufo::server::ParseOpenAiResponseControls(body, &chat),
+           "Responses accepts a namespace beside a function");
+    FakeBackend backend;
+    backend.pieces = {
+        "<tool_call>{\"name\":\"close_agent\",\"arguments\":{}}</tool_call>"
+        "<tool_call>{\"name\":\"exec\",\"arguments\":{}}</tool_call>"};
+    auto response = gufo::server::CreateOpenAiResponse(
+        Request(body.dump()), backend, chat, 256, {}, stream);
+    Expect(response.status == 200, "namespaced tool request succeeds");
+    std::vector<gufo::json::Value> results;
+    if (stream) {
+      response.streaming_body([&](std::string_view chunk) {
+        auto pos = chunk.find("data: ");
+        if (pos != std::string_view::npos &&
+            !chunk.substr(pos + 6).starts_with("[DONE]")) {
+          auto event = gufo::json::parse(chunk.substr(pos + 6));
+          if (event.member_str("type") == "response.completed")
+            results.push_back(*event.find("response"));
+        }
+        return true;
+      });
+    } else {
+      results.push_back(gufo::json::parse(response.body));
+    }
+    std::map<std::string, std::string> namespaces;
+    for (const auto& result : results)
+      for (const auto& item : result.find("output")->items())
+        if (item.member_str("type") == "function_call")
+          namespaces[item.member_str("name")] =
+              item.contains("namespace") ? item.member_str("namespace") : "-";
+    Expect(namespaces.size() == 2 &&
+               namespaces["close_agent"] == "multi_agent_v1" &&
+               namespaces["exec"] == "-",
+           "function calls echo only their own namespace");
   }
 }
 
@@ -1562,6 +1742,69 @@ void TestStreamingPromptOpenedReasoning() {
          "Streaming answer switches to content after think end");
   Expect(output.find(R"("content":"Check")") == std::string::npos,
          "Reasoning is never exposed as visible content");
+}
+
+void TestInitialOutputPhases() {
+  using gufo::json::Value;
+  struct Case {
+    std::string text;
+    bool automatic{false};
+  };
+  for (const auto& item :
+       {Case{"<think>literal example</think>"},
+        Case{" \n<think>literal example</think>\nanswer"},
+        Case{"<think>unfinished example"},
+        Case{"<think>Check carefully.</think>\nAnswer.", true}}) {
+    for (const bool stream : {false, true}) {
+      FakeBackend backend;
+      // Disabled thinking starts in the content phase. Tags requested as
+      // literal output remain data. Automatic detection still recognizes an
+      // initial reasoning block, including across token boundaries.
+      if (item.automatic)
+        backend.initial_output_state_override =
+            FakeBackend::InitialOutputState::kAuto;
+      for (const char byte : item.text)
+        backend.pieces.emplace_back(1, byte);
+      auto body = gufo::json::parse(R"({
+        "model":"test-model","messages":[]
+      })");
+      if (!item.automatic)
+        body["reasoning_effort"] = "none";
+      auto message = Value::object();
+      message["role"] = "user";
+      message["content"] =
+          item.automatic
+              ? "Answer carefully."
+              : "Copy this XML exactly, without code fences: " + item.text;
+      body["messages"].push_back(std::move(message));
+      body["stream"] = stream;
+      const auto response =
+          gufo::server::HandleOpenAiChat(Request(body.dump()), backend);
+      Expect(response.status == 200, "output-phase request succeeds");
+      std::string content, reasoning;
+      const auto collect = [&](const Value& message) {
+        content += message.member_str("content");
+        reasoning += message.member_str("reasoning_content");
+      };
+      if (stream) {
+        response.streaming_body([&](std::string_view chunk) {
+          const auto payload = chunk.substr(chunk.find("data: ") + 6);
+          if (!payload.starts_with("[DONE]")) {
+            const auto event = gufo::json::parse(payload);
+            for (const auto& choice : event.find("choices")->items())
+              collect(*choice.find("delta"));
+          }
+          return true;
+        });
+      } else {
+        const auto output = gufo::json::parse(response.body);
+        collect(*output.find("choices")->items()[0].find("message"));
+      }
+      Expect(content == (item.automatic ? "Answer." : item.text) &&
+                 reasoning == (item.automatic ? "Check carefully." : ""),
+             "initial output phase controls reasoning tag interpretation");
+    }
+  }
 }
 
 void TestConflictingReasoningControlsAreRejected() {
@@ -3629,7 +3872,7 @@ void TestGemmaNativeToolCalls() {
   expect_call(response, "Constrained native Gemma 4 calls are parsed");
 
   // With thinking on, the output may open the thought channel before a call.
-  backend.initial_state = Backend::InitialOutputState::kAuto;
+  backend.initial_output_state_override = Backend::InitialOutputState::kAuto;
   backend.pieces = {"<|channel>thought\nUse the tool.<channel|>",
                     "<|tool_call>call:get_weather{city:<|\"|>Rome<|\"|>}",
                     "<tool_call|>"};
@@ -3656,7 +3899,7 @@ void TestGemmaNativeToolCalls() {
 
   // An agent turn: automatic, non-parallel, streamed token by token. Gemma 4
   // opens an empty thought channel after tool responses even without thinking.
-  backend.initial_state = Backend::InitialOutputState::kAuto;
+  backend.initial_output_state_override = Backend::InitialOutputState::kAuto;
   const std::string call =
       "<|channel>thought\n<channel|><|tool_call>call:get_weather{city:<|\"|>"
       "Rome<|\"|>,note:<|\"|>a, "
@@ -3682,7 +3925,7 @@ void TestGemmaNativeToolCalls() {
 void TestResponsesAutoReasoning() {
   using Backend = gufo::server::TextGenerationBackend;
   FakeBackend backend;
-  backend.initial_state = Backend::InitialOutputState::kAuto;
+  backend.initial_output_state_override = Backend::InitialOutputState::kAuto;
   backend.pieces = {"<think>Check the sum.</think>", "Four."};
   const auto buffered = gufo::server::CreateOpenAiResponse(
       Request("{}"), backend, {}, 0, {}, false);
@@ -3857,139 +4100,156 @@ void TestToolClosingFraming() {
     std::string argument;
     std::string content;
   };
-  for (const auto& item : std::vector<Case>{
-           {"I'll update `config.py\n" + call, 1, R"({"text":"42"})",
-            "I'll update `config.py\n"},
-           {"Let`s write it.\n" + call, 1, R"({"text":"42"})",
-            "Let`s write it.\n"},
-           {"looks like `" + call + "` and no call.", 0, "",
-            "looks like `" + call + "` and no call."},
-           {"looks like ``" + call + "`` and no call.", 0, "",
-            "looks like ``" + call + "`` and no call."},
-           {"looks like `" + call, 1, R"({"text":"42"})", "looks like `"},
-           {"looks like ``" + call, 1, R"({"text":"42"})", "looks like ``"},
-           {"`example\n\n" + call, 1, R"({"text":"42"})", "`example\n\n"},
-           {"looks like `literal <think>\n" + call + "`", 0, "",
-            "looks like `literal <think>\n" + call + "`"},
-           {call + "\n</invoke>\n</parameter>\n</function>\n", 1,
-            R"({"text":"42"})", ""},
-           {call + "\n</function>\n" + call, 2, R"({"text":"42"})", ""},
-           {call + "\n" + envelope, 1, R"({"text":"42"})", ""},
-           {call + "\n</invoke>\n<|im_end|>", 1, R"({"text":"42"})",
-            "<|im_end|>"},
-           {"</invoke>\n" + call, 1, R"({"text":"42"})", "</invoke>\n"},
-           {"</invoke>", 0, "", "</invoke>"},
-           {"Text </parameter>", 0, "", "Text </parameter>"},
-           {"The token is <|im_end|>", 0, "", "The token is <|im_end|>"},
-           {"<parameter>x</parameter>", 0, "", "<parameter>x</parameter>"},
-           {raw_xml, 0, "", raw_xml},
-           {"Raw XML: " + raw_xml, 0, "", "Raw XML: " + raw_xml},
-           {envelope, 0, "", ""},
-           {"Planning.\n" + envelope, 0, "", "Planning."},
-           {"<invoke name=\"f\"><parameter name=\"text\">x", 0, "", ""},
-           {"Planning.\n<parameter=text>\nx\n</parameter>\n</function>\n</"
-            "tool_call>",
-            0, "",
-            "Planning.\n<parameter=text>\nx\n</parameter>\n</function>\n</"
-            "tool_call>"},
-           {"<function=f><parameter=text>x</parameter></function>", 0, "",
-            "<function=f><parameter=text>x</parameter></function>"},
-           {"```xml\n" + envelope + "\n```", 0, "",
-            "```xml\n" + envelope + "\n```"},
-           {"`" + envelope + "` and prose", 0, "",
-            "`" + envelope + "` and prose"},
-           {"```python\nprint(1)\n" + call, 1, R"({"text":"42"})",
-            "```python\nprint(1)\n"},
-           {"```xml\n" + call + "\n```", 0, "", "```xml\n" + call + "\n```"},
-           {"```xml\n" + call + "\n```\n" + call, 1, R"({"text":"42"})",
-            "```xml\n" + call + "\n```\n"},
-           {"`" + inline_call + "`", 0, "", "`" + inline_call + "`"},
-           {"``" + inline_call + "``", 0, "", "``" + inline_call + "``"},
-           {"```xml\n<tool_call><function=unknown></function></tool_call>", 0,
-            "", "```xml\n<tool_call><function=unknown></function></tool_call>"},
-           {"```xml\n<tool_call><function=f></function></tool_call>", 0, "",
-            "```xml\n<tool_call><function=f></function></tool_call>"},
-           {"```xml\n<tool_call><function=f><parameter=extra>x</parameter></"
-            "function></tool_call>",
-            0, "",
-            "```xml\n<tool_call><function=f><parameter=extra>x</parameter></"
-            "function></tool_call>"},
-           {"<tool_call><function=f><parameter=text>\nEOS = "
-            "\"<|im_end|>\"\n</parameter></function></tool_call>",
-            1, R"({"text":"EOS = \"<|im_end|>\""})", ""},
-           {"<tool_call><function=f><parameter=text>\n<|im_start|><|endoftext|>"
-            "<|not_a_vocab_entry|>\n</parameter></function></tool_call>",
-            1, R"({"text":"<|im_start|><|endoftext|><|not_a_vocab_entry|>"})",
-            ""},
-           {"<tool_call><function=f><parameter=text>\n</invoke>\n</parameter></"
-            "function></tool_call>",
-            1, R"({"text":"</invoke>"})", ""},
-       }) {
-    for (bool stream : {false, true}) {
-      for (bool bytewise : {false, true}) {
-        auto body = schema;
-        body["stream"] = stream;
-        body["tool_choice"] = "auto";
-        FakeBackend backend;
-        backend.tool_format = gufo::sampling::JsonConstraint::ToolFormat::kQwen;
-        if (bytewise)
-          for (const char byte : item.text)
-            backend.pieces.emplace_back(1, byte);
-        else
-          backend.pieces.push_back(item.text);
-        const auto response =
-            gufo::server::HandleOpenAiChat(Request(body.dump()), backend);
-        Expect(response.status == 200, "framing request succeeds");
-        std::vector<Value> calls;
-        std::string content;
-        std::string finish;
-        if (!stream) {
-          const auto output = gufo::json::parse(response.body);
-          const auto& choice = output.find("choices")->items()[0];
-          const auto& message = *choice.find("message");
-          content = message.member_str("content");
-          finish = choice.member_str("finish_reason");
-          if (const auto* found = message.find("tool_calls"))
-            calls.assign(found->items().begin(), found->items().end());
-        } else {
-          response.streaming_body([&](std::string_view part) {
-            if (part == "data: [DONE]\n\n")
-              return true;
-            const auto event = gufo::json::parse(part.substr(6));
-            for (const auto& choice : event.find("choices")->items()) {
-              finish += choice.member_str("finish_reason");
-              if (const auto* delta = choice.find("delta")) {
-                content += delta->member_str("content");
-                if (const auto* found = delta->find("tool_calls"))
-                  calls.insert(calls.end(), found->items().begin(),
-                               found->items().end());
+  const std::vector<Case> qwen_cases{
+      {"I'll update `config.py\n" + call, 1, R"({"text":"42"})",
+       "I'll update `config.py\n"},
+      {"Let`s write it.\n" + call, 1, R"({"text":"42"})", "Let`s write it.\n"},
+      {"looks like `" + call + "` and no call.", 0, "",
+       "looks like `" + call + "` and no call."},
+      {"looks like ``" + call + "`` and no call.", 0, "",
+       "looks like ``" + call + "`` and no call."},
+      {"looks like `" + call, 1, R"({"text":"42"})", "looks like `"},
+      {"looks like ``" + call, 1, R"({"text":"42"})", "looks like ``"},
+      {"`example\n\n" + call, 1, R"({"text":"42"})", "`example\n\n"},
+      {"looks like `literal <think>\n" + call + "`", 0, "",
+       "looks like `literal <think>\n" + call + "`"},
+      {call + "\n</invoke>\n</parameter>\n</function>\n", 1, R"({"text":"42"})",
+       ""},
+      {call + "\n</function>\n" + call, 2, R"({"text":"42"})", ""},
+      {call + "\n" + envelope, 1, R"({"text":"42"})", ""},
+      {call + "\n</invoke>\n<|im_end|>", 1, R"({"text":"42"})", "<|im_end|>"},
+      {"</invoke>\n" + call, 1, R"({"text":"42"})", "</invoke>\n"},
+      {"</invoke>", 0, "", "</invoke>"},
+      {"Text </parameter>", 0, "", "Text </parameter>"},
+      {"The token is <|im_end|>", 0, "", "The token is <|im_end|>"},
+      {"<parameter>x</parameter>", 0, "", "<parameter>x</parameter>"},
+      {raw_xml, 0, "", raw_xml},
+      {"Raw XML: " + raw_xml, 0, "", "Raw XML: " + raw_xml},
+      {envelope, 0, "", ""},
+      {"Planning.\n" + envelope, 0, "", "Planning."},
+      {"<invoke name=\"f\"><parameter name=\"text\">x", 0, "", ""},
+      {"Planning.\n<parameter=text>\nx\n</parameter>\n</function>\n</"
+       "tool_call>",
+       0, "",
+       "Planning.\n<parameter=text>\nx\n</parameter>\n</function>\n</"
+       "tool_call>"},
+      {"<function=f><parameter=text>x</parameter></function>", 0, "",
+       "<function=f><parameter=text>x</parameter></function>"},
+      {"```xml\n" + envelope + "\n```", 0, "", "```xml\n" + envelope + "\n```"},
+      {"`" + envelope + "` and prose", 0, "", "`" + envelope + "` and prose"},
+      {"```python\nprint(1)\n" + call, 1, R"({"text":"42"})",
+       "```python\nprint(1)\n"},
+      {"```xml\n" + call + "\n```", 0, "", "```xml\n" + call + "\n```"},
+      {"```xml\n" + call + "\n```\n" + call, 1, R"({"text":"42"})",
+       "```xml\n" + call + "\n```\n"},
+      {"`" + inline_call + "`", 0, "", "`" + inline_call + "`"},
+      {"``" + inline_call + "``", 0, "", "``" + inline_call + "``"},
+      {"```xml\n<tool_call><function=unknown></function></tool_call>", 0, "",
+       "```xml\n<tool_call><function=unknown></function></tool_call>"},
+      {"```xml\n<tool_call><function=f></function></tool_call>", 0, "",
+       "```xml\n<tool_call><function=f></function></tool_call>"},
+      {"```xml\n<tool_call><function=f><parameter=extra>x</parameter></"
+       "function></tool_call>",
+       0, "",
+       "```xml\n<tool_call><function=f><parameter=extra>x</parameter></"
+       "function></tool_call>"},
+      {"<tool_call><function=f><parameter=text>\nEOS = "
+       "\"<|im_end|>\"\n</parameter></function></tool_call>",
+       1, R"({"text":"EOS = \"<|im_end|>\""})", ""},
+      {"<tool_call><function=f><parameter=text>\n<|im_start|><|endoftext|>"
+       "<|not_a_vocab_entry|>\n</parameter></function></tool_call>",
+       1, R"({"text":"<|im_start|><|endoftext|><|not_a_vocab_entry|>"})", ""},
+      {"<tool_call><function=f><parameter=text>\n</invoke>\n</parameter></"
+       "function></tool_call>",
+       1, R"({"text":"</invoke>"})", ""},
+  };
+  // As in llama.cpp, DeepSeek output is content outside its native block,
+  // which ends the output: client envelopes and closers are never removed.
+  const std::string dsml =
+      "\n\n<｜DSML｜tool_calls>\n<｜DSML｜invoke name=\"f\">\n"
+      "<｜DSML｜parameter name=\"text\" string=\"true\">42"
+      "</｜DSML｜parameter>\n</｜DSML｜invoke>\n</｜DSML｜tool_calls>";
+  const std::vector<Case> deepseek_cases{
+      {envelope, 0, "", envelope},
+      {"Planning.\n" + envelope, 0, "", "Planning.\n" + envelope},
+      {"<invoke name=\"f\"><parameter name=\"text\">x", 0, "",
+       "<invoke name=\"f\"><parameter name=\"text\">x"},
+      {"</invoke>\n</parameter>", 0, "", "</invoke>\n</parameter>"},
+      {call, 0, "", call},
+      {"</invoke>" + dsml, 1, R"({"text":"42"})", "</invoke>"},
+      {"Planning.\n" + envelope + dsml, 1, R"({"text":"42"})",
+       "Planning.\n" + envelope},
+  };
+  using Format = gufo::sampling::JsonConstraint::ToolFormat;
+  for (const auto& [format, cases] :
+       {std::pair{Format::kQwen, &qwen_cases},
+        std::pair{Format::kDeepSeek, &deepseek_cases}})
+    for (const auto& item : *cases) {
+      for (bool stream : {false, true}) {
+        for (bool bytewise : {false, true}) {
+          auto body = schema;
+          body["stream"] = stream;
+          body["tool_choice"] = "auto";
+          FakeBackend backend;
+          backend.tool_format = format;
+          if (bytewise)
+            for (const char byte : item.text)
+              backend.pieces.emplace_back(1, byte);
+          else
+            backend.pieces.push_back(item.text);
+          const auto response =
+              gufo::server::HandleOpenAiChat(Request(body.dump()), backend);
+          Expect(response.status == 200, "framing request succeeds");
+          std::vector<Value> calls;
+          std::string content;
+          std::string finish;
+          if (!stream) {
+            const auto output = gufo::json::parse(response.body);
+            const auto& choice = output.find("choices")->items()[0];
+            const auto& message = *choice.find("message");
+            content = message.member_str("content");
+            finish = choice.member_str("finish_reason");
+            if (const auto* found = message.find("tool_calls"))
+              calls.assign(found->items().begin(), found->items().end());
+          } else {
+            response.streaming_body([&](std::string_view part) {
+              if (part == "data: [DONE]\n\n")
+                return true;
+              const auto event = gufo::json::parse(part.substr(6));
+              for (const auto& choice : event.find("choices")->items()) {
+                finish += choice.member_str("finish_reason");
+                if (const auto* delta = choice.find("delta")) {
+                  content += delta->member_str("content");
+                  if (const auto* found = delta->find("tool_calls"))
+                    calls.insert(calls.end(), found->items().begin(),
+                                 found->items().end());
+                }
               }
-            }
-            return true;
-          });
+              return true;
+            });
+          }
+          if (calls.size() != item.calls || content != item.content) {
+            std::cerr << "Framing input: " << item.text << "\nstream=" << stream
+                      << " bytewise=" << bytewise
+                      << "\nExpected content: " << item.content
+                      << "\nActual content: " << content
+                      << "\nExpected calls: " << item.calls
+                      << ", actual: " << calls.size() << '\n';
+          }
+          Expect(calls.size() == item.calls,
+                 "only complete declared calls are emitted");
+          Expect(content == item.content,
+                 "literal content and framing are distinguished using request "
+                 "context");
+          Expect(finish == (item.calls ? "tool_calls" : "stop"),
+                 "finish reason agrees with parsed calls");
+          if (!calls.empty())
+            Expect(calls.back().find("function")->member_str("arguments") ==
+                       item.argument,
+                   "literal arguments survive exactly");
         }
-        if (calls.size() != item.calls || content != item.content) {
-          std::cerr << "Framing input: " << item.text << "\nstream=" << stream
-                    << " bytewise=" << bytewise
-                    << "\nExpected content: " << item.content
-                    << "\nActual content: " << content
-                    << "\nExpected calls: " << item.calls
-                    << ", actual: " << calls.size() << '\n';
-        }
-        Expect(calls.size() == item.calls,
-               "only complete declared calls are emitted");
-        Expect(content == item.content,
-               "literal content and framing are distinguished using request "
-               "context");
-        Expect(finish == (item.calls ? "tool_calls" : "stop"),
-               "finish reason agrees with parsed calls");
-        if (!calls.empty())
-          Expect(calls.back().find("function")->member_str("arguments") ==
-                     item.argument,
-                 "literal arguments survive exactly");
       }
     }
-  }
 }
 
 void TestUnconstrainedQuoteFallbackChecksSchema() {
@@ -4399,10 +4659,12 @@ int main() {
   TestPiReasoningControlsAndOutputFraming();
   TestPiNativeDeepSeekThinkingObject();
   TestStreamingPromptOpenedReasoning();
+  TestInitialOutputPhases();
   TestConflictingReasoningControlsAreRejected();
   TestToolCallsAreStructured();
   TestToolParameterCompatibility();
   TestInvalidToolsFailBeforeGeneration();
+  TestResponsesClientCompatTolerances();
   TestToolNameCharacters();
   TestMalformedHistoricalFunctions();
   TestToolClosingFraming();
