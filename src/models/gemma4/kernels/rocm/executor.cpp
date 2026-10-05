@@ -13,6 +13,7 @@
 #include "src/models/gemma4/kernels/rocm/gemv.hpp"
 #include "src/models/gemma4/kernels/rocm/kernels.hpp"
 #include "src/models/gemma4/kernels/rocm/moe.hpp"
+#include "src/models/gemma4/kernels/rocm/wmma_gemv.hpp"
 #include "src/models/qwen/hip/ops/gemm.hpp"
 #include "src/models/qwen/hip/ops/token.hpp"
 #include "src/models/qwen38_flash_next/kernels/rocm/kernels.hpp"
@@ -29,7 +30,7 @@ std::size_t AlignUp(std::size_t n) {
 
 struct Layout {
   std::size_t tokens, logit_index, key_ends, x, h, q, k, v, attn, o, gate, up,
-      hsel, logits, partials, q8, act;
+      hsel, logits, partials, q8, act, wmma;
   std::size_t x_half, moe_x_half, moe_sync, moe_h, moe_logits, moe_ids,
       moe_weights, moe_groups, moe_gu, moe_act, moe_out, moe_counts, moe_bounds,
       moe_cursors, moe_rows_token, moe_rows_slot, moe_tiles;
@@ -102,6 +103,7 @@ Layout Plan(const Config& c, const Config* draft, std::uint32_t vocab,
   l.hsel = take(std::size_t{logit_rows} * c.hidden_size * f);
   l.logits = take(std::size_t{logit_rows} * vocab * f);
   l.partials = take(partial_floats * f);
+  l.wmma = take(WmmaGemvScratchBytes(static_cast<std::uint32_t>(max_cols)));
   const std::uint32_t q8_rows = std::max(rows, logit_rows);
   l.q8 = take(q8_rows > kSplitRows
                   ? hip::QuantizedActivationBytes(q8_rows, max_cols)
@@ -272,6 +274,7 @@ Executor::Executor(const DeviceModel& model, std::uint32_t max_rows,
   logits_ = reinterpret_cast<float*>(base + l.logits);
   partials_ = reinterpret_cast<float*>(base + l.partials);
   q8_ = base + l.q8;
+  wmma_ = base + l.wmma;
   x_half_ = base + l.x_half;
   half_prefill_ = model.half_prefill();
   if (model.config().HasExperts()) {
@@ -472,6 +475,14 @@ void Executor::Project(const DeviceTensor& w, const float* x, const void* xq,
     }
     hip::LaunchBatchedQuantGEMMPreQuantized(w.type, w.data, xq, y, rows, w.rows,
                                             w.cols, stream_);
+    return;
+  }
+  // Target projections take the WMMA kernel at every width when the drafter
+  // is loaded (verification rows round like single tokens), and batched
+  // autoregressive rows from six on, where it is faster.
+  if (w.cols >= 2048 && (model_.has_draft() || rows >= 6) &&
+      LaunchWmmaGemv(w.type, w.data, x, y, rows, w.rows, w.cols, wmma_,
+                     stream_)) {
     return;
   }
   if (rows > 1) {

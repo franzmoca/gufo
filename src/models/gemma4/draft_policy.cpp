@@ -8,19 +8,26 @@
 namespace gufo::models::gemma4 {
 namespace {
 
-// Median complete-cycle costs on gfx1151 for the dense 31B family (QAT Q4_0
-// target and drafter; the UD-Q4_K_XL pair has the same draft/verify ratios),
-// measured 2026-09-28 by timing drafter chains and verification forwards at
-// each depth. Only cost ratios steer the decision.
+// Costs on gfx1151 for the dense 31B family: drafter steps measured
+// 2026-09-28 (QAT drafter), verification forwards (target rows with logits,
+// median of seven) remeasured 2026-10-05 on UD-Q4_K_XL after its
+// projections moved to the WMMA kernels, whose cost barely grows with rows (a
+// row never costs less than a narrower forward: the medians differ by noise
+// there). Only cost ratios steer the decision.
 constexpr std::array<std::uint32_t, 5> kDepths = {0, 4096, 16384, 32768, 65536};
 constexpr std::array<float, 5> kDraftStepMs = {1.95F, 2.05F, 2.40F, 2.82F,
                                                3.66F};
-constexpr std::array<std::array<float, 8>, 5> kVerifyMs = {{
-    {90.6F, 90.6F, 92.7F, 94.3F, 97.4F, 101.4F, 106.6F, 115.1F},
-    {92.7F, 93.2F, 95.3F, 96.9F, 100.7F, 105.2F, 109.5F, 119.2F},
-    {96.0F, 97.5F, 99.8F, 102.1F, 107.2F, 113.4F, 121.1F, 131.5F},
-    {100.2F, 103.8F, 106.4F, 109.5F, 116.2F, 123.5F, 133.1F, 144.8F},
-    {108.7F, 117.0F, 120.8F, 124.9F, 134.9F, 144.7F, 159.1F, 173.6F},
+constexpr std::array<std::array<float, 16>, 5> kVerifyMs = {{
+    {99.5F, 99.8F, 100.6F, 101.4F, 102.0F, 102.8F, 103.3F, 103.9F, 109.0F,
+     109.6F, 110.1F, 111.1F, 111.7F, 112.3F, 112.7F, 113.1F},
+    {104.1F, 105.8F, 107.0F, 108.0F, 108.7F, 110.6F, 111.9F, 113.3F, 122.7F,
+     123.5F, 124.4F, 125.0F, 126.1F, 127.6F, 127.6F, 130.7F},
+    {108.2F, 112.2F, 114.0F, 115.3F, 117.3F, 120.3F, 123.2F, 125.7F, 138.9F,
+     140.0F, 142.2F, 144.4F, 146.8F, 149.1F, 150.0F, 153.2F},
+    {112.5F, 119.1F, 121.7F, 123.1F, 126.3F, 130.6F, 136.0F, 140.0F, 158.3F,
+     160.4F, 163.8F, 167.0F, 170.3F, 173.5F, 175.2F, 180.1F},
+    {121.0F, 132.0F, 136.1F, 137.9F, 143.6F, 149.7F, 159.8F, 166.7F, 195.9F,
+     199.8F, 206.1F, 213.5F, 218.0F, 223.6F, 228.0F, 235.5F},
 }};
 
 // The 26B-A4B (UD-Q4_K_XL target, Unsloth Q8_0 drafter), measured

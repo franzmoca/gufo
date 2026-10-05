@@ -79,11 +79,11 @@ void CheckCalibration() {
 
 void CheckCosts() {
   const g4::DraftCosts shallow = g4::DraftCostsAt(0);
-  Require(shallow.verify[1] == 90.6F && shallow.verify[8] == 115.1F,
+  Require(shallow.verify[1] == 99.5F && shallow.verify[8] == 103.9F,
           "d0 verification costs");
   Require(std::fabs(shallow.draft[7] - 7 * 1.95F) < 1e-4F, "d0 draft steps");
   const g4::DraftCosts mid = g4::DraftCostsAt(2048);
-  Require(std::fabs(mid.verify[3] - 0.5F * (92.7F + 95.3F)) < 1e-3F,
+  Require(std::fabs(mid.verify[3] - 0.5F * (100.6F + 107.0F)) < 1e-3F,
           "interpolation between depths");
   const g4::DraftCosts deep = g4::DraftCostsAt(131072);
   const g4::DraftCosts measured = g4::DraftCostsAt(65536);
@@ -131,17 +131,19 @@ void CheckChain() {
   }
   {
     // Prior only: signal s is taken as the acceptance probability of its bin
-    // midpoint. Draft two is worth it while survival * T >= E * dT.
+    // midpoint. Draft two is worth it while survival * T >= E * dT (at 64K
+    // keys, where a row costs enough to put the threshold between bins).
+    const g4::DraftCosts deep = g4::DraftCostsAt(65536);
     g4::DraftCalibration prior;
-    g4::CalibratedChain chain(prior, costs, 1, 7);
+    g4::CalibratedChain chain(prior, deep, 1, 7);
     Require(chain.Include(0.95F), "first draft");  // survival 0.9375
-    const float current = costs.draft[2] + costs.verify[2];
-    const float next = costs.draft[3] + costs.verify[3];
+    const float current = deep.draft[2] + deep.verify[2];
+    const float next = deep.draft[3] + deep.verify[3];
     const float needed = (1.0F + 0.9375F) * (next - current) / current;
     // Bin midpoints 0.0625 (0.0-0.125) and 0.1875: survival 0.059 / 0.176.
     Require(0.9375F * 0.0625F < needed && 0.9375F * 0.1875F > needed,
             "test premise: threshold between two bins");
-    g4::CalibratedChain again(prior, costs, 1, 7);
+    g4::CalibratedChain again(prior, deep, 1, 7);
     Require(again.Include(0.95F), "first draft");
     Require(!again.Include(0.05F), "draft below the cost threshold kept");
     Require(chain.Include(0.15F), "draft above the cost threshold dropped");

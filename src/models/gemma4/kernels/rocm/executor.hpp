@@ -218,6 +218,8 @@ private:
   float* logits_{nullptr};
   float* partials_{nullptr};
   void* q8_{nullptr};
+  /// Activation pack and partial sums of the WMMA projections.
+  void* wmma_{nullptr};
   /// Prefill activations as binary16 (Q8_1 costs this model's accuracy),
   /// written by the kernels producing them: each projection input in x_half_,
   /// the expert input, read after the dense MLP, in moe_x_half_.

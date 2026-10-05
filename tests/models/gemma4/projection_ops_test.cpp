@@ -22,6 +22,7 @@
 #include "src/core/hip/hip_utils.hpp"
 #include "src/core/quant/ggml_gemm.hpp"
 #include "src/models/gemma4/kernels/rocm/gemv.hpp"
+#include "src/models/gemma4/kernels/rocm/wmma_gemv.hpp"
 #include "src/models/qwen/hip/ops/gemm.hpp"
 #include "src/models/qwen38_flash_next/kernels/rocm/kernels.hpp"
 #include "tests/models/gemma4/check.hpp"
@@ -397,6 +398,78 @@ void CheckHalfShape(std::size_t m, std::size_t k, std::mt19937& rng) {
   HIP_CHECK(hipFree(dy));
 }
 
+/// The WMMA projections: every width from 1 to 16 rounds a row identically
+/// (a row's output never depends on the other rows), and each output stays
+/// within FP32 rounding of the FP64 dot of the dequantized row. Activation
+/// sub-blocks span zeros, tiny values and magnitudes past the binary16
+/// range, which the per-sub-block power-of-two scale must absorb.
+void CheckWmmaShape(const Format& f, std::uint32_t m, std::uint32_t k,
+                    std::mt19937& rng) {
+  namespace g4k = gufo::models::gemma4::rocm;
+  const std::string name = std::string(f.name) + " WMMA " + std::to_string(m) +
+                           "x" + std::to_string(k);
+  constexpr std::uint32_t kRows = g4k::kWmmaGemvRows;
+  const auto w = RandomMatrix(f, m, k, rng);
+  std::normal_distribution<float> normal(0.0F, 1.0F);
+  std::uniform_int_distribution<int> kind(0, 9);
+  std::vector<float> x(std::size_t{kRows} * k);
+  for (std::size_t b = 0; b < x.size() / 32; ++b) {
+    const int c = kind(rng);
+    const float scale = c == 0 ? 0.0F : c == 1 ? 1e-6F : c == 2 ? 3e4F : 1.0F;
+    for (std::size_t j = 0; j < 32; ++j) {
+      x[b * 32 + j] = scale * normal(rng);
+    }
+  }
+  auto* dw = Device(w.data(), w.size());
+  float* dx = Device(x.data(), x.size());
+  float* dy = nullptr;
+  void* scratch = nullptr;
+  HIP_CHECK(hipMalloc(&dy, std::size_t{kRows} * m * sizeof(float)));
+  HIP_CHECK(hipMalloc(&scratch, g4k::WmmaGemvScratchBytes(k)));
+  std::vector<float> full(std::size_t{kRows} * m);
+  Require(
+      g4k::LaunchWmmaGemv(f.type, dw, dx, dy, kRows, m, k, scratch, nullptr),
+      name + " rejected");
+  HIP_CHECK(hipMemcpy(full.data(), dy, full.size() * 4, hipMemcpyDeviceToHost));
+  std::vector<float> part(full.size());
+  for (std::uint32_t width = 1; width < kRows; ++width) {
+    // Each width starts at a different row, so neighbours change too.
+    const std::uint32_t first = (width * 5) % (kRows - width + 1);
+    HIP_CHECK(hipMemset(dy, 0xFF, std::size_t{width} * m * sizeof(float)));
+    Require(g4k::LaunchWmmaGemv(f.type, dw, dx + std::size_t{first} * k, dy,
+                                width, m, k, scratch, nullptr),
+            name + " rejected");
+    HIP_CHECK(hipMemcpy(part.data(), dy, std::size_t{width} * m * 4,
+                        hipMemcpyDeviceToHost));
+    Require(std::memcmp(part.data(), full.data() + std::size_t{first} * m,
+                        std::size_t{width} * m * 4) == 0,
+            name + ": width " + std::to_string(width) + " differs");
+  }
+  const std::size_t row_bytes = k / f.block * f.bytes;
+  std::vector<float> row(k);
+  double worst = 0.0;
+  for (std::uint32_t o = 0; o < m; o += std::max<std::uint32_t>(1, m / 61)) {
+    gufo::quant::Dequantize(f.type, w.data() + o * row_bytes, row.data(), k);
+    for (std::uint32_t r = 0; r < kRows; r += 5) {
+      double want = 0.0, magnitude = 0.0;
+      for (std::uint32_t c = 0; c < k; ++c) {
+        const double p = double{row[c]} * x[std::size_t{r} * k + c];
+        want += p;
+        magnitude += std::fabs(p);
+      }
+      const float got = full[std::size_t{r} * m + o];
+      Require(std::isfinite(got), name + ": non-finite output");
+      worst = std::max(worst, std::fabs(got - want) / magnitude);
+    }
+  }
+  std::cout << name << ": width-invariant, error " << worst << "\n";
+  Require(worst < 1e-6, name + ": error " + std::to_string(worst));
+  HIP_CHECK(hipFree(dw));
+  HIP_CHECK(hipFree(dx));
+  HIP_CHECK(hipFree(dy));
+  HIP_CHECK(hipFree(scratch));
+}
+
 /// The load-time BF16 -> binary16 rewrite: exact inside the binary16 range,
 /// round to nearest below it, and every value past it counted.
 void CheckBf16Conversion(std::mt19937& rng) {
@@ -567,6 +640,24 @@ int main() {
     for (const auto& [m, k] : half_shapes) {
       CheckHalfShape(m, k, rng);
     }
+    // WMMA projections at the 31B's Q4_K shapes (fused [q | k] of a global
+    // layer and [gate | up]), a partial row block and the split reduction.
+    const std::pair<std::uint32_t, std::uint32_t> wmma_shapes[] = {
+        {8192, 5376},  {4096, 5376}, {18432, 5376},
+        {43008, 5376}, {5376, 8192}, {5376, 16384},
+        {5376, 21504}, {4100, 5376}, {4100, 21504}};
+    for (const auto& [m, k] : wmma_shapes) {
+      CheckWmmaShape(formats[0], m, k, rng);
+    }
+    // Its Q5_K / Q6_K layers (V, down, the Q5_K vocabulary head's width) and
+    // the QAT target's Q4_0, with partial row blocks.
+    CheckWmmaShape(formats[1], 43008, 5376, rng);
+    CheckWmmaShape(formats[1], 4100, 21504, rng);
+    CheckWmmaShape(formats[2], 4096, 5376, rng);
+    CheckWmmaShape(formats[2], 5376, 21504, rng);
+    CheckWmmaShape(formats[2], 4100, 5376, rng);
+    CheckWmmaShape(formats[4], 43008, 5376, rng);
+    CheckWmmaShape(formats[4], 4100, 21504, rng);
     CheckBf16Conversion(rng);
     CheckRepack(rng);
   });

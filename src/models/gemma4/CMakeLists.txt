@@ -20,6 +20,7 @@ if (ENGINE_ENABLE_HIP)
     ${GEMMA4_ROCM_DIR}/kernels.hip.cpp
     ${GEMMA4_ROCM_DIR}/attention_wmma.hip.cpp
     ${GEMMA4_ROCM_DIR}/gemv.hip.cpp
+    ${GEMMA4_ROCM_DIR}/wmma_gemv.hip.cpp
     ${GEMMA4_ROCM_DIR}/moe.hip.cpp
     ${GEMMA4_ROCM_DIR}/moe_prefill.hip.cpp
     ${GEMMA4_ROCM_DIR}/device_model.cpp
@@ -29,12 +30,14 @@ if (ENGINE_ENABLE_HIP)
   set_source_files_properties(${GEMMA4_ROCM_DIR}/kernels.hip.cpp
     ${GEMMA4_ROCM_DIR}/attention_wmma.hip.cpp
     ${GEMMA4_ROCM_DIR}/gemv.hip.cpp
+    ${GEMMA4_ROCM_DIR}/wmma_gemv.hip.cpp
     ${GEMMA4_ROCM_DIR}/moe.hip.cpp
     ${GEMMA4_ROCM_DIR}/moe_prefill.hip.cpp
     vision/encoder.hip PROPERTIES LANGUAGE HIP)
   # Projections must round identically at every width (verification equals
   # decode), so they are compiled with strict floating-point semantics.
   set_source_files_properties(${GEMMA4_ROCM_DIR}/gemv.hip.cpp
+    ${GEMMA4_ROCM_DIR}/wmma_gemv.hip.cpp
     ${GEMMA4_ROCM_DIR}/moe.hip.cpp PROPERTIES
     COMPILE_OPTIONS "-fno-fast-math;-ffp-contract=off")
   target_compile_options(gufo_gemma4 PRIVATE
