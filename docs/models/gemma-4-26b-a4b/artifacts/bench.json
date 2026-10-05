@@ -281,7 +281,8 @@
       "--max-pending-per-client",
       "8"
     ],
-    "readiness": "/ready"
+    "readiness": "/ready",
+    "ar_exactness": "reported"
   },
   "reference": {
     "name": "llama.cpp",

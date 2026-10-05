@@ -700,7 +700,11 @@ def run_multi(session: Session, table: TableSpec, display_table: TableSpec | Non
                     if sample["completion_tokens"] != int(spec["output_tokens"]):
                         raise RuntimeError(f"{table.id}: incomplete generated output at C{users}")
                 if session.target == "gufo" and reference and result["completionExactness"]["exactRate"] != 1.0:
-                    raise RuntimeError(f"{table.id}: C{users} output differs from its isolated AR reference")
+                    if not (mode == "ar" and cfg.ar_exactness_reported):
+                        raise RuntimeError(f"{table.id}: C{users} output differs from its isolated AR reference")
+                    exactness = result["completionExactness"]
+                    print(f"{table.id} {session.target} {mode} C{users}: {exactness['exactRequests']}/"
+                          f"{exactness['comparedRequests']} completions match the isolated C1 (reported)")
                 report["workload"]["promptGenerator"] = {
                     "recipe": "single-user-d0", "task": task,
                     "requestedTokens": int(matched_prompt),

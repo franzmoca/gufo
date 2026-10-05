@@ -104,6 +104,14 @@ class BenchConfig:
         not an AR-only server (Gemma 4, see its QUALITY.md)."""
         return self.data.get("speculative", {}).get("exactness_reference") == "self"
 
+    @property
+    def ar_exactness_reported(self) -> bool:
+        """Multi-user AR completions that differ from the isolated C1 are
+        recorded instead of failing the table: set for engines whose batched
+        AR rounds differently from one session's faster GEMV, so a greedy
+        near-tie can depend on concurrency (Gemma 4, see its QUALITY.md)."""
+        return self.data.get("gufo", {}).get("ar_exactness") == "reported"
+
     def substitute(self, args: list[str], variant: str | None) -> list[str]:
         """Replace `{role}` placeholders with the variant's file paths."""
         out = []
