@@ -883,6 +883,8 @@ bool LaunchRoutedGemv(ExpertFormat format, const void* w,
       LaunchRouted<ExpertFormat::kF16>(w, groups, max_groups, x, x_div, y, m, k,
                                        stream, geglu);
       return true;
+    case ExpertFormat::kQ4_0:
+      return false;
   }
   return false;
 }

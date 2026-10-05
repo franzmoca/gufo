@@ -52,9 +52,9 @@ struct DeviceDraft {
 /// The target (and optionally its MTP drafter) resident on the GPU.
 /// Projection formats with a binary16-activation prefill GEMM.
 [[nodiscard]] constexpr bool HalfPrefillFormat(core::GgmlType type) noexcept {
-  return type == core::GgmlType::kQ4_K || type == core::GgmlType::kQ5_K ||
-         type == core::GgmlType::kQ6_K || type == core::GgmlType::kQ8_0 ||
-         type == core::GgmlType::kF16;
+  return type == core::GgmlType::kQ4_0 || type == core::GgmlType::kQ4_K ||
+         type == core::GgmlType::kQ5_K || type == core::GgmlType::kQ6_K ||
+         type == core::GgmlType::kQ8_0 || type == core::GgmlType::kF16;
 }
 
 class DeviceModel {

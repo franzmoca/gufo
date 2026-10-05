@@ -546,15 +546,25 @@ constexpr int kQ80Words = 17;
 /// Bytes per staged binary16 row: the stage's 64 values, padded to 144 bytes
 /// (36 dwords, conflict-free fragment reads).
 constexpr int kF16Stride = 144;
+/// Bytes per staged Q4_0 row: the stage's two raw 18-byte blocks as nine
+/// words (d0, codes 0-15, d1, codes 0-15; the first block's codes start two
+/// bytes into a word, the second's on a word), padded like Q5_1 to 48 bytes.
+constexpr int kQ40Stride = 48;
+constexpr int kQ40Words = 9;
 
 template<ExpertFormat F>
 constexpr int kDownStride = F == ExpertFormat::kQ5_1   ? kQ51Stride
                             : F == ExpertFormat::kQ8_0 ? kQ80Stride
+                            : F == ExpertFormat::kQ4_0 ? kQ40Stride
                                                        : kF16Stride;
 template<ExpertFormat F>
 constexpr int kDownBlockBytes = F == ExpertFormat::kQ5_1   ? 24
                                 : F == ExpertFormat::kQ8_0 ? 34
+                                : F == ExpertFormat::kQ4_0 ? 18
                                                            : 64;
+/// Words a word-staged format (Q8_0, Q4_0) keeps per row and stage.
+template<ExpertFormat F>
+constexpr int kDownWords = F == ExpertFormat::kQ8_0 ? kQ80Words : kQ40Words;
 /// Floats per token row of the down kernel's output transpose (128 rows plus
 /// padding: 132 = 4 mod 64 puts a tile's writes on distinct banks).
 constexpr int kOutStride = kRowsPerBlock + 4;
@@ -634,6 +644,46 @@ __device__ __forceinline__ void DecodeQ80(const std::uint32_t (&w)[kQ80Words],
   }
 }
 
+/// Q4_0 K block s (< 2) of a staged row's nine words as two fragments: the
+/// low nibbles of its 16 code bytes (values 0-15), then the high nibbles
+/// (16-31); weight (q - 8) * d, exact before the binary16 rounding.
+__device__ __forceinline__ void DecodeQ40(const std::uint32_t (&w)[kQ40Words],
+                                          int s, bool live, v16h* lo,
+                                          v16h* hi) {
+  std::uint32_t codes[4];
+  std::uint32_t d_bits = 0;
+  if (s == 0) {
+    d_bits = w[0] & 0xFFFFU;
+#pragma unroll
+    for (int i = 0; i < 4; ++i) {
+      codes[i] = __builtin_amdgcn_alignbit(w[i + 1], w[i], 16);
+    }
+  } else {
+    d_bits = w[4] >> 16U;
+#pragma unroll
+    for (int i = 0; i < 4; ++i) {
+      codes[i] = w[5 + i];
+    }
+  }
+  const __half2 scale = __half2half2(__builtin_bit_cast(
+      __half, static_cast<std::uint16_t>(live ? d_bits : 0U)));
+  const __half2 offset = __float2half2_rn(1032.0F);
+#pragma unroll
+  for (int part = 0; part < 2; ++part) {
+    __half2 h[8];
+#pragma unroll
+    for (int i = 0; i < 4; ++i) {
+      CodesToHalves((codes[i] >> (4 * part)) & 0x0F0F0F0FU, offset, scale,
+                    &h[2 * i]);
+    }
+    if (part == 0) {
+      __builtin_memcpy(lo, h, 32);
+    } else {
+      __builtin_memcpy(hi, h, 32);
+    }
+  }
+}
+
 /// Routed Q5_1 / Q8_0 / binary16 down projection with FP32 outputs: the
 /// layout and tiling of RoutedHalfKQuantKernel over 64-value stages (three
 /// 16-byte pieces per Q5_1 row, consecutive threads on consecutive pieces).
@@ -641,7 +691,8 @@ __device__ __forceinline__ void DecodeQ80(const std::uint32_t (&w)[kQ80Words],
 /// outputs leave as one contiguous 512-byte store. kGeGlu (Q8_0, binary16):
 /// the gate/up projection with RoutedHalfKQuantKernel's row split and GeGLU
 /// epilogue into `out_half`.
-template<ExpertFormat F, int kTileTokens, bool kGeGlu = false>
+template<ExpertFormat F, int kTileTokens, bool kGeGlu = false,
+         bool kDense = false>
 __global__ void __launch_bounds__(kThreads)
     RoutedHalfDownKernel(const std::uint8_t* __restrict__ w,
                          const __half* __restrict__ x,
@@ -650,8 +701,13 @@ __global__ void __launch_bounds__(kThreads)
                          const std::int32_t* __restrict__ rows_in,
                          const std::int32_t* __restrict__ rows_out,
                          float* __restrict__ out, __half* __restrict__ out_half,
-                         std::uint32_t m, std::uint32_t k) {
+                         std::uint32_t m, std::uint32_t k,
+                         std::uint32_t dense_rows = 0,
+                         std::uint32_t dense_group = 0) {
   constexpr bool kQ8 = F == ExpertFormat::kQ8_0;
+  // Q8_0 and Q4_0 rows are only 2-byte aligned: staged as words.
+  constexpr bool kWordStaged = kQ8 || F == ExpertFormat::kQ4_0;
+  constexpr int kRowWords = kDownWords<F>;
   constexpr bool kF16 = F == ExpertFormat::kF16;
   constexpr int kStride = kDownStride<F>;
   constexpr int kStageBytes = 2 * kDownBlockBytes<F>;
@@ -666,11 +722,34 @@ __global__ void __launch_bounds__(kThreads)
   __shared__ __attribute__((aligned(16))) std::uint8_t
       s_act_bytes[kActBytes > kOutBytes ? kActBytes : kOutBytes];
   auto* s_act = reinterpret_cast<__half*>(s_act_bytes);
-  const std::int32_t tile = tiles[blockIdx.y];
-  const int expert = tile & 0xFFFF;
-  const int t_local = (tile >> 16) * kTileTokens;
-  const int bucket_begin = pad_bounds[expert];
-  const int bucket_rows = pad_bounds[expert + 1] - bucket_begin;
+  int expert = 0;
+  int t_local = 0;
+  int bucket_begin = 0;
+  int bucket_rows = 0;
+  unsigned row_block = blockIdx.x;
+  if constexpr (kDense) {
+    // RoutedHalfKQuantKernel's dense raster.
+    const unsigned token_tiles = (dense_rows + kTileTokens - 1) / kTileTokens;
+    const unsigned span = dense_group * (gridDim.x / token_tiles);
+    const unsigned first = blockIdx.x / span * dense_group;
+    const unsigned width = min(dense_group, token_tiles - first);
+    const unsigned within = blockIdx.x % span;
+    t_local = static_cast<int>(first + within % width) * kTileTokens;
+    row_block = within / width;
+    bucket_rows = static_cast<int>(dense_rows);
+  } else {
+    const std::int32_t tile = tiles[blockIdx.y];
+    expert = tile & 0xFFFF;
+    t_local = (tile >> 16) * kTileTokens;
+    bucket_begin = pad_bounds[expert];
+    bucket_rows = pad_bounds[expert + 1] - bucket_begin;
+  }
+  const auto source_row = [&](int t) {
+    return kDense ? t : rows_in[bucket_begin + t];
+  };
+  const auto dest_row = [&](int t) {
+    return kDense ? t : rows_out[bucket_begin + t];
+  };
   if (t_local >= bucket_rows) {
     return;
   }
@@ -680,7 +759,7 @@ __global__ void __launch_bounds__(kThreads)
   const int wave = tid / kWave;
   const int sub = lane & 15;
   const int half = lane >> 4;
-  const std::uint32_t row0 = blockIdx.x * kRowsPerBlock;
+  const std::uint32_t row0 = row_block * kRowsPerBlock;
   const std::uint32_t half_m = m / 2;
   const std::size_t row_bytes = std::size_t{k} / 32 * kDownBlockBytes<F>;
   const std::uint8_t* w_expert =
@@ -689,7 +768,7 @@ __global__ void __launch_bounds__(kThreads)
   const auto matrix_row = [&](int l) -> std::uint32_t {
     if constexpr (kGeGlu) {
       return (l >= kRowsPerBlock / 2 ? half_m : 0U) +
-             blockIdx.x * (kRowsPerBlock / 2) +
+             row_block * (kRowsPerBlock / 2) +
              static_cast<std::uint32_t>(l % (kRowsPerBlock / 2));
     } else {
       return row0 + static_cast<std::uint32_t>(l);
@@ -697,7 +776,7 @@ __global__ void __launch_bounds__(kThreads)
   };
   const auto row_live = [&](int l) {
     if constexpr (kGeGlu) {
-      return blockIdx.x * (kRowsPerBlock / 2) +
+      return row_block * (kRowsPerBlock / 2) +
                  static_cast<std::uint32_t>(l % (kRowsPerBlock / 2)) <
              half_m;
     } else {
@@ -706,12 +785,13 @@ __global__ void __launch_bounds__(kThreads)
   };
 
   // Weight fetch. Q5_1: piece c (tid, and tid + 256 for tid < 128) is bytes
-  // 16 (c % 3) of row c / 3's stage. Q8_0: word c = tid + 256 i is word
-  // c % 17 of row c / 17's stage (the rows are only 2-byte aligned).
+  // 16 (c % 3) of row c / 3's stage. Q8_0 / Q4_0: word c = tid + 256 i is
+  // word c % 17 (c % 9) of row c / 17 (c / 9)'s stage.
   // Binary16: piece c = tid + 256 i is bytes 16 (c % 8) of row c / 8's stage.
   static_assert(kPieces > kThreads && kPieces <= 2 * kThreads);
-  constexpr int kWords = kRowsPerBlock * kQ80Words;
-  constexpr int kWordsPer = kQ8 ? (kWords + kThreads - 1) / kThreads : 1;
+  constexpr int kWords = kRowsPerBlock * kRowWords;
+  constexpr int kWordsPer =
+      kWordStaged ? (kWords + kThreads - 1) / kThreads : 1;
   constexpr int kHalfPieces = kRowsPerBlock * 8;
   constexpr int kHalfPer = kF16 ? kHalfPieces / kThreads : 1;
   const auto row_src = [&](int r_local) {
@@ -739,12 +819,12 @@ __global__ void __launch_bounds__(kThreads)
         f_pieces[i] = *reinterpret_cast<const uint4*>(
             row_src(c / 8) + stage * kStageBytes + (c % 8) * 16);
       }
-    } else if constexpr (kQ8) {
+    } else if constexpr (kWordStaged) {
 #pragma unroll
       for (int i = 0; i < kWordsPer; ++i) {
         const int c = word_of(i);
         f_words[i] = *reinterpret_cast<const std::uint32_t*>(
-            row_src(c / kQ80Words) + stage * kStageBytes + (c % kQ80Words) * 4);
+            row_src(c / kRowWords) + stage * kStageBytes + (c % kRowWords) * 4);
       }
     } else {
       f_data0 = *reinterpret_cast<const uint4*>(f_src0 + stage * kStageBytes);
@@ -759,13 +839,13 @@ __global__ void __launch_bounds__(kThreads)
         *reinterpret_cast<uint4*>(s_rows + (c / 8) * kStride + (c % 8) * 16) =
             f_pieces[i];
       }
-    } else if constexpr (kQ8) {
+    } else if constexpr (kWordStaged) {
 #pragma unroll
       for (int i = 0; i < kWordsPer; ++i) {
         const int c = tid + i * kThreads;
         if (c < kWords) {
-          *reinterpret_cast<std::uint32_t*>(s_rows + (c / kQ80Words) * kStride +
-                                            (c % kQ80Words) * 4) = f_words[i];
+          *reinterpret_cast<std::uint32_t*>(s_rows + (c / kRowWords) * kStride +
+                                            (c % kRowWords) * 4) = f_words[i];
         }
       }
     } else {
@@ -785,7 +865,7 @@ __global__ void __launch_bounds__(kThreads)
     const int t = chunk / 8;
     a_src[i] = -1;
     if (chunk < kActChunks && t_local + t < bucket_rows) {
-      const std::int32_t src = rows_in[bucket_begin + t_local + t];
+      const std::int32_t src = source_row(t_local + t);
       if (src >= 0) {
         a_src[i] = src * static_cast<std::int32_t>(k) + (chunk % 8) * 8;
       }
@@ -842,6 +922,19 @@ __global__ void __launch_bounds__(kThreads)
       }
       words[16] = reinterpret_cast<const std::uint32_t*>(row)[16];
     }
+    std::uint32_t q40_words[kQ40Words];
+    if constexpr (F == ExpertFormat::kQ4_0) {
+      const auto* r4 = reinterpret_cast<const uint4*>(row);
+#pragma unroll
+      for (int i = 0; i < 2; ++i) {
+        const uint4 v = r4[i];
+        q40_words[4 * i] = v.x;
+        q40_words[4 * i + 1] = v.y;
+        q40_words[4 * i + 2] = v.z;
+        q40_words[4 * i + 3] = v.w;
+      }
+      q40_words[8] = reinterpret_cast<const std::uint32_t*>(row)[8];
+    }
 #pragma unroll
     for (int s = 0; s < 2; ++s) {
       v16h a_lo;
@@ -856,6 +949,8 @@ __global__ void __launch_bounds__(kThreads)
         __builtin_memcpy(&a_hi, hi, 32);
       } else if constexpr (kQ8) {
         DecodeQ80(words, s, live, &a_lo, &a_hi);
+      } else if constexpr (F == ExpertFormat::kQ4_0) {
+        DecodeQ40(q40_words, s, live, &a_lo, &a_hi);
       } else {
         DecodeQ51(row + 24 * s, live, &a_lo, &a_hi);
       }
@@ -899,7 +994,7 @@ __global__ void __launch_bounds__(kThreads)
       if (t >= bucket_rows) {
         continue;
       }
-      const std::int32_t dst = rows_out[bucket_begin + t];
+      const std::int32_t dst = dest_row(t);
       if (dst < 0) {
         continue;
       }
@@ -908,7 +1003,7 @@ __global__ void __launch_bounds__(kThreads)
 #pragma unroll
       for (int i = 0; i < 8; ++i) {
         const std::uint32_t r =
-            blockIdx.x * (kRowsPerBlock / 2) +
+            row_block * (kRowsPerBlock / 2) +
             static_cast<std::uint32_t>(wave * 16 + 2 * i + half);
         if (r < half_m) {
           const __half up =
@@ -936,7 +1031,7 @@ __global__ void __launch_bounds__(kThreads)
     __syncthreads();
     const int tt = tid / 16;
     const int t = t_local + j * 16 + tt;
-    const std::int32_t dst = t < bucket_rows ? rows_out[bucket_begin + t] : -1;
+    const std::int32_t dst = t < bucket_rows ? dest_row(t) : -1;
     if (dst >= 0) {
       const int r = (tid % 16) * 8;
       const float* src = s_out + tt * kOutStride + r;
@@ -964,8 +1059,11 @@ bool LaunchDenseHalfGemm(ExpertFormat format, const void* w, const void* x,
                          float* out, void* out_half, std::uint32_t rows,
                          std::uint32_t m, std::uint32_t k, hipStream_t stream,
                          bool geglu) {
-  if (rows == 0 || k % 256 != 0 || (out == nullptr) == (out_half == nullptr) ||
-      (geglu && (out_half == nullptr || m % 2 != 0))) {
+  const bool q40 = format == ExpertFormat::kQ4_0;
+  if (rows == 0 || k % (q40 ? kDownStageK : 256) != 0 ||
+      (out == nullptr) == (out_half == nullptr) ||
+      (geglu && (out_half == nullptr || m % 2 != 0)) ||
+      (q40 && out_half != nullptr && !geglu)) {
     return false;
   }
   constexpr int kTile = 96;
@@ -1000,6 +1098,19 @@ bool LaunchDenseHalfGemm(ExpertFormat format, const void* w, const void* x,
       return true;
     case ExpertFormat::kQ6_K:
       launch.template operator()<ExpertFormat::kQ6_K>();
+      return true;
+    case ExpertFormat::kQ4_0:
+      if (geglu) {
+        RoutedHalfDownKernel<ExpertFormat::kQ4_0, kTile, true, true>
+            <<<grid, kThreads, 0, stream>>>(wb, xh, nullptr, nullptr, nullptr,
+                                            nullptr, nullptr, oh, m, k, rows,
+                                            kGroup);
+      } else {
+        RoutedHalfDownKernel<ExpertFormat::kQ4_0, kTile, false, true>
+            <<<grid, kThreads, 0, stream>>>(wb, xh, nullptr, nullptr, nullptr,
+                                            nullptr, out, nullptr, m, k, rows,
+                                            kGroup);
+      }
       return true;
     default:
       return false;

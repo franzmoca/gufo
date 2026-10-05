@@ -13,9 +13,9 @@ the limits of the [standard 31B](../gemma-4-31b/QUALITY.md).
 | --- | --- |
 | GPU decode (FP32 activations, split-K GEMV and attention) vs scalar reference, 22-token chat prompt | Mean KL 1.3e-7 (limit 1e-5), top-1 22/22 |
 | Eight-row verification vs scalar reference | Mean KL 1.2e-7, top-1 22/22; verification rows reproduce single-token decode with the drafter loaded bit for bit (Q4_0 projection widths 2–16 in `gemma4.projection_ops`, whole-model rows in `gemma4.target`) |
-| GPU prefill (Q8_1 activations × Q4_0 codes, binary16 WMMA attention) vs scalar reference, same prompt | Mean KL 0.0011 (limit 0.015), max 0.0086, top-1 22/22. llama.cpp b11069 prefill on the same tokens: 0.0010, max 0.0094, 22/22 |
-| Bulk prefill vs exact rows, 1542-token conversation past the window and ring | Mean KL 0.0027 (limit 0.15), top-1 1517/1542 |
-| Bulk prefill vs exact rows, 1353-token repetitive prompt (reported, not a gate) | Mean KL 0.050, top-1 1329/1353 |
+| GPU prefill (binary16 activations × Q4_0 weights, binary16 WMMA projections and attention) vs scalar reference, same prompt | Mean KL 2.2e-6 (limit 0.015), max 1.8e-5, top-1 22/22 (Q8_1 activations until 2026-10-05: 0.0011). llama.cpp b11069 prefill on the same tokens: 0.0010, max 0.0094, 22/22 |
+| Bulk prefill vs exact rows, 1542-token conversation past the window and ring | Mean KL 8.5e-6 (limit 0.15), top-1 1542/1542 (Q8_1 activations: 0.0027, 1517/1542) |
+| Bulk prefill vs exact rows, 1353-token repetitive prompt (reported, not a gate) | Mean KL 0.00069, top-1 1353/1353 (Q8_1 activations: 0.050, 1329/1353) |
 | Long context vs llama.cpp b11069, 16K templated turn (16,022-token prose prompt, 640-token greedy Gufo reply, teacher-forced) | KL(llama.cpp ‖ Gufo) 0.0028, max 0.109, top-1 626/641, true-token NLL 0.106 (llama.cpp 0.111; the reply is Gufo's own greedy output) |
 | Greedy MTP vs single-token decode with the drafter loaded, three prompts, plus prompt-lookup copies | Identical token IDs (`gemma4.target`) |
 | Greedy MTP vs an AR-only server | Not equal in general, as for the standard 31B: AR-only decode uses the split-K GEMV, whose FP32 summation order differs from the verification kernels |
@@ -23,10 +23,11 @@ the limits of the [standard 31B](../gemma-4-31b/QUALITY.md).
 | Session state | Prefix extension, rewind and snapshot restore after a sliding-ring wrap continue bit for bit (`gemma4.target`) |
 | Vision | `gemma4.vision_encoder` and `gemma4.vision_session` pass with this repository's `mmproj-BF16.gguf` |
 
-Q4_0 codes are exact int8 values, so prefill loses only the Q8_1 activation
-rounding; on this checkpoint llama.cpp's integer-dot prefill lands at the same
-distance from the reference as Gufo's, unlike the K-quant standard 31B (0.038
-vs 0.0055).
+Prefill rows remeasured October 5, 2026, after prefill moved to binary16
+activations. Q4_0 weights (q − 8) d round once to binary16; the remaining
+prefill error is the binary16 activation rounding. llama.cpp's integer-dot
+prefill keeps the Q8_1 activation rounding Gufo used before (0.0010 vs
+0.0011).
 
 ## Reproduce
 

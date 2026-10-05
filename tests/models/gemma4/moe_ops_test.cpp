@@ -832,6 +832,74 @@ void CheckDensePrefill(const Format& f, std::uint32_t m, std::uint32_t k,
   HIP_CHECK(hipFree(dw));
 }
 
+/// The dense Q4_0 prefill GEMM (the QAT targets) against FP64 dots of the
+/// dequantized rows and the binary16 inputs; its fused GeGLU bit for bit
+/// against the separate pass over its own binary16-rounded FP32 rows.
+void CheckDenseQ40(const Format& f, std::uint32_t m, std::uint32_t k,
+                   std::mt19937& rng) {
+  const auto w = RandomMatrix(f, m, k, rng);
+  auto* dw = Device(w.data(), w.size());
+  const std::size_t row_bytes = k / f.block * f.bytes;
+  for (const std::uint32_t rows : {1U, 97U, 300U}) {
+    const auto x = Normal(std::size_t{rows} * k, 1.0F, rng);
+    std::vector<__half> xh(x.size());
+    for (std::size_t i = 0; i < x.size(); ++i) {
+      xh[i] = __float2half(x[i]);
+    }
+    auto* dx = Device(xh.data(), xh.size());
+    const std::uint32_t width = m / 2;
+    float* dy = nullptr;
+    __half *gu = nullptr, *want = nullptr, *fused = nullptr;
+    HIP_CHECK(hipMalloc(&dy, std::size_t{rows} * m * 4));
+    HIP_CHECK(hipMalloc(&gu, std::size_t{rows} * m * 2));
+    HIP_CHECK(hipMalloc(&want, std::size_t{rows} * width * 2));
+    HIP_CHECK(hipMalloc(&fused, std::size_t{rows} * width * 2));
+    Require(g4k::LaunchDenseHalfGemm(f.format, dw, dx, dy, nullptr, rows, m, k,
+                                     nullptr) &&
+                g4k::LaunchDenseHalfGemm(f.format, dw, dx, nullptr, fused, rows,
+                                         m, k, nullptr, true),
+            "dense Q4_0 prefill GEMM rejected");
+    const auto got = Host(dy, std::size_t{rows} * m);
+    std::vector<float> row(k);
+    double worst = 0.0;
+    for (std::uint32_t r = 0; r < rows; r += 7) {
+      for (std::uint32_t o = 0; o < m; o += 13) {
+        gufo::quant::Dequantize(f.type, w.data() + o * row_bytes, row.data(),
+                                k);
+        double expect = 0.0, magnitude = 0.0;
+        for (std::uint32_t c = 0; c < k; ++c) {
+          const double p = double{row[c]} * __half2float(xh[r * k + c]);
+          expect += p;
+          magnitude += std::fabs(p);
+        }
+        worst = std::max(
+            worst, std::fabs(got[std::size_t{r} * m + o] - expect) / magnitude);
+      }
+    }
+    Require(worst < 2e-3, "dense Q4_0 prefill error " + std::to_string(worst));
+    std::vector<__half> rounded(got.size());
+    for (std::size_t i = 0; i < got.size(); ++i) {
+      rounded[i] = __float2half(std::clamp(got[i], -65504.0F, 65504.0F));
+    }
+    HIP_CHECK(hipMemcpy(gu, rounded.data(), rounded.size() * 2,
+                        hipMemcpyHostToDevice));
+    g4k::GeGluPackedHalf(gu, want, rows, width, nullptr);
+    const auto a = Host(want, std::size_t{rows} * width);
+    const auto b = Host(fused, std::size_t{rows} * width);
+    Require(std::memcmp(a.data(), b.data(), a.size() * 2) == 0,
+            "dense Q4_0 GeGLU differs from the separate pass at " +
+                std::to_string(rows) + " rows");
+    std::cout << "dense prefill Q4_0, " << rows << " rows: error " << worst
+              << "\n";
+    for (void* p : {static_cast<void*>(dx), static_cast<void*>(dy),
+                    static_cast<void*>(gu), static_cast<void*>(want),
+                    static_cast<void*>(fused)}) {
+      HIP_CHECK(hipFree(p));
+    }
+  }
+  HIP_CHECK(hipFree(dw));
+}
+
 }  // namespace
 
 int main() {
@@ -875,5 +943,8 @@ int main() {
     for (const Format& f : {q4k, q5k, q6k}) {
       CheckDensePrefill(f, 2000, kHidden, rng);
     }
+    const Format q40{
+        g4k::ExpertFormat::kQ4_0, GgmlType::kQ4_0, 32, 18, {0}, "Q4_0"};
+    CheckDenseQ40(q40, 2000, kHidden, rng);
   });
 }

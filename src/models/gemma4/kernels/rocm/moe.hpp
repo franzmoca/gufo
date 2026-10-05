@@ -19,6 +19,8 @@ enum class ExpertFormat : std::uint32_t {
   kQ8_0,
   kQ5_1,
   kF16,
+  /// Dense prefill only (the QAT targets): no expert kernels.
+  kQ4_0,
 };
 
 /// Rows whose assignments one expert group can hold: an expert appears at
@@ -108,10 +110,11 @@ void MoeRoute(const MoeRouteArgs& args, hipStream_t stream);
     std::uint32_t k, hipStream_t stream, bool geglu = false);
 
 /// Dense prefill projection over binary16 activation rows `x` ([rows][k])
-/// for K-quant W (Q4_K, Q5_K, Q6_K): the routed GEMM's arithmetic over an
-/// identity routing. `out` (FP32) or `out_half` (binary16, saturated) is
-/// [rows][m]; `geglu` as in LaunchRoutedHalfGemm. Returns false for other
-/// formats or k not a multiple of 256.
+/// for Q4_K, Q5_K, Q6_K (the routed GEMM's arithmetic over an identity
+/// routing; k a multiple of 256) or Q4_0 (the routed down kernel's layout
+/// with weights (q - 8) d; k a multiple of 64). `out` (FP32) or `out_half`
+/// (binary16, saturated; K-quants only) is [rows][m]; `geglu` as in
+/// LaunchRoutedHalfGemm. Returns false for other formats or shapes.
 [[nodiscard]] bool LaunchDenseHalfGemm(ExpertFormat format, const void* w,
                                        const void* x, float* out,
                                        void* out_half, std::uint32_t rows,

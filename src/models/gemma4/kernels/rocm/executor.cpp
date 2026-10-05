@@ -427,9 +427,11 @@ qwen38_flash_next::rocm::DenseF16Plan HalfPlan(std::uint32_t m,
   return k == 2112 ? DenseF16Plan::kRowGroups8 : DenseF16Plan::kAuto;
 }
 
-/// The K-quant formats of the dense binary16 prefill GEMM.
-std::optional<ExpertFormat> KQuantHalfFormat(core::GgmlType type) {
+/// The formats of the dense binary16 prefill GEMM (LaunchDenseHalfGemm).
+std::optional<ExpertFormat> DenseHalfFormat(core::GgmlType type) {
   switch (type) {
+    case core::GgmlType::kQ4_0:
+      return ExpertFormat::kQ4_0;
     case core::GgmlType::kQ4_K:
       return ExpertFormat::kQ4_K;
     case core::GgmlType::kQ5_K:
@@ -451,16 +453,16 @@ void Executor::Project(const DeviceTensor& w, const float* x, const void* xq,
   }
   if (rows > kSplitRows) {
     if (half_prefill_) {
-      // Binary16 activations: Q8_0 and K-quant weights decode to binary16
-      // in the WMMA GEMMs; other formats keep the W8A8 route on their own
-      // Q8_1 rows.
+      // Binary16 activations: Q8_0, Q4_0 and K-quant weights decode to
+      // binary16 in the WMMA GEMMs; other formats keep the W8A8 route on their
+      // own Q8_1 rows.
       if (w.type == core::GgmlType::kQ8_0 &&
           qwen38_flash_next::rocm::DenseF16Gemm(
               w.data, static_cast<const __half*>(xq), y, rows, w.rows, w.cols,
               stream_, HalfPlan(w.rows, w.cols))) {
         return;
       }
-      if (const auto format = KQuantHalfFormat(w.type);
+      if (const auto format = DenseHalfFormat(w.type);
           format && LaunchDenseHalfGemm(*format, w.data, xq, y, nullptr, rows,
                                         w.rows, w.cols, stream_)) {
         return;
@@ -790,7 +792,7 @@ void Executor::Forward(std::span<const Segment> segments,
     }
     const void* gq = nullptr;
     const float* down_in = gate_;
-    const auto gate_up_half = KQuantHalfFormat(L.ffn_gate_up.type);
+    const auto gate_up_half = DenseHalfFormat(L.ffn_gate_up.type);
     if (!L.ffn_gate_up.empty() && half && gate_up_half &&
         half_only({&L.ffn_down}) &&
         LaunchDenseHalfGemm(*gate_up_half, L.ffn_gate_up.data, fq, nullptr,
