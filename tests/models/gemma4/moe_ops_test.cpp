@@ -368,7 +368,8 @@ void CheckProjection(const Format& f, std::uint32_t m, std::uint32_t k,
   std::int32_t* dg = nullptr;
   HIP_CHECK(hipMalloc(&dg, g4k::ExpertGroupInts(kExperts) * 4));
 
-  const auto run = [&](std::uint32_t first_row, std::uint32_t rows) {
+  const auto run = [&](std::uint32_t first_row, std::uint32_t rows,
+                       bool single = false) {
     std::vector<std::int32_t> sub(ids.begin() + first_row * kUsed,
                                   ids.begin() + (first_row + rows) * kUsed);
     const auto table = Groups(sub);
@@ -377,7 +378,7 @@ void CheckProjection(const Format& f, std::uint32_t m, std::uint32_t k,
     HIP_CHECK(hipMemset(dy, 0xFF, std::size_t{rows} * kUsed * m * 4));
     const float* xin = dx + std::size_t{first_row} * kUsed / x_div * k;
     Require(g4k::LaunchRoutedGemv(f.format, dw, dg, rows * kUsed, xin, x_div,
-                                  dy, m, k, nullptr),
+                                  dy, m, k, nullptr, false, single),
             name + ": shape rejected");
     return Host(dy, std::size_t{rows} * kUsed * m);
   };
@@ -415,11 +416,19 @@ void CheckProjection(const Format& f, std::uint32_t m, std::uint32_t k,
                   "-row batch differs from the 16-row batch");
     }
   }
+  // One-row decode runs a single slot per pass.
+  for (std::uint32_t first = 0; first < kRows; first += 5) {
+    const auto part = run(first, 1, true);
+    Require(std::memcmp(part.data(), &all[std::size_t{first} * kUsed * m],
+                        part.size() * 4) == 0,
+            name + ": the one-slot pass differs from the 16-row batch");
+  }
 
   // The fused gate/up form: GeGLU of the same rows, batch invariant too.
   if (x_div == kUsed) {
     const std::uint32_t width = m / 2;
-    const auto run_geglu = [&](std::uint32_t first_row, std::uint32_t rows) {
+    const auto run_geglu = [&](std::uint32_t first_row, std::uint32_t rows,
+                               bool single = false) {
       std::vector<std::int32_t> sub(ids.begin() + first_row * kUsed,
                                     ids.begin() + (first_row + rows) * kUsed);
       const auto table = Groups(sub);
@@ -428,7 +437,7 @@ void CheckProjection(const Format& f, std::uint32_t m, std::uint32_t k,
       HIP_CHECK(hipMemset(dy, 0xFF, std::size_t{rows} * kUsed * width * 4));
       const float* xin = dx + std::size_t{first_row} * kUsed / x_div * k;
       Require(g4k::LaunchRoutedGemv(f.format, dw, dg, rows * kUsed, xin, x_div,
-                                    dy, m, k, nullptr, true),
+                                    dy, m, k, nullptr, true, single),
               name + ": GeGLU shape rejected");
       return Host(dy, std::size_t{rows} * kUsed * width);
     };
@@ -457,6 +466,10 @@ void CheckProjection(const Format& f, std::uint32_t m, std::uint32_t k,
                           part.size() * 4) == 0,
               name + ": fused GeGLU depends on the batch");
     }
+    const auto single = run_geglu(3, 1, true);
+    Require(std::memcmp(single.data(), &fused[std::size_t{3} * kUsed * width],
+                        single.size() * 4) == 0,
+            name + ": the one-slot fused GeGLU pass differs");
   }
 
   // Cold weights as in decode: a full 128-expert tensor, fresh random
