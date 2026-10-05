@@ -49,6 +49,9 @@ struct KvCache {
   std::vector<std::uint16_t*> v;  ///< Per layer, binary16.
   /// Target post-norm hidden state of the frontier token (MTP draft input).
   float* hidden{nullptr};
+  /// The same for the last of the lookahead rows a prefill computed past the
+  /// frontier (Session::Sync), adopted if the next Sync asks for them.
+  float* ahead_hidden{nullptr};
 };
 
 /// Image soft-token rows of one forward: rows [row, row + count) take
@@ -123,6 +126,10 @@ public:
   /// Keeps hidden row `row` of the last Forward as the cache's frontier
   /// state for drafting.
   void CommitHidden(KvCache& cache, std::uint32_t row);
+  /// Copies row `row` of the last forward to cache.ahead_hidden, and that
+  /// back to cache.hidden.
+  void StashHidden(KvCache& cache, std::uint32_t row);
+  void AdoptStashedHidden(KvCache& cache);
   /// Moves every layer's K/V of key `from` to key `to`: an accepted
   /// sibling's spare key into its position.
   void MoveKey(KvCache& cache, std::uint32_t from, std::uint32_t to);

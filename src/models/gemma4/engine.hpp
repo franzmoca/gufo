@@ -193,10 +193,17 @@ public:
   /// Sync with images: `images` (ordered, each followed by a text token)
   /// take their rows from `embed`. Reuse stops at the first image whose
   /// identity or placement changed, and an image is always evaluated whole.
+  /// `lookahead`: text tokens expected to follow `prompt` in the next Sync
+  /// (the chat template's generation prompt after a cache boundary). Up to
+  /// kSplitRows of them are evaluated in the prompt's last forward instead
+  /// of a separate one, while the session still ends at `prompt`, so a
+  /// snapshot taken now holds exactly `prompt`; the next Sync adopts them if
+  /// it asks for exactly `prompt` followed by `lookahead`.
   [[nodiscard]] bool Sync(std::span<const TokenId> prompt,
                           std::span<const ImageSpan> images,
                           const ImageEmbeddings& embed,
-                          std::string* error_msg = nullptr);
+                          std::string* error_msg = nullptr,
+                          std::span<const TokenId> lookahead = {});
   [[nodiscard]] bool Evaluate(TokenId token, std::string* error_msg = nullptr);
   /// Appends `tokens` and returns the logits of every row ([n][vocab]);
   /// used for teacher-forced qualification.
@@ -300,9 +307,14 @@ private:
 
   Session(std::shared_ptr<Model> model, std::unique_ptr<rocm::KvCache> cache);
   /// Evaluates tokens_[begin, end) in prefill chunks that never split an
-  /// image; the last row's logits land in logits_.
+  /// image; the last row's logits land in logits_. `lookahead` rows follow
+  /// in the last forward: their last row's logits and hidden state are
+  /// stashed (ahead_), the session itself ends at tokens_.
   bool Extend(std::size_t begin, std::string* error_msg,
-              const ImageEmbeddings& embed = {});
+              const ImageEmbeddings& embed = {},
+              std::span<const TokenId> lookahead = {});
+  /// Forgets rows a Sync computed past the frontier.
+  void DropLookahead() noexcept;
 
   /// A cycle's drafting state (engine.cpp).
   struct CycleDraft;
@@ -370,6 +382,10 @@ private:
   /// Emitted but not yet evaluated; its predecessor's hidden state is the
   /// cache's frontier hidden.
   std::optional<TokenId> pending_;
+  /// Tokens evaluated past tokens_ by Sync's lookahead: their KV rows are in
+  /// the cache, the last one's hidden state in cache_->ahead_hidden.
+  std::vector<TokenId> ahead_;
+  std::vector<float> ahead_logits_;
   SpeculativeStats stats_;
   /// Calibrated-policy tables of a request-scoped session ([greedy,
   /// sampled] drafts, then their siblings), reset by Sync.

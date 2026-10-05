@@ -1284,6 +1284,9 @@ TextPrefillStep TextRunnerPool::Request::Prefill(std::size_t max_input_tokens) {
     frontier = std::min(frontier, impl_->boundaries.front());
   const auto model_prompt =
       std::span<const TextRunnerToken>(impl_->prompt).first(frontier);
+  impl_->runner->SetPromptLookahead(
+      dynamic_cast<TextRunnerState&>(impl_->lease.state()),
+      std::span<const TextRunnerToken>(impl_->prompt).subspan(frontier));
   auto step = impl_->runner->Prefill(
       dynamic_cast<TextRunnerState&>(impl_->lease.state()), model_prompt,
       impl_->prefill_offset, max_input_tokens);

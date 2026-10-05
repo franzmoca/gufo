@@ -259,7 +259,8 @@ int main() {
     // A small prefill chunk keeps the sliding ring short (window + 256), so
     // the snapshot check below wraps it inside this context.
     options.max_context = 2048;
-    options.prefill_chunk = 256;
+    // 240 rows plus an absorbed remainder of up to 16 make 256-row forwards.
+    options.prefill_chunk = 240;
     auto model = g4::Model::Load(path, options, &error);
     Require(model != nullptr, error);
     const std::size_t vocab = model->VocabSize();
@@ -330,7 +331,9 @@ int main() {
     const auto long_prompt = PromptTokens(*model, text);
     Require(long_prompt.size() > model->SessionRingSlots() + 64 &&
                 long_prompt.size() + 16 < options.max_context,
-            "snapshot prompt does not wrap the sliding ring");
+            "snapshot prompt (" + std::to_string(long_prompt.size()) +
+                " tokens) does not wrap the sliding ring (" +
+                std::to_string(model->SessionRingSlots()) + " slots)");
     auto original = model->CreateSession(0, &error);
     Require(original && original->Sync(long_prompt, &error), error);
     const auto snapshot = original->SaveSnapshot(&error);
@@ -370,6 +373,52 @@ int main() {
     original.reset();
     typed.reset();
     serialized.reset();
+
+    // Sync's lookahead (the generation prompt after a cache boundary) runs
+    // in the prompt's last forward while the session ends at the boundary.
+    // The adopting Sync keeps the KV of a whole-prompt Sync, so greedy
+    // decoding continues bitwise; its first logits come from a two-row head
+    // projection. A snapshot taken at the boundary restores and extends.
+    {
+      constexpr std::size_t kTail = 7;
+      const std::span<const g4::TokenId> head(long_prompt.data(),
+                                              long_prompt.size() - kTail);
+      const std::span<const g4::TokenId> tail(long_prompt.data() + head.size(),
+                                              kTail);
+      auto whole = model->CreateSession(0, &error);
+      auto ahead = model->CreateSession(0, &error);
+      Require(whole && whole->Sync(long_prompt, &error), error);
+      Require(ahead && ahead->Sync(head, {}, {}, &error, tail) &&
+                  ahead->Position() == head.size(),
+              "lookahead sync: " + error);
+      const auto boundary = ahead->SaveSnapshot(&error);
+      Require(boundary != nullptr, error);
+      Require(ahead->Sync(long_prompt, &error) &&
+                  ahead->Position() == long_prompt.size(),
+              "lookahead adoption: " + error);
+      const auto first = as_vector(whole->Logits());
+      const Stats adopted = Compare(first, as_vector(ahead->Logits()), vocab);
+      Require(adopted.top1 == 1 && adopted.mean_kl < limits.decode,
+              "adopted lookahead logits diverge");
+      for (int step = 0; step < 8; ++step) {
+        const auto logits = as_vector(whole->Logits());
+        const auto next = static_cast<g4::TokenId>(
+            std::max_element(logits.begin(), logits.end()) - logits.begin());
+        Require(whole->Evaluate(next, &error) && ahead->Evaluate(next, &error),
+                error);
+        Require(as_vector(ahead->Logits()) == as_vector(whole->Logits()),
+                "adopted lookahead diverges at step " + std::to_string(step));
+      }
+      auto restored = model->CreateSession(0, &error);
+      Require(restored && restored->RestoreSnapshot(*boundary, &error) &&
+                  restored->Position() == head.size() &&
+                  restored->Sync(long_prompt, &error),
+              "boundary snapshot: " + error);
+      const Stats resumed =
+          Compare(first, as_vector(restored->Logits()), vocab);
+      Require(resumed.top1 == 1 && resumed.mean_kl < limits.prefill,
+              "boundary snapshot diverges after its tail");
+    }
 
     // Bulk prefill over many attention tiles and a wrapped ring stays close
     // to the exact small-batch rows on a realistic conversation.

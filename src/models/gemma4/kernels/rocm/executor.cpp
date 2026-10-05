@@ -206,7 +206,7 @@ std::size_t Executor::CacheBytes(const Config& c, std::uint32_t max_context,
     bytes += AlignUp(slots * key_widths[l] * sizeof(std::uint16_t)) +
              AlignUp(slots * c.KvDim(l) * sizeof(std::uint16_t));
   }
-  return bytes + AlignUp(std::size_t{c.hidden_size} * sizeof(float));
+  return bytes + 2 * AlignUp(std::size_t{c.hidden_size} * sizeof(float));
 }
 
 std::vector<std::uint32_t> Executor::KeyWidths(const DeviceModel& model) {
@@ -377,6 +377,8 @@ std::unique_ptr<KvCache> Executor::CreateCache(std::uint32_t max_context,
     at += bytes;
   }
   cache->hidden = reinterpret_cast<float*>(at);
+  cache->ahead_hidden = reinterpret_cast<float*>(
+      at + AlignUp(std::size_t{c.hidden_size} * sizeof(float)));
   return cache;
 }
 
@@ -1115,6 +1117,18 @@ bool Executor::PrefillExperts(const DeviceLayer& l, std::uint32_t n,
 void Executor::CommitHidden(KvCache& cache, std::uint32_t row) {
   const std::size_t d = model_.config().hidden_size;
   HIP_CHECK(hipMemcpyAsync(cache.hidden, h_ + row * d, d * sizeof(float),
+                           hipMemcpyDeviceToDevice, stream_));
+}
+
+void Executor::StashHidden(KvCache& cache, std::uint32_t row) {
+  const std::size_t d = model_.config().hidden_size;
+  HIP_CHECK(hipMemcpyAsync(cache.ahead_hidden, h_ + row * d, d * sizeof(float),
+                           hipMemcpyDeviceToDevice, stream_));
+}
+
+void Executor::AdoptStashedHidden(KvCache& cache) {
+  const std::size_t d = model_.config().hidden_size;
+  HIP_CHECK(hipMemcpyAsync(cache.hidden, cache.ahead_hidden, d * sizeof(float),
                            hipMemcpyDeviceToDevice, stream_));
 }
 

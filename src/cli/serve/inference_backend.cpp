@@ -2973,10 +2973,13 @@ public:
     }
     return embedding->data();
   }
+  /// Prompt tokens after the next prefill step's frontier.
+  std::vector<std::int32_t>& lookahead() { return lookahead_; }
 
 private:
   std::unique_ptr<Gemma4Session> session_;
   std::shared_ptr<const models::gemma4::vision::Prompt> images_;
+  std::vector<std::int32_t> lookahead_;
   std::map<std::size_t,
            std::shared_ptr<const models::gemma4::vision::Encoder::Embedding>>
       embeddings_;
@@ -3236,6 +3239,16 @@ public:
     }
   }
 
+  void SetPromptLookahead(
+      TextRunnerState& state,
+      std::span<const TextRunnerToken> tokens) const override {
+    auto& lookahead = RequireGemma4State(state).lookahead();
+    lookahead.clear();
+    for (const auto token : tokens) {
+      lookahead.push_back(Gemma4EngineToken(token));
+    }
+  }
+
   [[nodiscard]] TextPrefillStep Prefill(
       TextRunnerState& state, std::span<const TextRunnerToken> prompt,
       std::size_t offset, std::size_t max_input_tokens) const override {
@@ -3277,8 +3290,19 @@ public:
       }
       return gemma.Embedding(*vision_, index);
     };
+    // A step that ends the model prompt short of the request's (a cache
+    // boundary before the generation prompt) evaluates the rest alongside;
+    // the next step adopts it. Image rows are never looked ahead.
+    std::span<const std::int32_t> lookahead;
+    if (end == prompt.size() &&
+        (images == nullptr ||
+         std::ranges::none_of(images->images, [&](const auto& image) {
+           return image.span.offset >= end;
+         }))) {
+      lookahead = gemma.lookahead();
+    }
     std::string error;
-    if (!session.Sync(prefix, spans, embed, &error)) {
+    if (!session.Sync(prefix, spans, embed, &error, lookahead)) {
       session.Reset();
       throw std::runtime_error("Gemma 4 prefill failed: " + error);
     }

@@ -321,6 +321,16 @@ public:
   virtual void PrepareBatchExecution(TextRunnerState& state) const {
     (void)state;
   }
+  /// The prompt tokens after the next Prefill's frontier, set before every
+  /// prefill step (empty when the frontier ends the prompt). A step that
+  /// stops at a snapshot boundary must still leave the state exactly at that
+  /// boundary; a runner may compute these tokens alongside and adopt the
+  /// result if the following step asks for exactly them.
+  virtual void SetPromptLookahead(
+      TextRunnerState& state, std::span<const TextRunnerToken> tokens) const {
+    (void)state;
+    (void)tokens;
+  }
   /// Processes at most max_input_tokens, yielding after one model-owned
   /// chunk even when the scheduler grants the whole remaining prompt.
   [[nodiscard]] virtual TextPrefillStep Prefill(

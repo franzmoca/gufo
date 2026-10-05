@@ -149,9 +149,11 @@ std::shared_ptr<Model> Model::Load(const std::string& model_path,
     return nullptr;
   }
   try {
+    // A final remainder of up to kSplitRows rows joins the last prefill
+    // chunk (Session::Extend).
     m->executor_ = std::make_unique<rocm::Executor>(
-        *m->device_, options.prefill_chunk, options.max_logit_rows,
-        options.max_context);
+        *m->device_, options.prefill_chunk + rocm::kSplitRows,
+        options.max_logit_rows, options.max_context);
   } catch (const std::exception& e) {
     Fail(error_msg, e.what());
     return nullptr;
@@ -201,7 +203,7 @@ std::size_t Model::ResidentBytes() const noexcept {
          rocm::Executor::ScratchBytes(
              config(), HasMtp() ? &draft_weights_->config : nullptr,
              VocabSize(), device_->max_cols(), device_->max_half_cols(),
-             options_.prefill_chunk, options_.max_logit_rows,
+             options_.prefill_chunk + rocm::kSplitRows, options_.max_logit_rows,
              options_.max_context);
 }
 
@@ -234,6 +236,7 @@ std::size_t Session::AllocatedBytes() const noexcept {
 }
 
 void Session::Reset() {
+  DropLookahead();
   pending_.reset();
   tokens_.clear();
   images_.clear();
@@ -248,17 +251,35 @@ void Session::Reset() {
   }
 }
 
+void Session::DropLookahead() noexcept {
+  ahead_.clear();
+  ahead_logits_.clear();
+}
+
 bool Session::Extend(std::size_t begin, std::string* error_msg,
-                     const ImageEmbeddings& embed) {
+                     const ImageEmbeddings& embed,
+                     std::span<const TokenId> lookahead) {
   auto& executor = *model_->executor_;
-  const std::size_t chunk = executor.max_rows();
+  const std::size_t chunk = model_->options_.prefill_chunk;
+  // The lookahead rows ride in the last forward; tokens_ holds them only
+  // while it runs.
+  const std::size_t frontier = tokens_.size();
+  tokens_.insert(tokens_.end(), lookahead.begin(), lookahead.end());
+  DropLookahead();
   valid_ = false;
   try {
     std::lock_guard lock(model_->mutex_);
     std::vector<rocm::ImageRows> rows;
+    std::vector<float> logits;
     std::size_t count = 0;
     for (std::size_t start = begin; start < tokens_.size(); start += count) {
       std::size_t end = std::min(start + chunk, tokens_.size());
+      // A remainder of at most kSplitRows rows joins this chunk: alone it
+      // would read every weight again for a few rows.
+      if (tokens_.size() - end <= rocm::kSplitRows &&
+          tokens_.size() - start <= executor.max_rows()) {
+        end = tokens_.size();
+      }
       rows.clear();
       for (std::size_t i = 0; i < images_.size(); ++i) {
         const ImageSpan& image = images_[i];
@@ -286,23 +307,45 @@ bool Session::Extend(std::size_t begin, std::string* error_msg,
       }
       count = end - start;
       const bool last = end == tokens_.size();
-      const auto last_row = static_cast<std::uint32_t>(count - 1);
+      // Logit rows: the frontier's last token when this chunk holds it, and
+      // the last lookahead row.
+      std::vector<std::uint32_t> logit_rows;
+      const bool holds_frontier = start < frontier && frontier <= end;
+      if (holds_frontier) {
+        logit_rows.push_back(static_cast<std::uint32_t>(frontier - 1 - start));
+      }
+      if (last && !lookahead.empty()) {
+        logit_rows.push_back(static_cast<std::uint32_t>(count - 1));
+      }
       executor.Forward(*cache_, std::span(tokens_).subspan(start, count),
-                       static_cast<std::uint32_t>(start),
-                       last ? std::span<const std::uint32_t>(&last_row, 1)
-                            : std::span<const std::uint32_t>{},
-                       rows);
+                       static_cast<std::uint32_t>(start), logit_rows, rows);
+      if (logit_rows.empty()) {
+        continue;
+      }
+      executor.CopyLogits(logit_rows.size(), &logits);
+      const std::size_t vocab = model_->VocabSize();
+      if (holds_frontier) {
+        executor.CommitHidden(*cache_, logit_rows.front());
+        logits_.assign(logits.begin(),
+                       logits.begin() + static_cast<std::ptrdiff_t>(vocab));
+      }
+      if (last && !lookahead.empty()) {
+        executor.StashHidden(*cache_, logit_rows.back());
+        ahead_logits_.assign(logits.end() - static_cast<std::ptrdiff_t>(vocab),
+                             logits.end());
+      }
     }
-    executor.CommitHidden(*cache_, static_cast<std::uint32_t>(count - 1));
-    executor.CopyLogits(1, &logits_);
   } catch (const std::exception& e) {
     tokens_.resize(begin);
     std::erase_if(images_, [&](const ImageSpan& image) {
       return std::size_t{image.offset} + image.rows > begin;
     });
     lookup_.Clear();
+    DropLookahead();
     return Fail(error_msg, e.what());
   }
+  tokens_.resize(frontier);
+  ahead_.assign(lookahead.begin(), lookahead.end());
   valid_ = true;
   return true;
 }
@@ -313,7 +356,8 @@ bool Session::Sync(std::span<const TokenId> prompt, std::string* error_msg) {
 
 bool Session::Sync(std::span<const TokenId> prompt,
                    std::span<const ImageSpan> images,
-                   const ImageEmbeddings& embed, std::string* error_msg) {
+                   const ImageEmbeddings& embed, std::string* error_msg,
+                   std::span<const TokenId> lookahead) {
   if (prompt.empty()) {
     Reset();
     return Fail(error_msg, "prompt is empty");
@@ -325,6 +369,30 @@ bool Session::Sync(std::span<const TokenId> prompt,
   }
   if (prompt.size() > cache_->max_context) {
     return Fail(error_msg, "prompt exceeds the session context");
+  }
+  // Rows the previous Sync evaluated past its frontier: adopt them if this
+  // prompt asks for exactly those tokens next.
+  if (!ahead_.empty()) {
+    const bool adopt =
+        valid_ && !pending_ &&
+        prompt.size() == tokens_.size() + ahead_.size() &&
+        std::ranges::equal(prompt.first(tokens_.size()), tokens_) &&
+        std::ranges::equal(prompt.subspan(tokens_.size()), ahead_) &&
+        std::ranges::equal(images, images_);
+    if (adopt) {
+      try {
+        std::lock_guard lock(model_->mutex_);
+        model_->executor_->AdoptStashedHidden(*cache_);
+      } catch (const std::exception& e) {
+        Reset();
+        return Fail(error_msg, e.what());
+      }
+      tokens_.insert(tokens_.end(), ahead_.begin(), ahead_.end());
+      logits_.swap(ahead_logits_);
+      DropLookahead();
+      return true;
+    }
+    DropLookahead();
   }
   std::size_t previous_end = 0;
   for (const ImageSpan& image : images) {
@@ -376,7 +444,10 @@ bool Session::Sync(std::span<const TokenId> prompt,
   tokens_.assign(prompt.begin(), prompt.end());
   images_.assign(images.begin(), images.end());
   lookup_.Clear();
-  return Extend(common, error_msg, embed);
+  const bool ahead = lookahead.size() <= rocm::kSplitRows &&
+                     prompt.size() + lookahead.size() <= cache_->max_context;
+  return Extend(common, error_msg, embed,
+                ahead ? lookahead : std::span<const TokenId>{});
 }
 
 bool Session::Evaluate(TokenId token, std::string* error_msg) {
@@ -391,6 +462,7 @@ bool Session::Evaluate(TokenId token, std::string* error_msg) {
 bool Session::EvaluateAll(std::span<const TokenId> tokens,
                           std::vector<float>* logits, std::string* error_msg) {
   auto& executor = *model_->executor_;
+  DropLookahead();
   if (tokens_.size() + tokens.size() > cache_->max_context) {
     return Fail(error_msg, "tokens exceed the session context");
   }
@@ -794,6 +866,7 @@ struct Session::CycleDraft {
 bool Session::DecodeStep(std::size_t max_tokens,
                          sampling::SamplerState& sampler, DecodeResult* result,
                          std::string* error_msg, bool stop_at_eos) {
+  DropLookahead();
   Cycle cycle{.max_tokens = max_tokens,
               .sampler = &sampler,
               .result = result,
@@ -1085,6 +1158,9 @@ bool Session::DecodeBatch(std::span<BatchDecode> decodes) {
   if (decodes.empty()) {
     return true;
   }
+  for (BatchDecode& decode : decodes) {
+    decode.session->DropLookahead();
+  }
   Model& model = *decodes.front().session->model_;
   std::lock_guard lock(model.mutex_);
   // One verification forward keeps its single-session arithmetic up to
@@ -1205,6 +1281,9 @@ bool Session::DecodeBatch(std::span<BatchDecode> decodes) {
 bool Session::EvaluateBatch(std::span<Session* const> sessions,
                             std::span<const TokenId> tokens,
                             std::string* error_msg) {
+  for (Session* session : sessions) {
+    session->DropLookahead();
+  }
   if (sessions.size() != tokens.size()) {
     return Fail(error_msg, "gemma4 batch needs one token per session");
   }
