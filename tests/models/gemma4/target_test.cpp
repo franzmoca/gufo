@@ -603,7 +603,8 @@ int main() {
     Require(first.size() == 96 && first == again,
             "sampled MTP does not replay its seed");
     Require(stats.accepted > 0, "sampled MTP accepted no drafts");
-    Require(stats.siblings > 0, "sampled MTP verified no siblings");
+    // Siblings depend on the rows a batch leaves: exact replay drafts none.
+    Require(stats.siblings == 0, "exact-replay sampled MTP drafted siblings");
     // Sampled copies are point-mass proposals under the same rule.
     g4::Session::SpeculativeStats sampled_copy_stats;
     const auto sampled_copy =
@@ -612,5 +613,22 @@ int main() {
             "sampled MTP with prompt lookup does not replay its seed");
     Require(sampled_copy_stats.copied_accepted > 0,
             "sampled prompt lookup accepted no copies");
+    // The shared default verifies sampled siblings by recursive rejection
+    // sampling: some are drafted and some accepted.
+    mtp.reset();
+    options.draft_calibration = g4::DraftCalibrationScope::kShared;
+    auto shared = g4::Model::Load(path, options, &error);
+    Require(shared != nullptr, error);
+    g4::Session::SpeculativeStats shared_stats;
+    for (int i = 0; i < 3; ++i) {
+      chat.seed = 7 + i;
+      Require(
+          Generate(*shared, prompt, 96, true, chat, &shared_stats).size() == 96,
+          "shared sampled MTP stopped early");
+    }
+    std::cout << "sampled siblings: verified " << shared_stats.siblings
+              << ", accepted " << shared_stats.siblings_accepted << '\n';
+    Require(shared_stats.siblings > 0 && shared_stats.siblings_accepted > 0,
+            "shared sampled MTP verified or accepted no siblings");
   });
 }

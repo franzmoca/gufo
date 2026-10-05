@@ -1018,7 +1018,9 @@ void Session::FinishDraft(Cycle& cycle) {
   cycle.copied = draft.copies.size();
   if (draft.policy == DraftPolicy::kCalibrated) {
     // Siblings, shallowest first, while each pays for its row: the
-    // drafter's next choice where the chain's draft is rejected.
+    // drafter's next choice where the chain's draft is rejected. How many
+    // fit depends on the rows a batch leaves, and they change the target's
+    // draws, so an exact-replay sampled cycle (alone) proposes none.
     auto rows = static_cast<std::uint32_t>(cycle.rows.size());
     const DraftCalibration& hits = Calibration(cycle.sampled, true);
     if (draft.share != nullptr && !draft.alone) {
@@ -1028,8 +1030,8 @@ void Session::FinishDraft(Cycle& cycle) {
            .expected = draft.share->expected - draft.calibrated.Expected()});
     }
     for (std::size_t i = 0;
-         i < draft.drafts.size() && i < draft.alternatives.size() &&
-         rows < draft.max_drafts + 1 &&
+         !draft.alone && i < draft.drafts.size() &&
+         i < draft.alternatives.size() && rows < draft.max_drafts + 1 &&
          (!draft.SharesSpare() || draft.FreeRows() > 0);
          ++i) {
       const Alternative& alt = draft.alternatives[i];
