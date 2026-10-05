@@ -72,21 +72,37 @@ struct ImageSpan {
 /// until Sync returns. Sync asks only for images it must evaluate.
 using ImageEmbeddings = std::function<const float*(std::size_t index)>;
 
-/// Host copy of one session's context: tokens, the KV rows later tokens can
-/// still attend (every global row, the last window-1 sliding rows in logical
-/// order), the frontier hidden state and the last logits.
+/// One session's context: tokens, the KV rows later tokens can still attend
+/// (every global row, the last window-1 sliding rows in logical order), the
+/// frontier hidden state and the last logits. The KV rows and hidden state
+/// stay in device memory: on this unified-memory APU a device copy runs near
+/// memory bandwidth, while a fresh host buffer pays first-touch page faults
+/// (1.34 GB: 30 ms against 220 ms). The payload reads back in the layout
+/// Session::RestoreSnapshot(payload) accepts.
 class SessionSnapshot final {
 public:
+  using Sink = std::function<void(std::span<const std::uint8_t>)>;
+
+  ~SessionSnapshot();
+  SessionSnapshot(const SessionSnapshot&) = delete;
+  SessionSnapshot& operator=(const SessionSnapshot&) = delete;
+
   [[nodiscard]] std::uint64_t SizeBytes() const noexcept {
-    return data_.size();
+    return head_.size() + body_bytes_ + tail_.size();
   }
-  [[nodiscard]] std::span<const std::uint8_t> bytes() const noexcept {
-    return data_;
-  }
+  /// Writes the payload; false on a size mismatch or a failed device copy.
   [[nodiscard]] bool CopyTo(std::span<std::uint8_t> destination) const;
+  /// Hands the payload to `sink` in order, in pieces of at most 64 MiB;
+  /// false on a failed device copy.
+  [[nodiscard]] bool Stream(const Sink& sink) const;
 
 private:
-  std::vector<std::uint8_t> data_;
+  SessionSnapshot() = default;
+
+  std::vector<std::uint8_t> head_;  // header, tokens, image records
+  std::uint8_t* body_{nullptr};     // device: KV rows, hidden state
+  std::uint64_t body_bytes_{0};
+  std::vector<std::uint8_t> tail_;  // logits
   friend class Session;
 };
 
@@ -274,6 +290,14 @@ public:
                                      std::string* error_msg = nullptr);
 
 private:
+  /// Restores a payload of `total` bytes whose head (header, tokens, image
+  /// records) is `head`, KV rows and hidden state `body` (device memory when
+  /// `device_body`) and logits `tail`. A null `body` reads one contiguous
+  /// payload from `head`.
+  bool RestoreParts(std::span<const std::uint8_t> head, std::uint64_t total,
+                    const std::uint8_t* body, bool device_body,
+                    const std::uint8_t* tail, std::string* error_msg);
+
   Session(std::shared_ptr<Model> model, std::unique_ptr<rocm::KvCache> cache);
   /// Evaluates tokens_[begin, end) in prefill chunks that never split an
   /// image; the last row's logits land in logits_.

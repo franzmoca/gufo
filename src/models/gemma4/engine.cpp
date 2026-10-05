@@ -1260,11 +1260,59 @@ bool Session::EvaluateBatch(std::span<Session* const> sessions,
   return true;
 }
 
-bool SessionSnapshot::CopyTo(std::span<std::uint8_t> destination) const {
-  if (destination.size() != data_.size()) {
+namespace {
+
+// Copies [offset, offset + bytes) of an immutable snapshot body to host
+// memory on a private stream, so a persistence worker neither waits behind
+// nor holds up the executor's queue.
+bool CopyBodyToHost(const std::uint8_t* body, std::uint64_t offset,
+                    std::uint64_t bytes, std::uint8_t* out) {
+  hipStream_t stream = nullptr;
+  if (hipStreamCreateWithFlags(&stream, hipStreamNonBlocking) != hipSuccess) {
     return false;
   }
-  std::memcpy(destination.data(), data_.data(), data_.size());
+  const bool ok = hipMemcpyAsync(out, body + offset, bytes,
+                                 hipMemcpyDeviceToHost, stream) == hipSuccess &&
+                  hipStreamSynchronize(stream) == hipSuccess;
+  (void)hipStreamDestroy(stream);
+  return ok;
+}
+
+}  // namespace
+
+SessionSnapshot::~SessionSnapshot() {
+  if (body_ != nullptr) {
+    (void)hipFree(body_);
+  }
+}
+
+bool SessionSnapshot::CopyTo(std::span<std::uint8_t> destination) const {
+  if (destination.size() != SizeBytes()) {
+    return false;
+  }
+  std::uint8_t* at = destination.data();
+  std::memcpy(at, head_.data(), head_.size());
+  at += head_.size();
+  if (!CopyBodyToHost(body_, 0, body_bytes_, at)) {
+    return false;
+  }
+  at += body_bytes_;
+  std::memcpy(at, tail_.data(), tail_.size());
+  return true;
+}
+
+bool SessionSnapshot::Stream(const Sink& sink) const {
+  constexpr std::uint64_t kPiece = std::uint64_t{64} << 20;
+  sink(head_);
+  std::vector<std::uint8_t> piece(std::min(kPiece, body_bytes_));
+  for (std::uint64_t offset = 0; offset < body_bytes_; offset += kPiece) {
+    const std::uint64_t bytes = std::min(kPiece, body_bytes_ - offset);
+    if (!CopyBodyToHost(body_, offset, bytes, piece.data())) {
+      return false;
+    }
+    sink(std::span<const std::uint8_t>(piece.data(), bytes));
+  }
+  sink(tail_);
   return true;
 }
 
@@ -1291,13 +1339,14 @@ std::unique_ptr<SessionSnapshot> Session::SaveSnapshot(
   const Config& c = model_->config();
   const auto n = static_cast<std::uint32_t>(tokens_.size());
   auto snapshot = std::unique_ptr<SessionSnapshot>(new SessionSnapshot());
-  auto& data = snapshot->data_;
-  data.resize(SnapshotBytes());
+  auto& head = snapshot->head_;
+  head.resize(sizeof(SnapshotHeader) + std::size_t{n} * 4 + 4 +
+              images_.size() * kImageRecordBytes);
   const SnapshotHeader header{
       kSnapshotMagic,  kSnapshotPayloadVersion, n,
       c.hidden_size,   model_->VocabSize(),     c.num_layers,
       c.sliding_window};
-  std::uint8_t* at = data.data();
+  std::uint8_t* at = head.data();
   std::memcpy(at, &header, sizeof(header));
   at += sizeof(header);
   std::memcpy(at, tokens_.data(), tokens_.size() * 4);
@@ -1311,6 +1360,16 @@ std::unique_ptr<SessionSnapshot> Session::SaveSnapshot(
     std::memcpy(at + 8, image.identity.data(), image.identity.size());
     at += kImageRecordBytes;
   }
+  auto& tail = snapshot->tail_;
+  tail.resize(std::size_t{model_->VocabSize()} * 4);
+  std::memcpy(tail.data(), logits_.data(), tail.size());
+  snapshot->body_bytes_ = SnapshotBytes() - head.size() - tail.size();
+  if (hipMalloc(&snapshot->body_, snapshot->body_bytes_) != hipSuccess) {
+    snapshot->body_ = nullptr;
+    Fail(error_msg, "snapshot allocation failed");
+    return nullptr;
+  }
+  std::uint8_t* body = snapshot->body_;
   const hipStream_t stream = model_->executor_->stream();
   std::lock_guard lock(model_->mutex_);
   const auto copy_rows = [&](const std::uint16_t* cache, std::uint32_t layer,
@@ -1321,12 +1380,12 @@ std::unique_ptr<SessionSnapshot> Session::SaveSnapshot(
       const std::uint32_t slot = ring ? p % cache_->ring : p;
       const std::uint32_t run =
           ring ? std::min(n - p, cache_->ring - slot) : n - p;
-      (void)hipMemcpyAsync(at,
+      (void)hipMemcpyAsync(body,
                            reinterpret_cast<const std::uint8_t*>(cache) +
                                std::size_t{slot} * row,
-                           std::size_t{run} * row, hipMemcpyDeviceToHost,
+                           std::size_t{run} * row, hipMemcpyDeviceToDevice,
                            stream);
-      at += std::size_t{run} * row;
+      body += std::size_t{run} * row;
       p += run;
     }
   };
@@ -1335,31 +1394,38 @@ std::unique_ptr<SessionSnapshot> Session::SaveSnapshot(
     copy_rows(cache_->k[l], l, first, model_->executor_->key_widths()[l]);
     copy_rows(cache_->v[l], l, first, c.KvDim(l));
   }
-  (void)hipMemcpyAsync(at, cache_->hidden, std::size_t{c.hidden_size} * 4,
-                       hipMemcpyDeviceToHost, stream);
-  at += std::size_t{c.hidden_size} * 4;
+  (void)hipMemcpyAsync(body, cache_->hidden, std::size_t{c.hidden_size} * 4,
+                       hipMemcpyDeviceToDevice, stream);
   if (hipStreamSynchronize(stream) != hipSuccess) {
     Fail(error_msg, "snapshot copy failed");
     return nullptr;
   }
-  std::memcpy(at, logits_.data(), logits_.size() * 4);
   return snapshot;
 }
 
 bool Session::RestoreSnapshot(const SessionSnapshot& snapshot,
                               std::string* error_msg) {
-  return RestoreSnapshot(snapshot.bytes(), error_msg);
+  return RestoreParts(snapshot.head_, snapshot.SizeBytes(), snapshot.body_,
+                      true, snapshot.tail_.data(), error_msg);
 }
 
 bool Session::RestoreSnapshot(std::span<const std::uint8_t> payload,
                               std::string* error_msg) {
+  return RestoreParts(payload, payload.size(), nullptr, false, nullptr,
+                      error_msg);
+}
+
+bool Session::RestoreParts(std::span<const std::uint8_t> head,
+                           std::uint64_t total, const std::uint8_t* body,
+                           bool device_body, const std::uint8_t* tail,
+                           std::string* error_msg) {
   Reset();
   const Config& c = model_->config();
   SnapshotHeader header{};
-  if (payload.size() < sizeof(header)) {
+  if (head.size() < sizeof(header)) {
     return Fail(error_msg, "snapshot is truncated");
   }
-  std::memcpy(&header, payload.data(), sizeof(header));
+  std::memcpy(&header, head.data(), sizeof(header));
   if (header.magic != kSnapshotMagic ||
       header.version != kSnapshotPayloadVersion ||
       header.hidden != c.hidden_size || header.vocab != model_->VocabSize() ||
@@ -1374,20 +1440,29 @@ bool Session::RestoreSnapshot(std::span<const std::uint8_t> payload,
   lookup_.Clear();
   const std::size_t images_at = sizeof(header) + std::size_t{n} * 4;
   std::uint32_t image_count = 0;
-  if (payload.size() >= images_at + 4) {
-    std::memcpy(&image_count, payload.data() + images_at, 4);
+  if (head.size() >= images_at + 4) {
+    std::memcpy(&image_count, head.data() + images_at, 4);
   }
-  if (payload.size() < images_at + 4 ||
-      image_count > (payload.size() - images_at - 4) / kImageRecordBytes) {
+  if (head.size() < images_at + 4 ||
+      image_count > (head.size() - images_at - 4) / kImageRecordBytes) {
     Reset();
     return Fail(error_msg, "snapshot size does not match its header");
   }
   images_.resize(image_count);
-  if (payload.size() != SnapshotBytes()) {
+  const std::size_t head_bytes =
+      images_at + 4 + std::size_t{image_count} * kImageRecordBytes;
+  const std::size_t tail_bytes = std::size_t{model_->VocabSize()} * 4;
+  if (total != SnapshotBytes() ||
+      (body != nullptr && head.size() != head_bytes)) {
     Reset();
     return Fail(error_msg, "snapshot size does not match its header");
   }
-  const std::uint8_t* at = payload.data() + sizeof(header);
+  if (body == nullptr) {
+    // One contiguous payload: the body and logits follow the head.
+    body = head.data() + head_bytes;
+    tail = head.data() + (total - tail_bytes);
+  }
+  const std::uint8_t* at = head.data() + sizeof(header);
   std::memcpy(tokens_.data(), at, std::size_t{n} * 4);
   at += std::size_t{n} * 4 + 4;
   std::size_t previous_end = 0;
@@ -1403,6 +1478,8 @@ bool Session::RestoreSnapshot(std::span<const std::uint8_t> payload,
     }
     previous_end = std::size_t{image.offset} + image.rows;
   }
+  const hipMemcpyKind kind =
+      device_body ? hipMemcpyDeviceToDevice : hipMemcpyHostToDevice;
   const hipStream_t stream = model_->executor_->stream();
   std::lock_guard lock(model_->mutex_);
   const auto copy_rows = [&](std::uint16_t* cache, std::uint32_t layer,
@@ -1414,9 +1491,9 @@ bool Session::RestoreSnapshot(std::span<const std::uint8_t> payload,
       const std::uint32_t run =
           ring ? std::min(n - p, cache_->ring - slot) : n - p;
       (void)hipMemcpyAsync(
-          reinterpret_cast<std::uint8_t*>(cache) + std::size_t{slot} * row, at,
-          std::size_t{run} * row, hipMemcpyHostToDevice, stream);
-      at += std::size_t{run} * row;
+          reinterpret_cast<std::uint8_t*>(cache) + std::size_t{slot} * row,
+          body, std::size_t{run} * row, kind, stream);
+      body += std::size_t{run} * row;
       p += run;
     }
   };
@@ -1425,17 +1502,15 @@ bool Session::RestoreSnapshot(std::span<const std::uint8_t> payload,
     copy_rows(cache_->k[l], l, first, model_->executor_->key_widths()[l]);
     copy_rows(cache_->v[l], l, first, c.KvDim(l));
   }
-  (void)hipMemcpyAsync(cache_->hidden, at, std::size_t{c.hidden_size} * 4,
-                       hipMemcpyHostToDevice, stream);
-  at += std::size_t{c.hidden_size} * 4;
+  (void)hipMemcpyAsync(cache_->hidden, body, std::size_t{c.hidden_size} * 4,
+                       kind, stream);
   if (hipStreamSynchronize(stream) != hipSuccess) {
     Reset();
     return Fail(error_msg, "snapshot restore failed");
   }
   logits_.resize(model_->VocabSize());
-  std::memcpy(logits_.data(), at, logits_.size() * 4);
+  std::memcpy(logits_.data(), tail, tail_bytes);
   valid_ = true;
   return true;
 }
-
 }  // namespace gufo::models::gemma4

@@ -337,8 +337,13 @@ int main() {
     Require(snapshot != nullptr &&
                 snapshot->SizeBytes() == original->SnapshotBytes(),
             error);
-    const std::vector<std::uint8_t> bytes(snapshot->bytes().begin(),
-                                          snapshot->bytes().end());
+    std::vector<std::uint8_t> bytes(snapshot->SizeBytes());
+    Require(snapshot->CopyTo(bytes), "snapshot payload copy failed");
+    std::vector<std::uint8_t> streamed;
+    Require(snapshot->Stream([&](std::span<const std::uint8_t> piece) {
+      streamed.insert(streamed.end(), piece.begin(), piece.end());
+    }) && streamed == bytes,
+            "streamed snapshot payload differs from its copy");
     auto typed = model->CreateSession(0, &error);
     auto serialized = model->CreateSession(0, &error);
     Require(typed && typed->RestoreSnapshot(*snapshot, &error), error);

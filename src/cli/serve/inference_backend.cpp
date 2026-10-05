@@ -3504,7 +3504,9 @@ public:
 
   void StreamPersistentSnapshot(const TextRunnerSnapshot& snapshot,
                                 const SnapshotSink& sink) const override {
-    sink(Owned(snapshot).snapshot->bytes());
+    if (!Owned(snapshot).snapshot->Stream(sink)) {
+      throw std::runtime_error("Gemma 4 persistent snapshot copy failed");
+    }
   }
 
   void RestorePersistentSnapshot(
