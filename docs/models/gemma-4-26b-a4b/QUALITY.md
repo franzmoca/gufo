@@ -15,7 +15,7 @@ cover the load-time binary16 rewrite.
 
 | Check | UD-Q4_K_XL | UD-Q6_K_XL | UD-Q8_K_XL |
 | --- | --- | --- | --- |
-| GPU decode (FP32 activations) vs scalar reference, 22-token chat prompt | Mean KL 1.1e-6 (limit 1e-4), max 1.4e-5, top-1 22/22 | Mean KL 4.8e-7, max 5.0e-6, top-1 22/22 | Mean KL 8.8e-7, max 6.2e-6, top-1 22/22 |
+| GPU decode (FP32 activations) vs scalar reference, 22-token chat prompt | Mean KL 7.5e-7 (limit 1e-4), max 9.0e-6, top-1 22/22 (1.1e-6 before the own-key attention step, 2026-10-05) | Mean KL 4.8e-7, max 5.0e-6, top-1 22/22 | Mean KL 8.8e-7, max 6.2e-6, top-1 22/22 |
 | Eight-row verification | Bit-identical to single-token decode | Bit-identical to single-token decode | Bit-identical to single-token decode |
 | GPU prefill (binary16 activations, binary16 WMMA attention) vs scalar reference, same prompt | Mean KL 3.7e-5 (limit 1e-3), top-1 21/22 (a near-tie) | Mean KL 2.9e-5, top-1 22/22 | Mean KL 3.3e-5, top-1 22/22 |
 | Bulk prefill vs exact rows, 1542-token conversation past the window and ring | Mean KL 0.027 (limit 0.06), top-1 1489/1542 | Mean KL 0.019, top-1 1494/1542 | Mean KL 0.031, top-1 1480/1542 |

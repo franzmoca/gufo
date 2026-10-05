@@ -101,6 +101,12 @@ public:
 
   /// Decides the next draft from its signal.
   [[nodiscard]] bool Include(float signal) noexcept;
+  /// After the chain: whether a sibling of draft `depth` (0-based, decided
+  /// in depth order) pays for one more verification row. It adds a token
+  /// when the chain reaches that draft, the draft is rejected and the
+  /// sibling accepted (`hit`); `rows` counts the cycle's rows so far.
+  [[nodiscard]] bool IncludeSibling(std::uint32_t depth, std::uint32_t rows,
+                                    float hit) noexcept;
   /// Whether a first draft certain to be accepted would pay for its drafter
   /// step and row; when not, the cycle need not draft at all.
   [[nodiscard]] bool FirstDraftCanPay() const noexcept;
@@ -121,6 +127,9 @@ private:
   DraftBatch others_;
   std::uint32_t kept_{0};
   std::uint32_t steps_{0};
+  /// Per kept draft: the chain's survival before it and its acceptance.
+  std::array<float, 16> reach_{};
+  std::array<float, 16> accept_{};
   float survival_{1.0F};
   float expected_{1.0F};  ///< the target's own token is always emitted
 };

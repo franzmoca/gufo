@@ -93,16 +93,23 @@ public:
   /// order) to the device logits buffer. Every earlier position must already
   /// be in `cache`.
   /// `images` (ordered, disjoint, inside `tokens`) replace those rows' inputs.
+  /// `siblings`: see Segment.
   void Forward(KvCache& cache, std::span<const std::int32_t> tokens,
                std::uint32_t first_position,
                std::span<const std::uint32_t> logit_rows,
-               std::span<const ImageRows> images = {});
+               std::span<const ImageRows> images = {},
+               std::uint32_t siblings = 0);
 
-  /// Consecutive rows of one session in a batched forward.
+  /// Consecutive rows of one session in a batched forward. The last
+  /// `siblings` rows are alternatives to the drafts at depths 1..siblings:
+  /// sibling i sits at position first_position + 1 + i, attends what the
+  /// chain's draft there attends, and keeps its K/V at the spare key
+  /// first_position + rows - siblings + i (MoveKey commits it).
   struct Segment {
     KvCache* cache;
     std::uint32_t first_position;
     std::uint32_t rows;
+    std::uint32_t siblings{0};
   };
   /// Forward over several sessions' rows (`tokens` holds the segments' rows
   /// in order; logit and hidden rows index that concatenation). Row-wise work
@@ -116,6 +123,9 @@ public:
   /// Keeps hidden row `row` of the last Forward as the cache's frontier
   /// state for drafting.
   void CommitHidden(KvCache& cache, std::uint32_t row);
+  /// Moves every layer's K/V of key `from` to key `to`: an accepted
+  /// sibling's spare key into its position.
+  void MoveKey(KvCache& cache, std::uint32_t from, std::uint32_t to);
 
   /// Drafts up to `steps` tokens with the MTP drafter after `token` at
   /// position `position` (the committed frontier), reading the target's KV

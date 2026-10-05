@@ -467,6 +467,140 @@ std::int32_t TopToken(const qwen38_flash_next::MtpCandidateLogits& candidates) {
   return static_cast<std::int32_t>(candidates.ids[best]);
 }
 
+/// The drafter's choice after `chosen`: a sibling draft at the same depth.
+struct Alternative {
+  std::int32_t token{-1};
+  /// Calibration signal: the drafter's probability of the sibling once the
+  /// draft beside it is ruled out.
+  float signal{0.0F};
+};
+
+/// Greedy: the runner-up candidate (TopToken's order).
+Alternative GreedyAlternative(
+    const qwen38_flash_next::MtpCandidateLogits& candidates,
+    std::int32_t chosen) {
+  std::size_t best = candidates.size;
+  std::size_t top = candidates.size;
+  for (std::size_t i = 0; i < candidates.size; ++i) {
+    if (static_cast<std::int32_t>(candidates.ids[i]) == chosen) {
+      top = i;
+      continue;
+    }
+    if (best == candidates.size ||
+        candidates.logits[i] > candidates.logits[best] ||
+        (candidates.logits[i] == candidates.logits[best] &&
+         candidates.ids[i] < candidates.ids[best])) {
+      best = i;
+    }
+  }
+  if (best == candidates.size || top == candidates.size) {
+    return {};
+  }
+  double total = 0.0;
+  for (std::size_t i = 0; i < candidates.size; ++i) {
+    total += std::exp(
+        static_cast<double>(candidates.logits[i] - candidates.logits[top]));
+  }
+  const double second = std::exp(static_cast<double>(candidates.logits[best] -
+                                                     candidates.logits[top])) /
+                        total;
+  const double rest = 1.0 - 1.0 / total;
+  return {static_cast<std::int32_t>(candidates.ids[best]),
+          rest > 0.0 ? static_cast<float>(second / rest) : 0.0F};
+}
+
+/// Sampled: a draw from the proposal without its token.
+Alternative SampledAlternative(const qwen38_flash_next::MtpProposal& proposal,
+                               std::uint64_t* rng) {
+  const double rest = 1.0 - static_cast<double>(proposal.probability);
+  if (!(rest > 0.0)) {
+    return {};
+  }
+  const double draw = sampling::Uniform(rng) * rest;
+  double cumulative = 0.0;
+  std::size_t last = proposal.size;
+  for (std::size_t i = 0; i < proposal.size; ++i) {
+    if (proposal.ids[i] == proposal.token || proposal.probabilities[i] <= 0) {
+      continue;
+    }
+    last = i;
+    cumulative += proposal.probabilities[i];
+    if (draw < cumulative) {
+      break;
+    }
+  }
+  if (last == proposal.size) {
+    return {};
+  }
+  return {static_cast<std::int32_t>(proposal.ids[last]),
+          static_cast<float>(proposal.probabilities[last] / rest)};
+}
+
+struct SiblingVerification {
+  sampling::TokenId token;
+  bool accepted;  ///< the chain's draft
+  bool sibling;   ///< the sibling, after the draft's rejection
+};
+
+/// p/q verification of a draft with a sibling drawn from q without it:
+/// recursive rejection sampling. The draft is accepted with min(1, p/q);
+/// else the sibling, against the residual r = norm(max(p - q, 0)) and its
+/// own proposal q' = q without the draft, with min(1, r/q'); else the token
+/// comes from norm(max(r - q', 0)). The emitted token follows p exactly.
+SiblingVerification VerifyWithSibling(std::span<const float> logits,
+                                      const qwen38_flash_next::MtpProposal& q,
+                                      sampling::TokenId sibling,
+                                      sampling::SamplerState& sampler) {
+  const auto target = sampler.Distribution(logits);
+  if (sampler.Uniform() * q.probability < target.probability(q.token)) {
+    return {q.token, true, false};
+  }
+  const auto draft = [&q](sampling::TokenId token) {
+    for (std::size_t i = 0; i < q.size; ++i) {
+      if (q.ids[i] == token) {
+        return static_cast<double>(q.probabilities[i]);
+      }
+    }
+    return 0.0;
+  };
+  std::vector<sampling::Probability> residual;
+  double total = 0.0;
+  for (const auto& entry : target.entries()) {
+    const double value = std::max(entry.value - draft(entry.token), 0.0);
+    if (value > 0.0) {
+      residual.push_back({.token = entry.token, .value = value});
+      total += value;
+    }
+  }
+  if (!(total > 0.0) || !std::isfinite(total)) {
+    return {target.Sample(sampler.mutable_rng_state()), false, false};
+  }
+  const double rest = 1.0 - static_cast<double>(q.probability);
+  const double own = draft(sibling) / rest;
+  const double r =
+      std::max(target.probability(sibling) - draft(sibling), 0.0) / total;
+  if (sampler.Uniform() * own < r) {
+    return {sibling, false, true};
+  }
+  std::vector<sampling::Probability> second;
+  for (const auto& entry : residual) {
+    const double other =
+        entry.token == q.token ? 0.0 : draft(entry.token) / rest;
+    const double value = std::max(entry.value / total - other, 0.0);
+    if (value > 0.0) {
+      second.push_back({.token = entry.token, .value = value});
+    }
+  }
+  if (second.empty()) {
+    return {sampling::SamplingDistribution(std::move(residual))
+                .Sample(sampler.mutable_rng_state()),
+            false, false};
+  }
+  return {sampling::SamplingDistribution(std::move(second))
+              .Sample(sampler.mutable_rng_state()),
+          false, false};
+}
+
 }  // namespace
 
 /// One cycle's drafting: the length policy, sampled proposals and
@@ -491,6 +625,9 @@ struct Session::CycleDraft {
     if (cycle.sampled) {
       // A cycle-local proposal stream; target draws keep the sampler's.
       draft_rng = sampling::NextRandom(cycle.sampler->mutable_rng_state());
+      // Siblings draw from their own stream: the chain's drafts stay those
+      // of a cycle without them.
+      sibling_rng = draft_rng ^ 0x9E3779B97F4A7C15ULL;
       // Drafts are proposals: only the target's verification is
       // constrained (a grammar may exclude every drafter candidate).
       draft_sampler = cycle.sampler->WithoutConstraint();
@@ -583,6 +720,7 @@ struct Session::CycleDraft {
         return rocm::DraftProposal{};
       }
       draft_sampler.Accept(proposal.token);
+      alternatives.push_back(SampledAlternative(proposal, &sibling_rng));
       cycle.proposals.push_back(proposal);
       context.push_back(static_cast<std::int32_t>(proposal.token));
       return rocm::DraftProposal{
@@ -593,6 +731,7 @@ struct Session::CycleDraft {
       return rocm::DraftProposal{};
     }
     const std::int32_t token = TopToken(c);
+    alternatives.push_back(GreedyAlternative(c, token));
     context.push_back(token);
     return rocm::DraftProposal{.token = token, .last = Copy()};
   }
@@ -612,8 +751,11 @@ struct Session::CycleDraft {
   std::vector<std::int32_t> context;
   std::vector<std::int32_t> copies;
   std::vector<std::int32_t> drafts;
+  /// Per MTP draft, the sibling it could have beside it.
+  std::vector<Alternative> alternatives;
   sampling::SamplerState draft_sampler{sampling::SamplingConfig{}, {}};
   std::uint64_t draft_rng{0};
+  std::uint64_t sibling_rng{0};
 };
 
 bool Session::DecodeStep(std::size_t max_tokens,
@@ -637,7 +779,8 @@ bool Session::DecodeStep(std::size_t max_tokens,
     for (std::uint32_t i = 0; i < logit_rows.size(); ++i) {
       logit_rows[i] = i;
     }
-    executor.Forward(*cache_, cycle.rows, cycle.position, logit_rows);
+    executor.Forward(*cache_, cycle.rows, cycle.position, logit_rows, {},
+                     static_cast<std::uint32_t>(cycle.siblings.size()));
     executor.CopyLogits(cycle.rows.size(), &logits);
   } catch (const std::exception& e) {
     Reset();
@@ -647,12 +790,12 @@ bool Session::DecodeStep(std::size_t max_tokens,
   return true;
 }
 
-DraftCalibration& Session::Calibration(bool sampled) {
+DraftCalibration& Session::Calibration(bool sampled, bool sibling) {
   auto& tables =
       model_->options_.draft_calibration == DraftCalibrationScope::kRequest
           ? calibration_
           : model_->calibration_;
-  return tables[sampled ? 1 : 0];
+  return tables[(sampled ? 1 : 0) + (sibling ? 2 : 0)];
 }
 
 bool Session::BeginCycle(Cycle& cycle, std::uint32_t draft_limit,
@@ -754,6 +897,37 @@ void Session::FinishDraft(Cycle& cycle) {
   cycle.rows.insert(cycle.rows.end(), draft.copies.begin(), draft.copies.end());
   cycle.copied = draft.copies.size();
   if (draft.policy == DraftPolicy::kCalibrated) {
+    // Siblings, shallowest first, while each pays for its row: the
+    // drafter's next choice where the chain's draft is rejected.
+    auto rows = static_cast<std::uint32_t>(cycle.rows.size());
+    const DraftCalibration& hits = Calibration(cycle.sampled, true);
+    if (draft.share != nullptr && !draft.alone) {
+      const auto own = static_cast<std::uint32_t>(draft.drafts.size() + 1);
+      draft.calibrated.SetOthers(
+          {.rows = draft.share->rows - own,
+           .expected = draft.share->expected - draft.calibrated.Expected()});
+    }
+    for (std::size_t i = 0;
+         i < draft.drafts.size() && i < draft.alternatives.size() &&
+         rows < draft.max_drafts + 1;
+         ++i) {
+      const Alternative& alt = draft.alternatives[i];
+      const float before = draft.calibrated.Expected();
+      if (alt.token < 0 ||
+          !draft.calibrated.IncludeSibling(static_cast<std::uint32_t>(i), rows,
+                                           hits.Estimate(alt.signal))) {
+        break;
+      }
+      if (draft.share != nullptr) {
+        draft.share->rows += 1;
+        draft.share->expected += draft.calibrated.Expected() - before;
+      }
+      cycle.siblings.push_back(alt.token);
+      cycle.sibling_signals.push_back(alt.signal);
+      ++rows;
+    }
+    cycle.rows.insert(cycle.rows.end(), cycle.siblings.begin(),
+                      cycle.siblings.end());
     cycle.expected = draft.calibrated.Expected();
     cycle.draft_ms = draft.calibrated.DraftMs();
   }
@@ -773,42 +947,76 @@ void Session::FinishCycle(Cycle& cycle, std::span<const float> logits,
     }
   };
   // Row i predicts the token after rows[i]; drafts stay while the target's
-  // own sample agrees with them.
+  // own sample agrees with them. Sibling rows trail the chain.
+  const std::size_t siblings = cycle.siblings.size();
+  const std::size_t chain = rows.size() - siblings;
   const std::size_t vocab = model_->VocabSize();
   std::size_t row = 0;
   std::uint64_t accepted = 0;
   bool agrees = false;
+  bool sibling = false;
   for (;; ++row) {
     const auto row_logits = logits.subspan(row * vocab, vocab);
     agrees = false;
-    if (cycle.sampled && row + 1 < rows.size()) {
-      const auto verified = qwen38_flash_next::VerifyMtpProposal(
-          row_logits, cycle.proposals[row], sampler);
-      emit(static_cast<TokenId>(verified.token));
-      agrees = verified.accepted;
+    const bool beside = row < siblings && row + 1 < chain;
+    if (cycle.sampled && row + 1 < chain) {
+      if (beside) {
+        const auto verified = VerifyWithSibling(
+            row_logits, cycle.proposals[row], cycle.siblings[row], sampler);
+        emit(static_cast<TokenId>(verified.token));
+        agrees = verified.accepted;
+        sibling = verified.sibling;
+      } else {
+        const auto verified = qwen38_flash_next::VerifyMtpProposal(
+            row_logits, cycle.proposals[row], sampler);
+        emit(static_cast<TokenId>(verified.token));
+        agrees = verified.accepted;
+      }
     } else {
       emit(static_cast<TokenId>(sampler.Sample(row_logits)));
-      agrees = row + 1 < rows.size() && result->tokens.back() == rows[row + 1];
+      agrees = row + 1 < chain && result->tokens.back() == rows[row + 1];
+      sibling =
+          beside && !agrees && result->tokens.back() == cycle.siblings[row];
     }
     if (!agrees || result->stop || result->tokens.size() >= cycle.max_tokens) {
       break;
     }
     ++accepted;
   }
-  // Rows [0, row] are committed; the last emitted token becomes pending.
-  tokens_.insert(tokens_.end(), rows.begin(), rows.begin() + row + 1);
+  if (row < siblings && row + 1 < chain && !agrees) {
+    Calibration(cycle.sampled, true)
+        .Observe(cycle.sibling_signals[row], sibling);
+  }
+  // An accepted sibling (the target's own token) commits in place of the
+  // rejected draft, and its row's token follows.
+  std::size_t last = row;
+  if (sibling && !result->stop && result->tokens.size() < cycle.max_tokens) {
+    last = chain + row;
+    emit(static_cast<TokenId>(
+        sampler.Sample(logits.subspan(last * vocab, vocab))));
+    tokens_.insert(tokens_.end(), rows.begin(), rows.begin() + row + 1);
+    tokens_.push_back(cycle.siblings[row]);
+    model_->executor_->MoveKey(
+        *cache_, cycle.position + static_cast<std::uint32_t>(chain + row),
+        cycle.position + static_cast<std::uint32_t>(row + 1));
+    stats_.siblings_accepted += 1;
+  } else {
+    // Rows [0, row] are committed; the last emitted token becomes pending.
+    tokens_.insert(tokens_.end(), rows.begin(), rows.begin() + row + 1);
+  }
   model_->executor_->CommitHidden(
-      *cache_, first_hidden_row + static_cast<std::uint32_t>(row));
-  const auto kept = logits.subspan(row * vocab, vocab);
+      *cache_, first_hidden_row + static_cast<std::uint32_t>(last));
+  const auto kept = logits.subspan(last * vocab, vocab);
   logits_.assign(kept.begin(), kept.end());
   valid_ = true;
   pending_ = result->tokens.back();
   stats_.cycles += 1;
-  stats_.verified += rows.size() > 1 ? 1 : 0;
-  stats_.drafted += rows.size() - 1;
+  stats_.verified += chain > 1 ? 1 : 0;
+  stats_.drafted += chain - 1;
   stats_.accepted += accepted;
+  stats_.siblings += siblings;
   // Copies trail the MTP drafts.
-  const std::size_t mtp = rows.size() - 1 - cycle.copied;
+  const std::size_t mtp = chain - 1 - cycle.copied;
   stats_.copied += cycle.copied;
   // The calibrated policy learns from every draft verification judged: the
   // accepted ones and the one that ended the chain (copies trail the MTP
@@ -816,7 +1024,7 @@ void Session::FinishCycle(Cycle& cycle, std::span<const float> logits,
   if (!cycle.signals.empty()) {
     DraftCalibration& calibration = Calibration(cycle.sampled);
     const std::size_t judged =
-        std::min(row + (row + 1 < rows.size() ? 1 : 0), cycle.signals.size());
+        std::min(row + (row + 1 < chain ? 1 : 0), cycle.signals.size());
     for (std::size_t j = 0; j < judged; ++j) {
       calibration.Observe(cycle.signals[j], j < row || agrees);
     }
@@ -900,7 +1108,8 @@ bool Session::DecodeBatch(std::span<BatchDecode> decodes) {
       continue;
     }
     segments.push_back({decodes[i].session->cache_.get(), cycles[i].position,
-                        static_cast<std::uint32_t>(cycles[i].rows.size())});
+                        static_cast<std::uint32_t>(cycles[i].rows.size()),
+                        static_cast<std::uint32_t>(cycles[i].siblings.size())});
     tokens.insert(tokens.end(), cycles[i].rows.begin(), cycles[i].rows.end());
     active.push_back(i);
   }

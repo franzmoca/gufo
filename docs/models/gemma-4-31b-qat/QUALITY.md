@@ -11,13 +11,13 @@ the limits of the [standard 31B](../gemma-4-31b/QUALITY.md).
 
 | Check | Result |
 | --- | --- |
-| GPU decode (FP32 activations, split-K GEMV and attention) vs scalar reference, 22-token chat prompt | Mean KL 1.3e-7 (limit 1e-5), top-1 22/22 |
-| Eight-row verification vs scalar reference | Mean KL 1.4e-7, top-1 22/22 (WMMA projections since 2026-10-05; 1.2e-7 before); verification rows reproduce single-token decode with the drafter loaded bit for bit (Q4_0 WMMA projection widths 1–16 in `gemma4.projection_ops`, whole-model rows in `gemma4.target`) |
+| GPU decode (FP32 activations, split-K GEMV and attention) vs scalar reference, 22-token chat prompt | Mean KL 1.7e-7 (limit 1e-5), top-1 22/22 (1.3e-7 before the own-key attention step, 2026-10-05) |
+| Eight-row verification vs scalar reference | Mean KL 1.6e-7, top-1 22/22 (1.4e-7 before the own-key step) (WMMA projections since 2026-10-05; 1.2e-7 before); verification rows reproduce single-token decode with the drafter loaded bit for bit (Q4_0 WMMA projection widths 1–16 in `gemma4.projection_ops`, whole-model rows in `gemma4.target`) |
 | GPU prefill (binary16 activations × Q4_0 weights, binary16 WMMA projections and attention) vs scalar reference, same prompt | Mean KL 2.2e-6 (limit 0.015), max 1.8e-5, top-1 22/22 (Q8_1 activations until 2026-10-05: 0.0011). llama.cpp b11069 prefill on the same tokens: 0.0010, max 0.0094, 22/22 |
 | Bulk prefill vs exact rows, 1542-token conversation past the window and ring | Mean KL 8.5e-6 (limit 0.15), top-1 1542/1542 (Q8_1 activations: 0.0027, 1517/1542) |
 | Bulk prefill vs exact rows, 1353-token repetitive prompt (reported, not a gate) | Mean KL 0.00069, top-1 1353/1353 (Q8_1 activations: 0.050, 1329/1353) |
 | Long context vs llama.cpp b11069, 16K templated turn (16,022-token prose prompt, 640-token greedy Gufo reply, teacher-forced) | KL(llama.cpp ‖ Gufo) 0.0028, max 0.109, top-1 626/641, true-token NLL 0.106 (llama.cpp 0.111; the reply is Gufo's own greedy output) |
-| Greedy MTP vs single-token decode with the drafter loaded, three prompts, plus prompt-lookup copies | Identical token IDs (`gemma4.target`) |
+| Greedy MTP vs single-token decode with the drafter loaded, three prompts, plus prompt-lookup copies | Identical token IDs (`gemma4.target`); with sibling drafts every cycle's logits equal decode's bit for bit (22 of 171 siblings accepted) |
 | Greedy MTP vs an AR-only server | Not equal in general, as for the standard 31B: AR-only decode uses the split-K GEMV, whose FP32 summation order differs from the verification kernels |
 | Sampled MTP | Seeded replay repeats the same tokens (`gemma4.target`) |
 | Session state | Prefix extension, rewind and snapshot restore after a sliding-ring wrap continue bit for bit (`gemma4.target`) |

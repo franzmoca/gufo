@@ -194,6 +194,36 @@ void CheckBatch() {
           "a payable draft was skipped");
 }
 
+/// A sibling adds a token where the chain reaches its draft, the draft is
+/// rejected and the sibling accepted; it pays for its row like a draft.
+void CheckSiblings() {
+  const g4::DraftCosts costs = g4::DraftCostsAt(0);
+  // Every signal accepted three times in five.
+  g4::DraftCalibration likely;
+  for (int i = 0; i < 10000; ++i) {
+    likely.Observe(0.9F, i % 5 < 3);
+  }
+  g4::CalibratedChain chain(likely, costs, 1, 7);
+  Require(chain.Include(0.9F) && chain.Include(0.9F), "a likely chain");
+  const float expected = chain.Expected();
+  // Rows: pending and two drafts. The first sibling's gain is
+  // reach 1 x rejection 0.4 x hit 0.5.
+  Require(chain.IncludeSibling(0, 3, 0.5F), "a paying sibling was dropped");
+  Require(std::fabs(chain.Expected() - (expected + 0.2F)) < 1e-3F,
+          "sibling expectation");
+  // A sibling that is never accepted, or past the chain, does not pay.
+  Require(!chain.IncludeSibling(1, 4, 0.0F), "a hopeless sibling was kept");
+  Require(!chain.IncludeSibling(2, 4, 1.0F), "a sibling beyond the chain");
+  // Beside three sessions on the expert model a doubtful sibling's row costs
+  // more than it adds.
+  const g4::DraftCosts moe = g4::DraftCostsAt(0, true);
+  g4::CalibratedChain crowded(likely, moe, 1, 7,
+                              g4::DraftBatch{.rows = 3, .expected = 3.0F});
+  Require(crowded.Include(0.9F), "first draft");
+  Require(!crowded.IncludeSibling(0, 2, 0.05F),
+          "a doubtful batched sibling was verified");
+}
+
 }  // namespace
 
 int main() {
@@ -204,5 +234,6 @@ int main() {
     CheckCosts();
     CheckChain();
     CheckBatch();
+    CheckSiblings();
   });
 }

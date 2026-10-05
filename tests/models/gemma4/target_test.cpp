@@ -142,11 +142,59 @@ std::vector<g4::TokenId> Generate(
   std::cout << "speculative: cycles " << stats.cycles << ", drafted "
             << stats.drafted << ", accepted " << stats.accepted << ", copied "
             << stats.copied << ", copies accepted " << stats.copied_accepted
-            << '\n';
+            << ", siblings " << stats.siblings << ", siblings accepted "
+            << stats.siblings_accepted << '\n';
   if (stats_out != nullptr) {
     *stats_out = stats;
   }
   return out;
+}
+
+/// Greedy speculation against autoregressive decode, logits included: after
+/// every cycle the session's logits (those of the row that chose its last
+/// token: a chain row or an accepted sibling's) equal decode's bit for bit.
+void CheckSpeculativeLogits(g4::Model& model,
+                            std::span<const g4::TokenId> prompt,
+                            std::size_t count,
+                            g4::Session::SpeculativeStats* stats_out) {
+  std::string error;
+  auto session = model.CreateSession(0, &error);
+  Require(session && session->Sync(prompt, &error), error);
+  gufo::sampling::SamplerState sampler({}, {});
+  std::vector<g4::TokenId> ar;
+  std::vector<std::vector<float>> ar_logits;
+  while (ar.size() < count) {
+    const auto logits = session->Logits();
+    ar_logits.emplace_back(logits.begin(), logits.end());
+    const auto token = static_cast<g4::TokenId>(sampler.Sample(logits));
+    sampler.Accept(static_cast<gufo::sampling::TokenId>(token));
+    ar.push_back(token);
+    Require(session->Evaluate(token, &error), error);
+  }
+  // A fresh session: re-syncing this one would keep its cached prompt
+  // keys, written by the forward of a different width.
+  session = model.CreateSession(0, &error);
+  Require(session && session->Sync(prompt, &error), error);
+  sampler = gufo::sampling::SamplerState({}, {});
+  std::vector<g4::TokenId> spec;
+  while (spec.size() < count) {
+    g4::Session::DecodeResult step;
+    Require(session->DecodeStep(count - spec.size(), sampler, &step, &error,
+                                false) &&
+                !step.tokens.empty(),
+            error);
+    spec.insert(spec.end(), step.tokens.begin(), step.tokens.end());
+    const auto logits = session->Logits();
+    Require(std::equal(logits.begin(), logits.end(),
+                       ar_logits[spec.size() - 1].begin(),
+                       ar_logits[spec.size() - 1].end()),
+            "speculative logits differ from decode at token " +
+                std::to_string(spec.size() - 1));
+  }
+  Require(spec == ar, "greedy MTP differs from AR");
+  const auto& stats = session->Statistics();
+  stats_out->siblings += stats.siblings;
+  stats_out->siblings_accepted += stats.siblings_accepted;
 }
 
 /// The fixture conversation: turns separated by "@@ user" / "@@ model".
@@ -378,6 +426,22 @@ int main() {
       const auto spec = Generate(*mtp, prompt, 64, true);
       Require(ar == spec, std::string("greedy MTP differs from AR: ") + text);
     }
+    // Siblings: an accepted one's row and the keys it leaves in the cache
+    // continue exactly as decode would.
+    {
+      g4::Session::SpeculativeStats sibling_stats;
+      for (const char* text :
+           {"Write a paragraph about the history of Genoa's harbour.",
+            "Describe an autumn morning in a mountain village.",
+            "Explain how a lighthouse lens concentrates light."}) {
+        CheckSpeculativeLogits(*mtp, PromptTokens(*mtp, text), 96,
+                               &sibling_stats);
+      }
+      std::cout << "siblings: verified " << sibling_stats.siblings
+                << ", accepted " << sibling_stats.siblings_accepted << '\n';
+      Require(sibling_stats.siblings_accepted > 0,
+              "greedy MTP accepted no siblings");
+    }
     // Batched decoding: sessions sharing a forward reproduce their own
     // single-session output (greedy), for plain and speculative steps.
     {
@@ -485,6 +549,7 @@ int main() {
     Require(first.size() == 96 && first == again,
             "sampled MTP does not replay its seed");
     Require(stats.accepted > 0, "sampled MTP accepted no drafts");
+    Require(stats.siblings > 0, "sampled MTP verified no siblings");
     // Sampled copies are point-mass proposals under the same rule.
     g4::Session::SpeculativeStats sampled_copy_stats;
     const auto sampled_copy =

@@ -31,6 +31,9 @@ void RmsNorm(const float* x, const float* weight, float* y, std::uint32_t rows,
 /// Pair i turns by position * theta_scale^i / freq_factors[i] with
 /// theta_scale = theta^(-2/dim) (`freq_factors` null means 1), as ggml's
 /// NEOX rope computes it.
+/// The last `siblings` rows are sibling drafts beside the chain's drafts:
+/// sibling i sits at position first_position + 1 + i and stores its K/V at
+/// key spare_key + i.
 struct QkvPostArgs {
   float* q;
   const float* k;
@@ -55,6 +58,8 @@ struct QkvPostArgs {
   /// Packed destination of the processed Q ([rows][heads * head_dim]); null
   /// rewrites q in place.
   float* q_out;
+  std::uint32_t siblings;
+  std::uint32_t spare_key;
 };
 void QkvPost(const QkvPostArgs& args, hipStream_t stream);
 
@@ -90,6 +95,12 @@ void QueryPost(float* q, const float* q_norm, float theta_scale,
 /// bound to max(position + 1, key_ends[row]): image rows attend to every key
 /// of their image in sliding layers. Those bounds never decrease with the
 /// row and never pass the last row's position + 1.
+///
+/// The last `siblings` rows (QkvPost's) sit at first_position + 1 + i and
+/// attend what the chain's row there attends, except that their own key
+/// comes from spare_key + i. Split attention adds every row's own (last) key
+/// in one step after the others, so a sibling computes what its row alone
+/// would.
 struct AttentionArgs {
   const float* q;
   const std::uint16_t* k_cache;  ///< binary16; rotated dims when derived
@@ -110,6 +121,8 @@ struct AttentionArgs {
   /// Optional binary16 copy of `out` (the WMMA prefill path writes it; there
   /// `out` may be null).
   void* out_half;
+  std::uint32_t siblings;
+  std::uint32_t spare_key;
 };
 inline constexpr std::uint32_t kSplitRows = 16;
 /// Derived keys: rope_pairs must be a multiple of 16 and at most this.
@@ -177,6 +190,22 @@ void Softcap(float* logits, std::size_t count, float cap, hipStream_t stream);
 /// Copies rows `src[index[i]]` into dst[i] (row width `dim` floats).
 void GatherRows(const float* src, const std::uint32_t* index, float* dst,
                 std::uint32_t rows, std::uint32_t dim, hipStream_t stream);
+
+/// One session's K/V caches, every layer: copies the binary16 row of key
+/// `from` over that of key `to` (keys at slot key % ring[l] where ring[l] >
+/// 0), widths in values per row.
+struct MoveKeyArgs {
+  static constexpr std::uint32_t kMaxLayers = 64;
+  std::uint16_t* k[kMaxLayers];
+  std::uint16_t* v[kMaxLayers];
+  std::uint32_t k_width[kMaxLayers];
+  std::uint32_t v_width[kMaxLayers];
+  std::uint32_t ring[kMaxLayers];
+  std::uint32_t layers;
+  std::uint32_t from;
+  std::uint32_t to;
+};
+void MoveKey(const MoveKeyArgs& args, hipStream_t stream);
 
 }  // namespace gufo::models::gemma4::rocm
 

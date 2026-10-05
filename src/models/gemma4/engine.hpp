@@ -156,9 +156,9 @@ private:
   std::unique_ptr<rocm::DeviceModel> device_;
   std::unique_ptr<rocm::Executor> executor_;
   std::mutex mutex_;
-  /// Calibrated-policy tables shared by every session ([greedy, sampled]);
-  /// guarded by mutex_.
-  std::array<DraftCalibration, 2> calibration_;
+  /// Calibrated-policy tables shared by every session ([greedy, sampled]
+  /// drafts, then their siblings); guarded by mutex_.
+  std::array<DraftCalibration, 4> calibration_;
 
   friend class Session;
 };
@@ -229,6 +229,10 @@ public:
     std::uint64_t accepted{0};  ///< MTP drafts and copied tokens
     std::uint64_t copied{0};    ///< prompt-lookup tokens among `drafted`
     std::uint64_t copied_accepted{0};
+    /// Siblings verified beside MTP drafts, and those whose token and
+    /// following one were emitted.
+    std::uint64_t siblings{0};
+    std::uint64_t siblings_accepted{0};
   };
   [[nodiscard]] const SpeculativeStats& Statistics() const noexcept {
     return stats_;
@@ -297,6 +301,11 @@ private:
     bool sampled{false};
     std::vector<qwen38_flash_next::MtpProposal> proposals;
     std::size_t copied{0};
+    /// The drafter's next choice beside MTP drafts 1..siblings.size(),
+    /// verified in rows after the chain (sampled: drawn from the draft's
+    /// proposal without it), and each one's calibration signal.
+    std::vector<TokenId> siblings;
+    std::vector<float> sibling_signals;
     /// Calibrated policy: the signal of each verified MTP draft.
     std::vector<float> signals;
     /// Calibrated policy: tokens the cycle is expected to emit and its
@@ -331,9 +340,10 @@ private:
   std::optional<TokenId> pending_;
   SpeculativeStats stats_;
   /// Calibrated-policy tables of a request-scoped session ([greedy,
-  /// sampled]), reset by Sync.
-  std::array<DraftCalibration, 2> calibration_;
-  [[nodiscard]] DraftCalibration& Calibration(bool sampled);
+  /// sampled] drafts, then their siblings), reset by Sync.
+  std::array<DraftCalibration, 4> calibration_;
+  [[nodiscard]] DraftCalibration& Calibration(bool sampled,
+                                              bool sibling = false);
 
   friend class Model;
 };

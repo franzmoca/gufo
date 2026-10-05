@@ -214,7 +214,8 @@ bool CalibratedChain::Include(float signal) noexcept {
     return false;
   }
   steps_ = index + 1;
-  const float survival = survival_ * calibration_.Estimate(signal);
+  const float accept = calibration_.Estimate(signal);
+  const float survival = survival_ * accept;
   if (index >= min_drafts_) {
     // Stopping here verifies `index` drafts after one more drafter step than
     // needed; verifying this one adds a row, and going on adds a step.
@@ -228,9 +229,27 @@ bool CalibratedChain::Include(float signal) noexcept {
       return false;
     }
   }
+  reach_[kept_] = survival_;
+  accept_[kept_] = accept;
   survival_ = survival;
   expected_ += survival;
   ++kept_;
+  return true;
+}
+
+bool CalibratedChain::IncludeSibling(std::uint32_t depth, std::uint32_t rows,
+                                     float hit) noexcept {
+  if (depth >= kept_) {
+    return false;
+  }
+  const float gain = reach_[depth] * (1.0F - accept_[depth]) * hit;
+  // The drafter does not run again: only the row is extra.
+  const float current = others_.draft_ms + costs_.draft[steps_] + Verify(rows);
+  const float next = current - Verify(rows) + Verify(rows + 1);
+  if (gain * current < (others_.expected + expected_) * (next - current)) {
+    return false;
+  }
+  expected_ += gain;
   return true;
 }
 

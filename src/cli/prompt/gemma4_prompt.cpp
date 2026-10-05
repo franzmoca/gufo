@@ -196,7 +196,8 @@ int Generate(const PromptOptions& opt, g4::Model& model, g4::Session& session,
                 << (stats.drafted != 0 ? static_cast<double>(stats.accepted) /
                                              static_cast<double>(stats.drafted)
                                        : 0.0)
-                << '\n';
+                << " siblings=" << stats.siblings
+                << " siblings_accepted=" << stats.siblings_accepted << '\n';
     }
   }
   return 0;

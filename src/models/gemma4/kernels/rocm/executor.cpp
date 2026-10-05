@@ -586,9 +586,10 @@ void Executor::DeriveKeys(AttentionArgs& att, std::uint32_t layer) const {
 void Executor::Forward(KvCache& cache, std::span<const std::int32_t> tokens,
                        std::uint32_t first_position,
                        std::span<const std::uint32_t> logit_rows,
-                       std::span<const ImageRows> images) {
+                       std::span<const ImageRows> images,
+                       std::uint32_t siblings) {
   const Segment segment{&cache, first_position,
-                        static_cast<std::uint32_t>(tokens.size())};
+                        static_cast<std::uint32_t>(tokens.size()), siblings};
   Forward(std::span<const Segment>(&segment, 1), tokens, logit_rows, images);
 }
 
@@ -603,6 +604,11 @@ void Executor::Forward(std::span<const Segment> segments,
     if (s.rows == 0 || s.cache->ring != ring_ ||
         s.first_position + std::uint64_t{s.rows} > s.cache->max_context) {
       throw std::invalid_argument("gemma4 forward segment exceeds its cache");
+    }
+    // Siblings stand beside drafts: at most one per draft.
+    if (s.siblings != 0 &&
+        (2 * s.siblings >= s.rows || s.rows > kSplitRows || !images.empty())) {
+      throw std::invalid_argument("gemma4 forward siblings exceed the chain");
     }
     total += s.rows;
   }
@@ -744,6 +750,8 @@ void Executor::Forward(std::span<const Segment> segments,
       post.ring = sliding ? cache.ring : 0;
       post.eps = eps;
       post.rotated_pairs = DerivedKeys(l) ? model_.global_rope_pairs() : 0;
+      post.siblings = seg.siblings;
+      post.spare_key = seg.first_position + seg.rows - seg.siblings;
       QkvPost(post, stream_);
 
       AttentionArgs att{};
@@ -767,6 +775,8 @@ void Executor::Forward(std::span<const Segment> segments,
       att.out_half =
           half ? static_cast<__half*>(x_half_) + std::size_t{row0} * c.QDim(l)
                : nullptr;
+      att.siblings = post.siblings;
+      att.spare_key = post.spare_key;
       DeriveKeys(att, l);
       Attention(att, stream_);
       row0 += seg.rows;
@@ -1105,6 +1115,25 @@ void Executor::CommitHidden(KvCache& cache, std::uint32_t row) {
   const std::size_t d = model_.config().hidden_size;
   HIP_CHECK(hipMemcpyAsync(cache.hidden, h_ + row * d, d * sizeof(float),
                            hipMemcpyDeviceToDevice, stream_));
+}
+
+void Executor::MoveKey(KvCache& cache, std::uint32_t from, std::uint32_t to) {
+  const Config& c = model_.config();
+  MoveKeyArgs args{};
+  if (c.num_layers > MoveKeyArgs::kMaxLayers) {
+    throw std::invalid_argument("gemma4 MoveKey layer count");
+  }
+  args.layers = c.num_layers;
+  args.from = from;
+  args.to = to;
+  for (std::uint32_t l = 0; l < c.num_layers; ++l) {
+    args.k[l] = cache.k[l];
+    args.v[l] = cache.v[l];
+    args.k_width[l] = key_widths_[l];
+    args.v_width[l] = c.KvDim(l);
+    args.ring[l] = c.IsSliding(l) ? cache.ring : 0;
+  }
+  rocm::MoveKey(args, stream_);
 }
 
 void Executor::DraftChain(KvCache& cache, std::int32_t token,

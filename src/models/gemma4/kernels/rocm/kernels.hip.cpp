@@ -409,7 +409,10 @@ __global__ void __launch_bounds__(kThreads) QkvPostKernel(QkvPostArgs a) {
   if (head >= a.heads + a.kv_heads) {
     return;
   }
-  const std::uint32_t position = a.first_position + row;
+  const std::uint32_t chain = a.rows - a.siblings;
+  const bool sibling = row >= chain;
+  const std::uint32_t position =
+      sibling ? a.first_position + 1 + (row - chain) : a.first_position + row;
   const auto dim_of = [&](int w, int k) {
     return static_cast<std::uint32_t>(kWave * w + lane + kThreads * k);
   };
@@ -495,7 +498,8 @@ __global__ void __launch_bounds__(kThreads) QkvPostKernel(QkvPostArgs a) {
   }
   const std::uint32_t kvh = head - a.heads;
   const std::size_t in = row * kv_row + std::size_t{kvh} * D;
-  const std::uint32_t slot = a.ring != 0 ? position % a.ring : position;
+  const std::uint32_t key = sibling ? a.spare_key + (row - chain) : position;
+  const std::uint32_t slot = a.ring != 0 ? key % a.ring : key;
   const std::size_t cache =
       (static_cast<std::size_t>(slot) * a.kv_heads + kvh) * D;
   auto* k_cache = reinterpret_cast<__half*>(a.k_cache);
@@ -564,9 +568,20 @@ struct KeyRange {
   std::uint32_t hi;
 };
 
+/// Row `row`'s position: chain rows are consecutive, siblings stand at
+/// depths 1, 2, ... beside them.
+__device__ inline std::uint32_t RowPosition(const AttentionArgs& a,
+                                            std::uint32_t row) {
+  if (a.shared_position) {
+    return a.first_position;
+  }
+  const std::uint32_t chain = a.rows - a.siblings;
+  return row < chain ? a.first_position + row
+                     : a.first_position + 1 + (row - chain);
+}
+
 __device__ inline KeyRange RowKeys(const AttentionArgs& a, std::uint32_t row) {
-  const std::uint32_t position =
-      a.shared_position ? a.first_position : a.first_position + row;
+  const std::uint32_t position = RowPosition(a, row);
   const std::uint32_t end =
       a.key_ends != nullptr ? max(position + 1, a.key_ends[row]) : position + 1;
   const std::uint32_t hi = min(end, a.key_limit);
@@ -743,7 +758,8 @@ __device__ __forceinline__ float ReduceScatterN(float (&v)[N]) {
 /// (the heads of one KV head) stream each key and value once for every row.
 /// Online softmax per 32-key tile. A row's arithmetic does not depend on R or
 /// on the rows sharing its block: scores reduce in groups of KG keys and only
-/// the load batching (LG keys) varies with R. Writes (m, l, unnormalized acc).
+/// the load batching (LG keys) varies with R; each row's last key (its own)
+/// joins in a final step after the tiles. Writes (m, l, unnormalized acc).
 template<int D, int G, int R, int WPH, int CW>
 __global__ void __launch_bounds__(kThreads* WPH)
     __attribute__((amdgpu_waves_per_eu(R == 4 ? 8 : 1)))
@@ -771,6 +787,9 @@ __global__ void __launch_bounds__(kThreads* WPH)
       max(0, min(R, static_cast<int>(a.rows) - static_cast<int>(row0)));
   const std::uint32_t base = (first_split + local) * C;
   const std::size_t stride = static_cast<std::size_t>(a.kv_heads) * D;
+  const auto slot_of = [&](std::uint32_t key) {
+    return a.ring != 0 ? key % a.ring : key;
+  };
   const auto* k_head =
       reinterpret_cast<const __half*>(a.k_cache) + blockIdx.y * D;
   const auto* v_head =
@@ -794,8 +813,10 @@ __global__ void __launch_bounds__(kThreads* WPH)
     const std::uint32_t row =
         block_row0 + min(rg * R + r, static_cast<int>(block_rows) - 1);
     const KeyRange keys = RowKeys(a, row);
+    // The tiles stop before a row's last key, its own: a sibling keeps that
+    // one at a spare key, so every row attends it in a final step.
     lo[r] = r < rows ? keys.lo : 0;
-    hi[r] = r < rows ? keys.hi : 0;
+    hi[r] = r < rows && keys.hi > keys.lo ? keys.hi - 1 : lo[r];
     const float* qr =
         a.q + (static_cast<std::size_t>(row) * a.heads + head) * D + lane * P;
 #pragma unroll
@@ -813,11 +834,17 @@ __global__ void __launch_bounds__(kThreads* WPH)
       acc[r][i] = 0.0F;
     }
   }
-  // Keys any row of the block attends in this chunk; rows' ranges grow with
-  // the row index. Keys outside [begin, end) load as zeros.
-  const std::uint32_t begin = max(base, RowKeys(a, block_row0).lo);
-  const std::uint32_t end =
-      min(base + C, RowKeys(a, block_row0 + block_rows - 1).hi);
+  // Keys any row of the block attends in this chunk (siblings stand among
+  // the chain's positions). Keys outside [begin, end) load as zeros.
+  std::uint32_t block_lo = RowKeys(a, block_row0).lo;
+  std::uint32_t block_hi = RowKeys(a, block_row0).hi;
+  for (std::uint32_t i = 1; i < block_rows; ++i) {
+    const KeyRange keys = RowKeys(a, block_row0 + i);
+    block_lo = min(block_lo, keys.lo);
+    block_hi = max(block_hi, keys.hi);
+  }
+  const std::uint32_t begin = max(base, block_lo);
+  const std::uint32_t end = min(base + C, block_hi);
   // Derived keys (rope_pairs > 0): the cache keeps only the rotated key
   // dims, staged beside the value tile; every other key dim is its value
   // (the query carries the key weight).
@@ -847,7 +874,7 @@ __global__ void __launch_bounds__(kThreads* WPH)
     } else {
       const std::uint32_t key = key0 + kk;
       if (key >= begin && key < end) {
-        const std::uint32_t slot = a.ring != 0 ? key % a.ring : key;
+        const std::uint32_t slot = slot_of(key);
         const auto* src =
             reinterpret_cast<const uint4*>(head_cache + slot * stride + dim0);
 #pragma unroll
@@ -884,7 +911,7 @@ __global__ void __launch_bounds__(kThreads* WPH)
       const std::uint32_t key =
           key0 + static_cast<int>(threadIdx.x) / kGroups + n * kKeysPerPass;
       if (key >= begin && key < end) {
-        const std::uint32_t slot = a.ring != 0 ? key % a.ring : key;
+        const std::uint32_t slot = slot_of(key);
         const __half* row = head_cache + slot * stride + group * 8;
         staged[2 * n] = *reinterpret_cast<const uint4*>(row);
         staged[2 * n + 1] = *reinterpret_cast<const uint4*>(row + D / 2);
@@ -924,7 +951,7 @@ __global__ void __launch_bounds__(kThreads* WPH)
       const std::uint32_t key = key0 + u / rot_chunks;
       staged_rot[n] = uint4{0, 0, 0, 0};
       if (u < kWave * rot_chunks && key >= begin && key < end) {
-        const std::uint32_t slot = a.ring != 0 ? key % a.ring : key;
+        const std::uint32_t slot = slot_of(key);
         staged_rot[n] = *reinterpret_cast<const uint4*>(
             k_rotated +
             (static_cast<std::size_t>(slot) * a.kv_heads + blockIdx.y) * 2 *
@@ -1138,6 +1165,45 @@ __global__ void __launch_bounds__(kThreads* WPH)
   } else {
     tiles.template operator()<R>();
   }
+  // Each row's own key, in the chunk that holds it: one more online-softmax
+  // step (a sibling's key and value come from its spare key).
+  const std::uint32_t chain = a.rows - a.siblings;
+#pragma unroll
+  for (int r = 0; r < R; ++r) {
+    const std::uint32_t row = row0 + r;
+    if (r >= rows) {
+      continue;
+    }
+    const KeyRange keys = RowKeys(a, row);
+    const std::uint32_t own = keys.hi - 1;
+    if (keys.hi <= keys.lo || own < base || own >= base + C) {
+      continue;
+    }
+    const std::uint32_t key = row >= chain ? a.spare_key + (row - chain) : own;
+    const std::size_t slot = slot_of(key);
+    const __half* vk = v_head + slot * stride + dim0;
+    const __half* kk = derived && rot_offset >= 0
+                           ? k_rotated +
+                                 (slot * a.kv_heads + blockIdx.y) * 2 * pairs +
+                                 rot_offset
+                       : derived ? vk
+                                 : k_head + slot * stride + dim0;
+    float dot = 0.0F;
+#pragma unroll
+    for (int i = 0; i < P; ++i) {
+      dot = __builtin_fmaf(q[r][i], __half2float(kk[i]), dot);
+    }
+    const float score = Uniform(WaveSum(dot));
+    const float mn = fmaxf(m[r], score);
+    const float scale = Uniform(expf(m[r] - mn));
+    const float p = Uniform(expf(score - mn));
+    l[r] = __builtin_fmaf(l[r], scale, p);
+    m[r] = mn;
+#pragma unroll
+    for (int i = 0; i < P; ++i) {
+      acc[r][i] = __builtin_fmaf(p, __half2float(vk[i]), acc[r][i] * scale);
+    }
+  }
 #pragma unroll
   for (int r = 0; r < R; ++r) {
     if (r < rows) {
@@ -1221,8 +1287,10 @@ void LaunchSplitAttention(const AttentionArgs& a, hipStream_t stream) {
   // doubled grid fills more of the GPU (tg d2048 50.6 -> 51.0).
   constexpr int CW = G == kWaves ? 1 : 2;
   const std::uint32_t chunk = SplitChunk(D);
+  // Siblings stand beside the chain: its last row is the last position.
+  const std::uint32_t chain = a.rows - a.siblings;
   const std::uint32_t last_position =
-      a.shared_position ? a.first_position : a.first_position + a.rows - 1;
+      a.shared_position ? a.first_position : a.first_position + chain - 1;
   const std::uint32_t max_hi = std::min(last_position + 1, a.key_limit);
   const std::uint32_t min_lo = a.window != 0 && a.first_position + 1 > a.window
                                    ? a.first_position + 1 - a.window
@@ -1411,6 +1479,20 @@ __global__ void GatherRowsKernel(const float* src, const std::uint32_t* index,
   }
 }
 
+/// Block (layer, 0) moves the layer's key row, (layer, 1) its value row.
+__global__ void __launch_bounds__(kThreads) MoveKeyKernel(MoveKeyArgs a) {
+  const std::uint32_t l = blockIdx.x;
+  const bool values = blockIdx.y != 0;
+  const std::uint32_t width = values ? a.v_width[l] : a.k_width[l];
+  std::uint16_t* cache = values ? a.v[l] : a.k[l];
+  const std::uint32_t ring = a.ring[l];
+  const std::size_t from = ring != 0 ? a.from % ring : a.from;
+  const std::size_t to = ring != 0 ? a.to % ring : a.to;
+  for (std::uint32_t i = threadIdx.x; i < width; i += kThreads) {
+    cache[to * width + i] = cache[from * width + i];
+  }
+}
+
 unsigned Blocks(std::size_t count) {
   return static_cast<unsigned>((count + kThreads - 1) / kThreads);
 }
@@ -1456,6 +1538,10 @@ void QueryPost(float* q, const float* q_norm, float theta_scale,
 }
 
 void Attention(const AttentionArgs& args, hipStream_t stream) {
+  if (args.siblings != 0 && (args.rows > kSplitRows || args.shared_position ||
+                             2 * args.siblings >= args.rows)) {
+    throw std::invalid_argument("siblings need split attention beside drafts");
+  }
   if (args.rope_pairs != 0 &&
       (args.head_dim != 512 || args.rope_pairs % 16 != 0 ||
        args.rope_pairs > static_cast<std::uint32_t>(kMaxRopePairs))) {
@@ -1566,6 +1652,13 @@ void Softcap(float* logits, std::size_t count, float cap, hipStream_t stream) {
 void GatherRows(const float* src, const std::uint32_t* index, float* dst,
                 std::uint32_t rows, std::uint32_t dim, hipStream_t stream) {
   GatherRowsKernel<<<rows, kThreads, 0, stream>>>(src, index, dst, dim);
+}
+
+void MoveKey(const MoveKeyArgs& args, hipStream_t stream) {
+  if (args.layers == 0 || args.layers > MoveKeyArgs::kMaxLayers) {
+    throw std::invalid_argument("MoveKey layer count");
+  }
+  MoveKeyKernel<<<dim3(args.layers, 2), kThreads, 0, stream>>>(args);
 }
 
 }  // namespace gufo::models::gemma4::rocm
