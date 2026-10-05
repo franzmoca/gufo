@@ -190,7 +190,7 @@ struct Group {
 };
 
 /// Format traits. A super-block holds 256 values (Q4_0: eight blocks); a
-/// lane loads its row's half super-block `n` as Raw and decodes group g of
+/// lane loads its row's super-block as Raw and decodes group g of half n of
 /// it exactly as ggml dequantizes, minus the scale and minimum.
 template<WmmaFormat F>
 struct Fmt;
@@ -203,11 +203,17 @@ struct Fmt<WmmaFormat::kQ4_K> {
   static constexpr bool kMin = true;
   struct Raw {
     uint4 h;
-    uint4 q[4];
+    uint4 q[8];
   };
-  __device__ static Raw Load(const std::uint8_t* sb, int n) {
+  __device__ static Raw Load(const std::uint8_t* sb) {
     const auto* p = reinterpret_cast<const uint4*>(sb);
-    return {p[0], {p[1 + 4 * n], p[2 + 4 * n], p[3 + 4 * n], p[4 + 4 * n]}};
+    Raw r;
+    r.h = p[0];
+#pragma unroll
+    for (int i = 0; i < 8; ++i) {
+      r.q[i] = p[1 + i];
+    }
+    return r;
   }
   template<int kN, int kG>
   __device__ static Group Decode(const Raw& r) {
@@ -220,7 +226,7 @@ struct Fmt<WmmaFormat::kQ4_K> {
 #pragma unroll
     for (int f = 0; f < 2; ++f) {
       std::uint32_t w[4];
-      Words(r.q[2 * (kG >> 1) + f], w);
+      Words(r.q[4 * kN + 2 * (kG >> 1) + f], w);
 #pragma unroll
       for (int i = 0; i < 4; ++i) {
         w[i] = (w[i] >> (4 * (kG & 1))) & 0x0F0F0F0FU;
@@ -240,13 +246,19 @@ struct Fmt<WmmaFormat::kQ5_K> {
   struct Raw {
     uint4 h;
     uint4 qh[2];
-    uint4 q[4];
+    uint4 q[8];
   };
-  __device__ static Raw Load(const std::uint8_t* sb, int n) {
+  __device__ static Raw Load(const std::uint8_t* sb) {
     const auto* p = reinterpret_cast<const uint4*>(sb);
-    return {p[0],
-            {p[1], p[2]},
-            {p[3 + 4 * n], p[4 + 4 * n], p[5 + 4 * n], p[6 + 4 * n]}};
+    Raw r;
+    r.h = p[0];
+    r.qh[0] = p[1];
+    r.qh[1] = p[2];
+#pragma unroll
+    for (int i = 0; i < 8; ++i) {
+      r.q[i] = p[3 + i];
+    }
+    return r;
   }
   template<int kN, int kG>
   __device__ static Group Decode(const Raw& r) {
@@ -261,7 +273,7 @@ struct Fmt<WmmaFormat::kQ5_K> {
     for (int f = 0; f < 2; ++f) {
       std::uint32_t w[4];
       std::uint32_t hb[4];
-      Words(r.q[2 * (kG >> 1) + f], w);
+      Words(r.q[4 * kN + 2 * (kG >> 1) + f], w);
       Words(r.qh[f], hb);
 #pragma unroll
       for (int i = 0; i < 4; ++i) {
@@ -281,41 +293,44 @@ struct Fmt<WmmaFormat::kQ6_K> {
   static constexpr int kGroupK = 16;
   static constexpr bool kMin = false;
   struct Raw {
-    uint4 ql[4];
-    uint4 qh[2];
-    uint2 sc;
+    uint4 ql[8];
+    uint4 qh[4];
+    uint4 sc;
     std::uint32_t d;
   };
   // Super-blocks are only 2-byte aligned; gfx1151 serves unaligned loads.
-  __device__ static Raw Load(const std::uint8_t* sb, int n) {
+  __device__ static Raw Load(const std::uint8_t* sb) {
+    const auto* p = reinterpret_cast<const uint4*>(sb);
     Raw r;
-    const auto* ql = reinterpret_cast<const uint4*>(sb + 64 * n);
-    const auto* qh = reinterpret_cast<const uint4*>(sb + 128 + 32 * n);
+#pragma unroll
+    for (int i = 0; i < 8; ++i) {
+      r.ql[i] = p[i];
+    }
 #pragma unroll
     for (int i = 0; i < 4; ++i) {
-      r.ql[i] = ql[i];
+      r.qh[i] = p[8 + i];
     }
-    r.qh[0] = qh[0];
-    r.qh[1] = qh[1];
-    r.sc = *reinterpret_cast<const uint2*>(sb + 192 + 8 * n);
+    r.sc = p[12];
     r.d = *reinterpret_cast<const std::uint16_t*>(sb + 208);
     return r;
   }
-  /// Group g covers values 16 g..16 g + 15 of the half: quarter q = g / 2 of
-  /// ggml's y[l + 32 q], l from 16 (g % 2); its scale is sc[g].
+  /// Group g of half n covers values 128 n + 16 g..+15: quarter q = g / 2
+  /// of ggml's y[l + 32 q], l from 16 (g % 2); its scale is sc[8 n + g].
   template<int kN, int kG>
   __device__ static Group Decode(const Raw& r) {
     constexpr int kQ = kG >> 1;
     constexpr int kH = kG & 1;
+    constexpr int kS = 8 * kN + kG;
     Group g;
-    const std::uint32_t sw[2] = {r.sc.x, r.sc.y};
-    const auto scale = static_cast<std::int8_t>((sw[kG / 4] >> (8 * (kG % 4))));
+    std::uint32_t sw[4];
+    Words(r.sc, sw);
+    const auto scale = static_cast<std::int8_t>(sw[kS / 4] >> (8 * (kS % 4)));
     g.d = HalfBits(r.d) * static_cast<float>(scale);
     g.dm = 0.0F;
     std::uint32_t w[4];
     std::uint32_t hb[4];
-    Words(r.ql[2 * (kQ & 1) + kH], w);
-    Words(r.qh[kH], hb);
+    Words(r.ql[4 * kN + 2 * (kQ & 1) + kH], w);
+    Words(r.qh[2 * kN + kH], hb);
 #pragma unroll
     for (int i = 0; i < 4; ++i) {
       w[i] = ((w[i] >> (4 * (kQ >> 1))) & 0x0F0F0F0FU) |
@@ -333,28 +348,30 @@ struct Fmt<WmmaFormat::kQ4_0> {
   static constexpr int kGroups = 4;
   static constexpr int kGroupK = 32;
   static constexpr bool kMin = false;
-  /// The half's four 18-byte blocks (72 bytes, 2-byte aligned) as words.
+  /// The super-block's eight 18-byte blocks as words.
   struct Raw {
-    std::uint32_t w[19];
+    std::uint32_t w[37];
   };
-  /// Halves start 8-byte aligned (rows are whole 144-byte super-blocks).
-  __device__ static Raw Load(const std::uint8_t* sb, int n) {
+  /// Super-blocks are 16-byte aligned (rows are whole super-blocks).
+  __device__ static Raw Load(const std::uint8_t* sb) {
+    const auto* p = reinterpret_cast<const uint4*>(sb);
     Raw r;
-    const auto* p = reinterpret_cast<const uint2*>(sb + 72 * n);
 #pragma unroll
     for (int i = 0; i < 9; ++i) {
-      const uint2 v = p[i];
-      r.w[2 * i] = v.x;
-      r.w[2 * i + 1] = v.y;
+      const uint4 v = p[i];
+      r.w[4 * i] = v.x;
+      r.w[4 * i + 1] = v.y;
+      r.w[4 * i + 2] = v.z;
+      r.w[4 * i + 3] = v.w;
     }
-    r.w[18] = 0;
+    r.w[36] = 0;
     return r;
   }
-  /// Block g: d at byte 18 g, codes at 18 g + 2 (low nibbles values 0-15,
-  /// high nibbles 16-31); w = d (q - 8).
+  /// Block 4 n + g: d at its first two bytes, codes after them (low nibbles
+  /// values 0-15, high nibbles 16-31); w = d (q - 8).
   template<int kN, int kG>
   __device__ static Group Decode(const Raw& r) {
-    constexpr int kByte = 18 * kG;
+    constexpr int kByte = 18 * (4 * kN + kG);
     constexpr int kWord = kByte / 4;
     Group g;
     g.d = HalfBits(kByte % 4 == 0 ? r.w[kWord] : r.w[kWord] >> 16);
@@ -362,7 +379,6 @@ struct Fmt<WmmaFormat::kQ4_0> {
     std::uint32_t c[4];
 #pragma unroll
     for (int i = 0; i < 4; ++i) {
-      // Codes begin two bytes after d.
       c[i] = (kByte + 2) % 4 == 0
                  ? r.w[(kByte + 2) / 4 + i]
                  : __builtin_amdgcn_alignbyte(r.w[(kByte + 2) / 4 + i + 1],
@@ -544,27 +560,21 @@ __global__ void __launch_bounds__(kThreads)
   const int span = sb1 - sb0;
   const int rot = span > 0 ? static_cast<int>(blockIdx.x) % span : 0;
   const auto at = [&](int i) { return sb0 + (i + rot) % span; };
-  typename Format::Raw next0{};
-  typename Format::Raw next1{};
-  const auto fetch_w = [&](int sb) {
-    next0 = Format::Load(super(sb), 0);
-    next1 = Format::Load(super(sb), 1);
-  };
+  typename Format::Raw next{};
   if (span > 0) {
-    fetch_w(at(0));
+    next = Format::Load(super(at(0)));
     fetch_x(at(0));
   }
   for (int it = 0; it < span; ++it) {
-    const typename Format::Raw cur0 = next0;
-    const typename Format::Raw cur1 = next1;
+    const typename Format::Raw cur = next;
     commit_x();
     __syncthreads();
     if (it + 1 < span) {
-      fetch_w(at(it + 1));
+      next = Format::Load(super(at(it + 1)));
       fetch_x(at(it + 1));
     }
-    groups.template operator()<0>(cur0);
-    groups.template operator()<1>(cur1);
+    groups.template operator()<0>(cur);
+    groups.template operator()<1>(cur);
     __syncthreads();
   }
   if (!live) {
