@@ -82,14 +82,16 @@ void MoeRoute(const MoeRouteArgs& args, hipStream_t stream);
 /// up to four of its slots; a slot's FMA order depends only on its row and
 /// the shape, so decode and verification rows round identically. With
 /// `geglu`, W holds fused [gate | up] rows (m even) and y[s][0..m / 2)
-/// receives gelu_tanh(gate) * up instead. Returns false without launching
-/// for unsupported shapes.
+/// receives gelu_tanh(gate) * up instead. `single` (every group holds one
+/// slot: one-row decode) takes a one-slot build of the same arithmetic.
+/// Returns false without launching for unsupported shapes.
 [[nodiscard]] bool LaunchRoutedGemv(ExpertFormat format, const void* w,
                                     const std::int32_t* groups,
                                     std::uint32_t max_groups, const float* x,
                                     std::uint32_t x_div, float* y,
                                     std::uint32_t m, std::uint32_t k,
-                                    hipStream_t stream, bool geglu = false);
+                                    hipStream_t stream, bool geglu = false,
+                                    bool single = false);
 
 /// Routed prefill projection over binary16 activation rows `x` ([rows][k])
 /// in Flash-Next's routing layout (RoutedCompact buckets and a tile map of

@@ -480,7 +480,7 @@ __device__ inline float GeGlu(float x, float u) {
 /// kGeGlu: the first half of the wave groups take gate rows, the second
 /// half the matching up rows (m / 2 further), and the block writes
 /// GeGlu(gate, up) rows of width m / 2.
-template<ExpertFormat F, int kSplit, bool kGeGlu>
+template<ExpertFormat F, int kSplit, bool kGeGlu, int kSlots = kSlotsPerPass>
 __global__ void __launch_bounds__(kThreads)
     RoutedGemvKernel(const std::uint8_t* __restrict__ w,
                      const std::int32_t* __restrict__ groups,
@@ -491,7 +491,7 @@ __global__ void __launch_bounds__(kThreads)
   constexpr int kGroups = kWaves / kSplit;
   constexpr int kRowsPerBlock = kRowsPerWave * kGroups;
   static_assert(!kGeGlu || kGroups % 2 == 0);
-  __shared__ float partial[kSlotsPerPass][kSplit][kWaves / kSplit][kWave];
+  __shared__ float partial[kSlots][kSplit][kWaves / kSplit][kWave];
   if (static_cast<int>(blockIdx.y) >= groups[0]) {
     return;
   }
@@ -515,12 +515,12 @@ __global__ void __launch_bounds__(kThreads)
   const std::uint8_t* base =
       w + (std::size_t{static_cast<std::uint32_t>(expert)} * m + row) *
               RowBytes<F>(k);
-  for (int s0 = 0; s0 < count; s0 += kSlotsPerPass) {
-    float acc[kSlotsPerPass];
-    const float* xs[kSlotsPerPass];
-    int slot[kSlotsPerPass];
+  for (int s0 = 0; s0 < count; s0 += kSlots) {
+    float acc[kSlots];
+    const float* xs[kSlots];
+    int slot[kSlots];
 #pragma unroll
-    for (int j = 0; j < kSlotsPerPass; ++j) {
+    for (int j = 0; j < kSlots; ++j) {
       acc[j] = 0.0F;
       slot[j] = s0 + j < count ? group[2 + s0 + j] : -1;
       xs[j] =
@@ -535,7 +535,7 @@ __global__ void __launch_bounds__(kThreads)
           continue;
         }
 #pragma unroll
-        for (int j = 0; j < kSlotsPerPass; ++j) {
+        for (int j = 0; j < kSlots; ++j) {
           if (slot[j] >= 0) {
             acc[j] = Contract<F>(acc[j], wv, xs[j] + offset);
           }
@@ -543,7 +543,7 @@ __global__ void __launch_bounds__(kThreads)
       }
     }
 #pragma unroll
-    for (int j = 0; j < kSlotsPerPass; ++j) {
+    for (int j = 0; j < kSlots; ++j) {
 #pragma unroll
       for (int offset = T::kTasks / 2; offset > 0; offset >>= 1) {
         acc[j] += __shfl_xor(acc[j], offset, kWave);
@@ -551,14 +551,14 @@ __global__ void __launch_bounds__(kThreads)
     }
     if constexpr (kGeGlu) {
 #pragma unroll
-      for (int j = 0; j < kSlotsPerPass; ++j) {
+      for (int j = 0; j < kSlots; ++j) {
         partial[j][slice][wave_group][lane] = acc[j];
       }
       __syncthreads();
       // Row sums in wave order, as without the fusion.
       if (slice == 0 && t == 0 && wave_group < kGroups / 2 && row < half_m) {
 #pragma unroll
-        for (int j = 0; j < kSlotsPerPass; ++j) {
+        for (int j = 0; j < kSlots; ++j) {
           if (slot[j] >= 0) {
             float gate = partial[j][0][wave_group][lane];
             float up = partial[j][0][wave_group + kGroups / 2][lane];
@@ -576,7 +576,7 @@ __global__ void __launch_bounds__(kThreads)
     } else if constexpr (kSplit == 1) {
       if (t == 0 && row < m) {
 #pragma unroll
-        for (int j = 0; j < kSlotsPerPass; ++j) {
+        for (int j = 0; j < kSlots; ++j) {
           if (slot[j] >= 0) {
             y[std::size_t{static_cast<std::uint32_t>(slot[j])} * m + row] =
                 acc[j];
@@ -585,13 +585,13 @@ __global__ void __launch_bounds__(kThreads)
       }
     } else {
 #pragma unroll
-      for (int j = 0; j < kSlotsPerPass; ++j) {
+      for (int j = 0; j < kSlots; ++j) {
         partial[j][slice][wave_group][lane] = acc[j];
       }
       __syncthreads();
       if (slice == 0 && t == 0 && row < m) {
 #pragma unroll
-        for (int j = 0; j < kSlotsPerPass; ++j) {
+        for (int j = 0; j < kSlots; ++j) {
           if (slot[j] >= 0) {
             float sum = partial[j][0][wave_group][lane];
 #pragma unroll
@@ -611,7 +611,7 @@ template<ExpertFormat F, bool kGeGlu>
 void LaunchRouted(const void* w, const std::int32_t* groups,
                   std::uint32_t max_groups, const float* x, std::uint32_t x_div,
                   float* y, std::uint32_t m, std::uint32_t k,
-                  hipStream_t stream) {
+                  hipStream_t stream, bool single) {
   constexpr int kRowsPerWave = kWave / Traits<F>::kTasks;
   const auto* weights = static_cast<const std::uint8_t*>(w);
   // A GeGLU launch covers m / 2 gate rows and their up rows.
@@ -622,27 +622,39 @@ void LaunchRouted(const void* w, const std::int32_t* groups,
   // its 11 super-blocks over four waves (eight leave most slices one).
   if (k < 2048) {
     constexpr int kRows = kRowsPerWave * kWaves / kShare;
-    RoutedGemvKernel<F, 1, kGeGlu>
-        <<<dim3((rows + kRows - 1) / kRows, max_groups), kThreads, 0, stream>>>(
-            weights, groups, x, x_div, y, m, k);
+    const dim3 grid((rows + kRows - 1) / kRows, max_groups);
+    if (single) {
+      RoutedGemvKernel<F, 1, kGeGlu, 1>
+          <<<grid, kThreads, 0, stream>>>(weights, groups, x, x_div, y, m, k);
+    } else {
+      RoutedGemvKernel<F, 1, kGeGlu>
+          <<<grid, kThreads, 0, stream>>>(weights, groups, x, x_div, y, m, k);
+    }
     return;
   }
   constexpr int kSplit = 4;
   constexpr int kRows = kRowsPerWave * (kWaves / kSplit) / kShare;
-  RoutedGemvKernel<F, kSplit, kGeGlu>
-      <<<dim3((rows + kRows - 1) / kRows, max_groups), kThreads, 0, stream>>>(
-          weights, groups, x, x_div, y, m, k);
+  const dim3 grid((rows + kRows - 1) / kRows, max_groups);
+  if (single) {
+    RoutedGemvKernel<F, kSplit, kGeGlu, 1>
+        <<<grid, kThreads, 0, stream>>>(weights, groups, x, x_div, y, m, k);
+  } else {
+    RoutedGemvKernel<F, kSplit, kGeGlu>
+        <<<grid, kThreads, 0, stream>>>(weights, groups, x, x_div, y, m, k);
+  }
 }
 
 template<ExpertFormat F>
 void LaunchRouted(const void* w, const std::int32_t* groups,
                   std::uint32_t max_groups, const float* x, std::uint32_t x_div,
                   float* y, std::uint32_t m, std::uint32_t k,
-                  hipStream_t stream, bool geglu) {
+                  hipStream_t stream, bool geglu, bool single) {
   if (geglu) {
-    LaunchRouted<F, true>(w, groups, max_groups, x, x_div, y, m, k, stream);
+    LaunchRouted<F, true>(w, groups, max_groups, x, x_div, y, m, k, stream,
+                          single);
   } else {
-    LaunchRouted<F, false>(w, groups, max_groups, x, x_div, y, m, k, stream);
+    LaunchRouted<F, false>(w, groups, max_groups, x, x_div, y, m, k, stream,
+                           single);
   }
 }
 
@@ -835,7 +847,7 @@ bool LaunchRoutedGemv(ExpertFormat format, const void* w,
                       const std::int32_t* groups, std::uint32_t max_groups,
                       const float* x, std::uint32_t x_div, float* y,
                       std::uint32_t m, std::uint32_t k, hipStream_t stream,
-                      bool geglu) {
+                      bool geglu, bool single) {
   if (max_groups == 0 || x_div == 0 || (geglu && m % 2 != 0)) {
     return false;
   }
@@ -845,21 +857,21 @@ bool LaunchRoutedGemv(ExpertFormat format, const void* w,
         return false;
       }
       LaunchRouted<ExpertFormat::kQ4_K>(w, groups, max_groups, x, x_div, y, m,
-                                        k, stream, geglu);
+                                        k, stream, geglu, single);
       return true;
     case ExpertFormat::kQ5_K:
       if (k % 256 != 0) {
         return false;
       }
       LaunchRouted<ExpertFormat::kQ5_K>(w, groups, max_groups, x, x_div, y, m,
-                                        k, stream, geglu);
+                                        k, stream, geglu, single);
       return true;
     case ExpertFormat::kQ6_K:
       if (k % 256 != 0) {
         return false;
       }
       LaunchRouted<ExpertFormat::kQ6_K>(w, groups, max_groups, x, x_div, y, m,
-                                        k, stream, geglu);
+                                        k, stream, geglu, single);
       return true;
     case ExpertFormat::kQ8_0:
       // Word-aligned rows: an even number of 34-byte blocks.
@@ -867,21 +879,21 @@ bool LaunchRoutedGemv(ExpertFormat format, const void* w,
         return false;
       }
       LaunchRouted<ExpertFormat::kQ8_0>(w, groups, max_groups, x, x_div, y, m,
-                                        k, stream, geglu);
+                                        k, stream, geglu, single);
       return true;
     case ExpertFormat::kQ5_1:
       if (k % 32 != 0) {
         return false;
       }
       LaunchRouted<ExpertFormat::kQ5_1>(w, groups, max_groups, x, x_div, y, m,
-                                        k, stream, geglu);
+                                        k, stream, geglu, single);
       return true;
     case ExpertFormat::kF16:
       if (k % 32 != 0) {
         return false;
       }
       LaunchRouted<ExpertFormat::kF16>(w, groups, max_groups, x, x_div, y, m, k,
-                                       stream, geglu);
+                                       stream, geglu, single);
       return true;
     case ExpertFormat::kQ4_0:
       return false;

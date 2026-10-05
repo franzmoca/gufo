@@ -1031,12 +1031,13 @@ void Executor::Experts(const DeviceLayer& l, std::uint32_t n,
       if (!gate_up || !down ||
           !LaunchRoutedGemv(*gate_up, l.gate_up_exps.data, moe_groups_,
                             max_groups, moe_h_ + std::size_t{r0} * d, used, act,
-                            2 * width, d, stream, true)) {
+                            2 * width, d, stream, true, rows == 1)) {
         throw std::runtime_error("gemma4 expert gate/up format unsupported");
       }
+      // One row: every expert group holds a single slot.
       if (!LaunchRoutedGemv(*down, l.down_exps.data, moe_groups_, max_groups,
                             act, 1, moe_out_ + std::size_t{r0} * used * d, d,
-                            width, stream)) {
+                            width, stream, false, rows == 1)) {
         throw std::runtime_error("gemma4 expert down format unsupported");
       }
     }
