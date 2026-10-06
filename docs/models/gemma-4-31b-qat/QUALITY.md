@@ -20,7 +20,7 @@ the limits of the [standard 31B](../gemma-4-31b/QUALITY.md).
 | Greedy MTP vs single-token decode with the drafter loaded, three prompts, plus prompt-lookup copies | Identical token IDs (`gemma4.target`); with sibling drafts every cycle's logits equal decode's bit for bit (22 of 171 siblings accepted) |
 | Greedy MTP vs an AR-only server | Not equal in general, as for the standard 31B: AR-only decode uses the split-K GEMV, whose FP32 summation order differs from the verification kernels |
 | Sampled MTP | Seeded replay repeats the same tokens (`gemma4.target`) |
-| Session state | Prefix extension, rewind and snapshot restore after a sliding-ring wrap continue bit for bit (`gemma4.target`) |
+| Session state | Prefix extension, rewind and snapshot restore after a sliding-ring wrap continue bit for bit; snapshots sharing position blocks hold the same payload as fresh copies, also after rewritten or ring-wrapped blocks (`gemma4.target`) |
 | Vision | `gemma4.vision_encoder` and `gemma4.vision_session` pass with this repository's `mmproj-BF16.gguf` |
 
 Prefill rows remeasured October 5, 2026, after prefill moved to binary16

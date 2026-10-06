@@ -1493,6 +1493,21 @@ __global__ void __launch_bounds__(kThreads) MoveKeyKernel(MoveKeyArgs a) {
   }
 }
 
+/// Bytes one block of CopyRunsKernel copies.
+constexpr std::uint64_t kCopySlab = std::uint64_t{64} << 10;
+
+__global__ void __launch_bounds__(kThreads)
+    CopyRunsKernel(const CopyRun* runs) {
+  const CopyRun run = runs[blockIdx.x];
+  const std::uint64_t begin = std::uint64_t{blockIdx.y} * kCopySlab;
+  const std::uint64_t end = std::min(run.bytes, begin + kCopySlab) / 16;
+  const auto* from = static_cast<const uint4*>(run.from);
+  auto* to = static_cast<uint4*>(run.to);
+  for (std::uint64_t i = begin / 16 + threadIdx.x; i < end; i += kThreads) {
+    to[i] = from[i];
+  }
+}
+
 unsigned Blocks(std::size_t count) {
   return static_cast<unsigned>((count + kThreads - 1) / kThreads);
 }
@@ -1659,6 +1674,19 @@ void MoveKey(const MoveKeyArgs& args, hipStream_t stream) {
     throw std::invalid_argument("MoveKey layer count");
   }
   MoveKeyKernel<<<dim3(args.layers, 2), kThreads, 0, stream>>>(args);
+}
+
+void CopyRuns(const CopyRun* runs, std::uint32_t count, std::uint64_t longest,
+              hipStream_t stream) {
+  const std::uint64_t slabs = (longest + kCopySlab - 1) / kCopySlab;
+  if (count == 0 || slabs == 0) {
+    return;
+  }
+  if (slabs > 65535) {
+    throw std::invalid_argument("CopyRuns run length");
+  }
+  CopyRunsKernel<<<dim3(count, static_cast<unsigned>(slabs)), kThreads, 0,
+                   stream>>>(runs);
 }
 
 }  // namespace gufo::models::gemma4::rocm

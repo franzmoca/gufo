@@ -5,10 +5,12 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <condition_variable>
 #include <cstring>
 #include <exception>
 #include <optional>
 #include <stdexcept>
+#include <thread>
 #include <utility>
 
 #include "src/core/gguf_reader.hpp"
@@ -58,6 +60,118 @@ bool Fail(std::string* error_msg, std::string message) {
 
 }  // namespace
 
+/// Snapshot memory of one model. hipFree waits for every forward queued on
+/// the device (200 ms behind a prefill), so a worker thread frees device
+/// blocks rather than the thread dropping the last reference while other
+/// sessions run. SessionSnapshot::Stream gathers into host buffers
+/// registered on first use and kept, on a private high-priority stream:
+/// registering or freeing pinned memory also waits for the device, and
+/// registered ordinary memory stays cached for the CPU, which reads every
+/// byte (pinned allocations are uncached here). A stream created at load
+/// would shift the hardware queues the executor's streams share (server
+/// decode 3.4% slower).
+struct SnapshotMemory : std::enable_shared_from_this<SnapshotMemory> {
+  static constexpr std::uint64_t kStagingBytes = std::uint64_t{64} << 20;
+  static constexpr std::uint32_t kStagingRuns = 8192;
+
+  ~SnapshotMemory() {
+    {
+      std::lock_guard lock(free_mutex);
+      stopping = true;
+    }
+    free_ready.notify_one();
+    if (freer.joinable()) {
+      freer.join();
+    }
+    for (void* p : frees) {
+      (void)hipFree(p);
+    }
+    if (registered) {
+      (void)hipHostUnregister(runs.data());
+      (void)hipHostUnregister(out.data());
+    }
+    if (stream != nullptr) {
+      (void)hipStreamDestroy(stream);
+    }
+  }
+  /// Device bytes, freed by the worker; null on failure.
+  std::shared_ptr<std::uint8_t> Allocate(std::uint64_t bytes) {
+    void* at = nullptr;
+    if (hipMalloc(&at, bytes) != hipSuccess) {
+      return nullptr;
+    }
+    return std::shared_ptr<std::uint8_t>(
+        static_cast<std::uint8_t*>(at),
+        [memory = shared_from_this()](std::uint8_t* p) { memory->Free(p); });
+  }
+  void Free(void* p) {
+    {
+      std::lock_guard lock(free_mutex);
+      frees.push_back(p);
+      if (!freer.joinable()) {
+        freer = std::thread([this] { FreeLoop(); });
+      }
+    }
+    free_ready.notify_one();
+  }
+  void FreeLoop() {
+    std::unique_lock lock(free_mutex);
+    while (true) {
+      free_ready.wait(lock, [&] { return stopping || !frees.empty(); });
+      if (frees.empty()) {
+        return;
+      }
+      std::vector<void*> batch;
+      batch.swap(frees);
+      lock.unlock();
+      for (void* p : batch) {
+        (void)hipFree(p);
+      }
+      lock.lock();
+    }
+  }
+  /// Stream's staging, under `mutex`.
+  bool StagingReady() {
+    if (registered) {
+      return true;
+    }
+    // A high-priority stream runs on its own hardware queue; on a shared one
+    // the gather waited behind a whole queued prefill.
+    int least = 0;
+    int greatest = 0;
+    if (stream == nullptr &&
+        (hipDeviceGetStreamPriorityRange(&least, &greatest) != hipSuccess ||
+         hipStreamCreateWithPriority(&stream, hipStreamNonBlocking, greatest) !=
+             hipSuccess)) {
+      return false;
+    }
+    out.resize(kStagingBytes);
+    runs.resize(kStagingRuns);
+    if (hipHostRegister(out.data(), kStagingBytes, hipHostRegisterDefault) !=
+        hipSuccess) {
+      return false;
+    }
+    if (hipHostRegister(runs.data(), kStagingRuns * sizeof(rocm::CopyRun),
+                        hipHostRegisterDefault) != hipSuccess) {
+      (void)hipHostUnregister(out.data());
+      return false;
+    }
+    registered = true;
+    return true;
+  }
+
+  std::mutex free_mutex;
+  std::condition_variable free_ready;
+  std::vector<void*> frees;
+  bool stopping{false};
+  std::thread freer;
+  std::mutex mutex;  ///< Stream's staging
+  hipStream_t stream{nullptr};
+  bool registered{false};
+  std::vector<rocm::CopyRun> runs;
+  std::vector<std::uint8_t> out;
+};
+
 Model::Model() = default;
 
 void Model::SetTapSink(LayerTapSink sink) {
@@ -87,6 +201,7 @@ std::shared_ptr<Model> Model::Load(const std::string& model_path,
     Fail(error_msg, "gemma4 model options must be positive");
     return nullptr;
   }
+  m->snapshot_memory_ = std::make_shared<SnapshotMemory>();
   std::string error;
   std::unique_ptr<core::GgufReader> reader =
       core::GgufReader::OpenFile(model_path, &error);
@@ -1343,58 +1458,232 @@ bool Session::EvaluateBatch(std::span<Session* const> sessions,
 
 namespace {
 
-// Copies [offset, offset + bytes) of an immutable snapshot body to host
-// memory on a private stream, so a persistence worker neither waits behind
-// nor holds up the executor's queue.
-bool CopyBodyToHost(const std::uint8_t* body, std::uint64_t offset,
-                    std::uint64_t bytes, std::uint8_t* out) {
-  hipStream_t stream = nullptr;
-  if (hipStreamCreateWithFlags(&stream, hipStreamNonBlocking) != hipSuccess) {
-    return false;
+/// Positions per snapshot block of the global and the sliding layers. Ring
+/// sizes are multiples of both, so a block never wraps in a sliding layer's
+/// ring. Rows around the blocks are copied into each snapshot: short sliding
+/// blocks keep those few where rows are large.
+constexpr std::uint32_t kGlobalBlockRows = 256;
+constexpr std::uint32_t kSlidingBlockRows = 64;
+
+constexpr std::uint32_t BlockRows(bool sliding) {
+  return sliding ? kSlidingBlockRows : kGlobalBlockRows;
+}
+
+/// The blocks of a snapshot at `n`: global layers' blocks [0, global),
+/// sliding layers' blocks [sliding_first, sliding_end) — whole blocks inside
+/// the live window, the only sliding rows the ring is sure to hold.
+struct BlockShape {
+  std::uint32_t n;
+  std::uint32_t live;  ///< first live sliding row
+  std::uint32_t global;
+  std::uint32_t sliding_first;
+  std::uint32_t sliding_end;
+};
+
+BlockShape ShapeOf(const Config& c, std::uint32_t n) {
+  BlockShape s{};
+  s.n = n;
+  s.live = n < c.sliding_window ? 0 : n - (c.sliding_window - 1);
+  s.global = n / kGlobalBlockRows;
+  s.sliding_first = (s.live + kSlidingBlockRows - 1) / kSlidingBlockRows;
+  s.sliding_end = std::max(n / kSlidingBlockRows, s.sliding_first);
+  return s;
+}
+
+/// Byte offsets of each layer's K and V rows inside a block of its kind.
+struct BlockLayout {
+  std::vector<std::uint64_t> k_at;
+  std::vector<std::uint64_t> v_at;
+  std::uint64_t global_bytes{0};
+  std::uint64_t sliding_bytes{0};
+};
+
+BlockLayout LayoutOf(const Config& c,
+                     const std::vector<std::uint32_t>& key_widths) {
+  BlockLayout layout;
+  for (std::uint32_t l = 0; l < c.num_layers; ++l) {
+    const bool sliding = c.IsSliding(l);
+    std::uint64_t& bytes = sliding ? layout.sliding_bytes : layout.global_bytes;
+    layout.k_at.push_back(bytes);
+    bytes += std::uint64_t{BlockRows(sliding)} * key_widths[l] * 2;
+    layout.v_at.push_back(bytes);
+    bytes += std::uint64_t{BlockRows(sliding)} * c.KvDim(l) * 2;
   }
-  const bool ok = hipMemcpyAsync(out, body + offset, bytes,
-                                 hipMemcpyDeviceToHost, stream) == hipSuccess &&
-                  hipStreamSynchronize(stream) == hipSuccess;
-  (void)hipStreamDestroy(stream);
-  return ok;
+  return layout;
+}
+
+constexpr std::uint32_t kRest = UINT32_MAX;
+
+/// Positions [first, first + rows) of layer `layer`'s K or V rows (`values`),
+/// contiguous in the session's cache and in the snapshot: in block `block`
+/// of the layer's kind, or in the rest (kRest), at byte `offset`.
+struct BodyRun {
+  std::uint32_t layer;
+  bool values;
+  std::uint32_t first;
+  std::uint32_t rows;
+  std::uint64_t row_bytes;
+  std::uint32_t block;
+  std::uint64_t offset;
+};
+
+/// Visits a snapshot body in payload order: layer by layer, K rows then V
+/// rows by position. Rest rows follow one another in that order; returns
+/// their bytes.
+template<typename Visit>
+std::uint64_t VisitBody(const Config& c,
+                        const std::vector<std::uint32_t>& key_widths,
+                        const BlockLayout& layout, const BlockShape& s,
+                        std::uint32_t ring, const Visit& visit) {
+  std::uint64_t rest = 0;
+  for (std::uint32_t l = 0; l < c.num_layers; ++l) {
+    const bool sliding = c.IsSliding(l);
+    const std::uint32_t block_rows = BlockRows(sliding);
+    const std::uint32_t blocked_begin =
+        sliding ? s.sliding_first * block_rows : 0;
+    const std::uint32_t blocked_end =
+        (sliding ? s.sliding_end : s.global) * block_rows;
+    for (const bool values : {false, true}) {
+      const std::uint64_t row =
+          std::uint64_t{values ? c.KvDim(l) : key_widths[l]} * 2;
+      for (std::uint32_t p = sliding ? s.live : 0; p < s.n;) {
+        BodyRun run{l, values, p, 0, row, kRest, rest};
+        std::uint32_t end = s.n;
+        if (p >= blocked_begin && p < blocked_end) {
+          run.block = p / block_rows;
+          end = (run.block + 1) * block_rows;
+          run.offset = (values ? layout.v_at : layout.k_at)[l] +
+                       std::uint64_t{p - run.block * block_rows} * row;
+        } else if (p < blocked_begin) {
+          end = std::min(blocked_begin, s.n);
+        }
+        if (sliding) {
+          end = std::min(end, (p / ring + 1) * ring);
+        }
+        run.rows = end - p;
+        if (run.block == kRest) {
+          rest += run.rows * row;
+        }
+        visit(run);
+        p = end;
+      }
+    }
+  }
+  return rest;
+}
+
+/// Appends a copy, extending the last one where both sides continue it.
+void AddRun(std::vector<rocm::CopyRun>& runs, const void* from, void* to,
+            std::uint64_t bytes) {
+  if (!runs.empty()) {
+    rocm::CopyRun& last = runs.back();
+    if (static_cast<const std::uint8_t*>(last.from) + last.bytes == from &&
+        static_cast<std::uint8_t*>(last.to) + last.bytes == to) {
+      last.bytes += bytes;
+      return;
+    }
+  }
+  runs.push_back({from, to, bytes});
+}
+
+/// Runs `runs` on the executor's stream, holding `mutex`, and waits for them.
+bool CopyOnStream(rocm::Executor& executor, std::mutex& mutex,
+                  std::span<const rocm::CopyRun> runs) {
+  std::lock_guard lock(mutex);
+  bool queued = true;
+  try {
+    executor.CopyRuns(runs);
+  } catch (const std::exception&) {
+    queued = false;
+  }
+  return hipStreamSynchronize(executor.stream()) == hipSuccess && queued;
 }
 
 }  // namespace
-
-SessionSnapshot::~SessionSnapshot() {
-  if (body_ != nullptr) {
-    (void)hipFree(body_);
-  }
-}
 
 bool SessionSnapshot::CopyTo(std::span<std::uint8_t> destination) const {
   if (destination.size() != SizeBytes()) {
     return false;
   }
-  std::uint8_t* at = destination.data();
-  std::memcpy(at, head_.data(), head_.size());
-  at += head_.size();
-  if (!CopyBodyToHost(body_, 0, body_bytes_, at)) {
-    return false;
-  }
-  at += body_bytes_;
-  std::memcpy(at, tail_.data(), tail_.size());
-  return true;
+  std::size_t at = 0;
+  return Stream([&](std::span<const std::uint8_t> piece) {
+    std::memcpy(destination.data() + at, piece.data(), piece.size());
+    at += piece.size();
+  });
 }
 
 bool SessionSnapshot::Stream(const Sink& sink) const {
-  constexpr std::uint64_t kPiece = std::uint64_t{64} << 20;
-  sink(head_);
-  std::vector<std::uint8_t> piece(std::min(kPiece, body_bytes_));
-  for (std::uint64_t offset = 0; offset < body_bytes_; offset += kPiece) {
-    const std::uint64_t bytes = std::min(kPiece, body_bytes_ - offset);
-    if (!CopyBodyToHost(body_, offset, bytes, piece.data())) {
-      return false;
+  // Each piece of the body gathers into host memory in one launch on a
+  // private stream: a persistence worker neither waits behind nor holds up
+  // the executor's queue, and pays no per-row copy overhead.
+  constexpr std::uint64_t kLongestRun = std::uint64_t{4} << 20;
+  SnapshotMemory& staging = *memory_;
+  std::lock_guard lock(staging.mutex);
+  bool ok = staging.StagingReady();
+  std::uint32_t count = 0;
+  std::uint64_t filled = 0;
+  std::uint64_t longest = 0;
+  const auto flush = [&] {
+    try {
+      rocm::CopyRuns(staging.runs.data(), count, longest, staging.stream);
+    } catch (const std::exception&) {
+      ok = false;
     }
-    sink(std::span<const std::uint8_t>(piece.data(), bytes));
+    ok = hipStreamSynchronize(staging.stream) == hipSuccess && ok;
+    if (ok) {
+      sink(std::span<const std::uint8_t>(staging.out.data(), filled));
+    }
+    count = 0;
+    filled = 0;
+    longest = 0;
+  };
+  if (ok) {
+    sink(head_);
   }
-  sink(tail_);
-  return true;
+  for (const Piece& piece : body_) {
+    for (std::uint64_t done = 0; ok && done < piece.bytes;) {
+      const std::uint64_t bytes =
+          std::min({piece.bytes - done, SnapshotMemory::kStagingBytes - filled,
+                    kLongestRun});
+      staging.runs[count++] = {piece.at + done, staging.out.data() + filled,
+                               bytes};
+      longest = std::max(longest, bytes);
+      filled += bytes;
+      done += bytes;
+      if (filled == SnapshotMemory::kStagingBytes ||
+          count == SnapshotMemory::kStagingRuns) {
+        flush();
+      }
+    }
+  }
+  if (ok && count != 0) {
+    flush();
+  }
+  if (ok) {
+    sink(tail_);
+  }
+  return ok;
+}
+
+void Session::SettleHeld() const {
+  const std::uint64_t from = cache_->written_from;
+  const std::uint64_t to = cache_->written_to;
+  const auto settle = [&](auto& held, bool sliding) {
+    const std::uint64_t rows = BlockRows(sliding);
+    for (std::size_t i = 0; i < held.size(); ++i) {
+      // Rewritten, or (sliding) a write a ring further on took a slot.
+      if ((i + 1) * rows > from || (sliding && i * rows + cache_->ring < to)) {
+        held[i].reset();
+      }
+    }
+    while (!held.empty() && held.back().expired()) {
+      held.pop_back();
+    }
+  };
+  settle(held_global_, false);
+  settle(held_sliding_, true);
+  cache_->written_from = UINT32_MAX;
+  cache_->written_to = 0;
 }
 
 std::uint64_t Session::SnapshotBytes() const {
@@ -1444,78 +1733,136 @@ std::unique_ptr<SessionSnapshot> Session::SaveSnapshot(
   auto& tail = snapshot->tail_;
   tail.resize(std::size_t{model_->VocabSize()} * 4);
   std::memcpy(tail.data(), logits_.data(), tail.size());
-  snapshot->body_bytes_ = SnapshotBytes() - head.size() - tail.size();
-  if (hipMalloc(&snapshot->body_, snapshot->body_bytes_) != hipSuccess) {
-    snapshot->body_ = nullptr;
+  snapshot->memory_ = model_->snapshot_memory_;
+
+  auto& executor = *model_->executor_;
+  const auto& key_widths = executor.key_widths();
+  const BlockLayout layout = LayoutOf(c, key_widths);
+  const BlockShape shape = ShapeOf(c, n);
+  const std::uint32_t ring = cache_->ring;
+  // Planning and allocation touch only this session's state, so other
+  // sessions' forwards proceed until the copy.
+  SettleHeld();
+  SnapshotMemory& memory = *model_->snapshot_memory_;
+  // Blocks the cache still holds are shared; the others are copied, each
+  // kind's new blocks into one allocation.
+  snapshot->sliding_first_ = shape.sliding_first;
+  std::vector<bool> fresh_global(shape.global);
+  std::vector<bool> fresh_sliding(shape.sliding_end - shape.sliding_first);
+  const auto gather =
+      [&](std::vector<std::shared_ptr<const std::uint8_t>>& blocks,
+          std::uint32_t first, std::vector<bool>& fresh,
+          const std::vector<std::weak_ptr<const std::uint8_t>>& held,
+          std::uint64_t block_bytes) {
+        blocks.resize(fresh.size());
+        std::uint64_t missing = 0;
+        for (std::size_t i = 0; i < blocks.size(); ++i) {
+          if (first + i < held.size()) {
+            blocks[i] = held[first + i].lock();
+          }
+          fresh[i] = blocks[i] == nullptr;
+          missing += fresh[i] ? 1 : 0;
+        }
+        if (missing == 0) {
+          return true;
+        }
+        const auto region = memory.Allocate(missing * block_bytes);
+        if (region == nullptr) {
+          return false;
+        }
+        std::uint64_t next = 0;
+        for (std::size_t i = 0; i < blocks.size(); ++i) {
+          if (fresh[i]) {
+            blocks[i] = std::shared_ptr<const std::uint8_t>(
+                region, region.get() + next * block_bytes);
+            ++next;
+          }
+        }
+        return true;
+      };
+  const std::uint64_t hidden_bytes = std::uint64_t{c.hidden_size} * 4;
+  const std::uint64_t rest_bytes =
+      VisitBody(c, key_widths, layout, shape, ring, [](const BodyRun&) {});
+  const auto rest = memory.Allocate(rest_bytes + hidden_bytes);
+  if (rest == nullptr ||
+      !gather(snapshot->global_, 0, fresh_global, held_global_,
+              layout.global_bytes) ||
+      !gather(snapshot->sliding_, shape.sliding_first, fresh_sliding,
+              held_sliding_, layout.sliding_bytes)) {
     Fail(error_msg, "snapshot allocation failed");
     return nullptr;
   }
-  std::uint8_t* body = snapshot->body_;
-  const hipStream_t stream = model_->executor_->stream();
-  std::lock_guard lock(model_->mutex_);
-  const auto copy_rows = [&](const std::uint16_t* cache, std::uint32_t layer,
-                             std::uint32_t first, std::uint32_t width) {
-    const std::size_t row = std::size_t{width} * 2;
-    const bool ring = c.IsSliding(layer);
-    for (std::uint32_t p = first; p < n;) {
-      const std::uint32_t slot = ring ? p % cache_->ring : p;
-      const std::uint32_t run =
-          ring ? std::min(n - p, cache_->ring - slot) : n - p;
-      (void)hipMemcpyAsync(body,
-                           reinterpret_cast<const std::uint8_t*>(cache) +
-                               std::size_t{slot} * row,
-                           std::size_t{run} * row, hipMemcpyDeviceToDevice,
-                           stream);
-      body += std::size_t{run} * row;
-      p += run;
+  snapshot->rest_ = rest;
+  std::vector<rocm::CopyRun> runs;
+  auto& body = snapshot->body_;
+  const auto add_piece = [&](const std::uint8_t* from, std::uint64_t bytes) {
+    if (!body.empty() && body.back().at + body.back().bytes == from) {
+      body.back().bytes += bytes;
+    } else {
+      body.push_back({from, bytes});
     }
+    snapshot->body_bytes_ += bytes;
   };
-  for (std::uint32_t l = 0; l < c.num_layers; ++l) {
-    const std::uint32_t first = FirstLiveRow(c, l, n);
-    copy_rows(cache_->k[l], l, first, model_->executor_->key_widths()[l]);
-    copy_rows(cache_->v[l], l, first, c.KvDim(l));
-  }
-  (void)hipMemcpyAsync(body, cache_->hidden, std::size_t{c.hidden_size} * 4,
-                       hipMemcpyDeviceToDevice, stream);
-  if (hipStreamSynchronize(stream) != hipSuccess) {
+  VisitBody(c, key_widths, layout, shape, ring, [&](const BodyRun& r) {
+    const bool sliding = c.IsSliding(r.layer);
+    std::uint8_t* to = rest.get() + r.offset;
+    bool copy = true;
+    if (r.block != kRest) {
+      const std::size_t i = sliding ? r.block - shape.sliding_first : r.block;
+      const auto& blocks = sliding ? snapshot->sliding_ : snapshot->global_;
+      // Fresh blocks are written here, before any other snapshot shares them.
+      to = const_cast<std::uint8_t*>(blocks[i].get()) + r.offset;
+      copy = sliding ? fresh_sliding[i] : fresh_global[i];
+    }
+    const std::uint64_t bytes = std::uint64_t{r.rows} * r.row_bytes;
+    if (copy) {
+      const std::uint16_t* cache =
+          r.values ? cache_->v[r.layer] : cache_->k[r.layer];
+      const std::uint32_t slot = sliding ? r.first % ring : r.first;
+      AddRun(runs,
+             reinterpret_cast<const std::uint8_t*>(cache) +
+                 std::uint64_t{slot} * r.row_bytes,
+             to, bytes);
+    }
+    add_piece(to, bytes);
+  });
+  std::uint8_t* hidden = rest.get() + rest_bytes;
+  AddRun(runs, cache_->hidden, hidden, hidden_bytes);
+  add_piece(hidden, hidden_bytes);
+  if (!CopyOnStream(executor, model_->mutex_, runs)) {
     Fail(error_msg, "snapshot copy failed");
     return nullptr;
   }
+  held_global_.resize(std::max<std::size_t>(held_global_.size(), shape.global));
+  held_sliding_.resize(
+      std::max<std::size_t>(held_sliding_.size(), shape.sliding_end));
+  std::ranges::copy(snapshot->global_, held_global_.begin());
+  std::ranges::copy(snapshot->sliding_,
+                    held_sliding_.begin() + shape.sliding_first);
   return snapshot;
 }
 
-bool Session::RestoreSnapshot(const SessionSnapshot& snapshot,
-                              std::string* error_msg) {
-  return RestoreParts(snapshot.head_, snapshot.SizeBytes(), snapshot.body_,
-                      true, snapshot.tail_.data(), error_msg);
-}
-
-bool Session::RestoreSnapshot(std::span<const std::uint8_t> payload,
-                              std::string* error_msg) {
-  return RestoreParts(payload, payload.size(), nullptr, false, nullptr,
-                      error_msg);
-}
-
-bool Session::RestoreParts(std::span<const std::uint8_t> head,
-                           std::uint64_t total, const std::uint8_t* body,
-                           bool device_body, const std::uint8_t* tail,
-                           std::string* error_msg) {
+std::size_t Session::ReadHead(std::span<const std::uint8_t> head,
+                              std::uint64_t total, std::string* error_msg) {
   Reset();
   const Config& c = model_->config();
   SnapshotHeader header{};
   if (head.size() < sizeof(header)) {
-    return Fail(error_msg, "snapshot is truncated");
+    Fail(error_msg, "snapshot is truncated");
+    return 0;
   }
   std::memcpy(&header, head.data(), sizeof(header));
   if (header.magic != kSnapshotMagic ||
       header.version != kSnapshotPayloadVersion ||
       header.hidden != c.hidden_size || header.vocab != model_->VocabSize() ||
       header.layers != c.num_layers || header.window != c.sliding_window) {
-    return Fail(error_msg, "snapshot belongs to another model or version");
+    Fail(error_msg, "snapshot belongs to another model or version");
+    return 0;
   }
   const std::uint32_t n = header.position;
   if (n == 0 || n > cache_->max_context) {
-    return Fail(error_msg, "snapshot position exceeds the session context");
+    Fail(error_msg, "snapshot position exceeds the session context");
+    return 0;
   }
   tokens_.resize(n);
   lookup_.Clear();
@@ -1527,21 +1874,14 @@ bool Session::RestoreParts(std::span<const std::uint8_t> head,
   if (head.size() < images_at + 4 ||
       image_count > (head.size() - images_at - 4) / kImageRecordBytes) {
     Reset();
-    return Fail(error_msg, "snapshot size does not match its header");
+    Fail(error_msg, "snapshot size does not match its header");
+    return 0;
   }
   images_.resize(image_count);
-  const std::size_t head_bytes =
-      images_at + 4 + std::size_t{image_count} * kImageRecordBytes;
-  const std::size_t tail_bytes = std::size_t{model_->VocabSize()} * 4;
-  if (total != SnapshotBytes() ||
-      (body != nullptr && head.size() != head_bytes)) {
+  if (total != SnapshotBytes()) {
     Reset();
-    return Fail(error_msg, "snapshot size does not match its header");
-  }
-  if (body == nullptr) {
-    // One contiguous payload: the body and logits follow the head.
-    body = head.data() + head_bytes;
-    tail = head.data() + (total - tail_bytes);
+    Fail(error_msg, "snapshot size does not match its header");
+    return 0;
   }
   const std::uint8_t* at = head.data() + sizeof(header);
   std::memcpy(tokens_.data(), at, std::size_t{n} * 4);
@@ -1555,14 +1895,101 @@ bool Session::RestoreParts(std::span<const std::uint8_t> head,
     if (image.rows == 0 || image.offset < previous_end ||
         std::size_t{image.offset} + image.rows >= n) {
       Reset();
-      return Fail(error_msg, "snapshot image placement is invalid");
+      Fail(error_msg, "snapshot image placement is invalid");
+      return 0;
     }
     previous_end = std::size_t{image.offset} + image.rows;
   }
-  const hipMemcpyKind kind =
-      device_body ? hipMemcpyDeviceToDevice : hipMemcpyHostToDevice;
+  return images_at + 4 + std::size_t{image_count} * kImageRecordBytes;
+}
+
+bool Session::RestoreSnapshot(const SessionSnapshot& snapshot,
+                              std::string* error_msg) {
+  const std::size_t head_bytes =
+      ReadHead(snapshot.head_, snapshot.SizeBytes(), error_msg);
+  if (head_bytes == 0) {
+    return false;
+  }
+  const Config& c = model_->config();
+  const auto n = static_cast<std::uint32_t>(tokens_.size());
+  const BlockShape shape = ShapeOf(c, n);
+  if (head_bytes != snapshot.head_.size() ||
+      snapshot.global_.size() != shape.global ||
+      snapshot.sliding_first_ != shape.sliding_first ||
+      snapshot.sliding_.size() != shape.sliding_end - shape.sliding_first) {
+    Reset();
+    return Fail(error_msg, "snapshot size does not match its header");
+  }
+  auto& executor = *model_->executor_;
+  const auto& key_widths = executor.key_widths();
+  const BlockLayout layout = LayoutOf(c, key_widths);
+  const std::uint32_t ring = cache_->ring;
+  SettleHeld();
+  // Blocks the cache still holds keep their rows.
+  const auto held = [&](std::uint32_t i, bool sliding) {
+    if (sliding) {
+      return i < held_sliding_.size() &&
+             held_sliding_[i].lock() ==
+                 snapshot.sliding_[i - shape.sliding_first];
+    }
+    return i < held_global_.size() &&
+           held_global_[i].lock() == snapshot.global_[i];
+  };
+  std::vector<rocm::CopyRun> runs;
+  const std::uint64_t rest_bytes =
+      VisitBody(c, key_widths, layout, shape, ring, [&](const BodyRun& r) {
+        const bool sliding = c.IsSliding(r.layer);
+        const std::uint8_t* from = snapshot.rest_.get() + r.offset;
+        if (r.block != kRest) {
+          if (held(r.block, sliding)) {
+            return;
+          }
+          from = (sliding ? snapshot.sliding_[r.block - shape.sliding_first]
+                          : snapshot.global_[r.block])
+                     .get() +
+                 r.offset;
+        }
+        std::uint16_t* cache =
+            r.values ? cache_->v[r.layer] : cache_->k[r.layer];
+        const std::uint32_t slot = sliding ? r.first % ring : r.first;
+        AddRun(runs, from,
+               reinterpret_cast<std::uint8_t*>(cache) +
+                   std::uint64_t{slot} * r.row_bytes,
+               std::uint64_t{r.rows} * r.row_bytes);
+      });
+  AddRun(runs, snapshot.rest_.get() + rest_bytes, cache_->hidden,
+         std::uint64_t{c.hidden_size} * 4);
+  held_global_.clear();
+  held_sliding_.clear();
+  if (!CopyOnStream(executor, model_->mutex_, runs)) {
+    Reset();
+    return Fail(error_msg, "snapshot restore failed");
+  }
+  held_global_.assign(snapshot.global_.begin(), snapshot.global_.end());
+  held_sliding_.resize(shape.sliding_end);
+  std::ranges::copy(snapshot.sliding_,
+                    held_sliding_.begin() + shape.sliding_first);
+  logits_.assign(reinterpret_cast<const float*>(snapshot.tail_.data()),
+                 reinterpret_cast<const float*>(snapshot.tail_.data()) +
+                     model_->VocabSize());
+  valid_ = true;
+  return true;
+}
+
+bool Session::RestoreSnapshot(std::span<const std::uint8_t> payload,
+                              std::string* error_msg) {
+  const std::size_t head_bytes = ReadHead(payload, payload.size(), error_msg);
+  if (head_bytes == 0) {
+    return false;
+  }
+  const Config& c = model_->config();
+  const auto n = static_cast<std::uint32_t>(tokens_.size());
+  const std::uint8_t* body = payload.data() + head_bytes;
+  const std::size_t tail_bytes = std::size_t{model_->VocabSize()} * 4;
   const hipStream_t stream = model_->executor_->stream();
   std::lock_guard lock(model_->mutex_);
+  held_global_.clear();
+  held_sliding_.clear();
   const auto copy_rows = [&](std::uint16_t* cache, std::uint32_t layer,
                              std::uint32_t first, std::uint32_t width) {
     const std::size_t row = std::size_t{width} * 2;
@@ -1573,7 +2000,7 @@ bool Session::RestoreParts(std::span<const std::uint8_t> head,
           ring ? std::min(n - p, cache_->ring - slot) : n - p;
       (void)hipMemcpyAsync(
           reinterpret_cast<std::uint8_t*>(cache) + std::size_t{slot} * row,
-          body, std::size_t{run} * row, kind, stream);
+          body, std::size_t{run} * row, hipMemcpyHostToDevice, stream);
       body += std::size_t{run} * row;
       p += run;
     }
@@ -1584,13 +2011,14 @@ bool Session::RestoreParts(std::span<const std::uint8_t> head,
     copy_rows(cache_->v[l], l, first, c.KvDim(l));
   }
   (void)hipMemcpyAsync(cache_->hidden, body, std::size_t{c.hidden_size} * 4,
-                       kind, stream);
+                       hipMemcpyHostToDevice, stream);
   if (hipStreamSynchronize(stream) != hipSuccess) {
     Reset();
     return Fail(error_msg, "snapshot restore failed");
   }
   logits_.resize(model_->VocabSize());
-  std::memcpy(logits_.data(), tail, tail_bytes);
+  std::memcpy(logits_.data(), payload.data() + (payload.size() - tail_bytes),
+              tail_bytes);
   valid_ = true;
   return true;
 }

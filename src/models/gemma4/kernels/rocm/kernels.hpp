@@ -207,6 +207,18 @@ struct MoveKeyArgs {
 };
 void MoveKey(const MoveKeyArgs& args, hipStream_t stream);
 
+/// One copy of CopyRuns: `bytes` (a multiple of 16) between 16-byte aligned
+/// addresses the device can access (device or registered host memory).
+struct CopyRun {
+  const void* from;
+  void* to;
+  std::uint64_t bytes;
+};
+/// Performs the `count` copies of the array `runs` (device-accessible), none
+/// longer than `longest` bytes, in one launch.
+void CopyRuns(const CopyRun* runs, std::uint32_t count, std::uint64_t longest,
+              hipStream_t stream);
+
 }  // namespace gufo::models::gemma4::rocm
 
 #endif  // GUFO_MODELS_GEMMA4_KERNELS_ROCM_KERNELS_HPP_

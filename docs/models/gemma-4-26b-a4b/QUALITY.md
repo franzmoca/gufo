@@ -24,7 +24,7 @@ cover the load-time binary16 rewrite.
 | Image sessions | `gemma4.vision_session` (changed image, rewind, extension, snapshot, chunking) passes | Passes | Passes |
 | Greedy MTP vs single-token decode with the drafter loaded, three prompts, plus prompt-lookup copies; batched sessions vs their own decode | Identical token IDs (`gemma4.target`) | Identical token IDs | Identical token IDs |
 | Sampled MTP | Seeded replay repeats the same tokens (`gemma4.target`) | Same | Same |
-| Session state | Prefix extension, rewind and snapshot restore after a ring wrap continue bit for bit (`gemma4.target`) | Same | Same |
+| Session state | Prefix extension, rewind and snapshot restore after a ring wrap continue bit for bit; snapshots sharing position blocks hold the same payload as fresh copies, also after rewritten or ring-wrapped blocks (`gemma4.target`) | Same | Same |
 
 The image rows' largest differences sit on the user's question right after
 the image (positions 266–280, up to KL 8.7 on UD-Q6_K_XL at one token), which

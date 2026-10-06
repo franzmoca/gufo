@@ -3,6 +3,7 @@
 #include <hip/hip_runtime.h>
 
 #include <algorithm>
+#include <bit>
 #include <cmath>
 #include <initializer_list>
 #include <limits>
@@ -321,6 +322,9 @@ Executor::Executor(const DeviceModel& model, std::uint32_t max_rows,
 }
 
 Executor::~Executor() {
+  if (copy_runs_ != nullptr) {
+    hip::LogCleanupError(hipFree(copy_runs_));
+  }
   if (draft_candidates_host_ != nullptr) {
     hip::LogCleanupError(hipHostFree(draft_candidates_host_));
   }
@@ -613,6 +617,11 @@ void Executor::Forward(std::span<const Segment> segments,
       throw std::invalid_argument("gemma4 forward siblings exceed the chain");
     }
     total += s.rows;
+  }
+  for (const Segment& s : segments) {
+    s.cache->written_from = std::min(s.cache->written_from, s.first_position);
+    s.cache->written_to =
+        std::max(s.cache->written_to, s.first_position + s.rows);
   }
   // Several sessions share a forward only at decode widths, where every
   // projection keeps its single-session arithmetic.
@@ -1148,7 +1157,40 @@ void Executor::MoveKey(KvCache& cache, std::uint32_t from, std::uint32_t to) {
     args.v_width[l] = c.KvDim(l);
     args.ring[l] = c.IsSliding(l) ? cache.ring : 0;
   }
+  cache.written_from = std::min(cache.written_from, to);
+  cache.written_to = std::max(cache.written_to, to + 1);
   rocm::MoveKey(args, stream_);
+}
+
+void Executor::CopyRuns(std::span<const CopyRun> runs) {
+  std::uint64_t longest = 0;
+  for (const CopyRun& run : runs) {
+    if (run.bytes % 16 != 0 || (reinterpret_cast<std::uintptr_t>(run.from) |
+                                reinterpret_cast<std::uintptr_t>(run.to)) %
+                                       16 !=
+                                   0) {
+      throw std::invalid_argument("gemma4 copy run alignment");
+    }
+    longest = std::max(longest, run.bytes);
+  }
+  if (runs.size() > copy_runs_capacity_) {
+    if (copy_runs_ != nullptr) {
+      HIP_CHECK(hipStreamSynchronize(stream_));
+      HIP_CHECK(hipFree(copy_runs_));
+      copy_runs_ = nullptr;
+      copy_runs_capacity_ = 0;
+    }
+    const std::size_t capacity = std::bit_ceil(runs.size());
+    HIP_CHECK(hipMalloc(&copy_runs_, capacity * sizeof(CopyRun)));
+    copy_runs_capacity_ = capacity;
+  }
+  if (runs.empty()) {
+    return;
+  }
+  HIP_CHECK(hipMemcpyAsync(copy_runs_, runs.data(), runs.size_bytes(),
+                           hipMemcpyHostToDevice, stream_));
+  rocm::CopyRuns(copy_runs_, static_cast<std::uint32_t>(runs.size()), longest,
+                 stream_);
 }
 
 void Executor::DraftChain(KvCache& cache, std::int32_t token,

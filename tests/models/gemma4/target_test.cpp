@@ -258,7 +258,7 @@ int main() {
     g4::ModelOptions options;
     // A small prefill chunk keeps the sliding ring short (window + 256), so
     // the snapshot check below wraps it inside this context.
-    options.max_context = 2048;
+    options.max_context = 3072;
     // 240 rows plus an absorbed remainder of up to 16 make 256-row forwards.
     options.prefill_chunk = 240;
     auto model = g4::Model::Load(path, options, &error);
@@ -366,6 +366,82 @@ int main() {
                   serialized->Evaluate(next, &error),
               error);
     }
+    // Snapshots of one history share their position blocks. Shared and
+    // freshly copied snapshots of equal states hold equal payloads, and a
+    // restore that skips the blocks its cache still holds continues exactly
+    // like one from the serialized payload, also after the session rewrote
+    // positions inside them or wrapped the sliding ring over them.
+    const auto payload = [](const g4::SessionSnapshot& s) {
+      std::vector<std::uint8_t> out(s.SizeBytes());
+      Require(s.CopyTo(out), "snapshot payload copy failed");
+      return out;
+    };
+    const auto from_bytes = [&] {
+      auto session = model->CreateSession(0, &error);
+      Require(session && session->RestoreSnapshot(bytes, &error), error);
+      return session;
+    };
+    {
+      const auto plain = from_bytes();
+      for (const g4::TokenId token :
+           std::span(original->Tokens()).subspan(long_prompt.size())) {
+        Require(plain->Evaluate(token, &error), error);
+      }
+      const auto reference = plain->SaveSnapshot(&error);
+      const auto shared = original->SaveSnapshot(&error);
+      const auto adopted = typed->SaveSnapshot(&error);
+      Require(reference && shared && adopted, error);
+      Require(payload(*shared) == payload(*reference) &&
+                  payload(*adopted) == payload(*reference),
+              "shared snapshot payload differs from a fresh copy");
+    }
+    std::string other;
+    for (int i = 0; i < 60; ++i) {
+      other += "Harbour " + std::to_string(i) +
+               " counted barrels of oil, crates of lemons and coils of rope. ";
+    }
+    const auto other_tokens = PromptTokens(*model, other);
+    const std::size_t n1 = long_prompt.size();
+    const std::size_t window = model->config().sliding_window;
+    const std::size_t ring = model->SessionRingSlots();
+    // The first whole sliding block (64 positions) of the snapshot's window,
+    // and enough tokens past the snapshot to overwrite 16 of its ring slots.
+    const std::size_t sliding_block = (n1 - (window - 1) + 63) / 64 * 64;
+    const std::size_t wrap = sliding_block + ring + 16 - n1;
+    Require(sliding_block + 64 <= n1 && other_tokens.size() >= wrap &&
+                n1 + wrap + 16 < options.max_context,
+            "snapshot test cannot wrap the ring over a sliding block");
+    const auto check_restore = [&](std::span<const g4::TokenId> prompt,
+                                   const std::string& what) {
+      Require(original->Sync(prompt, &error), error);
+      Require(original->RestoreSnapshot(*snapshot, &error), error);
+      const auto plain = from_bytes();
+      for (int step = 0; step < 4; ++step) {
+        const auto logits = as_vector(plain->Logits());
+        Require(as_vector(original->Logits()) == logits,
+                what + ": restore diverges at step " + std::to_string(step));
+        const auto next = static_cast<g4::TokenId>(
+            std::max_element(logits.begin(), logits.end()) - logits.begin());
+        Require(
+            original->Evaluate(next, &error) && plain->Evaluate(next, &error),
+            error);
+      }
+      const auto shared = original->SaveSnapshot(&error);
+      const auto reference = plain->SaveSnapshot(&error);
+      Require(shared && reference && payload(*shared) == payload(*reference),
+              what + ": shared snapshot payload differs from a fresh copy");
+    };
+    check_restore(long_prompt, "held blocks");
+    std::vector<g4::TokenId> rewritten(long_prompt.begin(),
+                                       long_prompt.end() - 200);
+    rewritten.insert(rewritten.end(), other_tokens.begin(),
+                     other_tokens.begin() + 100);
+    check_restore(rewritten, "rewritten blocks");
+    std::vector<g4::TokenId> wrapped = long_prompt;
+    wrapped.insert(wrapped.end(), other_tokens.begin(),
+                   other_tokens.begin() + static_cast<std::ptrdiff_t>(wrap));
+    check_restore(wrapped, "wrapped ring");
+
     std::vector<std::uint8_t> corrupt = bytes;
     corrupt.pop_back();
     Require(!serialized->RestoreSnapshot(corrupt, &error),

@@ -52,6 +52,11 @@ struct KvCache {
   /// The same for the last of the lookahead rows a prefill computed past the
   /// frontier (Session::Sync), adopted if the next Sync asks for them.
   float* ahead_hidden{nullptr};
+  /// Positions [written_from, written_to) span every row Forward and MoveKey
+  /// wrote since the owner last reset them (Session's shared snapshot
+  /// blocks); a new cache counts as written everywhere.
+  std::uint32_t written_from{0};
+  std::uint32_t written_to{UINT32_MAX};
 };
 
 /// Image soft-token rows of one forward: rows [row, row + count) take
@@ -133,6 +138,8 @@ public:
   /// Moves every layer's K/V of key `from` to key `to`: an accepted
   /// sibling's spare key into its position.
   void MoveKey(KvCache& cache, std::uint32_t from, std::uint32_t to);
+  /// Enqueues device copies (CopyRun's alignment) as one launch.
+  void CopyRuns(std::span<const CopyRun> runs);
 
   /// Drafts up to `steps` tokens with the MTP drafter after `token` at
   /// position `position` (the committed frontier), reading the target's KV
@@ -221,6 +228,8 @@ private:
   /// Per-row sliding-attention key ends of a forward with images.
   std::uint32_t* key_ends_{nullptr};
   std::vector<std::uint32_t> key_ends_host_;
+  CopyRun* copy_runs_{nullptr};  ///< CopyRuns descriptors
+  std::size_t copy_runs_capacity_{0};
   float* x_{nullptr};
   float* h_{nullptr};
   float* q_{nullptr};

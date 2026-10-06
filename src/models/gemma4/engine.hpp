@@ -59,6 +59,8 @@ struct ModelOptions {
 };
 
 class Session;
+/// Device memory and host staging of snapshots, one per model (engine.cpp).
+struct SnapshotMemory;
 
 /// One image of a prompt: its soft-token rows, and an identity that tells it
 /// apart from any other image behind the same tokens.
@@ -77,13 +79,16 @@ using ImageEmbeddings = std::function<const float*(std::size_t index)>;
 /// frontier hidden state and the last logits. The KV rows and hidden state
 /// stay in device memory: on this unified-memory APU a device copy runs near
 /// memory bandwidth, while a fresh host buffer pays first-touch page faults
-/// (1.34 GB: 30 ms against 220 ms). The payload reads back in the layout
+/// (1.34 GB: 30 ms against 220 ms). Rows of whole position blocks live in
+/// immutable blocks that snapshots of one session's history share, so a
+/// snapshot copies only the blocks its session wrote since the last one and
+/// the rows around them. The payload reads back in the layout
 /// Session::RestoreSnapshot(payload) accepts.
 class SessionSnapshot final {
 public:
   using Sink = std::function<void(std::span<const std::uint8_t>)>;
 
-  ~SessionSnapshot();
+  ~SessionSnapshot() = default;
   SessionSnapshot(const SessionSnapshot&) = delete;
   SessionSnapshot& operator=(const SessionSnapshot&) = delete;
 
@@ -98,11 +103,24 @@ public:
 
 private:
   SessionSnapshot() = default;
+  /// Device bytes of the body, in payload order.
+  struct Piece {
+    const std::uint8_t* at;
+    std::uint64_t bytes;
+  };
 
   std::vector<std::uint8_t> head_;  // header, tokens, image records
-  std::uint8_t* body_{nullptr};     // device: KV rows, hidden state
+  /// Device rows of position blocks [0, global_.size()) of the global layers
+  /// and [sliding_first_, + sliding_.size()) of the sliding ones.
+  std::vector<std::shared_ptr<const std::uint8_t>> global_;
+  std::vector<std::shared_ptr<const std::uint8_t>> sliding_;
+  std::uint32_t sliding_first_{0};
+  /// Device: the rows outside those blocks, then the hidden state.
+  std::shared_ptr<const std::uint8_t> rest_;
+  std::vector<Piece> body_;
   std::uint64_t body_bytes_{0};
   std::vector<std::uint8_t> tail_;  // logits
+  std::shared_ptr<SnapshotMemory> memory_;
   friend class Session;
 };
 
@@ -175,6 +193,7 @@ private:
   /// Calibrated-policy tables shared by every session ([greedy, sampled]
   /// drafts, then their siblings); guarded by mutex_.
   std::array<DraftCalibration, 4> calibration_;
+  std::shared_ptr<SnapshotMemory> snapshot_memory_;
 
   friend class Session;
 };
@@ -297,13 +316,13 @@ public:
                                      std::string* error_msg = nullptr);
 
 private:
-  /// Restores a payload of `total` bytes whose head (header, tokens, image
-  /// records) is `head`, KV rows and hidden state `body` (device memory when
-  /// `device_body`) and logits `tail`. A null `body` reads one contiguous
-  /// payload from `head`.
-  bool RestoreParts(std::span<const std::uint8_t> head, std::uint64_t total,
-                    const std::uint8_t* body, bool device_body,
-                    const std::uint8_t* tail, std::string* error_msg);
+  /// Reads a payload head (header, tokens, image records) of a `total`-byte
+  /// payload into tokens_ and images_; returns its size, or 0 after Reset.
+  std::size_t ReadHead(std::span<const std::uint8_t> head, std::uint64_t total,
+                       std::string* error_msg);
+  /// Drops held blocks whose rows the cache rewrote since the last call
+  /// (KvCache::written_from/to).
+  void SettleHeld() const;
 
   Session(std::shared_ptr<Model> model, std::unique_ptr<rocm::KvCache> cache);
   /// Evaluates tokens_[begin, end) in prefill chunks that never split an
@@ -386,6 +405,11 @@ private:
   /// the cache, the last one's hidden state in cache_->ahead_hidden.
   std::vector<TokenId> ahead_;
   std::vector<float> ahead_logits_;
+  /// Snapshot blocks whose rows the cache still holds, by position block
+  /// (expired where it does not), so the next snapshot shares them and a
+  /// restore skips them.
+  mutable std::vector<std::weak_ptr<const std::uint8_t>> held_global_;
+  mutable std::vector<std::weak_ptr<const std::uint8_t>> held_sliding_;
   SpeculativeStats stats_;
   /// Calibrated-policy tables of a request-scoped session ([greedy,
   /// sampled] drafts, then their siblings), reset by Sync.
