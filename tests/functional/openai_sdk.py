@@ -54,20 +54,25 @@ class CheckResults(dict):
         super().__init__()
         self.report, self.output = report, output
         self.recorder = recorder
+        # Concurrent cases record checks from several threads: each save
+        # serializes this report and renames the same temporary file.
+        self.lock = threading.RLock()
 
     def save(self):
         if self.output:
-            self.output.parent.mkdir(parents=True, exist_ok=True)
-            temporary = self.output.with_suffix(".tmp")
-            temporary.write_text(json.dumps(self.report, indent=2) + "\n")
-            temporary.replace(self.output)
+            with self.lock:
+                self.output.parent.mkdir(parents=True, exist_ok=True)
+                temporary = self.output.with_suffix(".tmp")
+                temporary.write_text(json.dumps(self.report, indent=2) + "\n")
+                temporary.replace(self.output)
 
     def __setitem__(self, name, value):
-        if name in self:
-            raise AssertionError(f"duplicate functional check: {name}")
-        super().__setitem__(name, value)
-        self.recorder.mark(name)
-        self.save()
+        with self.lock:
+            if name in self:
+                raise AssertionError(f"duplicate functional check: {name}")
+            super().__setitem__(name, value)
+            self.recorder.mark(name)
+            self.save()
 
 
 def chat_result(client, request, streaming=False, on_chunk=None, on_open=None):
