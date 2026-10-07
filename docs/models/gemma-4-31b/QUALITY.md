@@ -93,8 +93,8 @@ them.
 
 ## Benchmark method
 
-Gufo October 5, 2026 (revision 276f963, `nix build`, binary SHA-256 prefix
-17b35d541a4e5178), llama.cpp September 26–27; one warmed sample per point,
+Gufo October 7, 2026 (revision 2a24b0c, `nix build`, binary SHA-256 prefix
+d1eb64e09180774b), llama.cpp September 26–27; one warmed sample per point,
 greedy, thinking off. MTP drafts up to 15 tokens under Gufo's calibrated
 policy (the default) and up to four on llama.cpp and the fork. Single-user uses pp2048/tg128 after a cached
 prefix of the stated depth. Loading: cold files (page cache dropped with
@@ -105,8 +105,14 @@ halo-box/strix-llama.cpp (`8c1c282ec`, Vulkan RADV,
 `GGML_VK_MMV_NO_SPLIT=1 -b 2048 -ub 512`) was measured with the same driver; its results
 are in [artifacts/fork](artifacts/fork). Commands, counts and server flags are
 recorded per row in the artifacts.
+Against the October 5 build (same prompts and completions), repetitive MTP tg
+reads 0.5–3.5% lower at depth: the first token now arrives earlier (about
+150 ms at 32K), so the timed decode window opens one cycle earlier while
+requests finish sooner end to end. Single-user AR prefill at 128K is one 12-minute sample
+per point; the MTP tables' prefill at the same depth, through the same path,
+reads 2–5% above October 5.
 
-UD-Q8_K_XL tables: Gufo October 5 (same build), llama.cpp September 30, 2026, a reduced grid
+UD-Q8_K_XL tables: Gufo October 7 (same build), llama.cpp September 30, 2026, a reduced grid
 under the same driver, workloads and server flags: single-user depths 0, 4096,
 16384 and 32768, sampled MTP at depth 0 (three seeds), one and two users,
 memory and loading. Gufo drafts under its calibrated policy. Every Gufo

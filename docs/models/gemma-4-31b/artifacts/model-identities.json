@@ -33,5 +33,15 @@
     },
     "reference": "llama.cpp b11069 from flake.nix, ROCm gfx1151, measured 2026-09-30 on the same grid",
     "measurement": "One warmed sample per point (sampled MTP: three seeds), greedy, thinking off; MTP drafts up to seven (Gufo, calibrated policy) and four (llama.cpp). Loading drops the page cache with sync; echo 3 > /proc/sys/vm/drop_caches before each launch."
+  },
+  "benchmarks-2026-10-07": {
+    "gufo": {
+      "revision": "2a24b0c",
+      "build": "nix build",
+      "binarySha256Prefix": "d1eb64e09180774b",
+      "tables": "every Gufo table (UD-Q4_K_XL and UD-Q8_K_XL), remeasured 2026-10-07 after the server-path changes (device snapshots, generation prompt in the last prefill forward, tokenizer, shared snapshot blocks)"
+    },
+    "reference": "llama.cpp columns unchanged (pinned b11069, ROCm gfx1151; dates in BENCHMARKS.md)",
+    "measurement": "One warmed sample per point (sampled MTP: three seeds), greedy, thinking off; MTP drafts up to 15 (Gufo, calibrated policy) and four (llama.cpp). Loading drops the page cache with sync; echo 3 > /proc/sys/vm/drop_caches before each launch."
   }
 }

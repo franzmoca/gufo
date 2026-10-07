@@ -60,7 +60,7 @@ MTP=models/gemma-4-26b-a4b/mtp-gemma-4-26B-A4B-it.gguf
 
 The MTP drafter is the repository's Q8_0 `gemma4-assistant`,
 `mtp-gemma-4-26B-A4B-it.gguf`, and serves both quants. A 131072 context needs
-about 2.2 GiB of KV and rings; the global layers keep few KV heads.
+about 2.3 GiB of KV and rings; the global layers keep few KV heads.
 
 ## How it runs
 

@@ -14,15 +14,15 @@
       "gpuName": "AMD Radeon 8060S Graphics",
       "gpuPciId": "1002:1586",
       "kernelRelease": "7.2.7-200.fc44.x86_64",
-      "memoryTotalBytes": 133610651648,
+      "memoryTotalBytes": 133616881664,
       "memoryType": "LPDDR5X (Unified)",
       "rocmVersion": "7.2.3",
       "schemaVersion": "1.0.0"
     },
-    "fingerprintId": "daef66fd95bad8dddd2baaad4893b28692eff13447c073eaae38eff2dd3bbfa4",
+    "fingerprintId": "c86da8c5c4d44fad94450e1ce48b284978d59b3e7c30d7abb1c6fffdf7c5348a",
     "schemaVersion": "1.0.0"
   },
-  "measuredOn": "2026-10-05",
+  "measuredOn": "2026-10-07",
   "mode": null,
   "model": {
     "id": "Gemma-4-26B-A4B-It",
@@ -35,7 +35,7 @@
   "referenceName": "llama.cpp",
   "rows": {
     "0": {
-      "command": "gufo serve --port 40697 --sessions 1 llm --model gemma-4-26B-A4B-it-UD-Q8_K_XL.gguf --context 133760 --served-model-name bench --think off --max-pending-per-client 8",
+      "command": "gufo serve --port 33409 --sessions 1 llm --model gemma-4-26B-A4B-it-UD-Q8_K_XL.gguf --context 133760 --served-model-name bench --think off --max-pending-per-client 8",
       "counts": [
         {
           "cache_n": 0,
@@ -46,34 +46,34 @@
           "prompt_n": 2038
         }
       ],
-      "pp": 3465.59,
+      "pp": 3760.4,
       "pp_sd": null,
       "samples": 1,
-      "tg": 45.79,
+      "tg": 45.9,
       "tg_sd": null,
       "workload": "prose"
     },
     "16384": {
-      "command": "gufo serve --port 40697 --sessions 1 llm --model gemma-4-26B-A4B-it-UD-Q8_K_XL.gguf --context 133760 --served-model-name bench --think off --max-pending-per-client 8",
+      "command": "gufo serve --port 33409 --sessions 1 llm --model gemma-4-26B-A4B-it-UD-Q8_K_XL.gguf --context 133760 --served-model-name bench --think off --max-pending-per-client 8",
       "counts": [
         {
           "cache_n": 16361,
-          "completion_sha256": "874c21139e51609241d9e955a3c30e51385f19bc0eeeee813f7013f618ace4f0",
+          "completion_sha256": "bc61e011fe9684e9a3b4d1aa69dd058fbcd6e1fd930f51fa835e8d7bf8631277",
           "draft_n": 0,
           "draft_n_accepted": 0,
           "predicted_n": 128,
           "prompt_n": 2068
         }
       ],
-      "pp": 2350.55,
+      "pp": 2445.69,
       "pp_sd": null,
       "samples": 1,
-      "tg": 43.53,
+      "tg": 43.64,
       "tg_sd": null,
       "workload": "prose"
     },
     "32768": {
-      "command": "gufo serve --port 40697 --sessions 1 llm --model gemma-4-26B-A4B-it-UD-Q8_K_XL.gguf --context 133760 --served-model-name bench --think off --max-pending-per-client 8",
+      "command": "gufo serve --port 33409 --sessions 1 llm --model gemma-4-26B-A4B-it-UD-Q8_K_XL.gguf --context 133760 --served-model-name bench --think off --max-pending-per-client 8",
       "counts": [
         {
           "cache_n": 32754,
@@ -84,15 +84,15 @@
           "prompt_n": 2048
         }
       ],
-      "pp": 1986.29,
+      "pp": 2037.18,
       "pp_sd": null,
       "samples": 1,
-      "tg": 41.95,
+      "tg": 42.0,
       "tg_sd": null,
       "workload": "prose"
     },
     "4096": {
-      "command": "gufo serve --port 40697 --sessions 1 llm --model gemma-4-26B-A4B-it-UD-Q8_K_XL.gguf --context 133760 --served-model-name bench --think off --max-pending-per-client 8",
+      "command": "gufo serve --port 33409 --sessions 1 llm --model gemma-4-26B-A4B-it-UD-Q8_K_XL.gguf --context 133760 --served-model-name bench --think off --max-pending-per-client 8",
       "counts": [
         {
           "cache_n": 4073,
@@ -103,10 +103,10 @@
           "prompt_n": 2055
         }
       ],
-      "pp": 3138.8,
+      "pp": 3324.04,
       "pp_sd": null,
       "samples": 1,
-      "tg": 45.33,
+      "tg": 45.42,
       "tg_sd": null,
       "workload": "prose"
     }
@@ -117,7 +117,7 @@
       "gufo",
       "serve",
       "--port",
-      "40697",
+      "33409",
       "--sessions",
       "1",
       "llm",
@@ -135,8 +135,8 @@
   },
   "source": {
     "buildMode": "nix-release",
-    "dirty": true,
-    "revision": "276f9637340ed47549db24784066290a07443baf"
+    "dirty": false,
+    "revision": "2a24b0c7e9bf7729677e51cb14c1cd52cb232383"
   },
   "table": "single-ar-q8",
   "target": "gufo"

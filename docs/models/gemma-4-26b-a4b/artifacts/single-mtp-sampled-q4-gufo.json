@@ -14,15 +14,15 @@
       "gpuName": "AMD Radeon 8060S Graphics",
       "gpuPciId": "1002:1586",
       "kernelRelease": "7.2.7-200.fc44.x86_64",
-      "memoryTotalBytes": 133610651648,
+      "memoryTotalBytes": 133616881664,
       "memoryType": "LPDDR5X (Unified)",
       "rocmVersion": "7.2.3",
       "schemaVersion": "1.0.0"
     },
-    "fingerprintId": "daef66fd95bad8dddd2baaad4893b28692eff13447c073eaae38eff2dd3bbfa4",
+    "fingerprintId": "c86da8c5c4d44fad94450e1ce48b284978d59b3e7c30d7abb1c6fffdf7c5348a",
     "schemaVersion": "1.0.0"
   },
-  "measuredOn": "2026-10-05",
+  "measuredOn": "2026-10-07",
   "mode": "mtp",
   "model": {
     "id": "Gemma-4-26B-A4B-It",
@@ -35,11 +35,11 @@
   "referenceName": "llama.cpp",
   "rows": {
     "0": {
-      "acceptance": 57.68,
-      "acceptance_sd": 3.82,
-      "accepted_per_step": 1.18,
-      "accepted_per_step_sd": 0.15,
-      "command": "gufo serve --port 38847 --sessions 1 llm --model gemma-4-26B-A4B-it-UD-Q4_K_XL.gguf --context 133760 --served-model-name bench --think off --max-pending-per-client 8 --speculative mtp --mtp-model mtp-gemma-4-26B-A4B-it.gguf",
+      "acceptance": 58.31,
+      "acceptance_sd": 2.45,
+      "accepted_per_step": 1.1,
+      "accepted_per_step_sd": 0.07,
+      "command": "gufo serve --port 46595 --sessions 1 llm --model gemma-4-26B-A4B-it-UD-Q4_K_XL.gguf --context 133760 --served-model-name bench --think off --max-pending-per-client 8 --speculative mtp --mtp-model mtp-gemma-4-26B-A4B-it.gguf",
       "counts": [
         {
           "cache_n": 0,
@@ -51,26 +51,26 @@
         },
         {
           "cache_n": 0,
-          "completion_sha256": "4ec2b1108e052e585f6d2ccc9947dd07c7b4964781d629109da4291fca1a920f",
-          "draft_n": 121,
+          "completion_sha256": "e7c01f20ff87016ac9df3800f5589562b3877b4809c5b163839d5eb8c13ef0b6",
+          "draft_n": 116,
           "draft_n_accepted": 65,
           "predicted_n": 128,
           "prompt_n": 2038
         },
         {
           "cache_n": 0,
-          "completion_sha256": "17c269908838b91f6f789454d1899656df112aec61e73cd90829673c46713aa1",
-          "draft_n": 119,
-          "draft_n_accepted": 73,
+          "completion_sha256": "ec61bd8d0712bc335e062da5fa1eedc5f5fe35cf9b551bfd11f370e854c4e357",
+          "draft_n": 110,
+          "draft_n_accepted": 67,
           "predicted_n": 128,
           "prompt_n": 2051
         }
       ],
-      "pp": 3566.29,
-      "pp_sd": 194.34,
+      "pp": 3844.86,
+      "pp_sd": 166.59,
       "samples": 3,
-      "tg": 72.71,
-      "tg_sd": 2.78,
+      "tg": 71.79,
+      "tg_sd": 1.18,
       "workload": "story"
     }
   },
@@ -80,7 +80,7 @@
       "gufo",
       "serve",
       "--port",
-      "38847",
+      "46595",
       "--sessions",
       "1",
       "llm",
@@ -102,8 +102,8 @@
   },
   "source": {
     "buildMode": "nix-release",
-    "dirty": true,
-    "revision": "276f9637340ed47549db24784066290a07443baf"
+    "dirty": false,
+    "revision": "2a24b0c7e9bf7729677e51cb14c1cd52cb232383"
   },
   "table": "single-mtp-sampled-q4",
   "target": "gufo"

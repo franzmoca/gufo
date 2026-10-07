@@ -74,7 +74,7 @@ Native context is 262144. Global layers keep every token, sliding layers a
 fixed ring. A global layer's K and V come from one projection, so its cache
 stores V and only the 128 rotated key dims of each head (50 KiB per token
 across the ten global layers; the other key dims are V scaled by `k_norm`).
-A 131072 context needs about 6.3 GiB of global KV plus 2.3 GiB of rings next
+A 131072 context needs about 6.3 GiB of global KV plus 2.5 GiB of rings next
 to the 17.5 GiB of weights.
 Prompt snapshots feed the RAM and `--cache-disk` prompt caches; a trimmed or
 edited history re-prefills from the latest retained checkpoint before the

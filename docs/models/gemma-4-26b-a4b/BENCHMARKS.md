@@ -5,7 +5,7 @@ AMD Strix Halo `gfx1151`, 128 GB unified memory. Unsloth
 Unsloth Q8_0 `gemma4-assistant` MTP drafter. The UD-Q8_K_XL tables are a
 reduced grid (depths to 32K, up to two users). Gufo drafts up to 15 tokens
 under its calibrated length control, verifying the drafter's runner-up beside
-each draft; llama.cpp drafts up to four. Gufo columns measured October 5,
+each draft; llama.cpp drafts up to four. Gufo columns measured October 7,
 2026; llama.cpp columns September 28–30. HTTP, greedy,
 thinking off. llama.cpp is the repository's pinned `b11069` (ROCm) reference.
 Positive gain favors Gufo. **TODO** means unmeasured.
@@ -18,14 +18,14 @@ Approximately pp2048 / tg128; depth is the cached prefix in tokens.
 <!-- bench:single-ar-q4 -->
 | Gemma 4 26B-A4B UD-Q4_K_XL AR<br>Depth (tokens) | Gufo pp (tok/s) | llama.cpp pp (tok/s) | Gain | Gufo tg (tok/s) | llama.cpp tg (tok/s) | Gain |
 | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| 0 | 3703.22 | 1684.76 | +119.8% | 53.03 | 43.96 | +20.6% |
-| 4,096 | 3325.87 | 1404.62 | +136.8% | 52.50 | 43.26 | +21.4% |
-| 8,192 | 2896.22 | 1251.89 | +131.3% | 52.25 | 42.58 | +22.7% |
-| 12,288 | 2658.16 | 1115.27 | +138.3% | 51.63 | 41.94 | +23.1% |
-| 16,384 | 2373.17 | 1022.60 | +132.1% | 50.14 | 41.42 | +21.1% |
-| 32,768 | 2069.08 | 746.17 | +177.3% | 48.07 | 38.57 | +24.6% |
-| 65,536 | 1367.62 | 472.56 | +189.4% | 44.23 | 35.12 | +25.9% |
-| 131,072 | 823.42 | 281.37 | +192.6% | 37.97 | 29.42 | +29.1% |
+| 0 | 3991.15 | 1684.76 | +136.9% | 53.23 | 43.96 | +21.1% |
+| 4,096 | 3484.24 | 1404.62 | +148.1% | 52.64 | 43.26 | +21.7% |
+| 8,192 | 3194.56 | 1251.89 | +155.2% | 52.33 | 42.58 | +22.9% |
+| 12,288 | 2752.32 | 1115.27 | +146.8% | 51.72 | 41.94 | +23.3% |
+| 16,384 | 2597.17 | 1022.60 | +154.0% | 50.19 | 41.42 | +21.2% |
+| 32,768 | 2133.21 | 746.17 | +185.9% | 48.14 | 38.57 | +24.8% |
+| 65,536 | 1420.48 | 472.56 | +200.6% | 44.37 | 35.12 | +26.3% |
+| 131,072 | 855.94 | 281.37 | +204.2% | 37.97 | 29.42 | +29.1% |
 <!-- /bench -->
 
 ![Single user, autoregressive](artifacts/charts/single-ar-q4.svg)
@@ -35,14 +35,14 @@ Approximately pp2048 / tg128; depth is the cached prefix in tokens.
 <!-- bench:single-ar-q6 -->
 | Gemma 4 26B-A4B UD-Q6_K_XL AR<br>Depth (tokens) | Gufo pp (tok/s) | llama.cpp pp (tok/s) | Gain | Gufo tg (tok/s) | llama.cpp tg (tok/s) | Gain |
 | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| 0 | 3531.52 | 1425.52 | +147.7% | 48.74 | 40.94 | +19.1% |
-| 4,096 | 3194.05 | 1215.03 | +162.9% | 48.21 | 40.33 | +19.5% |
-| 8,192 | 2775.43 | 1103.41 | +151.5% | 47.97 | 39.75 | +20.7% |
-| 12,288 | 2597.14 | 996.77 | +160.6% | 47.44 | 39.19 | +21.1% |
-| 16,384 | 2290.72 | 918.82 | +149.3% | 46.18 | 38.75 | +19.2% |
-| 32,768 | 1976.84 | 679.89 | +190.8% | 44.41 | 36.64 | +21.2% |
-| 65,536 | 1320.99 | 447.13 | +195.4% | 41.11 | 33.19 | +23.9% |
-| 131,072 | 812.93 | 268.45 | +202.8% | 35.65 | 27.98 | +27.4% |
+| 0 | 3783.33 | 1425.52 | +165.4% | 48.85 | 40.94 | +19.3% |
+| 4,096 | 3341.97 | 1215.03 | +175.1% | 48.30 | 40.33 | +19.8% |
+| 8,192 | 3089.45 | 1103.41 | +180.0% | 48.07 | 39.75 | +20.9% |
+| 12,288 | 2668.45 | 996.77 | +167.7% | 47.47 | 39.19 | +21.1% |
+| 16,384 | 2458.71 | 918.82 | +167.6% | 46.22 | 38.75 | +19.3% |
+| 32,768 | 2000.60 | 679.89 | +194.3% | 44.40 | 36.64 | +21.2% |
+| 65,536 | 1336.60 | 447.13 | +198.9% | 41.10 | 33.19 | +23.8% |
+| 131,072 | 843.76 | 268.45 | +214.3% | 35.63 | 27.98 | +27.3% |
 <!-- /bench -->
 
 ![Single user, autoregressive](artifacts/charts/single-ar-q6.svg)
@@ -52,10 +52,10 @@ Approximately pp2048 / tg128; depth is the cached prefix in tokens.
 <!-- bench:single-ar-q8 -->
 | Gemma 4 26B-A4B UD-Q8_K_XL AR<br>Depth (tokens) | Gufo pp (tok/s) | llama.cpp pp (tok/s) | Gain | Gufo tg (tok/s) | llama.cpp tg (tok/s) | Gain |
 | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| 0 | 3465.59 | 1392.01 | +149.0% | 45.79 | 38.69 | +18.4% |
-| 4,096 | 3138.80 | 1212.07 | +159.0% | 45.33 | 38.17 | +18.8% |
-| 16,384 | 2350.55 | 907.60 | +159.0% | 43.53 | 36.66 | +18.7% |
-| 32,768 | 1986.29 | 680.43 | +191.9% | 41.95 | 34.84 | +20.4% |
+| 0 | 3760.40 | 1392.01 | +170.1% | 45.90 | 38.69 | +18.6% |
+| 4,096 | 3324.04 | 1212.07 | +174.2% | 45.42 | 38.17 | +19.0% |
+| 16,384 | 2445.69 | 907.60 | +169.5% | 43.64 | 36.66 | +19.0% |
+| 32,768 | 2037.18 | 680.43 | +199.4% | 42.00 | 34.84 | +20.6% |
 <!-- /bench -->
 
 ![Single user, autoregressive](artifacts/charts/single-ar-q8.svg)
@@ -70,14 +70,14 @@ differ per depth (artifacts). Over the same HTTP path Gufo's AR decodes at
 <!-- bench:single-mtp-q4 -->
 | Gemma 4 26B-A4B UD-Q4_K_XL MTP<br>Depth (tokens) | Gufo pp (tok/s) | llama.cpp pp (tok/s) | Gain pp | Gufo tg mixed (tok/s) | llama.cpp tg mixed (tok/s) | Gain mixed | Gufo tg repetitive (tok/s) | llama.cpp tg repetitive (tok/s) | Gain repetitive |
 | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| 0 | 3698.15 | 1630.60 | +126.8% | 79.63 | 57.61 | +38.2% | 252.78 | 62.06 | +307.3% |
-| 4,096 | 3325.64 | 1351.13 | +146.1% | 84.24 | 58.64 | +43.7% | 213.80 | 65.36 | +227.1% |
-| 8,192 | 2914.28 | 1199.20 | +143.0% | 78.83 | 56.85 | +38.7% | 274.10 | 39.35 | +596.6% |
-| 12,288 | 2713.42 | 1051.25 | +158.1% | 80.85 | 56.72 | +42.5% | 233.86 | 45.61 | +412.7% |
-| 16,384 | 2623.52 | 957.77 | +173.9% | 65.18 | 49.12 | +32.7% | 198.85 | 57.46 | +246.1% |
-| 32,768 | 2022.48 | 704.89 | +186.9% | 66.82 | 39.98 | +67.1% | 217.57 | 61.27 | +255.1% |
-| 65,536 | 1349.21 | 461.26 | +192.5% | 69.61 | 31.41 | +121.6% | 162.01 | 32.73 | +395.0% |
-| 131,072 | 829.89 | 276.99 | +199.6% | 48.25 | 20.98 | +130.0% | 120.40 | 22.16 | +443.3% |
+| 0 | 3945.16 | 1630.60 | +141.9% | 79.75 | 57.61 | +38.4% | 253.72 | 62.06 | +308.8% |
+| 4,096 | 3450.40 | 1351.13 | +155.4% | 84.33 | 58.64 | +43.8% | 214.73 | 65.36 | +228.5% |
+| 8,192 | 3209.27 | 1199.20 | +167.6% | 78.90 | 56.85 | +38.8% | 272.17 | 39.35 | +591.7% |
+| 12,288 | 2711.03 | 1051.25 | +157.9% | 80.41 | 56.72 | +41.8% | 227.58 | 45.61 | +399.0% |
+| 16,384 | 2610.37 | 957.77 | +172.5% | 64.98 | 49.12 | +32.3% | 194.91 | 57.46 | +239.2% |
+| 32,768 | 2050.42 | 704.89 | +190.9% | 66.43 | 39.98 | +66.2% | 202.59 | 61.27 | +230.7% |
+| 65,536 | 1360.10 | 461.26 | +194.9% | 69.71 | 31.41 | +121.9% | 159.40 | 32.73 | +387.0% |
+| 131,072 | 854.66 | 276.99 | +208.6% | 47.68 | 20.98 | +127.3% | 117.33 | 22.16 | +429.5% |
 <!-- /bench -->
 
 ![Single user, MTP](artifacts/charts/single-mtp-q4.svg)
@@ -87,14 +87,14 @@ differ per depth (artifacts). Over the same HTTP path Gufo's AR decodes at
 <!-- bench:single-mtp-q6 -->
 | Gemma 4 26B-A4B UD-Q6_K_XL MTP<br>Depth (tokens) | Gufo pp (tok/s) | llama.cpp pp (tok/s) | Gain pp | Gufo tg mixed (tok/s) | llama.cpp tg mixed (tok/s) | Gain mixed | Gufo tg repetitive (tok/s) | llama.cpp tg repetitive (tok/s) | Gain repetitive |
 | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| 0 | 3541.63 | 1393.42 | +154.2% | 70.76 | 54.03 | +31.0% | 250.27 | 58.75 | +326.0% |
-| 4,096 | 3200.47 | 1183.58 | +170.4% | 72.11 | 54.17 | +33.1% | 198.71 | 63.89 | +211.0% |
-| 8,192 | 2797.68 | 1043.91 | +168.0% | 74.90 | 50.06 | +49.6% | 255.66 | 39.41 | +548.7% |
-| 12,288 | 2602.90 | 943.21 | +176.0% | 76.82 | 54.67 | +40.5% | 216.05 | 58.98 | +266.3% |
-| 16,384 | 2562.32 | 864.65 | +196.3% | 74.69 | 45.14 | +65.5% | 177.29 | 52.93 | +235.0% |
-| 32,768 | 1973.88 | 651.38 | +203.0% | 60.89 | 37.61 | +61.9% | 213.85 | 60.24 | +255.0% |
-| 65,536 | 1325.25 | 435.03 | +204.6% | 57.34 | 33.29 | +72.2% | 154.46 | 31.08 | +397.0% |
-| 131,072 | 820.01 | 265.20 | +209.2% | 45.33 | 22.62 | +100.4% | 116.07 | 15.26 | +660.6% |
+| 0 | 3775.07 | 1393.42 | +170.9% | 70.26 | 54.03 | +30.0% | 250.90 | 58.75 | +327.1% |
+| 4,096 | 3336.65 | 1183.58 | +181.9% | 70.45 | 54.17 | +30.1% | 199.06 | 63.89 | +211.6% |
+| 8,192 | 3107.58 | 1043.91 | +197.7% | 77.39 | 50.06 | +54.6% | 251.51 | 39.41 | +538.2% |
+| 12,288 | 2661.05 | 943.21 | +182.1% | 75.44 | 54.67 | +38.0% | 212.08 | 58.98 | +259.6% |
+| 16,384 | 2570.84 | 864.65 | +197.3% | 73.60 | 45.14 | +63.0% | 182.46 | 52.93 | +244.7% |
+| 32,768 | 2010.40 | 651.38 | +208.6% | 60.83 | 37.61 | +61.7% | 207.42 | 60.24 | +244.3% |
+| 65,536 | 1334.49 | 435.03 | +206.8% | 57.28 | 33.29 | +72.1% | 153.26 | 31.08 | +393.1% |
+| 131,072 | 843.32 | 265.20 | +218.0% | 45.22 | 22.62 | +99.9% | 112.54 | 15.26 | +637.5% |
 <!-- /bench -->
 
 ![Single user, MTP](artifacts/charts/single-mtp-q6.svg)
@@ -104,10 +104,10 @@ differ per depth (artifacts). Over the same HTTP path Gufo's AR decodes at
 <!-- bench:single-mtp-q8 -->
 | Gemma 4 26B-A4B UD-Q8_K_XL MTP<br>Depth (tokens) | Gufo pp (tok/s) | llama.cpp pp (tok/s) | Gain pp | Gufo tg mixed (tok/s) | llama.cpp tg mixed (tok/s) | Gain mixed | Gufo tg repetitive (tok/s) | llama.cpp tg repetitive (tok/s) | Gain repetitive |
 | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| 0 | 3489.85 | 1376.85 | +153.5% | 70.41 | 47.09 | +49.5% | 240.09 | 54.45 | +340.9% |
-| 4,096 | 3166.65 | 1175.04 | +169.5% | 68.83 | 49.15 | +40.0% | 194.87 | 58.39 | +233.7% |
-| 16,384 | 2377.91 | 885.18 | +168.6% | 59.95 | 47.25 | +26.9% | 187.92 | 54.67 | +243.7% |
-| 32,768 | 1982.67 | 659.89 | +200.5% | 63.33 | 34.99 | +81.0% | 184.52 | 58.45 | +215.7% |
+| 0 | 3758.25 | 1376.85 | +173.0% | 70.61 | 47.09 | +49.9% | 241.18 | 54.45 | +342.9% |
+| 4,096 | 3323.72 | 1175.04 | +182.9% | 68.78 | 49.15 | +39.9% | 196.93 | 58.39 | +237.3% |
+| 16,384 | 2633.27 | 885.18 | +197.5% | 67.64 | 47.25 | +43.2% | 185.67 | 54.67 | +239.6% |
+| 32,768 | 2021.88 | 659.89 | +206.4% | 61.88 | 34.99 | +76.9% | 190.66 | 58.45 | +226.2% |
 <!-- /bench -->
 
 ![Single user, MTP](artifacts/charts/single-mtp-q8.svg)
@@ -122,7 +122,7 @@ widens Gufo's prefill spread.
 <!-- bench:single-mtp-sampled-q4 -->
 | Gemma 4 26B-A4B UD-Q4_K_XL MTP<br>Depth (tokens) | Gufo pp (tok/s) | llama.cpp pp (tok/s) | Gain | Gufo tg (tok/s) | llama.cpp tg (tok/s) | Gain |
 | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| 0 | 3566.29 ± 194.34 | 1580.72 ± 16.34 | +125.6% | 72.71 ± 2.78 | 51.02 ± 3.74 | +42.5% |
+| 0 | 3844.86 ± 166.59 | 1580.72 ± 16.34 | +143.2% | 71.79 ± 1.18 | 51.02 ± 3.74 | +40.7% |
 <!-- /bench -->
 
 ![Single user, sampled MTP](artifacts/charts/single-mtp-sampled-q4.svg)
@@ -132,7 +132,7 @@ widens Gufo's prefill spread.
 <!-- bench:single-mtp-sampled-q6 -->
 | Gemma 4 26B-A4B UD-Q6_K_XL MTP<br>Depth (tokens) | Gufo pp (tok/s) | llama.cpp pp (tok/s) | Gain | Gufo tg (tok/s) | llama.cpp tg (tok/s) | Gain |
 | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| 0 | 3413.76 ± 185.85 | 1360.32 ± 10.89 | +151.0% | 68.07 ± 0.80 | 45.05 ± 2.29 | +51.1% |
+| 0 | 3695.17 ± 163.47 | 1360.32 ± 10.89 | +171.6% | 63.76 ± 6.04 | 45.05 ± 2.29 | +41.5% |
 <!-- /bench -->
 
 ![Single user, sampled MTP](artifacts/charts/single-mtp-sampled-q6.svg)
@@ -142,7 +142,7 @@ widens Gufo's prefill spread.
 <!-- bench:single-mtp-sampled-q8 -->
 | Gemma 4 26B-A4B UD-Q8_K_XL MTP<br>Depth (tokens) | Gufo pp (tok/s) | llama.cpp pp (tok/s) | Gain | Gufo tg (tok/s) | llama.cpp tg (tok/s) | Gain |
 | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| 0 | 3359.35 ± 204.60 | 1364.58 ± 5.04 | +146.2% | 60.05 ± 0.72 | 39.46 ± 3.53 | +52.2% |
+| 0 | 3666.51 ± 168.85 | 1364.58 ± 5.04 | +168.7% | 63.72 ± 6.12 | 39.46 ± 3.53 | +61.5% |
 <!-- /bench -->
 
 ![Single user, sampled MTP](artifacts/charts/single-mtp-sampled-q8.svg)
@@ -155,11 +155,11 @@ All sessions prefilled before timed decoding; throughput sums individual rates.
 <!-- bench:multi-ar-q4 -->
 | Gemma 4 26B-A4B UD-Q4_K_XL AR<br>Users | Gufo AR (tok/s) | llama.cpp AR (tok/s) | Gain |
 | ---: | ---: | ---: | ---: |
-| 1 | 53.16 | 43.99 | +20.8% |
-| 2 | 92.38 | 71.85 | +28.6% |
-| 4 | 150.05 | 106.17 | +41.3% |
-| 6 | 182.53 | 129.53 | +40.9% |
-| 8 | 213.40 | 146.37 | +45.8% |
+| 1 | 53.18 | 43.99 | +20.9% |
+| 2 | 92.59 | 71.85 | +28.9% |
+| 4 | 150.42 | 106.17 | +41.7% |
+| 6 | 182.57 | 129.53 | +40.9% |
+| 8 | 213.20 | 146.37 | +45.7% |
 <!-- /bench -->
 
 ![Multiple users, autoregressive](artifacts/charts/multi-ar-q4.svg)
@@ -169,11 +169,11 @@ All sessions prefilled before timed decoding; throughput sums individual rates.
 <!-- bench:multi-ar-q6 -->
 | Gemma 4 26B-A4B UD-Q6_K_XL AR<br>Users | Gufo AR (tok/s) | llama.cpp AR (tok/s) | Gain |
 | ---: | ---: | ---: | ---: |
-| 1 | 48.74 | 40.76 | +19.6% |
-| 2 | 86.44 | 66.71 | +29.6% |
-| 4 | 143.94 | 95.56 | +50.6% |
-| 6 | 176.96 | 122.78 | +44.1% |
-| 8 | 206.97 | 133.78 | +54.7% |
+| 1 | 48.79 | 40.76 | +19.7% |
+| 2 | 80.39 | 66.71 | +20.5% |
+| 4 | 135.95 | 95.56 | +42.3% |
+| 6 | 171.28 | 122.78 | +39.5% |
+| 8 | 207.33 | 133.78 | +55.0% |
 <!-- /bench -->
 
 ![Multiple users, autoregressive](artifacts/charts/multi-ar-q6.svg)
@@ -183,8 +183,8 @@ All sessions prefilled before timed decoding; throughput sums individual rates.
 <!-- bench:multi-ar-q8 -->
 | Gemma 4 26B-A4B UD-Q8_K_XL AR<br>Users | Gufo AR (tok/s) | llama.cpp AR (tok/s) | Gain |
 | ---: | ---: | ---: | ---: |
-| 1 | 45.79 | 38.46 | +19.1% |
-| 2 | 82.18 | 59.11 | +39.0% |
+| 1 | 45.87 | 38.46 | +19.3% |
+| 2 | 82.38 | 59.11 | +39.4% |
 <!-- /bench -->
 
 ![Multiple users, autoregressive](artifacts/charts/multi-ar-q8.svg)
@@ -200,11 +200,11 @@ Gufo's own AR (126 vs 143 tok/s, one sample).
 <!-- bench:multi-mtp-q4 -->
 | Gemma 4 26B-A4B UD-Q4_K_XL MTP<br>Users | Gufo mixed (tok/s) | llama.cpp mixed (tok/s) | Gain | Gufo repetitive (tok/s) | llama.cpp repetitive (tok/s) | Gain |
 | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| 1 | 79.09 | 56.96 | +38.9% | 260.70 | 61.64 | +322.9% |
-| 2 | 135.48 | 89.93 | +50.7% | 308.93 | 102.28 | +202.0% |
-| 4 | 182.97 | 126.24 | +44.9% | 307.70 | 140.44 | +119.1% |
-| 6 | 193.30 | 160.35 | +20.5% | 335.53 | 171.28 | +95.9% |
-| 8 | 221.11 | 184.92 | +19.6% | 281.11 | 196.02 | +43.4% |
+| 1 | 79.34 | 56.96 | +39.3% | 261.41 | 61.64 | +324.1% |
+| 2 | 135.71 | 89.93 | +50.9% | 309.66 | 102.28 | +202.8% |
+| 4 | 183.33 | 126.24 | +45.2% | 308.49 | 140.44 | +119.7% |
+| 6 | 193.66 | 160.35 | +20.8% | 335.79 | 171.28 | +96.0% |
+| 8 | 221.50 | 184.92 | +19.8% | 281.73 | 196.02 | +43.7% |
 <!-- /bench -->
 
 ![Multiple users, MTP](artifacts/charts/multi-mtp-q4.svg)
@@ -214,11 +214,11 @@ Gufo's own AR (126 vs 143 tok/s, one sample).
 <!-- bench:multi-mtp-q6 -->
 | Gemma 4 26B-A4B UD-Q6_K_XL MTP<br>Users | Gufo mixed (tok/s) | llama.cpp mixed (tok/s) | Gain | Gufo repetitive (tok/s) | llama.cpp repetitive (tok/s) | Gain |
 | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| 1 | 71.55 | 51.22 | +39.7% | 253.64 | 57.94 | +337.8% |
-| 2 | 115.68 | 81.47 | +42.0% | 270.94 | 90.28 | +200.1% |
-| 4 | 150.32 | 113.95 | +31.9% | 293.60 | 131.20 | +123.8% |
-| 6 | 179.82 | 152.44 | +18.0% | 317.84 | 167.68 | +89.6% |
-| 8 | 194.26 | 170.86 | +13.7% | 271.56 | 197.08 | +37.8% |
+| 1 | 71.08 | 51.22 | +38.8% | 254.22 | 57.94 | +338.8% |
+| 2 | 121.97 | 81.47 | +49.7% | 272.10 | 90.28 | +201.4% |
+| 4 | 154.06 | 113.95 | +35.2% | 294.78 | 131.20 | +124.7% |
+| 6 | 179.99 | 152.44 | +18.1% | 318.01 | 167.68 | +89.7% |
+| 8 | 200.28 | 170.86 | +17.2% | 272.76 | 197.08 | +38.4% |
 <!-- /bench -->
 
 ![Multiple users, MTP](artifacts/charts/multi-mtp-q6.svg)
@@ -228,8 +228,8 @@ Gufo's own AR (126 vs 143 tok/s, one sample).
 <!-- bench:multi-mtp-q8 -->
 | Gemma 4 26B-A4B UD-Q8_K_XL MTP<br>Users | Gufo mixed (tok/s) | llama.cpp mixed (tok/s) | Gain | Gufo repetitive (tok/s) | llama.cpp repetitive (tok/s) | Gain |
 | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| 1 | 71.36 | 47.59 | +49.9% | 239.15 | 52.22 | +358.0% |
-| 2 | 120.75 | 75.70 | +59.5% | 269.29 | 88.95 | +202.7% |
+| 1 | 71.59 | 47.59 | +50.4% | 239.28 | 52.22 | +358.2% |
+| 2 | 120.62 | 75.70 | +59.3% | 269.80 | 88.95 | +203.3% |
 <!-- /bench -->
 
 ![Multiple users, MTP](artifacts/charts/multi-mtp-q8.svg)
@@ -264,7 +264,7 @@ C1, context capacity 262144, MTP. Cold model files to HTTP readiness.
 <!-- bench:loading -->
 | Gemma 4 26B-A4B<br>Target | Gufo ready (s) | llama.cpp ready (s) | Gain |
 | --- | ---: | ---: | ---: |
-| UD-Q4_K_XL | 3.90 | 5.63 | +44.4% |
+| UD-Q4_K_XL | 3.80 | 5.63 | +48.2% |
 | UD-Q6_K_XL | 4.91 | 6.84 | +39.3% |
 | UD-Q8_K_XL | 5.67 | 7.65 | +34.9% |
 <!-- /bench -->
@@ -282,8 +282,8 @@ its prompt cache snapshots (see the
 <!-- bench:memory-q4 -->
 | Gemma 4 26B-A4B UD-Q4_K_XL AR<br>Workload | Gufo GiB | llama.cpp GiB | Gain |
 | --- | ---: | ---: | ---: |
-| pp2048 + tg128 | 22.81 | 23.64 | +3.6% |
-| 16K prefix, pp4096 + tg128 | 26.00 | 24.18 | -7.0% |
+| pp2048 + tg128 | 22.66 | 23.64 | +4.3% |
+| 16K prefix, pp4096 + tg128 | 24.32 | 24.18 | -0.6% |
 <!-- /bench -->
 
 ![Memory occupation](artifacts/charts/memory-q4.svg)
@@ -293,8 +293,8 @@ its prompt cache snapshots (see the
 <!-- bench:memory-q6 -->
 | Gemma 4 26B-A4B UD-Q6_K_XL AR<br>Workload | Gufo GiB | llama.cpp GiB | Gain |
 | --- | ---: | ---: | ---: |
-| pp2048 + tg128 | 28.65 | 29.49 | +2.9% |
-| 16K prefix, pp4096 + tg128 | 31.84 | 30.03 | -5.7% |
+| pp2048 + tg128 | 28.51 | 29.49 | +3.4% |
+| 16K prefix, pp4096 + tg128 | 30.16 | 30.03 | -0.4% |
 <!-- /bench -->
 
 ![Memory occupation](artifacts/charts/memory-q6.svg)
@@ -304,8 +304,8 @@ its prompt cache snapshots (see the
 <!-- bench:memory-q8 -->
 | Gemma 4 26B-A4B UD-Q8_K_XL AR<br>Workload | Gufo GiB | llama.cpp GiB | Gain |
 | --- | ---: | ---: | ---: |
-| pp2048 + tg128 | 32.72 | 33.59 | +2.7% |
-| 16K prefix, pp4096 + tg128 | 35.91 | 34.14 | -4.9% |
+| pp2048 + tg128 | 32.57 | 33.59 | +3.1% |
+| 16K prefix, pp4096 + tg128 | 34.23 | 34.14 | -0.3% |
 <!-- /bench -->
 
 ![Memory occupation](artifacts/charts/memory-q8.svg)

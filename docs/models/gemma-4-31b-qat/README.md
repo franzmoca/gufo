@@ -39,5 +39,5 @@ Autoregressive decode reads Q4_0 through Gemma's split-K GEMV; verification
 rows and single-token decode with the drafter loaded use the shared exact
 small-batch kernels, so greedy speculative output equals single-token decoding
 of the same configuration. Prefill multiplies Q4_0 codes against Q8_1
-activations with WMMA. A 131072 context needs the same 8.6 GiB of KV and rings
+activations with WMMA. A 131072 context needs the same 8.8 GiB of KV and rings
 as the standard 31B next to 16.1 GiB of weights.

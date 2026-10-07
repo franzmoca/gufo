@@ -51,11 +51,17 @@ compared with `tools/gemma4/compare_logits.py L.g4lg G.g4lg`. Short prompt:
 
 ## Benchmark method
 
-Gufo October 5, 2026 (revision 276f963, `nix build`, binary SHA-256 prefix
-17b35d541a4e5178), llama.cpp September 28; one warmed sample per point, greedy, thinking off, the
+Gufo October 7, 2026 (revision 2a24b0c, `nix build`, binary SHA-256 prefix
+d1eb64e09180774b), llama.cpp September 28; one warmed sample per point, greedy, thinking off, the
 same driver workloads, server flags and table grid as the
 [standard 31B](../gemma-4-31b/QUALITY.md#benchmark-method). MTP drafts up to
 15 tokens under Gufo's calibrated policy (the default) and up to four on
 llama.cpp. Loading drops the page cache
 (`sync; echo 3 > /proc/sys/vm/drop_caches`) before each launch. Commands,
 counts and server flags are recorded per row in the artifacts.
+Against the October 5 build (same prompts and completions), repetitive MTP tg
+reads 0.5–3.5% lower at depth: the first token now arrives earlier (about
+150 ms at 32K), so the timed decode window opens one cycle earlier while
+requests finish sooner end to end. Single-user AR prefill at 128K is one 12-minute sample
+per point; the MTP tables' prefill at the same depth, through the same path,
+reads 2–5% above October 5.
