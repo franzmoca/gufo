@@ -10,6 +10,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "tools"))
 from gufo.control_tokens import kEndOfText, kImEnd, kImStart  # noqa: E402
 
 from metrics import validate_tool_events
+from templates import DROPS_EARLIER_REASONING
 
 
 OLD_TEXT = '    """Fixture notes."""}}]}}</tool_call>\n\n<tool_call>(\'tool\', \'{\''
@@ -58,7 +59,7 @@ def response_result(client, request, streaming):
                 finish="tool_calls" if calls else "stop", usage=response.usage.to_dict())
 
 
-def check_reasoning_separator(client, model, checks, chat_result):
+def check_reasoning_separator(client, model, checks, chat_result, sampling_preset="qwen38"):
     """Reasoning framing is not visible text, with or without constraints (#439)."""
     function = {"name": "unused", "description": "Not needed for arithmetic.",
                 "parameters": {"type": "object", "properties": {},
@@ -128,8 +129,12 @@ def check_reasoning_separator(client, model, checks, chat_result):
                 next_ = save("reasoning_separator_continuation",
                             chat_result(client, followup, True))
                 assert next_["text"] == "10" and not next_["tools"], next_
+                # A template that renders only later reasoning reuses the
+                # previous prompt, not the turn generated after it.
+                reused = result["usage"]["prompt_tokens" if sampling_preset in
+                                         DROPS_EARLIER_REASONING else "total_tokens"]
                 assert next_["usage"]["prompt_tokens_details"]["cached_tokens"] == (
-                    result["usage"]["total_tokens"]), (result, next_)
+                    reused), (result, next_)
                 # Thinking off still preserves paragraph breaks inside content.
                 plain = {**request, "reasoning_effort": "none", "messages": [
                     {"role": "user", "content":

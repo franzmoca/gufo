@@ -2642,7 +2642,7 @@ def main():
                 client, args.model, checks, image_content, chat_result, response_result),
             "image-count": lambda: check_image_count(
                 client, args.model, checks, image_content, chat_result, response_result,
-                args.context, args.concurrency),
+                args.context, args.concurrency, args.sampling_preset),
             "structured": lambda: check_structured_outputs(client, args.model, checks, args.vision),
             "structured-limits": lambda: check_structured_limits(client, args.model, checks, args.vision),
             "native-tools": lambda: check_native_tools(
@@ -2654,7 +2654,7 @@ def main():
             "tool-reasoning": lambda: check_tool_reasoning(
                 client, args.model, checks, chat_result, args.sampling_preset),
             "reasoning-separator": lambda: check_reasoning_separator(
-                client, args.model, checks, chat_result),
+                client, args.model, checks, chat_result, args.sampling_preset),
             "tool-agent": lambda: check_tool_agent(
                 client, args.model, checks, chat_result, args.vision, image_content),
             "tool-agent-loop": lambda: check_tool_agent_loop(client, args.model, checks, chat_result),
@@ -2670,7 +2670,7 @@ def main():
                 image_content("red") if args.vision else None),
             "tool-native-types": lambda: check_finite_argument_types(
                 client, args.model, checks, chat_result,
-                image_content("red") if args.vision else None),
+                image_content("red") if args.vision else None, args.sampling_preset),
             "tool-schema-edges": lambda: check_tool_schema_edges(
                 client, args.model, checks, chat_result, args.vision, image_content,
                 args.sampling_preset),
@@ -2708,7 +2708,7 @@ def main():
             "cache-bridge": lambda: check_cache_bridge(
                 client, args.model, checks, chat_result, args.snapshot_capacity_bytes),
             "system-injection": lambda: check_system_injection(
-                client, args.model, checks, chat_result),
+                client, args.model, checks, chat_result, args.sampling_preset),
         }
         selected = ([name for name in suites if name not in ("tool-native-types", "cache-bridge", "prefill-scheduling")
                      and (name not in ("image-inputs", "image-count") or args.vision)]
