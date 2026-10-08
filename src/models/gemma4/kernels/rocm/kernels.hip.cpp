@@ -5,6 +5,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <limits>
 #include <stdexcept>
 #include <utility>
 
@@ -771,9 +772,13 @@ __global__ void __launch_bounds__(kThreads* WPH)
   constexpr int LG = R == 1 && WPH == 1 ? 8 : KG;
   constexpr int kBlockThreads = kThreads * WPH;
   const int lane = threadIdx.x % kWave;
-  const int wave = (threadIdx.x / kWave) % kWaves;
+  // Wave-uniform indices, so row bounds and pointers derived from them stay
+  // in scalar registers.
+  const int wave =
+      __builtin_amdgcn_readfirstlane((threadIdx.x / kWave) % kWaves);
   // Row group: WPH waves per head split the block's rows, R each.
-  const int rg = static_cast<int>(threadIdx.x) / kThreads;
+  const int rg =
+      __builtin_amdgcn_readfirstlane(static_cast<int>(threadIdx.x) / kThreads);
   const std::uint32_t local = blockIdx.z * CW + wave / G;
   if (local >= splits) {
     return;
@@ -790,6 +795,14 @@ __global__ void __launch_bounds__(kThreads* WPH)
   const auto slot_of = [&](std::uint32_t key) {
     return a.ring != 0 ? key % a.ring : key;
   };
+  // Cache rows load from a uniform head base plus a 32-bit byte offset (the
+  // launcher checks the range), so a lane keeps one offset register rather
+  // than a 64-bit pointer.
+  const auto at = [](const __half* base, std::uint32_t byte_offset) {
+    return reinterpret_cast<const uint4*>(reinterpret_cast<const char*>(base) +
+                                          byte_offset);
+  };
+  const auto row_bytes = static_cast<std::uint32_t>(stride * sizeof(__half));
   const auto* k_head =
       reinterpret_cast<const __half*>(a.k_cache) + blockIdx.y * D;
   const auto* v_head =
@@ -874,9 +887,8 @@ __global__ void __launch_bounds__(kThreads* WPH)
     } else {
       const std::uint32_t key = key0 + kk;
       if (key >= begin && key < end) {
-        const std::uint32_t slot = slot_of(key);
         const auto* src =
-            reinterpret_cast<const uint4*>(head_cache + slot * stride + dim0);
+            at(head_cache, slot_of(key) * row_bytes + dim0 * sizeof(__half));
 #pragma unroll
         for (int i = 0; i < P / 8; ++i) {
           raw[i] = src[i];
@@ -911,10 +923,10 @@ __global__ void __launch_bounds__(kThreads* WPH)
       const std::uint32_t key =
           key0 + static_cast<int>(threadIdx.x) / kGroups + n * kKeysPerPass;
       if (key >= begin && key < end) {
-        const std::uint32_t slot = slot_of(key);
-        const __half* row = head_cache + slot * stride + group * 8;
-        staged[2 * n] = *reinterpret_cast<const uint4*>(row);
-        staged[2 * n + 1] = *reinterpret_cast<const uint4*>(row + D / 2);
+        const std::uint32_t offset =
+            slot_of(key) * row_bytes + group * 8 * sizeof(__half);
+        staged[2 * n] = *at(head_cache, offset);
+        staged[2 * n + 1] = *at(head_cache, offset + D / 2 * sizeof(__half));
       } else {
         staged[2 * n] = uint4{0, 0, 0, 0};
         staged[2 * n + 1] = uint4{0, 0, 0, 0};
@@ -951,12 +963,10 @@ __global__ void __launch_bounds__(kThreads* WPH)
       const std::uint32_t key = key0 + u / rot_chunks;
       staged_rot[n] = uint4{0, 0, 0, 0};
       if (u < kWave * rot_chunks && key >= begin && key < end) {
-        const std::uint32_t slot = slot_of(key);
-        staged_rot[n] = *reinterpret_cast<const uint4*>(
-            k_rotated +
-            (static_cast<std::size_t>(slot) * a.kv_heads + blockIdx.y) * 2 *
-                pairs +
-            (u % rot_chunks) * 8);
+        staged_rot[n] = *at(
+            k_rotated, ((slot_of(key) * a.kv_heads + blockIdx.y) * 2 * pairs +
+                        (u % rot_chunks) * 8) *
+                           sizeof(__half));
       }
     }
   };
@@ -1300,6 +1310,15 @@ void LaunchSplitAttention(const AttentionArgs& a, hipStream_t stream) {
       std::max<std::uint32_t>(1, (max_hi + chunk - 1) / chunk - first_split);
   if (splits > kMaxSplits) {
     throw std::invalid_argument("split attention context too long");
+  }
+  // The kernel addresses cache rows by 32-bit byte offsets.
+  const std::uint64_t slots =
+      a.ring != 0 ? a.ring
+                  : std::max<std::uint64_t>(
+                        max_hi, std::uint64_t{a.spare_key} + a.siblings);
+  if (slots * a.kv_heads * D * sizeof(__half) >
+      std::numeric_limits<std::uint32_t>::max()) {
+    throw std::invalid_argument("split attention cache exceeds 4 GiB");
   }
   constexpr std::uint32_t kBlock = G * CW * kWave;
   const std::uint32_t chunk_blocks = (splits + CW - 1) / CW;

@@ -107,7 +107,8 @@ __global__ void __launch_bounds__((kPrefillThreads<D, kHeads, kQueryBlocks>))
 
   const std::uint32_t tid = threadIdx.x;
   const std::uint32_t lane = tid & 31U;
-  const std::uint32_t wave = tid >> 5U;
+  // Wave-uniform: the row block, head and slice offsets stay scalar.
+  const std::uint32_t wave = __builtin_amdgcn_readfirstlane(tid >> 5U);
   const std::uint32_t sub = lane & 15U;
   const std::uint32_t half_id = lane >> 4U;
   const std::uint32_t rb = wave / kWavesPerRow;

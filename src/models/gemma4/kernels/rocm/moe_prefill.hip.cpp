@@ -806,7 +806,8 @@ __global__ void __launch_bounds__(kThreads)
   uint4 f_data0;
   uint4 f_data1;
   std::uint32_t f_words[kWordsPer];
-  uint4 f_pieces[kHalfPer];
+  // Binary16 stages as plain words: a uint4 array here stayed in scratch.
+  std::uint32_t f_pieces[4 * kHalfPer];
   const auto word_of = [&](int i) {
     const int c = tid + i * kThreads;
     return c < kWords ? c : kWords - 1;
@@ -816,8 +817,12 @@ __global__ void __launch_bounds__(kThreads)
 #pragma unroll
       for (int i = 0; i < kHalfPer; ++i) {
         const int c = tid + i * kThreads;
-        f_pieces[i] = *reinterpret_cast<const uint4*>(
+        const uint4 piece = *reinterpret_cast<const uint4*>(
             row_src(c / 8) + stage * kStageBytes + (c % 8) * 16);
+        f_pieces[4 * i] = piece.x;
+        f_pieces[4 * i + 1] = piece.y;
+        f_pieces[4 * i + 2] = piece.z;
+        f_pieces[4 * i + 3] = piece.w;
       }
     } else if constexpr (kWordStaged) {
 #pragma unroll
@@ -837,7 +842,8 @@ __global__ void __launch_bounds__(kThreads)
       for (int i = 0; i < kHalfPer; ++i) {
         const int c = tid + i * kThreads;
         *reinterpret_cast<uint4*>(s_rows + (c / 8) * kStride + (c % 8) * 16) =
-            f_pieces[i];
+            make_uint4(f_pieces[4 * i], f_pieces[4 * i + 1],
+                       f_pieces[4 * i + 2], f_pieces[4 * i + 3]);
       }
     } else if constexpr (kWordStaged) {
 #pragma unroll
@@ -941,12 +947,12 @@ __global__ void __launch_bounds__(kThreads)
       v16h a_hi;
       if constexpr (kF16) {
         // Padding rows (fetched from the last row) contribute zeros.
-        const auto* v = reinterpret_cast<const uint4*>(row + 64 * s);
-        const uint4 zero = make_uint4(0U, 0U, 0U, 0U);
-        const uint4 lo[2] = {live ? v[0] : zero, live ? v[1] : zero};
-        const uint4 hi[2] = {live ? v[2] : zero, live ? v[3] : zero};
-        __builtin_memcpy(&a_lo, lo, 32);
-        __builtin_memcpy(&a_hi, hi, 32);
+        using v8u =
+            std::uint32_t __attribute__((ext_vector_type(8), aligned(16)));
+        const auto* v = reinterpret_cast<const v8u*>(row + 64 * s);
+        const v8u zero = {};
+        a_lo = __builtin_bit_cast(v16h, live ? v[0] : zero);
+        a_hi = __builtin_bit_cast(v16h, live ? v[1] : zero);
       } else if constexpr (kQ8) {
         DecodeQ80(words, s, live, &a_lo, &a_hi);
       } else if constexpr (F == ExpertFormat::kQ4_0) {
