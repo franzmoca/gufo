@@ -109,9 +109,12 @@ with the others). `"ar_exactness": "reported"` in bench.json records the
 count instead of failing the table. Commands, counts and server flags are
 recorded per row in the artifacts.
 Against the October 5 build (same prompts and completions), repetitive MTP tg
-reads 0.5–3.5% lower at depth: the first token now arrives earlier (about
-150 ms at 32K), so the timed decode window opens one cycle earlier while
-requests finish sooner end to end.
+reads 0.5–3.5% lower at depth although GPU kernel time per decode cycle is
+unchanged (CLI profile). In the server the power manager now holds a higher
+shader clock and a lower memory-fabric clock during decode (26B at 32K:
+2,680 against 2,390 MHz; FCLK 1,640 against 1,700 MHz, at 139 against
+128 W), and decode is bandwidth-bound. Requests still finish about 230 ms
+sooner end to end (first token 150 ms earlier, no snapshot pause after it).
 
 UD-Q8_K_XL tables: Gufo October 7 (same build), llama.cpp September 30, 2026, a reduced grid
 under the same driver, workloads and server flags: single-user depths 0, 4096,
