@@ -33,6 +33,14 @@ struct TextPromptContext {
       std::size_t token_count) const {
     return PrefixInputIdentity(cache_identity, cache_prefixes, token_count);
   }
+  /// The nearest position at or before `position` (`up`: at or after) where
+  /// prefill may stop. A model can need an input whole, such as an image
+  /// whose rows attend each other; a step starting at such an input then
+  /// consumes it entirely, even beyond its token budget.
+  [[nodiscard]] virtual std::size_t PrefillStop(std::size_t position,
+                                                bool /*up*/) const {
+    return position;
+  }
 };
 
 struct TextPreparedPrompt {

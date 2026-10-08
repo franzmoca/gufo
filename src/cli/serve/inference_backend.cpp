@@ -3065,6 +3065,20 @@ private:
 
 struct Gemma4ImageContext final : TextPromptContext {
   std::shared_ptr<const models::gemma4::vision::Prompt> prompt;
+  // An image's soft tokens attend each other: prefill stops before the image
+  // or after its closing token.
+  [[nodiscard]] std::size_t PrefillStop(std::size_t position,
+                                        bool up) const override {
+    if (prompt) {
+      for (const auto& image : prompt->images) {
+        const std::size_t first = image.span.offset;
+        const std::size_t last = first + image.span.rows;  // closing token
+        if (position > first && position <= last)
+          return up ? last + 1 : first;
+      }
+    }
+    return position;
+  }
 };
 
 class Gemma4TextRunnerSnapshot final : public TextRunnerSnapshot {
@@ -3230,10 +3244,11 @@ public:
                                         image_tokens_));
     auto context = std::make_shared<Gemma4ImageContext>();
     context->cache_identity = prompt->cache_identity;
+    // A prefix ending at or before an image holds only the earlier images.
     for (const auto& image : prompt->images) {
+      const auto identity = prompt->IdentityForPrefix(image.span.offset);
       context->cache_prefixes.push_back(
-          {image.span.offset,
-           {image.prefix_identity.begin(), image.prefix_identity.end()}});
+          {image.span.offset, {identity.begin(), identity.end()}});
     }
     context->prompt = prompt;
     return {{prompt->tokens.begin(), prompt->tokens.end()},
