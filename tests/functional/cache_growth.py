@@ -5,6 +5,7 @@ import re
 import sys
 
 from cache_concurrency import skip_check
+from templates import DROPS_EARLIER_REASONING
 
 # The assistant opening after a stable boundary, such as Qwen's
 # `<|im_start|>assistant\n<think>\n`, is a few tokens long.
@@ -98,7 +99,14 @@ def check_cache_growth(client, model, checks, chat_result, preset=None,
             total, reused, prefilled = work(result)
             assert result["text"].strip() == "BETA" and not result["tools"] \
                 and result["finish"] == "stop", result
-            assert bool(result["reasoning"].strip()) == thinking, result
+            # Gemma 4 decides itself whether a trivial turn needs a thought: on
+            # 31B, turn 0 thinks at 0.51/0.20/0.44 across these system labels
+            # (llama.cpp b11069: 0.47/0.16/0.31), and later turns, shown
+            # without the earlier thoughts, at 0.15 (0.29). Its template drops
+            # earlier reasoning, so the replays render the same history either
+            # way; cold controls and the retry still check each choice.
+            if not thinking or preset not in DROPS_EARLIER_REASONING:
+                assert bool(result["reasoning"].strip()) == thinking, result
             if turn == 0:
                 assert total >= 2048 and reused == 0 and prefilled == total, result
             else:
