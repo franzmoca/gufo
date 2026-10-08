@@ -79,15 +79,19 @@ draft limit for this suite. Audio and image/video generation have separate tests
 | `stops` | Text, Unicode, reasoning and tool stops; peer isolation |
 | `conversation` | Thinking/efforts, images, cancellation and RAM reuse |
 | `image-inputs` | PNG, JPEG and WebP uploads in Chat and Responses; URL spellings, bad uploads and recovery |
+| `image-count` | 17+ images in one message and across turns; Chat/Responses, sampled thinking/JSON, concurrent colors, limits, cancellation and RAM/disk replay |
 | `tools` | Required/named/auto, schemas, literal arguments and tool history |
 | `auto-tools` | Focused subset for optional tool calls |
 | `tool-edges` | Referenced argument types, literal CR, unusual keys, named Responses metadata, foreign tool markers in prose and parallel calls (no DeepSeek text after the call block) |
 | `tool-reasoning` | Quoted tags, exact literal arguments, early stops, disabled tools, envelope framing, completed tool-result continuations and warm replay of contaminated history; Chat/Responses |
+| `reasoning-separator` | No leading separator newlines after reasoning in Chat/Responses, plain/tools/JSON; exact streamed/buffered text, warm retry, continuation and thinking-off paragraph breaks |
 | `tool-agent` | Ordinary nested agent schemas, edit/read/finish turns, no protocol switch, limits, stops/retry, images and sampled peers |
 | `tool-agent-loop` | Bounded autonomous read/edit/verify loop; each turn checks cache reuse and detects repeated actions |
 | `tool-history` | Legacy names, result pairing, current-tool constraints, images, cached retry, stops/limits and sampled peers |
 | `tool-untyped` | Open/typed tools, refs and finite values: framing, arguments, streaming, turns, limits, stops/retry and sampled peers |
 | `tool-mixed` | JSON-only neighbors, annotated refs, extra keys, URI and nullable arguments across Chat/Responses; images, stops/retry and sampled peers; a union neighbor keeps native calls, so a replayed reasoning/call turn is reused in full |
+| `tool-native-schemas` | opencode's tool set beside each schema family that used to force a JSON envelope (pattern, oneOf, allOf, not, open objects), auto and required, strict: native calls, no prompt instruction, typed arguments and full reuse of the generated call; Chat/Responses |
+| `tool-native-types` | Focused subset: enum/const/inferred string types, literal delimiters and exact continuation reuse after new literal tool markers; Chat/Responses, text/images |
 | `tool-schema-edges` | Wildcard JSON types, conditional fields, impossible schemas, nested metadata and required-call timing; both APIs, cache, stops and sampled peers |
 | `state-edges` | Actual AR/draft execution, tiny thinking budgets, zero-argument tools, schema changes, stops (including inside quoted calls), image retry and failed-request recovery |
 | `structured`, `structured-limits` | Request JSON schemas, SDK parsing, limits and stops |
@@ -95,21 +99,27 @@ draft limit for this suite. Audio and image/video generation have separate tests
 | `batch` | Independent requests across Chat, Responses and Completions; sessions 1–8 |
 | `progress` | Opt-in progress on all text endpoints; output/sampling equality, limits, stops, images, batching and cancel/resume |
 | `stream-start` | Plain streams on all text endpoints send headers before a cold prefill completes; a stream queued behind every session sends them after the five-second bound |
+| `prefill-scheduling` | Short arrival during a cold prefill: work-aligned arrival, independent per-request timings, unchanged output and no repeated prefill. Requires sessions ≥2 and context ≥16384; not in `all` |
 | `long-context` | Longer multi-turn recall, endpoint switching, sampled JSON and cancellation |
 | `metrics` | Live slots, Prometheus cache/time/draft counters, uncached work, endpoint totals, queueing and cancellation |
 | `cache` | Interrupted text/thinking/tool/image histories, ordinary and legacy tool names, RAM and disk restart; disk checkpoint spacing for a growing conversation and a branch restored after restart |
 | `cache-edits` | Reuse earlier work after editing the latest message, shortening an older tool result, or editing an earlier user message and dropping later turns; compare with uncached responses |
 | `cache-growth` | Keep cache reuse advancing over several turns when the client omits reasoning; check reasoning replay and thinking-off controls, including Messages thinking blocks, and compare with uncached responses |
+| `cache-depth` | Histories beyond 16K, concurrent branches from rewritten replies, a side conversation, resume, unchanged retries and exact uncached controls; use context 32768 and also check sessions 1 |
 | `cache-rotation` | Check cache RAM limits and keep history across conversations and small side requests; compare answers with uncached controls |
 | `cache-shared-prefix` | New conversations under one system prompt, one after another, with long and short tasks: from the third on they restore the whole shared prefix; compare answers with uncached controls |
+| `cache-bridge` | A chat bridge sends each user message with metadata its history copy drops, under a full RAM budget with small unrelated requests between turns: from the third turn on, reuse reaches the user turn two back; compare answers with uncached controls. Not in `all` |
+| `system-injection` | System/developer messages after the conversation start, in Chat and Responses: accepted, followed by the model and equal to uncached responses; the hoisted turn's reuse is recorded and the next turn must reuse it in full |
 | `cache-concurrency` | Concurrent identical prompts, shared-system fan-out with short and long tasks, short or no shared prefixes, a retained conversation beside a newcomer, and a cancelled leader; check waits, prefill work and uncached answers |
 
 For `discovery` (also included in `all`), pass `--expected-input-modalities text` or `text,image` before
 the server command. Projectors can load automatically beside the weights, so
 the expectation is explicit rather than inferred from `--mmproj`.
 
-For `image-inputs`, pass the model's `--mmproj` in the server command. It uses
-small fixed images and is included in `all` only when `--mmproj` is supplied.
+For `image-inputs` and `image-count`, pass the model's `--mmproj`. Both use small
+fixed images and are included in `all` only with that option. `image-count`
+restarts the server for disk replay; its first four cases are 1/16-image timing
+controls usable on older main with `--through-case image-count:image_count_control_16_True`.
 
 Repeat `--suite` to select affected tests; `--suite all` explicitly runs all. For long
 contexts, use server `--context 32768`; actual prompt depth is recorded. `cache`
@@ -161,13 +171,43 @@ commands in disposable fixtures using isolated Pi configuration. Use `--passes 1
 for a focused check; the default five passes matches the reported debug workload.
 `--conversation --context-file FILE` additionally tests retained long history.
 
+For a conversation that **actually grows past 200K tokens through tool results**,
+run `agent_long.py --agent pi|opencode --executable PATH --base-url URL
+--model NAME --output DIR --min-context 201000 --complex-tools --stress-turns 20`
+against a server at its supported context limit (262144 for Flash-Next).
+For Pi Responses, add `--api openai-responses --server-log SERVER_LOG`.
+It disables compaction and uses one session. The complex tools exercise nested
+unions, references, arrays, nullable fields and literal XML/JSON in transactional
+updates, with independent state/digest checks. Both Pi and OpenCode execute the
+same tools. Every request checks framing, arguments and that cached tokens equal
+the previous prompt plus generated tokens; transcripts
+and phase timings are retained. No synthetic system-padding counts as growth.
+If Pi omits a reasoning-only reply, the report identifies that history change
+and verifies reuse through the measured pre-generation boundary instead.
+
+`opencode_agent.py` runs real opencode (`--opencode PATH`, default on `PATH`)
+against a local server with `--base-url`, `--model` and a fresh `--output`.
+Each task uses isolated opencode configuration and a small stdio MCP server
+whose tools carry every schema family `tool-native-schemas` covers, so every
+turn declares them beside opencode's own tools. It checks that framing never
+reaches content or replayed history, that MCP arguments keep their JSON types,
+that tasks complete, and that each next agent request reuses the previous one.
+
 Cache checks use real assistant replies and run cold controls after the warm
 history, so the controls cannot hide a missed checkpoint. `cache-edits` checks
 latest-message edits, shortened tool results and rewinds. `cache-growth` checks
 omitted, preserved and explicitly discarded reasoning, plus thinking off.
+Unchanged retries in `cache-growth` and `cache-depth` must prefill nothing,
+unless the runner's server log shows that memory pressure refused the retry
+copy; the retry may then prefill only the assistant opening after the stable
+boundary.
 `cache-rotation` visits four conversations and eight small side requests; use
 `--sessions 1` to verify retention is independent of execution slots. It also
 checks the startup RAM cap; byte/record pressure is covered by CPU tests.
+`cache-bridge` needs RAM pressure: run it in its own invocation with a budget
+that holds at most 16 of its conversation checkpoints, such as
+`--cache-ram-bytes 2147483648` for Flash-Next at the default context.
+Background requests fill the budget first; a larger budget fails as unqualified.
 `cache-concurrency` sends each group at once. With `--sessions 2` or more,
 requests sharing a long prefix must wait for one prefill and then prefill only
 their own tail; groups sharing little or nothing must not wait. With
@@ -184,6 +224,12 @@ greedy and zero-prefill restores must still reproduce their output. Edited
 histories must retain a useful earlier prefix and match their cold answer;
 free-form reasoning may vary with prefill chunk shapes. Use the recorded
 requests and phase timings to investigate failures, not a full model sweep.
+
+Continuation report rows use `status: "passed"` for successful validation.
+`exact` records whether the resumed and follow-up assistant messages both match
+their reference hashes; `exact_required` records whether that equality is
+required. A sampled disk restore with partial re-prefill can pass with
+`exact: false`; greedy and zero-prefill restores still fail on a mismatch.
 
 Every request checks its applicable response format, expected output and timings.
 Missing measurements fail. `comparison.json` reports per-request prefill, decode,

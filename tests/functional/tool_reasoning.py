@@ -3,6 +3,11 @@
 import json
 import sys
 from copy import deepcopy
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "tools"))
+
+from gufo.control_tokens import kEndOfText, kImEnd, kImStart  # noqa: E402
 
 from metrics import validate_tool_events
 
@@ -51,6 +56,86 @@ def response_result(client, request, streaming):
              for item in response.output if item.type == "function_call"]
     return dict(text=response.output_text, reasoning=reasoning, tools=calls,
                 finish="tool_calls" if calls else "stop", usage=response.usage.to_dict())
+
+
+def check_reasoning_separator(client, model, checks, chat_result):
+    """Reasoning framing is not visible text, with or without constraints (#439)."""
+    function = {"name": "unused", "description": "Not needed for arithmetic.",
+                "parameters": {"type": "object", "properties": {},
+                               "additionalProperties": False}}
+    schema = {"type": "object", "properties": {"answer": {"type": "integer"}},
+              "required": ["answer"], "additionalProperties": False}
+    format_ = {"type": "json_schema", "name": "answer", "strict": True, "schema": schema}
+    prompt = "What is 4 + 5? Think briefly, then answer with only the digit. Do not use a tool."
+
+    def save(name, result):
+        checks[name] = result
+        print(f"CHECK {name}", file=sys.stderr, flush=True)
+        return result
+
+    for endpoint in ("chat", "responses"):
+        for mode in ("plain", "tools", "schema"):
+            request = dict(model=model, temperature=0, extra_body={"seed": 439,
+                           "presence_penalty": 0, "frequency_penalty": 0})
+            if endpoint == "chat":
+                request.update(messages=[{"role": "user", "content": prompt}],
+                               reasoning_effort="low", max_completion_tokens=256)
+                if mode == "tools":
+                    request.update(tools=[{"type": "function", "function": function}],
+                                   tool_choice="auto")
+                elif mode == "schema":
+                    request["response_format"] = {
+                        "type": "json_schema",
+                        "json_schema": {key: value for key, value in format_.items() if key != "type"}}
+                run = chat_result
+            else:
+                request.update(input=prompt, reasoning={"effort": "low"},
+                               max_output_tokens=256, store=False)
+                if mode == "tools":
+                    request.update(tools=[{"type": "function", **function}], tool_choice="auto")
+                elif mode == "schema":
+                    request["text"] = {"format": format_}
+                run = response_result
+            previous = None
+            for streaming in (False, True):
+                name = f"reasoning_separator_{endpoint}_{mode}_{streaming}"
+                result = save(name, run(client, request, streaming))
+                assert result["reasoning"] and not result["tools"], result
+                assert result["finish"] == "stop", result
+                # Do not strip: that hid the original regression from other suites.
+                assert result["text"] and not result["text"].startswith(("\r", "\n")), result
+                if mode == "schema":
+                    assert json.loads(result["text"]) == {"answer": 9}, result
+                else:
+                    assert result["text"] == "9", result
+                if previous is not None:
+                    assert result["text"] == previous["text"], (previous, result)
+                    # Ordinary buffered reasoning already trims its outer space;
+                    # the answer itself must agree byte for byte.
+                    assert result["reasoning"].strip() == previous["reasoning"].strip(), (previous, result)
+                    usage = result["usage"]
+                    details = usage.get("prompt_tokens_details", usage.get("input_tokens_details"))
+                    total = usage.get("prompt_tokens", usage.get("input_tokens"))
+                    assert details["cached_tokens"] == total, result
+                previous = result
+            if endpoint == "chat" and mode == "tools":
+                # Feed the client-visible text back into the next turn. Removing
+                # framing must not prevent reuse of the generated reasoning/answer.
+                followup = {**request, "messages": request["messages"] + [
+                    {"role": "assistant", "content": result["text"],
+                     "reasoning_content": result["reasoning"]},
+                    {"role": "user", "content": "Now add 1. Answer only with the number."}]}
+                next_ = save("reasoning_separator_continuation",
+                            chat_result(client, followup, True))
+                assert next_["text"] == "10" and not next_["tools"], next_
+                assert next_["usage"]["prompt_tokens_details"]["cached_tokens"] == (
+                    result["usage"]["total_tokens"]), (result, next_)
+                # Thinking off still preserves paragraph breaks inside content.
+                plain = {**request, "reasoning_effort": "none", "messages": [
+                    {"role": "user", "content":
+                     "Copy exactly, no quotes or code fences, preserving the blank line:\nALPHA\n\nBETA"}]}
+                copied = save("reasoning_separator_thinking_off", chat_result(client, plain, True))
+                assert copied["text"] == "ALPHA\n\nBETA" and not copied["reasoning"], copied
 
 
 def check_disabled_tool_markers(client, model, checks, chat_result):
@@ -128,7 +213,7 @@ ENVELOPE_CASES = {
         "Call terminal with exactly this command: printf '%s' '</invoke>'"
     ),
     "vocab_token_in_arguments": (
-        "Call terminal with exactly this command: printf '%s' 'EOS = \"<|im_end|>\"'"
+        f"Call terminal with exactly this command: printf '%s' 'EOS = \"{kImEnd}\"'"
     ),
     "lookalike_in_arguments": (
         "Call terminal with exactly this command: printf '%s' '<|not_a_vocab_entry|>'"
@@ -374,7 +459,7 @@ def check_envelope_closer_framing(client, model, checks, chat_result, preset=Non
     deepseek = preset == "deepseek4"
     commands = {"closer_before_call": "pwd", "framing_between_calls": "pwd",
                 "closer_in_arguments": "printf '%s' '</invoke>'",
-                "vocab_token_in_arguments": "printf '%s' 'EOS = \"<|im_end|>\"'",
+                "vocab_token_in_arguments": f"printf '%s' 'EOS = \"{kImEnd}\"'",
                 "lookalike_in_arguments": "printf '%s' '<|not_a_vocab_entry|>'"}
     for name, prompt in ENVELOPE_CASES.items():
         # A shape may override the documented call format: the model can only
@@ -407,6 +492,17 @@ def check_envelope_closer_framing(client, model, checks, chat_result, preset=Non
                     "markup the model wrote instead of a call stays visible", result)
             elif name in commands:
                 assert_terminal_call(result, commands[name])
+            elif (not deepseek and result["tools"] and name in (
+                    "explain_tool_call_syntax", "envelope_documented_then_prose",
+                    "qwen_envelope_documented_then_prose")):
+                # A literal <tool_call> in Qwen prose triggers the call grammar,
+                # and calls end the output, exactly as in llama.cpp (#438). The
+                # forced call must still be native and leak no framing.
+                assert result["finish"] == "tool_calls", result
+                assert all(call["function"]["name"] == "terminal"
+                           for call in result["tools"]), result
+                assert not any(tag in text for tag in ENVELOPE_CLOSERS), result
+                continue
             else:
                 assert not result["tools"] and result["finish"] == "stop", result
             if name == "framing_between_calls" and not visible_markup:
@@ -522,10 +618,10 @@ def check_envelope_closer_framing(client, model, checks, chat_result, preset=Non
         assert_terminal_call(warm, "pwd")
         assert_no_envelope_framing(warm)
         request["messages"] = tool_history(
-            request, warm, "/tmp/pr400-fixture\nLiteral <|im_start|> in tool output.")
+            request, warm, f"/tmp/pr400-fixture\nLiteral {kImStart} in tool output.")
         request["messages"][-2]["content"] = (
             (warm["text"] or "") + "\nPrinting the working directory.\n\n</invoke>\n"
-            "Literal <|endoftext|> in stored assistant text.")
+            f"Literal {kEndOfText} in stored assistant text.")
         request["messages"].append({"role": "user", "content": "Now call terminal with command date."})
         result = chat_result(client, request, streaming)
         checks[label] = result
@@ -541,7 +637,7 @@ def check_literal_protocol_data(client, model, checks, chat_result):
     """Vocabulary spellings and undeclared XML remain literal with tools enabled."""
     literals = {
         "raw_xml": '<invoke name="documentation"><parameter name="value">x</parameter></invoke>',
-        "token_word": 'EOS = "<|im_end|>"',
+        "token_word": f'EOS = "{kImEnd}"',
         "comparison": "3 < 5 and x < y.",
     }
     for name, literal in literals.items():

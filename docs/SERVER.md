@@ -194,9 +194,12 @@ between active decode rounds without changing a lone request's kernel policy.
 
 `--cache-ram-bytes 0` (the default) selects an automatic snapshot budget capped
 at 32 GiB and half the available host RAM after model/state allocation, respecting
-container limits. 27B also checks HIP free memory. A positive value sets a byte
-cap that may exceed the automatic budget, up to the available host RAM minus
-4 GiB; the startup line reports both as `automatic_bytes` and `max_bytes`.
+container limits. Available RAM is `MemAvailable` minus `CmaFree`: free CMA
+pages, such as the kernel's KHO scratch area on Ubuntu 26.04, only hold
+movable pages, not GPU allocations. 27B also checks HIP free memory. A
+positive value sets a byte cap that may exceed the automatic budget, up to the
+available host RAM minus 4 GiB; the startup line reports both as
+`automatic_bytes` and `max_bytes`.
 Disk staging and temporary disk-save buffers are separate from this RAM budget.
 The 128 checkpoint records are independent of `--sessions`; more than one can
 belong to a conversation.
@@ -232,11 +235,11 @@ its changed suffix again.
 
 `SIGINT` and `SIGTERM` cancel active requests and drain accepted disk writes
 before exiting. `--cache-disk DIR` defaults to 8 GiB retained on disk.
-`--cache-disk-staging-bytes 0` (the default) selects the smallest of 1 GiB,
-one eighth of available host RAM after model/session loading (including cgroup
-limits), and the disk budget. This bounds queued captures/writes and each disk
-read separately; it allocates nothing upfront. Live model state and retained
-RAM snapshots have separate budgets.
+`--cache-disk-staging-bytes 0` (the default) selects the smaller of one eighth
+of available host RAM after model/session loading (including cgroup limits) and
+the disk budget. This bounds queued captures/writes and each disk read
+separately; it allocates nothing upfront. Live model state and retained RAM
+snapshots have separate budgets.
 
 Snapshots that exceed either limit are skipped with their required size and
 available budget logged; live conversation reuse remains available. Existing
@@ -251,7 +254,7 @@ For a focused cancellation check, run
 `python3 tests/functional/continuation.py --output /tmp/cache-check.json`
 against a private server named `cache-test` on port 5815.
 It checks interruption during reasoning and visible output, with and without
-reasoning replay, greedy/seeded sampling, and explicit cache bypass. Use
+reasoning replay, and greedy/seeded sampling. Use
 `--tools --discard-assistant` to exercise interrupted agent tool turns; add
 `--prefix-repetitions 5500` for a roughly 50K-token prefix.
 For persistence, enable `--cache-disk` before the check, restart the same server,
@@ -261,10 +264,11 @@ Add `--append-image` to introduce the image after a cached text turn, and
 `--reasoning-effort high` to check a specific thinking effort.
 Each case continues for a third turn; repeat `--case NAME` to select only the
 cases needed for a change.
-The check requires exact snapshot and matched-history replay. It separately
-reports equality to a fresh full prefill, whose different matrix shapes and
-prefill/decode history can change rounding; that comparison is not silently
-counted as an exact cache replay.
+The check requires exact snapshot and matched-history replay in memory. After a
+restart, sampled output may vary when a disk restore re-prefills a gap; greedy
+and zero-prefill restores still require equality. The report separates successful
+validation (`status`) from observed assistant-message equality (`exact`) and its
+requirement (`exact_required`). The SDK conversation suite checks cache bypass.
 
 ### Hardware compute queues
 
@@ -571,7 +575,9 @@ it groups client-executed function tools for organization only, and its
 functions are flattened into the function list. Their `function_call` items
 keep the plain `name` and add the owning `namespace`, so clients can route
 them. Function names that collide across namespaces or with top-level
-functions are rejected. Standard Responses request fields with
+functions are rejected. Mid-conversation `system` and `developer` message
+items are accepted as in Chat Completions. Standard Responses request fields
+with
 no native effect are accepted and ignored so conforming clients interoperate
 (for example Codex): `include`, `reasoning.summary`, `text.verbosity`,
 `client_metadata` and `prompt_cache_key`.
@@ -648,7 +654,13 @@ ordinary continuation.
 `POST /v1/chat/completions` accepts the common compatibility subset:
 
 - `model`
-- `messages`
+- `messages`: `system` and `developer` messages may appear at any position.
+  Agent clients such as Codex send them mid-conversation after context
+  compaction or when session settings change. DeepSeek renders them in place.
+  Qwen's template accepts only one leading system turn, so Qwen models hoist
+  them into it in their original relative order. That changes the prompt head:
+  the request that introduces such a message is prefilled again, and later
+  requests that keep it reuse the whole prompt
 - `max_tokens` or `max_completion_tokens`
 - `temperature`
 - `top_p`
@@ -721,29 +733,36 @@ keep optional arguments optional. Open nested objects retain native syntax and
 declared requirements/types, including nested fields; unsupported schema
 keywords remain guidance. Unsupported property-admitting rules, including
 conditional branches, leave those objects open without discarding declared
-requirements. Qwen wildcard fields use JSON to preserve types. Non-strict
-union and untyped arguments keep the native syntax, as in llama.cpp: when the
-union admits strings the value is raw text, and its typed alternatives (such as
-`null` or an object) are tried before the string, so Qwen cannot return the
-literal string `"null"` for a string/null union. Strict unions use JSON.
+requirements. Union and untyped arguments keep the native syntax, as in
+llama.cpp: when the union admits strings the value is raw text, and its typed
+alternatives (such as `null` or an object) are tried before the string, so Qwen
+cannot return the literal string `"null"` for a string/null union.
+A model with a native call syntax (Qwen, DeepSeek) never switches to a JSON
+envelope, whatever the schema, strict flag or tool choice: as in llama.cpp
+`common/parsers/qwen3-coder.cpp` and `deepseek.cpp`, every call uses the chat
+template's syntax and no instruction is added to the prompt. Native tags enforce
+what they can carry. A string parameter whose `pattern` cannot be enforced is
+raw text; other values follow the supported parts of their schema, or any JSON
+value of their types when nothing can be enforced. Qwen tags carry no type, so
+Qwen generates declared parameters only; DeepSeek's `string` flag also carries
+wildcard fields. A value that must contain the native closing tag cannot be
+written natively. Only runners without a native syntax use the JSON envelope.
 Historical calls render typed argument values with the chat template's
 `tojson` spelling (`", "` and `": "` separators, raw UTF-8), as llama.cpp's
-Jinja runtime does, so a replayed turn reuses the tokens the model generated.
+Jinja runtime does. Cache reuse requires identical tokens; normalizing an
+assistant's formatting can require replaying that suffix.
 Constrained JSON keys follow schema order, with additional
-keys last. Impossible non-strict schemas fall back to JSON-object arguments;
-impossible strict schemas are rejected before generation.
+keys last. Impossible strict schemas are rejected before generation.
 Gemma 4 calls are constrained in its own `call:NAME{key:value}` syntax at
 every depth: `<|"|>`-delimited strings and bare keys in sorted order, as its
 template renders them. A key Gemma 4 cannot read bare (one containing
 `:{}[],`, starting with `<` or with surrounding whitespace) is `<|"|>`-quoted.
 Such a key containing `<|"|>`, or a fixed string value containing it, leaves
 non-strict arguments open and rejects a strict schema; there is no JSON
-fallback. With
-thinking on, constrained output may open the thought channel before a call or
-JSON answer.
+fallback. With thinking on, constrained output may open the thought channel
+before a call or JSON answer.
 `tool_choice: "required"` and named choices constrain decoding to a declared
-call. Extended schemas retain compact JSON on this path, avoiding extra
-native framing tokens; ordinary native calls keep their existing format. Where
+call, with the same argument syntax as `auto`. Where
 the backend cannot constrain sampling, an unmet `required` choice still returns
 `tool_choice_unsatisfied` (HTTP 502, or an SSE error after streaming starts).
 Stops and token limits terminate normally without emitting incomplete calls.
@@ -780,12 +799,11 @@ Constraints apply before target sampling in AR, DFlash2, MTP and DSpark, includi
 streaming, images and concurrent requests. Reasoning stays separate from JSON
 and counts toward the output budget. Changing the schema changes the cache prefix.
 
-For constrained tool or JSON output, only `</think>` (Gemma 4: `<channel|>`)
-ends the initial reasoning phase. Literal tool markers such as `<tool_call>` quoted during reasoning remain
-reasoning data; they do not start a call or move reasoning into visible content.
-This boundary is identical for buffered responses and SSE deltas in Chat
-Completions and Responses. Tool parsing starts after the reasoning delimiter,
-and markers inside tool argument strings remain argument data.
+`</think>` (Gemma 4: `<channel|>`) ends reasoning before constrained JSON.
+Native tools also accept an unquoted function header as the boundary when the
+model omits `</think>`. Bare marker mentions and quoted examples remain
+reasoning; markers inside arguments remain data. Buffered and streamed Chat
+Completions and Responses use the same boundaries.
 
 Parse the returned content: leading whitespace is valid JSON, and stops or token
 limits can leave it incomplete. `finish_reason: "stop"` includes matched stop
@@ -893,6 +911,10 @@ and API key for inference and metrics.
 as the bearer credential when it is set.
 
 ## Lifecycle and limits
+
+Qwen image inputs have no fixed image-count cap. Their expanded tokens must fit
+the model context; image-byte, pixel, request-body and read-time budgets still
+apply to the submitted history, including base64 images.
 
 The HTTP transport bounds connection count and request-body size. The scheduler
 bounds admission and output buffering and propagates client cancellation to
@@ -1074,7 +1096,8 @@ lines (the ROCm model-cache and managed-KV lines, DSpark attachment, the shared
 batch workspace) are suppressed by `--log-level=warn`/`error` too.
 
 Prompt text, message bodies and API keys stay unlogged at every level, and debug
-lines use the same escaping and redaction as the rest of the log. Client
+lines use the same escaping and redaction as the rest of the log. Only the
+opt-in [content trace](#content-trace), a separate file, records content. Client
 identity is the exception: scheduler admission lines name a client by the peer
 address of its socket (`client_id=127.0.0.1` on the default loopback bind), so a
 public `--host` writes client IP addresses into the debug tier.
@@ -1086,6 +1109,50 @@ speed. Speculative requests also include accepted and proposed drafts. Progress
 lines are INFO-tier: `--log-level=warn` or `--log-level=error` would discard
 them, so the server rejects that combination at startup instead of ignoring the
 flag.
+
+### Content trace
+
+Some failures only show in the content itself, such as tool-call markup leaking
+into `content` or a history that the template renders differently. For those,
+start `gufo serve llm` with `--trace <PATH>`. The server appends one JSON
+object per line to `PATH` and logs `event=trace_enabled` at WARN. A new file is
+created readable and writable by its owner only; an existing file keeps its
+permissions. A path that cannot be opened fails startup before the model loads.
+
+Each request to `/v1/chat/completions`, `/v1/completions`, `/v1/responses`,
+`/v1/messages` or `/completion` writes three records. Every record has `time`,
+`event` and the `request` id shown in the `X-Request-ID` header and in the
+`request=rN` log lines:
+
+- `request`: `method`, `path` and the `body` as received.
+- `generation`, written by the scheduler shared by every text model: its
+  `generation` number (the `request=` value of scheduler debug and progress
+  lines), `max_tokens` after clamping to the context, the effective `sampling`,
+  `prompt_tokens`, `cache` (`memory`, `disk` or `miss`), `cached_tokens`, the
+  miss detail the completion log also reports, `generated_tokens`, `finish`,
+  `error` when generation failed, the `prompt` decoded from its tokens with
+  special tokens spelled out, and the raw `output` before reasoning and
+  tool-call parsing.
+- `response`: `status`, `outcome`, whether the reply was a `stream`, and the
+  `body` the client received. For a stream this is the event stream as
+  written, `: ping` keepalives included, so a difference between streaming and
+  non-streaming parsing shows up in the trace.
+
+A request that fails before generation, for example with invalid JSON, has
+no `generation` record. Requests refused before routing (malformed HTTP or an
+oversized body), unauthenticated requests and other routes are not traced.
+Malformed UTF-8 is replaced with U+FFFD. A record that cannot be written in
+full, for example on a full disk, is cut from the file and the first failure is
+logged as `event=trace_write_failed`; a file that cannot be cut back, such as a
+pipe, stops tracing with `event=trace_disabled`. To read one request:
+
+```sh
+jq 'select(.request == "r12")' trace.jsonl
+```
+
+The file holds prompts, tool results and generated text in full: treat it
+like the conversations themselves and delete it when done. It is never
+rotated or truncated.
 
 Text completion logs include stop/length/cancellation, queue and first-token
 latency, prefill/decode speed, execution width, memory/disk cache hits and reused

@@ -15,9 +15,15 @@
 
 #include "src/core/crypto/sha256.hpp"
 #include "src/core/gguf_reader.hpp"
+#include "src/models/qwen/control_tokens.hpp"
 #include "src/models/qwen/tokenizer.hpp"
 #include "src/models/qwen/vision/prompt.hpp"
 #include "tests/models/chat_template_golden_helpers.hpp"
+
+using gufo::tokenization::kEndOfText;
+using gufo::tokenization::kImagePad;
+using gufo::tokenization::kImEnd;
+using gufo::tokenization::kImStart;
 
 namespace {
 
@@ -393,7 +399,7 @@ void TestHuggingFaceRenderedGoldens() {
       QwenChatTemplate::Render(vision, {}, options, nullptr, &offsets);
   Expect(offsets.size() == 2, "Every image retains a placeholder offset");
   for (const auto offset : offsets)
-    Expect(rendered->substr(offset, 13) == "<|image_pad|>",
+    Expect(rendered->substr(offset, 13) == kImagePad,
            "Image offsets follow whitespace trimming and Picture prefixes");
 
   ChatMessage call{ChatRole::kAssistant, "", "", "Use the tool."};
@@ -406,9 +412,19 @@ void TestHuggingFaceRenderedGoldens() {
       {base[0], call, {ChatRole::kUser, "<tool_response>21 C</tool_response>"}},
       options, "tool_loop_preserve");
   for (const auto role : {ChatRole::kSystem, ChatRole::kDeveloper}) {
-    Expect(!QwenChatTemplate::Render(
-               std::vector<ChatMessage>{base[0], {role, "Late instructions"}}),
-           "Late system/developer messages are rejected");
+    const std::vector<ChatMessage> late{{ChatRole::kSystem, "Be concise."},
+                                        history[0],
+                                        history[1],
+                                        {role, "Late instructions"},
+                                        history[2]};
+    const std::vector<ChatMessage> leading{late[0], late[3], late[1], late[2],
+                                           late[4]};
+    const auto rendered = QwenChatTemplate::Render(late, tools, options);
+    Expect(rendered &&
+               rendered == QwenChatTemplate::Render(leading, tools, options) &&
+               rendered->find("Be concise.\nLate instructions<|im_end|>") !=
+                   std::string::npos,
+           "Late system/developer messages join the leading system turn");
   }
   for (const auto role : {ChatRole::kSystem, ChatRole::kDeveloper,
                           ChatRole::kAssistant, ChatRole::kTool}) {
@@ -430,14 +446,14 @@ void TestRenderAndTokenize() {
   for (int i = 0; i < 256; ++i) {
     vocab.emplace_back(1, static_cast<char>(i));
   }
-  vocab.emplace_back("<|im_start|>");
-  vocab.emplace_back("<|im_end|>");
+  vocab.emplace_back(kImStart);
+  vocab.emplace_back(kImEnd);
   vocab.emplace_back("<think>");
   vocab.emplace_back("</think>");
 
   std::unordered_map<std::string, gufo::tokenization::TokenId> specials = {
-      {"<|im_start|>", 256},
-      {"<|im_end|>", 257},
+      {std::string(kImStart), 256},
+      {std::string(kImEnd), 257},
       {"<think>", 258},
       {"</think>", 259},
   };
@@ -478,16 +494,19 @@ void TestContentSpellingATokenIsNotParsedAsOne() {
   for (int i = 0; i < 256; ++i) {
     vocab.emplace_back(1, static_cast<char>(i));
   }
-  vocab.emplace_back("<|im_start|>");
-  vocab.emplace_back("<|im_end|>");
+  vocab.emplace_back(kImStart);
+  vocab.emplace_back(kImEnd);
   vocab.emplace_back("<think>");
   vocab.emplace_back("</think>");
 
-  vocab.emplace_back("<|endoftext|>");
+  vocab.emplace_back(kEndOfText);
 
   std::unordered_map<std::string, gufo::tokenization::TokenId> specials = {
-      {"<|im_start|>", 256}, {"<|im_end|>", 257},    {"<think>", 258},
-      {"</think>", 259},     {"<|endoftext|>", 260},
+      {std::string(kImStart), 256},
+      {std::string(kImEnd), 257},
+      {"<think>", 258},
+      {"</think>", 259},
+      {std::string(kEndOfText), 260},
   };
 
   std::string err;
@@ -511,13 +530,13 @@ void TestContentSpellingATokenIsNotParsedAsOne() {
 
   // The template never writes this one, so it can only appear if the message
   // text was read as a control token.
-  const auto injected = tokenizer->FindSpecialToken("<|endoftext|>");
+  const auto injected = tokenizer->FindSpecialToken(kEndOfText);
   Expect(injected.has_value(), "the message token is a vocabulary token");
   Expect(std::find(token_ids->begin(), token_ids->end(), *injected) ==
              token_ids->end(),
          "content spelling a control token does not inject it into the prompt");
 
-  const auto framing = tokenizer->FindSpecialToken("<|im_start|>");
+  const auto framing = tokenizer->FindSpecialToken(kImStart);
   Expect(framing.has_value() && std::find(token_ids->begin(), token_ids->end(),
                                           *framing) != token_ids->end(),
          "template framing still tokenizes as control tokens");
@@ -530,13 +549,13 @@ void TestToolReplayArgumentsAreContent() {
   for (int i = 0; i < 256; ++i) {
     vocab.emplace_back(1, static_cast<char>(i));
   }
-  for (const auto* token :
-       {"<|im_start|>", "<|im_end|>", "<tool_call>", "</tool_call>"}) {
+  for (std::string_view token : std::initializer_list<std::string_view>{
+           kImStart, kImEnd, "<tool_call>", "</tool_call>"}) {
     vocab.emplace_back(token);
   }
   std::unordered_map<std::string, gufo::tokenization::TokenId> specials = {
-      {"<|im_start|>", 256},
-      {"<|im_end|>", 257},
+      {std::string(kImStart), 256},
+      {std::string(kImEnd), 257},
       {"<tool_call>", 258},
       {"</tool_call>", 259},
   };
@@ -613,6 +632,53 @@ void TestToolReplayArgumentsAreContent() {
   }
 }
 
+void TestNewLiteralTokenDoesNotRetokenizeHistory() {
+  using namespace gufo::tokenization;
+  std::vector<std::string> vocab;
+  for (int i = 0; i < 256; ++i)
+    vocab.emplace_back(1, static_cast<char>(i));
+  for (std::string_view token : std::initializer_list<std::string_view>{
+           kImStart, kImEnd, "<tool_call>", "</tool_call>", ".\n"})
+    vocab.emplace_back(token);
+  const std::vector<std::string> merges = {". \n"};
+  const std::unordered_map<std::string, TokenId> specials = {
+      {std::string(kImStart), 256},
+      {std::string(kImEnd), 257},
+      {"<tool_call>", 258},
+      {"</tool_call>", 259}};
+  std::string error;
+  auto tokenizer =
+      QwenTokenizer::CreateFromVocabulary(vocab, merges, specials, &error);
+  Expect(tokenizer != nullptr, "Tokenizer with boundary merge: " + error);
+  ChatMessage assistant{ChatRole::kAssistant, ""};
+  assistant.tool_calls.push_back(
+      {.id = "read-1",
+       .name = "read",
+       .arguments = {{.name = "path", .value = "file"}}});
+  std::vector<ChatMessage> history{{ChatRole::kUser, "Read the file."},
+                                   assistant,
+                                   {ChatRole::kTool, "Done."}};
+  ChatTemplateOptions options;
+  options.add_generation_prompt = false;
+  options.enable_thinking = false;
+  const auto before =
+      QwenChatTemplate::RenderAndTokenize(*tokenizer, history, options);
+  Expect(before.has_value(), "History tokenizes");
+  Expect(
+      std::find(before->begin(), before->end(), 260) != before->end(),
+      "Fixture merges content punctuation with the following framing newline");
+  history.push_back({ChatRole::kUser, "The literal text <tool_call> is data."});
+  const auto after =
+      QwenChatTemplate::RenderAndTokenize(*tokenizer, history, options);
+  Expect(
+      after && after->size() > before->size() &&
+          std::equal(before->begin(), before->end(), after->begin()),
+      "A new literal control spelling leaves every historical token unchanged");
+  Expect(std::count(before->begin(), before->end(), 258) ==
+             std::count(after->begin(), after->end(), 258),
+         "Literal spelling does not add a structural tool opener");
+}
+
 /// The server prepares every request through models::qwen::vision::Prepare,
 /// text-only ones included, so the reading of message content as text (#383)
 /// has to hold there too. The synthetic vocabulary and the message are the ones
@@ -623,15 +689,18 @@ void TestVisionPreparationReadsContentAsText() {
   for (int i = 0; i < 256; ++i) {
     vocab.emplace_back(1, static_cast<char>(i));
   }
-  vocab.emplace_back("<|im_start|>");
-  vocab.emplace_back("<|im_end|>");
+  vocab.emplace_back(kImStart);
+  vocab.emplace_back(kImEnd);
   vocab.emplace_back("<think>");
   vocab.emplace_back("</think>");
-  vocab.emplace_back("<|endoftext|>");
+  vocab.emplace_back(kEndOfText);
 
   std::unordered_map<std::string, gufo::tokenization::TokenId> specials = {
-      {"<|im_start|>", 256}, {"<|im_end|>", 257},    {"<think>", 258},
-      {"</think>", 259},     {"<|endoftext|>", 260},
+      {std::string(kImStart), 256},
+      {std::string(kImEnd), 257},
+      {"<think>", 258},
+      {"</think>", 259},
+      {std::string(kEndOfText), 260},
   };
 
   std::string err;
@@ -646,7 +715,7 @@ void TestVisionPreparationReadsContentAsText() {
   gufo::tokenization::ChatTemplateOptions opts;
   opts.enable_thinking = false;
 
-  const auto injected = tokenizer->FindSpecialToken("<|endoftext|>");
+  const auto injected = tokenizer->FindSpecialToken(kEndOfText);
   Expect(injected.has_value(), "the message token is a vocabulary token");
 
   auto tpl = gufo::tokenization::QwenChatTemplate::CreateDefault();
@@ -666,7 +735,7 @@ void TestVisionPreparationReadsContentAsText() {
              tokenizer->Decode(prepared.tokens).find(text) != std::string::npos,
          "the literal characters of the message reach the model");
 
-  const auto framing = tokenizer->FindSpecialToken("<|im_start|>");
+  const auto framing = tokenizer->FindSpecialToken(kImStart);
   Expect(framing.has_value() &&
              std::find(prepared.tokens.begin(), prepared.tokens.end(),
                        *framing) != prepared.tokens.end(),
@@ -684,14 +753,18 @@ void TestEncodeRenderedReadsImageContentAsText() {
   for (int i = 0; i < 256; ++i) {
     vocab.emplace_back(1, static_cast<char>(i));
   }
-  for (const auto* token : {"<|im_start|>", "<|im_end|>", "<think>", "</think>",
-                            "<|endoftext|>", "<|image_pad|>"}) {
+  for (std::string_view token : std::initializer_list<std::string_view>{
+           kImStart, kImEnd, "<think>", "</think>", kEndOfText, kImagePad}) {
     vocab.emplace_back(token);
   }
 
   std::unordered_map<std::string, gufo::tokenization::TokenId> specials = {
-      {"<|im_start|>", 256}, {"<|im_end|>", 257},    {"<think>", 258},
-      {"</think>", 259},     {"<|endoftext|>", 260}, {"<|image_pad|>", 261},
+      {std::string(kImStart), 256},
+      {std::string(kImEnd), 257},
+      {"<think>", 258},
+      {"</think>", 259},
+      {std::string(kEndOfText), 260},
+      {std::string(kImagePad), 261},
   };
 
   std::string err;
@@ -709,8 +782,8 @@ void TestEncodeRenderedReadsImageContentAsText() {
   gufo::tokenization::ChatTemplateOptions opts;
   opts.enable_thinking = false;
 
-  const auto injected = tokenizer->FindSpecialToken("<|endoftext|>");
-  const auto framing = tokenizer->FindSpecialToken("<|im_start|>");
+  const auto injected = tokenizer->FindSpecialToken(kEndOfText);
+  const auto framing = tokenizer->FindSpecialToken(kImStart);
   Expect(injected.has_value() && framing.has_value(),
          "the message and framing tokens are vocabulary tokens");
 
@@ -720,9 +793,8 @@ void TestEncodeRenderedReadsImageContentAsText() {
       messages, {}, opts, &err, &offsets, nullptr, &spans);
   Expect(rendered.has_value(), "an image-bearing prompt renders: " + err);
   Expect(offsets.size() == 1 &&
-             rendered->substr(offsets[0],
-                              std::string_view("<|image_pad|>").size()) ==
-                 "<|image_pad|>",
+             rendered->substr(offsets[0], std::string_view(kImagePad).size()) ==
+                 kImagePad,
          "the picture becomes an image placeholder");
 
   gufo::tokenization::TokenizerOptions tok_options;
@@ -916,15 +988,15 @@ void TestEmptyReasoningReplayChangesThinkingSuffixTokens() {
   std::vector<std::string> vocab;
   for (int i = 0; i < 256; ++i)
     vocab.emplace_back(1, static_cast<char>(i));
-  vocab.emplace_back("<|im_start|>");
-  vocab.emplace_back("<|im_end|>");
+  vocab.emplace_back(kImStart);
+  vocab.emplace_back(kImEnd);
   vocab.emplace_back("<think>");
   vocab.emplace_back("</think>");
   vocab.emplace_back("\n\n");
   const std::vector<std::string> merges = {"\n \n"};
   const std::unordered_map<std::string, TokenId> specials = {
-      {"<|im_start|>", 256},
-      {"<|im_end|>", 257},
+      {std::string(kImStart), 256},
+      {std::string(kImEnd), 257},
       {"<think>", 258},
       {"</think>", 259},
   };
@@ -1012,7 +1084,7 @@ void TestStableBoundaryPrecedesReplacedFinalUserTurn() {
   const auto [first_text, first_stable] = render(first);
   const auto [second_text, second_stable] = render(second);
   Expect(first_stable < first_text.size() &&
-             first_text.compare(first_stable, 12, "<|im_start|>") == 0,
+             first_text.compare(first_stable, 12, kImStart) == 0,
          "boundary starts the final user turn");
   Expect(second_text.starts_with(first_text.substr(0, first_stable)),
          "boundary prefixes a request that replaces the final user turn");
@@ -1038,7 +1110,7 @@ void TestStableBoundaryPrecedesReplacedFinalUserTurn() {
   query.push_back({ChatRole::kUser, "Real question."});
   query.push_back({ChatRole::kUser, "Runtime context, turn 2."});
   const auto [query_text, query_stable] = render(query);
-  Expect(query_text.compare(query_stable, 12, "<|im_start|>") == 0 &&
+  Expect(query_text.compare(query_stable, 12, kImStart) == 0 &&
              query_text.substr(query_stable).find("Runtime context") !=
                  std::string::npos &&
              query_text.substr(query_stable).find("Real question") ==
@@ -1069,6 +1141,7 @@ int main() {
   TestRenderAndTokenize();
   TestContentSpellingATokenIsNotParsedAsOne();
   TestToolReplayArgumentsAreContent();
+  TestNewLiteralTokenDoesNotRetokenizeHistory();
   TestVisionPreparationReadsContentAsText();
   TestEncodeRenderedReadsImageContentAsText();
   TestChatCorpusConformance();

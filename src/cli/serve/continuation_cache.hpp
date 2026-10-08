@@ -61,6 +61,12 @@ public:
   ContinuationSnapshot& operator=(ContinuationSnapshot&&) = delete;
 
   [[nodiscard]] virtual std::size_t PayloadBytes() const noexcept = 0;
+  /// Prefer an available state that still holds this snapshot's borrowed rows.
+  /// This is an allocation hint; every state must remain able to restore it.
+  [[nodiscard]] virtual bool PrefersState(
+      const ContinuationState&) const noexcept {
+    return false;
+  }
 };
 
 enum class SnapshotEventAction : std::uint8_t {
@@ -77,10 +83,13 @@ enum class SnapshotEventReason : std::uint8_t {
 };
 
 /// Continuation boundaries take precedence over optional history/retry copies.
+/// A branch point is a continuation boundary learned where two prompts
+/// diverged; it stays a branch point after the older prompt's checkpoints go.
 enum class SnapshotPurpose : std::uint8_t {
   kContinuation,
   kHistory,
   kRetry,
+  kBranchPoint,
 };
 
 /// Sanitized snapshot-retention event.
@@ -269,9 +278,11 @@ private:
   struct Entry;
 
   [[nodiscard]] ContinuationState& StateAt(std::size_t index);
+  /// Reclaiming a retained copy of the same prefix keeps its learned branch
+  /// point: purpose becomes kBranchPoint for the publication.
   [[nodiscard]] bool ReserveSnapshot(
       std::size_t source_index, std::size_t snapshot_bytes,
-      std::size_t token_count, bool preserve_source, SnapshotPurpose purpose,
+      std::size_t token_count, bool preserve_source, SnapshotPurpose& purpose,
       std::span<const ContinuationToken> replacement_prefix,
       std::span<const std::uint8_t> input_identity);
   void SkipSnapshot(std::size_t reservation_bytes, SnapshotEventReason reason,

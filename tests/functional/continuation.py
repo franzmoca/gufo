@@ -105,6 +105,8 @@ def main():
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--restore", type=Path)
     parser.add_argument("--image", type=Path)
+    parser.add_argument("--image-count", type=int, default=1,
+                        help="Repeat --image to exercise larger image histories")
     parser.add_argument("--append-image", action="store_true",
                         help="Append --image after a cached text-only turn")
     parser.add_argument("--reasoning-effort", choices=("low", "medium", "high", "xhigh"),
@@ -125,6 +127,8 @@ def main():
     TRACE.path = args.output.with_suffix(".requests.json")
     if args.append_image and not args.image:
         parser.error("--append-image requires --image")
+    if args.image_count < 1 or (args.image_count != 1 and not args.image):
+        parser.error("--image-count requires --image and a positive count")
     if args.legacy_tool_history and not args.tools:
         parser.error("--legacy-tool-history requires --tools")
     reports = []
@@ -142,15 +146,19 @@ def main():
             # other prefill chunk shapes; greedy and exact restores cannot.
             if measured["prefill"] >= DISK_CHECKPOINT_STEP:
                 raise RuntimeError(f"{item['case']}: disk restore lost too much: {measured}")
-            exact = not item["request"]["temperature"] or measured["prefill"] == 0
-            if exact and digest(result) != item["sha256"]:
+            exact_required = not item["request"]["temperature"] or measured["prefill"] == 0
+            exact = digest(result) == item["sha256"]
+            if exact_required and not exact:
                 raise RuntimeError(f"{item['case']}: disk restore changed seeded output")
             if "followup" in item:
                 followup = call(args.url, item["followup"]["request"])
+                followup_exact = digest(followup) == item["followup"]["sha256"]
                 if metrics(followup)["cached"] < measured["cached"] or (
-                        exact and digest(followup) != item["followup"]["sha256"]):
+                        exact_required and not followup_exact):
                     raise RuntimeError(f"{item['case']}: disk-restored third turn differs")
-            report = {"case": item["case"], **measured, "exact": True}
+                exact = exact and followup_exact
+            report = {"case": item["case"], **measured, "status": "passed",
+                      "exact": exact, "exact_required": exact_required}
             reports.append(report)
             print(json.dumps(report), flush=True)
     else:
@@ -167,7 +175,8 @@ def main():
                 if args.image:
                     encoded = base64.b64encode(args.image.read_bytes()).decode()
                     content = [{"type": "image_url", "image_url": {
-                        "url": f"data:image/png;base64,{encoded}"}},
+                        "url": f"data:image/png;base64,{encoded}"}}
+                        for _ in range(args.image_count)] + [
                         {"type": "text", "text": content}]
                 messages = [
                     {"role": "system", "content": name + ". " +
@@ -275,7 +284,8 @@ def main():
                           "drop_reasoning": args.drop_reasoning,
                           "rewritten_tool_reasoning": rewritten_tool_reasoning,
                           "append_image": args.append_image,
-                          "interrupt_seconds": elapsed, **measured, "exact": True,
+                          "interrupt_seconds": elapsed, **measured, "status": "passed",
+                          "exact": True, "exact_required": True,
                           "followup": {"request": followup_body,
                                        "sha256": digest(followup), **metrics(followup)}}
                 reports.append(report)

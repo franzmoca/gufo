@@ -17,9 +17,14 @@ from pathlib import Path
 import re
 import signal
 import subprocess
+import sys
 import threading
 import time
 import urllib.parse
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "tools"))
+
+from gufo.control_tokens import kImEnd, kImStart  # noqa: E402
 
 from metrics import summarize
 
@@ -31,12 +36,12 @@ PROMPTS = {
     "creation": "Crée un module CommonJS stats.js qui exporte mean(tableau) et median(tableau) (médiane correcte pour un nombre pair d'éléments), puis test.js qui les vérifie avec node:assert sur quatre cas, exécute node test.js jusqu'à ce qu'il passe.",
     "bugfix": "Lance node slugify.test.js : il échoue. Corrige slugify.js (accents retirés, tout caractère non alphanumérique devient un tiret, tirets fusionnés et retirés aux extrémités) sans modifier slugify.test.js, et relance jusqu'à ce que ça passe.",
     "literal-protocol": (
-        'Use the write tool to create chat_template_fixture.py with EOS = "<|im_end|>", '
-        'BOS = "<|im_start|>", and render(role, content) returning '
+        f'Use the write tool to create chat_template_fixture.py with EOS = "{kImEnd}", '
+        f'BOS = "{kImStart}", and render(role, content) returning '
         'BOS + role + "\\n" + content + EOS + "\\n". '
         'These are literal Python string values, not message delimiters. '
         'Read it back with the read tool, then use bash to run Python assertions that '
-        'render("user", "hello") equals "<|im_start|>user\\nhello<|im_end|>\\n". '
+        f'render("user", "hello") equals "{kImStart}user\\nhello{kImEnd}\\n". '
         'Report success only after the assertions pass.'
     ),
 }
@@ -246,11 +251,11 @@ def validate_task(name, cwd, history):
         assert {"edit", "bash"} <= names, names
     elif name == "literal-protocol":
         source = (cwd / "chat_template_fixture.py").read_text()
-        assert "<|im_end|>" in source and "<|im_start|>" in source, source
+        assert kImEnd in source and kImStart in source, source
         namespace = {}
         exec(compile(source, "chat_template_fixture.py", "exec"), namespace)
-        assert namespace["EOS"] == "<|im_end|>" and namespace["BOS"] == "<|im_start|>"
-        assert namespace["render"]("user", "hello") == "<|im_start|>user\nhello<|im_end|>\n"
+        assert namespace["EOS"] == kImEnd and namespace["BOS"] == kImStart
+        assert namespace["render"]("user", "hello") == f"{kImStart}user\nhello{kImEnd}\n"
         assert {"write", "read", "bash"} <= names, names
         results = [m for m in history if m.get("role") == "toolResult"]
         assert results and all(not m.get("isError") for m in results), results

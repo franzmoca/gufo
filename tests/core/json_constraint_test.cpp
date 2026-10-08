@@ -5,6 +5,7 @@
 #include <barrier>
 #include <cassert>
 #include <cmath>
+#include <fstream>
 #include <iostream>
 #include <limits>
 #include <string_view>
@@ -617,6 +618,37 @@ void TestUnsupportedPatterns() {
   }
 }
 
+void TestNativeRequestMaskReuse() {
+  const auto arguments =
+      JsonConstraint::ToolParameters(parse(R"({
+    "type":"object","properties":{"value":{"type":"string"}},
+    "required":["value"],"additionalProperties":false})"),
+                                     false, JsonConstraint::ToolFormat::kQwen);
+  TokenConstraint binding;
+  binding.grammar =
+      JsonConstraint::WithTools(nullptr, {{"record", arguments}}, false, true,
+                                JsonConstraint::ToolFormat::kQwen);
+  binding.vocabulary =
+      std::make_shared<ConstraintVocabulary>(129, [](std::uint32_t id) {
+        return ConstraintVocabulary::Piece{
+            id == 128 ? "" : std::string(1, static_cast<char>(id)), id == 128};
+      });
+  const auto initial = binding.grammar->Start();
+  const auto first = binding.Allowed(initial);
+  auto state = initial;
+  for (const unsigned char byte : std::string_view(
+           "<tool_call>\n<function=record>\n<parameter=value>\nalpha\n"
+           "</parameter>\n</function>\n</tool_call>")) {
+    state = binding.grammar->Advance(state, byte);
+    assert(!state.empty());
+    (void)binding.Allowed(state);
+  }
+  assert(binding.grammar->Complete(state));
+  // Every new request starts here. Argument masks must not evict this mask
+  // and force another full-vocabulary traversal on a warm cache hit.
+  assert(binding.Allowed(initial) == first);
+}
+
 void TestReasoningConstraint() {
   const auto plain = JsonConstraint::Object();
   const auto grammar = JsonConstraint::WithReasoning(plain);
@@ -701,6 +733,83 @@ void TestReasoningConstraint() {
   assert(Accepts(*single, call));
   assert(!Accepts(*single, "Ordinary prose."));
   assert(!Accepts(*single, call + call));
+  for (const auto format : {JsonConstraint::ToolFormat::kQwen,
+                            JsonConstraint::ToolFormat::kDeepSeek}) {
+    const bool qwen = format == JsonConstraint::ToolFormat::kQwen;
+    const auto arguments = JsonConstraint::ToolParameters(parse(R"({
+      "type":"object","properties":{"value":{"type":"string","const":"42"}},
+      "required":["value"],"additionalProperties":false})"),
+                                                          true, format);
+    const std::string native =
+        qwen ? "<tool_call>\n<function=record>\n<parameter=value>\n42\n"
+               "</parameter>\n</function>\n</tool_call>"
+             : "<｜DSML｜tool_calls>\n<｜DSML｜invoke name=\"record\">\n"
+               "<｜DSML｜parameter name=\"value\" string=\"true\">42"
+               "</｜DSML｜parameter>\n</｜DSML｜invoke>\n</｜DSML｜tool_calls>";
+    for (const bool required : {false, true}) {
+      const auto native_grammar =
+          JsonConstraint::WithReasoning(JsonConstraint::WithTools(
+              nullptr, {{"record", arguments}}, required, false, format));
+      assert(Accepts(*native_grammar, "Read the file.\n\n" + native));
+      assert(Accepts(*native_grammar,
+                     "A literal <tool_call> is data.</think>" + native));
+      assert(Accepts(*native_grammar, "Example:\n```xml\n" + native +
+                                          "\n```\nNow call it.</think>" +
+                                          native));
+      assert(Accepts(*native_grammar,
+                     "Example: ``" + native + "``.</think>" + native));
+      auto invalid = native;
+      invalid.replace(invalid.find("42"), 2, "43");
+      assert(!Accepts(*native_grammar, "Read the file.\n\n" + invalid));
+      // Compare the fast reasoning mask against scalar grammar evaluation,
+      // including partial/overlapping markers, quoted headers, and tokens that
+      // cross from reasoning into invalid tool output.
+      const std::vector<ConstraintVocabulary::Piece> pieces{
+          {"word"},
+          {"\n"},
+          {"`"},
+          {"~~~\n"},
+          {"<"},
+          {"</think>"},
+          {"think>"},
+          {"tool_call>\n<function=record>"},
+          {native},
+          {invalid},
+          {"</think>" + native},
+          {"</think>" + invalid},
+          {"``" + native + "``"},
+          {"<tool_call>\n<tool_call>\n<function="},
+          {""},
+          {"", true}};
+      const ConstraintVocabulary vocabulary(
+          pieces.size(), [&](auto id) { return pieces[id]; });
+      for (const auto& prefix : std::vector<std::string>{
+               "", "Read the file.\n\n", "Example: `literal ", "```xml\n", "<",
+               "</", "<tool_call>\n<", "~~~\n", "``" + native, "</think>",
+               "Read the file.\n\n" + native}) {
+        auto checked = native_grammar->Start();
+        for (const unsigned char byte : prefix)
+          checked = native_grammar->Advance(checked, byte);
+        assert(!checked.empty());
+        const auto mask = vocabulary.Allowed(*native_grammar, checked);
+        for (std::uint32_t id = 0; id < pieces.size(); ++id)
+          assert(bool(mask[id]) ==
+                 vocabulary.Allows(*native_grammar, checked, id));
+      }
+      assert(Accepts(*native_grammar, "Reasoning only.") == !required);
+      auto state = native_grammar->Start();
+      for (const auto byte : std::string("Read the file.\n\n"))
+        state = native_grammar->Advance(state, byte);
+      const auto checkpoint = state;
+      for (const auto byte : native)
+        state = native_grammar->Advance(state, byte);
+      assert(native_grammar->Complete(state));
+      state = checkpoint;
+      for (const auto byte : "</think>" + native)
+        state = native_grammar->Advance(state, byte);
+      assert(native_grammar->Complete(state));
+    }
+  }
   const std::vector<std::string> tool_pieces{
       "Hello ",
       "<tool_",
@@ -820,20 +929,16 @@ void TestAutomaticTools() {
         assert(!sampler.CanSelectArgmax('!', /*penalties_applied=*/true));
         assert(!sampler.CanSelectArgmax(256, /*penalties_applied=*/true));
         accept(call);
-        // As in llama.cpp, a DeepSeek call block ends the output; Qwen returns
-        // to ordinary text.
-        if (format == Format::kDeepSeek) {
-          assert(sampler.NeedsConstraintMask());
-          assert(!sampler.CanSelectArgmax('a', /*penalties_applied=*/true));
+        // As in llama.cpp, calls end the output: no text may follow them.
+        // Parallel Qwen calls may follow each other; DeepSeek's share a block.
+        assert(sampler.NeedsConstraintMask());
+        assert(!sampler.CanSelectArgmax('a', /*penalties_applied=*/true));
+        if (format == Format::kDeepSeek)
           assert(!sampler.CanSelectArgmax(258, /*penalties_applied=*/true));
-          std::vector<float> after_call(259, -INFINITY);
-          after_call['a'] = 1;
-          after_call[258] = 1;
-          after_call[256] = 0;
-          assert(auto(sampler).Sample(after_call) == 256);
-        } else {
-          assert(!sampler.NeedsConstraintMask());
-        }
+        std::vector<float> after_call(259, -INFINITY);
+        after_call['a'] = 1;
+        after_call[256] = 0;
+        assert(auto(sampler).Sample(after_call) == 256);
         sampler.Accept(257);  // Empty pieces preserve the ordinary path.
         sampler.Accept(256);  // Natural EOS is allowed without another call.
         sampler = before_call;
@@ -897,7 +1002,22 @@ void TestNativeTools() {
     const auto parallel = JsonConstraint::WithTools(
         nullptr, {{"f", parameters}}, true, true, format);
     if (format == Format::kQwen) {
+      // A raw value must not absorb a delimiter prefix and let the actual
+      // closer complete it across the boundary. Pi's read call otherwise
+      // generated two closers, which the native parser correctly rejects.
+      assert(!Accepts(*grammar, wrap("archive.txt\n</parameter>", 3)));
+      assert(!Accepts(*grammar, wrap("archive.txt\n</parameter>\n", 3)));
+      assert(Accepts(*grammar, wrap("archive.txt\n</parameter> literal", 3)));
+      assert(Accepts(*grammar, wrap("archive.txt\n", 3)));
       assert(Accepts(*parallel, call + call));
+      for (const auto gap : {"", " ", "\n", "\n\n", "\n\t \t", "\n\n   "}) {
+        assert(Accepts(*parallel, call + gap));
+        assert(Accepts(*parallel, call + gap + call));
+      }
+      assert(Accepts(*parallel, call + "\n" + std::string(20, '\t')));
+      for (const auto gap : {"  ", "\t", "\r\n", "\n\n\n"})
+        assert(!Accepts(*parallel, call + gap));
+      assert(!Accepts(*parallel, call + "\n" + std::string(21, ' ')));
     } else {
       // As in llama.cpp, parallel DeepSeek calls share one block, which ends
       // the output.
@@ -943,15 +1063,39 @@ void TestNativeTools() {
   const auto ambiguous = parse(R"({"type":"object",
     "properties":{"text":{"type":["string","null"]}},
     "required":["text"],"additionalProperties":false})");
-  assert(!JsonConstraint::ToolParameters(ambiguous, true, Format::kQwen));
-  assert(!JsonConstraint::ToolParameters(ambiguous, true, Format::kDeepSeek));
+  // As llama.cpp, a strict union admitting strings keeps native raw text
+  // instead of moving every tool to a JSON envelope.
+  for (const auto format : {Format::kQwen, Format::kDeepSeek}) {
+    const auto parameters =
+        JsonConstraint::ToolParameters(ambiguous, true, format);
+    assert(parameters);
+    const auto grammar = JsonConstraint::WithTools(nullptr, {{"f", parameters}},
+                                                   true, false, format);
+    assert(
+        Accepts(*grammar, format == Format::kQwen
+                              ? "<tool_call>\n<function=f>\n<parameter=text>"
+                                "\nnull\n</parameter>\n</function>\n"
+                                "</tool_call>"
+                              : "<｜DSML｜tool_calls>\n<｜DSML｜invoke "
+                                "name=\"f\">\n<｜DSML｜parameter name=\"text\" "
+                                "string=\"false\">null</｜DSML｜parameter>\n"
+                                "</｜DSML｜invoke>\n</｜DSML｜tool_calls>"));
+  }
   const auto delimiter_pattern = parse(R"({"type":"object",
     "properties":{"text":{"type":"string","pattern":"^\\n</parameter>$"}},
     "required":["text"],"additionalProperties":false})");
   assert(Accepts(*JsonConstraint::Compile(delimiter_pattern, true),
                  R"({"text":"\n</parameter>"})"));
-  assert(
-      !JsonConstraint::ToolParameters(delimiter_pattern, true, Format::kQwen));
+  // The pattern needs the native delimiter, so it cannot be enforced; as in
+  // llama.cpp the parameter stays raw native text.
+  const auto delimited = JsonConstraint::WithTools(
+      nullptr,
+      {{"f", JsonConstraint::ToolParameters(delimiter_pattern, true,
+                                            Format::kQwen)}},
+      true, false, Format::kQwen);
+  assert(Accepts(*delimited,
+                 "<tool_call>\n<function=f>\n<parameter=text>\nanything\n"
+                 "</parameter>\n</function>\n</tool_call>"));
   for (const std::string name : {" text", "text ", "\ttext", "text\f"}) {
     auto unusual = gufo::json::Value::object();
     unusual["type"] = "object";
@@ -962,7 +1106,17 @@ void TestNativeTools() {
     auto value = gufo::json::Value::object();
     value[name] = "literal";
     assert(Accepts(*JsonConstraint::Compile(unusual, true), value.dump()));
-    assert(!JsonConstraint::ToolParameters(unusual, true, Format::kQwen));
+    // As llama.cpp, the name is written literally in native syntax (the
+    // parser matches declared names exactly) rather than a JSON envelope.
+    const auto qwen = JsonConstraint::WithTools(
+        nullptr,
+        {{"f", JsonConstraint::ToolParameters(unusual, true, Format::kQwen)}},
+        true, false, Format::kQwen);
+    assert(Accepts(*qwen, "<tool_call>\n<function=f>\n<parameter=" + name +
+                              ">\nliteral\n</parameter>\n</function>\n"
+                              "</tool_call>"));
+    assert(!Accepts(*qwen,
+                    "<tool_call>\n<function=f>\n</function>\n</tool_call>"));
     assert(JsonConstraint::ToolParameters(unusual, true, Format::kDeepSeek));
   }
 }
@@ -993,9 +1147,10 @@ void TestOpenNativeTools() {
                       parameter("city name", " é🦉\n\\path\n</tool_call> ") +
                       end;
     assert(Accepts(*grammar, call));
-    // DeepSeek parallel calls share one block, which ends the output.
+    // DeepSeek parallel calls share one block. As in llama.cpp, calls end
+    // the output in both formats.
     assert(Accepts(*grammar, call + "\n" + call) == qwen);
-    assert(Accepts(*grammar, call + " Done.") == qwen);
+    assert(!Accepts(*grammar, call + " Done."));
     if (!qwen)
       assert(Accepts(*grammar, begin + parameter("value", "42") +
                                    "</｜DSML｜invoke>" +
@@ -1118,12 +1273,22 @@ void TestNonStrictAgentTools() {
       rejected = true;
     }
     assert(rejected);
-    // Open nested objects must not bypass the existing exact JSON fallback
-    // for a scalar whose literal value contains the native closing delimiter.
+    // A literal holding the native closing delimiter cannot be written in
+    // native tags. As llama.cpp, the call stays native and the string raw,
+    // while the neighbor keeps its nested requirements.
     auto ambiguous = schema;
-    ambiguous["properties"]["path"]["const"] =
-        format == Format::kQwen ? "a\n</parameter>b" : "a</｜DSML｜parameter>b";
-    assert(!JsonConstraint::ToolParameters(ambiguous, false, format));
+    ambiguous["properties"]["path"]["const"] = format == Format::kQwen
+                                                   ? "a\n</parameter>\nb"
+                                                   : "a</｜DSML｜parameter>b";
+    const auto delimited = JsonConstraint::WithTools(
+        nullptr,
+        {{"edit", JsonConstraint::ToolParameters(ambiguous, false, format)}},
+        true, false, format);
+    assert(Accepts(*delimited, call));
+    auto delimited_nested = call;
+    delimited_nested.replace(delimited_nested.find(edits), edits.size(),
+                             R"([{"oldText":"a"}])");
+    assert(!Accepts(*delimited, delimited_nested));
     // Unsupported root annotations do not relax supported nested requirements.
     auto annotated = schema;
     annotated["unevaluatedProperties"] = true;
@@ -1131,15 +1296,18 @@ void TestNonStrictAgentTools() {
     annotated["properties"]["edits"]["items"]["unevaluatedProperties"] = true;
     const auto annotated_parameters =
         JsonConstraint::ToolParameters(annotated, false, format);
-    // Root wildcards cannot preserve arbitrary JSON types in Qwen's tags.
-    assert(bool(annotated_parameters) == (format == Format::kDeepSeek));
-    const auto annotated_call =
-        annotated_parameters ? JsonConstraint::WithTools(
-                                   nullptr, {{"edit", annotated_parameters}},
-                                   true, false, format)
-                             : nullptr;
-    if (annotated_call)
-      assert(Accepts(*annotated_call, call));
+    // Root wildcards cannot preserve arbitrary JSON types in Qwen's tags. As
+    // llama.cpp, Qwen then generates only the declared parameters.
+    assert(annotated_parameters);
+    const auto annotated_call = JsonConstraint::WithTools(
+        nullptr, {{"edit", annotated_parameters}}, true, false, format);
+    assert(Accepts(*annotated_call, call));
+    if (format == Format::kQwen) {
+      auto wildcard = call;
+      wildcard.insert(wildcard.find("</function>"),
+                      "<parameter=extra>\n1\n</parameter>\n");
+      assert(!Accepts(*annotated_call, wildcard));
+    }
     const auto annotated_json =
         JsonConstraint::ToolParameters(annotated, false, Format::kJson);
     assert(Accepts(*annotated_json,
@@ -1156,8 +1324,7 @@ void TestNonStrictAgentTools() {
                                 R"([{"oldText":"a","newText":42}])"}) {
       auto nested = call;
       nested.replace(nested.find(edits), edits.size(), invalid);
-      if (annotated_call)
-        assert(!Accepts(*annotated_call, nested));
+      assert(!Accepts(*annotated_call, nested));
       assert(!Accepts(*annotated_json,
                       std::string(R"({"path":"a","edits":)") + invalid + "}"));
       assert(!Accepts(*referenced_call, nested));
@@ -1165,7 +1332,7 @@ void TestNonStrictAgentTools() {
   }
   // Best-effort reference handling must remain bounded too.
   const auto cyclic = parse(R"({"$ref":"#","type":"object"})");
-  assert(!JsonConstraint::ToolParameters(cyclic, false, Format::kQwen));
+  assert(JsonConstraint::ToolParameters(cyclic, false, Format::kQwen));
   assert(JsonConstraint::ToolParameters(cyclic, false, Format::kJson));
 
   // Open-object support belongs to non-strict tools, never strict response
@@ -1274,7 +1441,14 @@ void TestUntypedNonStrictTools() {
          R"({"type":"object","additionalProperties":true,"enum":[{"value":"alpha"}]})",
          R"({"type":"object","additionalProperties":{"type":"string"}})"}) {
       const auto schema = parse(text);
-      assert(!JsonConstraint::ToolParameters(schema, false, format));
+      // No declared properties: as in llama.cpp the call stays native and
+      // takes no arguments.
+      const auto native = JsonConstraint::WithTools(
+          nullptr,
+          {{"record", JsonConstraint::ToolParameters(schema, false, format)}},
+          true, false, format);
+      assert(Accepts(*native, begin + end));
+      assert(!Accepts(*native, begin + value + end));
       const auto json =
           JsonConstraint::ToolParameters(schema, false, Format::kJson);
       assert(Accepts(*json, R"({"value":"alpha"})"));
@@ -1369,11 +1543,20 @@ void TestMixedBestEffortToolRoutes() {
          {Format::kQwen, Format::kDeepSeek, Format::kJson}) {
       const auto parameters =
           JsonConstraint::ToolParameters(parse(text), false, format);
+      assert(parameters);
       if (format == Format::kQwen) {
-        assert(!parameters);
+        // Qwen tags cannot type wildcard values. As llama.cpp, only declared
+        // parameters are generated and the call stays native.
+        const auto grammar = JsonConstraint::WithTools(
+            nullptr, {{"record", parameters}}, true, false, format);
+        auto with_extra = call(format, "a", "1");
+        with_extra.insert(with_extra.find("</function>"),
+                          "<parameter=x_b>\n2\n</parameter>\n");
+        assert(Accepts(*grammar, call(format, "a", "1")));
+        assert(!Accepts(*grammar, with_extra));
+        assert(!Accepts(*grammar, call(format, "x_b", "2")));
         continue;
       }
-      assert(parameters);
       if (format == Format::kJson) {
         assert(Accepts(*parameters, R"({"a":"1","x_b":"2"})"));
         assert(!Accepts(*parameters, R"({"a":1,"x_b":"2"})"));
@@ -1416,10 +1599,17 @@ void TestMixedBestEffortToolRoutes() {
     assert(!Accepts(*grammar, call(format, "b", "x")));
     if (format == Format::kDeepSeek)
       assert(!Accepts(*grammar, call(format, "a", "x", false)));
-    // Strict unions still need the exact JSON representation.
+    // Strict unions keep native framing too; llama.cpp has no strict mode
+    // and the parser types the value against the schema.
     auto closed = nullable;
     closed["additionalProperties"] = false;
-    assert(!JsonConstraint::ToolParameters(closed, true, format));
+    const auto strict_grammar = JsonConstraint::WithTools(
+        nullptr,
+        {{"record", JsonConstraint::ToolParameters(closed, true, format)}},
+        true, false, format);
+    assert(Accepts(*strict_grammar, call(format, "a", "null", false)));
+    assert(Accepts(*strict_grammar, call(format, "a", "text")));
+    assert(!Accepts(*strict_grammar, call(format, "b", "x")));
     const auto json =
         JsonConstraint::ToolParameters(nullable, false, Format::kJson);
     assert(Accepts(*json, R"({"a":null})"));
@@ -1473,11 +1663,22 @@ void TestToolSchemaSafety() {
   const auto uri = parse(R"({"type":"object","properties":{
     "url":{"type":"string","format":"uri"}},"required":["url"]})");
   for (const auto format : {Format::kQwen, Format::kDeepSeek}) {
-    // Keep established native calls and automatic agent framing. Forced
-    // extended calls use the shorter JSON representation they had on main.
-    assert(JsonConstraint::ToolParameters(ordinary, false, format, true));
+    // As in llama.cpp, a required call uses the same native arguments as an
+    // automatic one, whatever annotations the schema carries.
+    assert(JsonConstraint::ToolParameters(ordinary, false, format));
     assert(JsonConstraint::ToolParameters(uri, false, format));
-    assert(!JsonConstraint::ToolParameters(uri, false, format, true));
+    const auto required = JsonConstraint::WithTools(
+        nullptr,
+        {{"record", JsonConstraint::ToolParameters(uri, false, format)}}, true,
+        false, format);
+    assert(Accepts(*required,
+                   format == Format::kQwen
+                       ? "<tool_call>\n<function=record>\n<parameter=url>\n"
+                         "https://a.b\n</parameter>\n</function>\n</tool_call>"
+                       : "<｜DSML｜tool_calls>\n<｜DSML｜invoke "
+                         "name=\"record\">\n<｜DSML｜parameter name=\"url\" "
+                         "string=\"true\">https://a.b</｜DSML｜parameter>\n"
+                         "</｜DSML｜invoke>\n</｜DSML｜tool_calls>"));
   }
   for (
       const auto text :
@@ -1485,8 +1686,31 @@ void TestToolSchemaSafety() {
        R"({"type":"object","properties":{"x":{"$ref":"#"}},"required":["x"]})",
        R"({"$ref":"#"})"}) {
     const auto schema = parse(text);
-    for (const auto format : {Format::kQwen, Format::kDeepSeek})
-      assert(!JsonConstraint::ToolParameters(schema, false, format));
+    // Unsatisfiable or recursive guidance cannot be enforced; the value stays
+    // a generic native argument instead of switching to a JSON envelope. A
+    // cyclic root declares no properties, so as llama.cpp it takes none.
+    const bool declared = schema.contains("properties");
+    for (const auto format : {Format::kQwen, Format::kDeepSeek}) {
+      const auto grammar = JsonConstraint::WithTools(
+          nullptr,
+          {{"record", JsonConstraint::ToolParameters(schema, false, format)}},
+          true, false, format);
+      assert(Accepts(*grammar, format == Format::kQwen
+                                   ? "<tool_call>\n<function=record>\n</"
+                                     "function>\n</tool_call>"
+                                   : "<｜DSML｜tool_calls>\n<｜DSML｜invoke "
+                                     "name=\"record\">\n</｜DSML｜invoke>\n</"
+                                     "｜DSML｜tool_calls>") == !declared);
+      assert(Accepts(*grammar,
+                     format == Format::kQwen
+                         ? "<tool_call>\n<function=record>\n<parameter=x>\n5\n"
+                           "</parameter>\n</function>\n</tool_call>"
+                         : "<｜DSML｜tool_calls>\n<｜DSML｜invoke "
+                           "name=\"record\">\n<｜DSML｜parameter name=\"x\" "
+                           "string=\"false\">5</｜DSML｜parameter>\n"
+                           "</｜DSML｜invoke>\n</｜DSML｜tool_calls>") ==
+             declared);
+    }
     const auto json =
         JsonConstraint::ToolParameters(schema, false, Format::kJson);
     assert(json && Accepts(*json, R"({"x":5})"));
@@ -1523,7 +1747,20 @@ void TestToolSchemaSafety() {
     schema["type"] = "object";
     schema["properties"] = parse(R"({"kind":{"type":"string"}})");
     schema["required"] = parse(R"(["kind"])");
-    assert(!JsonConstraint::ToolParameters(schema, false, Format::kQwen));
+    // Qwen stays native and, as llama.cpp, generates only the root object's
+    // declared names; branch keywords declare none.
+    const auto qwen = JsonConstraint::WithTools(
+        nullptr,
+        {{"record",
+          JsonConstraint::ToolParameters(schema, false, Format::kQwen)}},
+        true, false, Format::kQwen);
+    assert(Accepts(*qwen,
+                   "<tool_call>\n<function=record>\n<parameter=kind>\nx\n"
+                   "</parameter>\n</function>\n</tool_call>"));
+    assert(!Accepts(*qwen,
+                    "<tool_call>\n<function=record>\n<parameter=kind>\nx\n"
+                    "</parameter>\n<parameter=payload>\n1\n</parameter>\n"
+                    "</function>\n</tool_call>"));
     const auto json =
         JsonConstraint::ToolParameters(schema, false, Format::kJson);
     for (const auto value : {"1", "true", "null", "[1]", R"({"x":1})"}) {
@@ -1551,8 +1788,207 @@ void TestToolSchemaSafety() {
   assert(!Accepts(*json, R"({"edits":[{"oldText":1,"newText":"b"}]})"));
   for (const auto format : {Format::kQwen, Format::kDeepSeek})
     assert(JsonConstraint::ToolParameters(metadata, false, format));
-  for (const auto format : {Format::kQwen, Format::kDeepSeek})
-    assert(!JsonConstraint::ToolParameters(metadata, false, format, true));
+  for (const auto format : {Format::kQwen, Format::kDeepSeek}) {
+    const auto required = JsonConstraint::WithTools(
+        nullptr,
+        {{"record", JsonConstraint::ToolParameters(metadata, false, format)}},
+        true, false, format);
+    const std::string edits =
+        R"([{"oldText":"a","newText":"b","metadata":{"x":1}}])";
+    const auto call =
+        format == Format::kQwen
+            ? "<tool_call>\n<function=record>\n<parameter=edits>\n" + edits +
+                  "\n</parameter>\n</function>\n</tool_call>"
+            : "<｜DSML｜tool_calls>\n<｜DSML｜invoke name=\"record\">\n"
+              "<｜DSML｜parameter name=\"edits\" string=\"false\">" +
+                  edits +
+                  "</｜DSML｜parameter>\n</｜DSML｜invoke>\n"
+                  "</｜DSML｜tool_calls>";
+    assert(Accepts(*required, call));
+    auto missing = call;
+    missing.replace(missing.find(edits), edits.size(), R"([{}])");
+    assert(!Accepts(*required, missing));
+  }
+}
+
+// llama.cpp common/parsers/qwen3-coder.cpp and deepseek.cpp keep native call
+// syntax for every schema: strings are raw text and other values follow their
+// schema as far as it is supported. No schema, tool choice or strict flag may
+// move a native model to a JSON envelope (#383, #438).
+void TestNativeToolSchemaMatrix() {
+  using Format = JsonConstraint::ToolFormat;
+  struct Property {
+    const char* schema;
+    const char* value;
+    bool string;
+    const char* rejected;  // A value the native grammar must still refuse.
+  };
+  const std::vector<Property> properties{
+      {R"({"type":"string"})", "plain \"text\"\n<b>", true, nullptr},
+      {R"({"type":"string","pattern":"^[0-9]{4}$"})", "not a year", true,
+       nullptr},
+      {R"({"type":"string","format":"uri"})", "https://example.com", true,
+       nullptr},
+      {R"({"type":"string","default":"x","examples":["y"],"deprecated":true,"nullable":true,"title":"T"})",
+       "x", true, nullptr},
+      {R"({"type":"string","enum":["red","blue"]})", "red", true, nullptr},
+      {R"({"type":"string","minLength":2})", "ab", true, nullptr},
+      {R"({"type":"integer","exclusiveMinimum":0,"maximum":9007199254740991})",
+       "240000", false, "x"},
+      {R"({"type":"integer","minimum":5,"maximum":2})", "5", false, nullptr},
+      {R"({"type":"boolean"})", "true", false, "yes"},
+      {R"({"oneOf":[{"type":"string"},{"type":"integer"}]})", "free text", true,
+       nullptr},
+      {R"({"anyOf":[{"type":"integer"},{"type":"null"}]})", "3", false, "x"},
+      {R"({"allOf":[{"type":"string"},{"minLength":1}]})", "text", true,
+       nullptr},
+      {R"({"allOf":[{"type":"integer"},{"minimum":1}]})", "2", false, "x"},
+      {R"({"not":{"type":"null"}})", "anything", true, nullptr},
+      {R"({"type":["string","null"]})", "text", true, nullptr},
+      {R"({"type":"object","properties":{"x":{"type":"integer"}},"required":["x"]})",
+       R"({"x": 1})", false, "x"},
+      {R"({"type":"array","items":{"type":"object","properties":{"k":{"type":"string"}},"required":["k"]}})",
+       R"([{"k": "v"}])", false, "[{}]"},
+      {R"({"$ref":"#/$defs/S"})", "referenced", true, nullptr},
+      {R"({})", "untyped", true, nullptr},
+      {R"({"if":{"type":"string"},"then":{"minLength":1}})", "conditional",
+       true, nullptr},
+  };
+  // Roots marked open admit extra names, which only DeepSeek's typed string
+  // flag can carry; Qwen generates declared names only, as llama.cpp.
+  const std::vector<std::pair<const char*, bool>> roots{
+      {R"({"type":"object"})", false},
+      {R"({"$schema":"https://json-schema.org/draft/2020-12/schema","type":"object","additionalProperties":false})",
+       false},
+      {R"({"type":"object","additionalProperties":true})", true},
+      {R"({"type":"object","patternProperties":{"^x_":{"type":"integer"}}})",
+       true},
+      {R"({"type":"object","if":{"required":["v"]},"then":{"required":["v"]}})",
+       true},
+      {R"({"type":"object","unevaluatedProperties":true,"title":"Args","description":"d"})",
+       true},
+  };
+  std::size_t checked = 0;
+  for (const auto& [root_text, open] : roots) {
+    for (const auto& property : properties) {
+      auto schema = parse(root_text);
+      schema["properties"] = gufo::json::Value::object();
+      schema["properties"]["v"] = parse(property.schema);
+      schema["properties"]["other"] = parse(R"({"type":"string"})");
+      schema["required"] = parse(R"(["v"])");
+      schema["$defs"] = parse(R"({"S":{"type":"string"}})");
+      for (const auto format : {Format::kQwen, Format::kDeepSeek}) {
+        const bool qwen = format == Format::kQwen;
+        const auto argument = [&](std::string_view name, std::string_view value,
+                                  bool string) {
+          return qwen ? "<parameter=" + std::string(name) + ">\n" +
+                            std::string(value) + "\n</parameter>\n"
+                      : "<｜DSML｜parameter name=\"" + std::string(name) +
+                            "\" string=\"" + (string ? "true" : "false") +
+                            "\">" + std::string(value) +
+                            "</｜DSML｜parameter>\n";
+        };
+        const auto call = [&](const std::string& arguments) {
+          return (qwen
+                      ? "<tool_call>\n<function=t>\n"
+                      : "<｜DSML｜tool_calls>\n<｜DSML｜invoke name=\"t\">\n") +
+                 arguments +
+                 (qwen ? "</function>\n</tool_call>"
+                       : "</｜DSML｜invoke>\n</｜DSML｜tool_calls>");
+        };
+        for (const bool strict : {false, true}) {
+          for (const bool required : {false, true}) {
+            std::shared_ptr<const JsonConstraint> parameters;
+            try {
+              parameters =
+                  JsonConstraint::ToolParameters(schema, strict, format);
+            } catch (const std::invalid_argument&) {
+              // Only an impossible or unsupported strict schema is rejected.
+              assert(strict);
+              continue;
+            }
+            assert(parameters && "a native model never uses a JSON envelope");
+            const auto grammar = JsonConstraint::WithTools(
+                nullptr, {{"t", parameters}}, required, false, format);
+            const auto value = argument("v", property.value, property.string);
+            if (!Accepts(*grammar, call(value)))
+              std::cerr << "value refused: root=" << root_text
+                        << " v=" << property.schema << " qwen=" << qwen
+                        << " strict=" << strict << "\n";
+            assert(Accepts(*grammar, call(value)));
+            assert(
+                Accepts(*grammar, call(argument("other", "o", true) + value)));
+            if (Accepts(*grammar, call(argument("other", "o", true))))
+              std::cerr << "missing required accepted: root=" << root_text
+                        << " v=" << property.schema << " qwen=" << qwen
+                        << " strict=" << strict << " required=" << required
+                        << "\n";
+            assert(!Accepts(*grammar, call(argument("other", "o", true))));
+            // Undeclared names are never generated for Qwen, strict tools or
+            // closed roots; DeepSeek's typed string flag may carry them for an
+            // open root, as its native ToolParameters already admits.
+            if (qwen || strict || !open) {
+              if (Accepts(*grammar, call(value + argument("zz", "1", true))))
+                std::cerr << "undeclared accepted: root=" << root_text
+                          << " v=" << property.schema << " qwen=" << qwen
+                          << " strict=" << strict << "\n";
+              assert(
+                  !Accepts(*grammar, call(value + argument("zz", "1", true))));
+            }
+            if (property.rejected &&
+                Accepts(*grammar, call(argument("v", property.rejected,
+                                                property.string))))
+              std::cerr << "rejected value accepted: root=" << root_text
+                        << " v=" << property.schema << " qwen=" << qwen
+                        << " strict=" << strict << "\n";
+            if (property.rejected)
+              assert(!Accepts(*grammar, call(argument("v", property.rejected,
+                                                      property.string))));
+            ++checked;
+          }
+        }
+      }
+    }
+  }
+  assert(checked >= roots.size() * properties.size() * 2 * 2);
+}
+
+// Verdicts of llama.cpp's own Qwen3-Coder and DeepSeek tool grammars (GBNF
+// engine, tool_choice required) for 86 schemas x 4 outputs. Every difference
+// is recorded with its reason. tools/llama_parity regenerates the fixture.
+void TestLlamaCppToolGrammarGoldens() {
+  using Format = JsonConstraint::ToolFormat;
+  std::ifstream in(GUFO_LLAMA_TOOL_GRAMMAR_GOLDENS);
+  assert(in && "llama.cpp tool grammar goldens are present");
+  const auto fixture =
+      parse(std::string(std::istreambuf_iterator<char>(in), {}));
+  std::size_t rows = 0, differences = 0;
+  for (const auto& row : fixture.find("rows")->items()) {
+    const auto format =
+        row.member_str("format") == "qwen" ? Format::kQwen : Format::kDeepSeek;
+    const auto grammar = JsonConstraint::WithTools(
+        nullptr,
+        {{"record", JsonConstraint::ToolParameters(*row.find("parameters"),
+                                                   false, format)}},
+        true, false, format);
+    const bool accepted = Accepts(*grammar, row.member_str("output"));
+    const bool llama = row.find("llama_cpp")->as_bool();
+    const bool expected = row.find("gufo")->as_bool();
+    if (accepted != expected)
+      std::cerr << "llama.cpp golden mismatch: " << row.member_str("format")
+                << " " << row.member_str("case") << " "
+                << row.member_str("class") << " gufo=" << accepted
+                << " recorded=" << expected << "\n";
+    assert(accepted == expected);
+    const bool explained = row.contains("difference");
+    assert(explained == (accepted != llama));
+    // gufo is never stricter on a valid output, except a const it enforces.
+    if (llama && row.member_str("class") == "valid" && !accepted)
+      assert(row.member_str("difference").find("const") != std::string::npos);
+    ++rows;
+    differences += explained;
+  }
+  assert(rows == 688 && differences < rows / 5);
 }
 
 int main(int argc, char** argv) {
@@ -1594,6 +2030,7 @@ int main(int argc, char** argv) {
   TestTokensAndSampling();
   TestStringMaskCache();
   TestUnsupportedPatterns();
+  TestNativeRequestMaskReuse();
   TestReasoningConstraint();
   TestAutomaticTools();
   TestNativeTools();
@@ -1602,6 +2039,8 @@ int main(int argc, char** argv) {
   TestUntypedNonStrictTools();
   TestMixedBestEffortToolRoutes();
   TestToolSchemaSafety();
+  TestNativeToolSchemaMatrix();
+  TestLlamaCppToolGrammarGoldens();
   std::cout << "JSON constraints: language, schema, Unicode and sampler checks "
                "passed\n";
 }

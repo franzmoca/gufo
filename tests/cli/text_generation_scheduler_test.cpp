@@ -5,6 +5,8 @@
 #include <chrono>
 #include <condition_variable>
 #include <cstdlib>
+#include <filesystem>
+#include <fstream>
 #include <functional>
 #include <future>
 #include <iostream>
@@ -26,6 +28,7 @@
 #include "src/cli/serve/http_server.hpp"
 #include "src/cli/serve/logging.hpp"
 #include "src/cli/serve/stop_sequences.hpp"
+#include "src/cli/serve/trace.hpp"
 
 namespace {
 
@@ -866,6 +869,87 @@ void TestRunnerCanReuseExactIncrementalText() {
          "exact incremental text avoids duplicate final decoding");
 }
 
+// An armed `--trace` records each finished request under the HTTP request id
+// bound where it was submitted: the prompt as the runner decodes it, the
+// effective limits and sampling, the cache outcome and the raw output.
+void TestGenerationTraceRecordsPromptAndOutput() {
+  namespace fs = std::filesystem;
+  using gufo::server::Trace;
+  auto control = std::make_shared<FakeControl>();
+  control->incremental_text_is_exact = true;
+  auto scheduler = MakeScheduler(control, 1);
+  (void)scheduler->Submit({7}, 2, 0.0F).Wait();
+  Expect(control->decode_calls.load(std::memory_order_relaxed) == 0,
+         "an unarmed trace decodes no prompt");
+
+  const auto path =
+      fs::temp_directory_path() /
+      ("gufo-scheduler-trace-" + std::to_string(::getpid()) + ".jsonl");
+  fs::remove(path);
+  Expect(!Trace::Open(path.string()).has_value(), "trace file opens");
+  gufo::sampling::SamplingConfig sampling;
+  sampling.temperature = 0.7F;
+  sampling.top_k = 4;
+  sampling.seed = 9;
+  TextGenerationScheduler::Result result;
+  {
+    const Trace::RequestScope scope("r42");
+    result = scheduler->Submit({7, 8}, 2, sampling).Wait();
+  }
+  Expect(control->decode_calls.load(std::memory_order_relaxed) == 1,
+         "an armed trace decodes the prompt once");
+  control->throw_advance_label = 9;
+  bool failed = false;
+  {
+    const Trace::RequestScope scope("r43");
+    try {
+      (void)scheduler->Submit({9}, 2, sampling).Wait();
+    } catch (const std::runtime_error&) {
+      failed = true;
+    }
+  }
+  Trace::Close();
+  Expect(failed, "the injected runner failure reaches the consumer");
+
+  std::vector<gufo::json::Value> records;
+  {
+    std::ifstream input(path);
+    for (std::string line; std::getline(input, line);) {
+      records.push_back(gufo::json::parse(line));
+    }
+  }
+  fs::remove(path);
+  Expect(records.size() == 2, "one generation record per request");
+  const auto& record = records.front();
+  Expect(record.member_str("event") == "generation" &&
+             record.member_str("request") == "r42",
+         "the record names the bound HTTP request");
+  Expect(record.member_str("prompt") == "7,8",
+         "the prompt is recorded as the runner decodes it");
+  Expect(!result.text.empty() && record.member_str("output") == result.text,
+         "the output is the generated text before transport parsing");
+  Expect(record.member_size("max_tokens") == 2 &&
+             record.member_size("prompt_tokens") == 2 &&
+             record.member_size("generated_tokens") == result.tokens.size(),
+         "the record carries the effective limits and counts");
+  const auto* recorded_sampling = record.find("sampling");
+  Expect(recorded_sampling != nullptr &&
+             recorded_sampling->find("temperature")->as_double() == 0.7 &&
+             recorded_sampling->member_size("top_k") == 4 &&
+             recorded_sampling->member_size("seed") == 9 &&
+             !recorded_sampling->find("constrained")->as_bool(),
+         "the record carries the effective sampling");
+  Expect(record.member_str("cache") == "miss" &&
+             record.member_str("finish") == "length" &&
+             record.find("error") == nullptr,
+         "the record carries the cache outcome and finish");
+  const auto& failure = records.back();
+  Expect(failure.member_str("request") == "r43" &&
+             failure.member_str("prompt") == "9" &&
+             failure.member_str("error") == "injected scheduler runner failure",
+         "a failed request still records its prompt and the failure");
+}
+
 void TestMultiTokenDecodePublishesDraftMetricsAndDisablesPrefixReuse() {
   auto control = std::make_shared<FakeControl>();
   control->incremental_prefill = false;
@@ -1079,6 +1163,83 @@ void TestMultiResidentPrefillUsesBoundedWorkUnits() {
         result.prefill_chunks == 3 && result.active_decode_prefill_chunks == 0,
         "model-sized work units still yield for admission and cancellation");
   }
+}
+
+void TestArrivalDoesNotWaitForAnotherLongChunk() {
+  for (const bool speculative : {false, true}) {
+    auto control = std::make_shared<FakeControl>();
+    control->multi_token_decode = speculative;
+    control->batched_multi_token_decode = speculative;
+    control->supports_batched_advance = speculative;
+    control->prefill_capacity = 4;
+    control->block_prefill_label = 1;
+    auto scheduler = MakeScheduler(control, 2, {.decode_active_tokens = 2});
+    auto long_request = scheduler->Submit(
+        {1, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20}, 4, 0.0F);
+    control->WaitForPrefill(1);
+    auto short_request = scheduler->Submit({2}, 1, 0.0F);
+    control->ReleasePrefill();
+    Expect(short_request.Wait().tokens == ExpectedTokens(2, 1),
+           "the arrival produces its independent first token");
+    Expect(long_request.Wait().tokens == ExpectedTokens(1, 4),
+           "the interrupted prefill retains its trajectory");
+    const auto events = control->Events();
+    const auto second_long = EventIndex(events, EventKind::kPrefill, 1, 1);
+    Expect(EventIndex(events, EventKind::kPrefill, 2) < second_long,
+           "a newcomer prefills before another chunk of the previous request");
+    Expect(EventIndex(events, EventKind::kAdvance, 2) < second_long,
+           "a ready short request does not wait to batch with a distant peer");
+  }
+}
+
+void TestLongPrefillsKeepWideFairTurns() {
+  auto control = std::make_shared<FakeControl>();
+  control->prefill_capacity = 4;
+  control->block_prefill_label = 1;
+  auto scheduler = MakeScheduler(control, 2, {.decode_active_tokens = 2});
+  auto first = scheduler->Submit(
+      {1, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20}, 2, 0.0F);
+  control->WaitForPrefill(1);
+  auto second = scheduler->Submit(
+      {2, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30}, 2, 0.0F);
+  control->ReleasePrefill();
+  Expect(first.Wait().tokens == ExpectedTokens(1, 2) &&
+             second.Wait().tokens == ExpectedTokens(2, 2),
+         "interleaved prefills preserve both outputs");
+  const auto events = control->Events();
+  const auto a = EventIndex(events, EventKind::kPrefill, 1, 1);
+  const auto b = EventIndex(events, EventKind::kPrefill, 2);
+  const auto next_b = EventIndex(events, EventKind::kPrefill, 2, 1);
+  Expect(b < a && a < next_b,
+         "the newcomer gets one turn, then the older prefill progresses");
+  Expect(
+      events[a].count == 4 && events[b].count == 4 && events[next_b].count == 4,
+      "long waiting prefills keep wide chunks before any decoder is ready");
+}
+
+void TestShortArrivalBehindWaitingPrefill() {
+  auto control = std::make_shared<FakeControl>();
+  control->prefill_capacity = 4;
+  control->block_prefill_label = 1;
+  auto scheduler = MakeScheduler(control, 3, {.decode_active_tokens = 2});
+  auto first = scheduler->Submit(
+      {1, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20}, 2, 0.0F);
+  control->WaitForPrefill(1);
+  auto second = scheduler->Submit({2, 20, 21, 22, 23, 24, 25, 26}, 2, 0.0F);
+  auto short_request = scheduler->Submit({3}, 1, 0.0F);
+  control->ReleasePrefill();
+  Expect(first.Wait().tokens == ExpectedTokens(1, 2) &&
+             second.Wait().tokens == ExpectedTokens(2, 2) &&
+             short_request.Wait().tokens == ExpectedTokens(3, 1),
+         "three independent requests preserve their outputs");
+  const auto events = control->Events();
+  const auto second_start = EventIndex(events, EventKind::kPrefill, 2);
+  Expect(events[second_start].count == 2,
+         "a long peer gets bounded work ahead of a waiting short request");
+  Expect(second_start < EventIndex(events, EventKind::kPrefill, 3) &&
+             EventIndex(events, EventKind::kAdvance, 3) <
+                 EventIndex(events, EventKind::kPrefill, 1, 1),
+         "the short newcomer gets its first token without repeating the round");
 }
 
 void TestDecodeActivePrefillIsBounded(bool multi_token, bool batched) {
@@ -2159,7 +2320,7 @@ void TestSnapshotDoesNotBlockOtherRequests() {
     };
     auto scheduler = MakeScheduler(control, 2, {.decode_active_tokens = 2});
     const std::vector<TextRunnerToken> prompt =
-        history ? std::vector<TextRunnerToken>(2049, 1)
+        history ? std::vector<TextRunnerToken>(2200, 1)
                 : std::vector<TextRunnerToken>{1, 10};
     auto first = scheduler->Submit(prompt, 7, 0.0F);
     const bool started = entered.try_acquire_for(kTestTimeout);
@@ -2189,6 +2350,48 @@ void TestSnapshotDoesNotBlockOtherRequests() {
   }
 }
 
+void TestCapturedDecoderResumesBeforeMorePrefill() {
+  auto control = std::make_shared<FakeControl>();
+  control->max_context = 4096;
+  control->preview_first_token = true;
+  control->block_prefill_label = 2;
+  std::binary_semaphore entered(0), release(0), finished(0);
+  std::atomic<unsigned> captures{0};
+  control->snapshot_callback = [&] {
+    if (captures.fetch_add(1) == 0) {
+      entered.release();
+      release.acquire();
+      finished.release();
+    }
+  };
+  auto scheduler = MakeScheduler(control, 2, {.decode_active_tokens = 2});
+  auto first = scheduler->Submit({1, 10}, 3, 0.0F);
+  Expect(entered.try_acquire_for(kTestTimeout), "first capture starts");
+  auto second = scheduler->Submit({2, 20, 21, 22, 23, 24, 25, 26, 27}, 1, 0.0F);
+  // Finish the capture while the peer's bounded chunk is still running.
+  control->WaitForPrefill(2);
+  release.release();
+  Expect(finished.try_acquire_for(kTestTimeout), "first capture finishes");
+  std::this_thread::sleep_for(std::chrono::milliseconds(50));
+  control->ReleasePrefill();
+  Expect(first.Wait().tokens == ExpectedTokens(1, 3),
+         "captured request resumes exactly");
+  Expect(second.Wait().tokens == ExpectedTokens(2, 1),
+         "peer prefill completes");
+  const auto events = control->Events();
+  const auto position = [&](EventKind kind, TextRunnerToken label,
+                            std::size_t occurrence) {
+    for (std::size_t index = 0; index < events.size(); ++index)
+      if (events[index].kind == kind && events[index].label == label &&
+          occurrence-- == 0)
+        return index;
+    return events.size();
+  };
+  Expect(
+      position(EventKind::kAdvance, 1, 0) < position(EventKind::kPrefill, 2, 1),
+      "a request leaving capture decodes before another peer chunk");
+}
+
 void TestCapturesAtCapacityAllowQueuedProgress() {
   for (const auto [multi, history] :
        {std::pair{false, false}, {true, false}, {false, true}, {true, true}}) {
@@ -2214,7 +2417,7 @@ void TestCapturesAtCapacityAllowQueuedProgress() {
         // Exercise captures during prefill as well as after first-token
         // publication, including the single-slot admission deadlock.
         metadata.cache_prefix_tokens = multi && !history ? 1 : 0;
-        auto prompt = std::vector<TextRunnerToken>(history ? 2049 : 2, 10);
+        auto prompt = std::vector<TextRunnerToken>(history ? 2200 : 2, 10);
         prompt.front() = static_cast<TextRunnerToken>(i + 1);
         requests.push_back(
             scheduler->Submit(prompt, 7, 0.0F, {}, false, metadata));
@@ -2246,7 +2449,7 @@ void TestCapturesAtCapacityAllowQueuedProgress() {
              "all slots capturing must not deadlock queued admission");
       results.get();
       if (history) {
-        auto prompt = std::vector<TextRunnerToken>(2049, 10);
+        auto prompt = std::vector<TextRunnerToken>(2200, 10);
         prompt.front() = 1;
         const auto resumed = scheduler->Submit(prompt, 7, 0.0F).Wait();
         Expect(resumed.cache_hit && resumed.cached_prompt_tokens == 2048 &&
@@ -2626,6 +2829,7 @@ int main() {
       }
     }
   }
+  TestCapturedDecoderResumesBeforeMorePrefill();
   TestCapturesAtCapacityAllowQueuedProgress();
   TestShutdownCancelsRunnerAcquisition();
   TestSnapshotDoesNotBlockOtherRequests();
@@ -2640,6 +2844,7 @@ int main() {
   TestAwaitedCheckpointSurvivesCachePressure();
   TestRunnerCanSkipUnusedFinalAdvance();
   TestRunnerCanReuseExactIncrementalText();
+  TestGenerationTraceRecordsPromptAndOutput();
   TestMultiTokenDecodePublishesDraftMetricsAndDisablesPrefixReuse();
   TestRequestTotalsDoNotNeedAConsumer();
   TestMultiTokenRunnerCanSwitchToBatchedExecution();
@@ -2647,6 +2852,9 @@ int main() {
   TestBatchFailureIsolation();
   TestBatchDeviceLossFailsSuccessfulPeers();
   TestMultiResidentPrefillUsesBoundedWorkUnits();
+  TestArrivalDoesNotWaitForAnotherLongChunk();
+  TestLongPrefillsKeepWideFairTurns();
+  TestShortArrivalBehindWaitingPrefill();
   for (const bool multi_token : {false, true}) {
     for (const bool batched : {false, true}) {
       if (batched && !multi_token)

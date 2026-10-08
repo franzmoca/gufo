@@ -40,6 +40,7 @@
 #if defined(ENGINE_ENABLE_HIP)
 #include <hip/hip_runtime_api.h>
 #endif
+#include "src/cli/serve/trace.hpp"
 #include "src/cli/serve/tts_service.hpp"
 #include "src/cli/serve/video_jobs.hpp"
 #include "src/cli/video/video.hpp"
@@ -234,6 +235,9 @@ struct ServerLogOptions {
 constexpr std::string_view kLogLevelHelp =
     "Log verbosity: error, warn, info or debug (default: info)";
 constexpr std::string_view kVerboseHelp = "Shorthand for --log-level=debug";
+constexpr std::string_view kTraceHelp =
+    "Append text request bodies, rendered prompts, generated text and replies "
+    "to PATH as JSON Lines; the file holds client content";
 
 void AddServerOptions(gufo::cli::ArgParser& parser, std::string* host,
                       int* port, std::size_t* session_count,
@@ -594,7 +598,7 @@ void PrintServeHelp(std::string_view program_name,
     std::size_t prefill_chunk_tokens =
         server::kDefaultDecodeActivePrefillTokens;
     std::size_t max_pending_requests = 16;
-    std::size_t max_pending_requests_per_client = 4;
+    std::size_t max_pending_requests_per_client = 0;
     std::uint64_t request_timeout_ms = 0;
     std::size_t max_output_bytes = server::kDefaultMaxOutputBytes;
     std::size_t max_buffered_output_bytes =
@@ -607,6 +611,7 @@ void PrintServeHelp(std::string_view program_name,
         server::TextRunnerDiskCacheOptions::kDefaultCapacityBytes;
     std::size_t cache_disk_staging_bytes = 0;
     bool log_progress = false;
+    std::string trace_path;
 
     gufo::cli::ArgParser parser(
         std::string(program_name) + " serve llm",
@@ -692,9 +697,10 @@ void PrintServeHelp(std::string_view program_name,
     parser.AddOption("", "--max-pending", "N",
                      "Maximum queued generation requests (default: 16)",
                      "Scheduling", &max_pending_requests);
-    parser.AddOption("", "--max-pending-per-client", "N",
-                     "Maximum queued requests per client IP (default: 4)",
-                     "Scheduling", &max_pending_requests_per_client);
+    parser.AddOption(
+        "", "--max-pending-per-client", "N",
+        "Maximum queued requests per client IP (default: --max-pending)",
+        "Scheduling", &max_pending_requests_per_client);
     parser.AddOption(
         "", "--request-timeout-ms", "MS",
         "Queue plus generation timeout; 0 disables it (default: 0)",
@@ -721,14 +727,16 @@ void PrintServeHelp(std::string_view program_name,
                      "Retained disk-cache byte budget (default: " +
                          std::to_string(cache_disk_bytes) + ")",
                      "Cache", &cache_disk_bytes);
-    parser.AddOption("", "--cache-disk-staging-bytes", "N",
-                     "RAM limit for queued snapshots and each disk read "
-                     "(default: 0 = auto, at most 1 GiB and 1/8 available RAM)",
-                     "Cache", &cache_disk_staging_bytes);
+    parser.AddOption(
+        "", "--cache-disk-staging-bytes", "N",
+        "RAM limit for queued snapshots and each disk read "
+        "(default: 0 = auto, at most the disk budget and 1/8 available RAM)",
+        "Cache", &cache_disk_staging_bytes);
     parser.AddFlag("", "--log-progress",
                    "Log live prefill and decode progress (needs "
                    "--log-level=info or debug)",
                    "Logging", &log_progress);
+    parser.AddOption("", "--trace", "PATH", kTraceHelp, "Logging", &trace_path);
     ServerOptionHelpTargets server_help;
     AddServerOptionsForHelp(parser, &server_help);
     parser.PrintHelp();
@@ -1143,7 +1151,8 @@ int RunServe(std::span<const char* const> args) {
     std::size_t prefill_chunk_tokens =
         server::kDefaultDecodeActivePrefillTokens;
     std::size_t max_pending_requests = 16;
-    std::size_t max_pending_requests_per_client = 4;
+    // Defaults to --max-pending after parsing unless supplied.
+    std::size_t max_pending_requests_per_client = 0;
     std::uint64_t request_timeout_ms = 0;
     std::size_t max_output_bytes = server::kDefaultMaxOutputBytes;
     std::size_t max_buffered_output_bytes =
@@ -1156,6 +1165,7 @@ int RunServe(std::span<const char* const> args) {
         server::TextRunnerDiskCacheOptions::kDefaultCapacityBytes;
     std::size_t cache_disk_staging_bytes = 0;
     bool log_progress = false;
+    std::string trace_path;
 
     gufo::cli::ArgParser llm_parser(
         "gufo serve llm",
@@ -1247,9 +1257,10 @@ int RunServe(std::span<const char* const> args) {
     llm_parser.AddOption("", "--max-pending", "N",
                          "Maximum queued generation requests (default: 16)",
                          "Scheduling", &max_pending_requests);
-    llm_parser.AddOption("", "--max-pending-per-client", "N",
-                         "Maximum queued requests per client IP (default: 4)",
-                         "Scheduling", &max_pending_requests_per_client);
+    llm_parser.AddOption(
+        "", "--max-pending-per-client", "N",
+        "Maximum queued requests per client IP (default: --max-pending)",
+        "Scheduling", &max_pending_requests_per_client);
     llm_parser.AddOption(
         "", "--request-timeout-ms", "MS",
         "Queue plus generation timeout; 0 disables it (default: 0)",
@@ -1281,12 +1292,14 @@ int RunServe(std::span<const char* const> args) {
     llm_parser.AddOption(
         "", "--cache-disk-staging-bytes", "N",
         "RAM limit for queued snapshots and each disk read "
-        "(default: 0 = auto, at most 1 GiB and 1/8 available RAM)",
+        "(default: 0 = auto, at most the disk budget and 1/8 available RAM)",
         "Cache", &cache_disk_staging_bytes);
     llm_parser.AddFlag("", "--log-progress",
                        "Log live prefill and decode progress (needs "
                        "--log-level=info or debug)",
                        "Logging", &log_progress);
+    llm_parser.AddOption("", "--trace", "PATH", kTraceHelp, "Logging",
+                         &trace_path);
 
     add_server_options(llm_parser);
     if (!llm_parser.Parse(sub_args, &parse_err)) {
@@ -1298,6 +1311,9 @@ int RunServe(std::span<const char* const> args) {
       PrintServeHelp("gufo", "llm");
       return 0;
     }
+    if (!llm_parser.WasSupplied("--max-pending-per-client")) {
+      max_pending_requests_per_client = max_pending_requests;
+    }
     if (!prepare_server_options()) {
       return 2;
     }
@@ -1308,6 +1324,18 @@ int RunServe(std::span<const char* const> args) {
       std::cerr << "Error: --log-progress needs --log-level=info or "
                    "--log-level=debug\n";
       return 2;
+    }
+    // Opened before the model loads, so an unwritable path fails at once
+    // instead of after the weights are resident.
+    if (!trace_path.empty()) {
+      if (const auto error = server::Trace::Open(trace_path)) {
+        std::cerr << "Error: cannot open --trace file '" << trace_path
+                  << "': " << *error << "\n";
+        return 2;
+      }
+      server::Logger::Warn("trace",
+                           "event=trace_enabled path=" + trace_path +
+                               " content=prompts,generated_text,replies");
     }
     sampling::SamplingConfig validated_sampling;
     const bool sampling_valid = !server::ParseSamplingConfig(

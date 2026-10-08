@@ -28,10 +28,10 @@ import zlib
 from metrics import compare, comparison_status, join_server_timings, timing_measurement
 
 TESTS = Path(__file__).resolve().parent
-SUITES = ("discovery", "responses", "stops", "conversation", "image-inputs", "structured", "structured-limits",
-          "tool-reasoning",
-          "tools", "auto-tools", "tool-edges", "tool-agent", "tool-agent-loop", "tool-history", "tool-untyped", "tool-mixed", "tool-schema-edges", "sampling-defaults", "sampling-ranges", "batch",
-          "long-context", "state-edges", "progress", "stream-start", "metrics", "cache-edits", "cache-growth", "cache-rotation", "cache-concurrency", "cache-shared-prefix", "cache")
+SUITES = ("discovery", "responses", "stops", "conversation", "image-inputs", "image-count", "structured", "structured-limits",
+          "tool-reasoning", "reasoning-separator",
+          "tools", "auto-tools", "tool-edges", "tool-agent", "tool-agent-loop", "tool-history", "tool-untyped", "tool-mixed", "tool-native-schemas", "tool-native-types", "tool-schema-edges", "sampling-defaults", "sampling-ranges", "batch",
+          "long-context", "state-edges", "progress", "stream-start", "prefill-scheduling", "metrics", "cache-edits", "cache-growth", "cache-depth", "cache-rotation", "cache-concurrency", "cache-shared-prefix", "cache-bridge", "system-injection", "cache")
 SAMPLING = {
     "--temperature": ("temperature", float), "--top-p": ("top_p", float),
     "--top-k": ("top_k", int), "--min-p": ("min_p", float),
@@ -56,8 +56,8 @@ COMPARISON_FIELDS = ("comparison_command", "sampling_preset", "sampling_override
 
 def provenance():
     source = hashlib.sha256()
-    for name in ("run.py", "metrics.py", "progress.py", "stream_start.py", "server_metrics.py", "openai_sdk.py", "continuation.py",
-                 "tool_reasoning.py", "tool_agent.py", "discovery.py", "image_inputs.py", "cache_edits.py", "cache_growth.py", "cache_rotation.py", "cache_concurrency.py", "cache_shared_prefix.py",
+    for name in ("run.py", "metrics.py", "progress.py", "stream_start.py", "prefill_scheduling.py", "server_metrics.py", "openai_sdk.py", "continuation.py",
+                 "tool_reasoning.py", "tool_agent.py", "tool_native.py", "discovery.py", "image_inputs.py", "cache_edits.py", "cache_growth.py", "cache_depth.py", "cache_rotation.py", "cache_concurrency.py", "cache_shared_prefix.py", "cache_bridge.py", "system_injection.py",
                  "cache_disk_spacing.py"):
         source.update((TESTS / name).read_bytes())
     lock = TESTS.parents[1] / "flake.lock"
@@ -247,16 +247,17 @@ def main():
             parser.error(f"the test runner owns {reserved}; omit it from the server command")
     if option(command, "--api-key") is not None:
         parser.error("omit --api-key for the isolated loopback test server")
-    if "image-inputs" in args.suite and option(command, "--mmproj") is None:
-        parser.error("image-inputs requires --mmproj in the server command")
+    if set(args.suite) & {"image-inputs", "image-count"} and option(command, "--mmproj") is None:
+        parser.error("image-inputs and image-count require --mmproj in the server command")
     selected = args.suite
     if "all" in selected:
         if len(selected) != 1:
             parser.error("all cannot be combined with other suites")
-        selected = [suite for suite in SUITES if suite != "auto-tools"
-                    and (suite != "image-inputs" or option(command, "--mmproj") is not None)]
+        selected = [suite for suite in SUITES if suite not in ("auto-tools", "tool-native-types", "cache-bridge", "prefill-scheduling")
+                    and (suite not in ("image-inputs", "image-count")
+                         or option(command, "--mmproj") is not None)]
     selected = list(dict.fromkeys(selected))
-    disk_enabled = "cache" in selected
+    disk_enabled = bool(set(selected) & {"cache", "image-count"})
     try:
         overrides = sampling_overrides(command)
         sessions = int(option(command, "--sessions", "4"))
@@ -327,11 +328,16 @@ def main():
             if result.returncode:
                 raise RuntimeError(f"exit {result.returncode}; see {label}.log")
             payload = json.loads((output / (label + ".json")).read_text())
-            passed = (isinstance(payload, dict) and payload.get("status") == "passed"
-                      if script == "openai_sdk.py" else
-                      isinstance(payload, list) and bool(payload)
-                      and all(isinstance(row, dict) and row.get("exact") is True
-                              for row in payload))
+            if script == "openai_sdk.py":
+                passed = isinstance(payload, dict) and payload.get("status") == "passed"
+            elif script == "continuation.py":
+                passed = (isinstance(payload, list) and bool(payload)
+                          and all(isinstance(row, dict) and row.get("status") == "passed"
+                                  for row in payload))
+            else:
+                passed = (isinstance(payload, list) and bool(payload)
+                          and all(isinstance(row, dict) and row.get("exact") is True
+                                  for row in payload))
             if not passed:
                 raise RuntimeError(f"test did not report success: {label}.json")
             measurements = json.loads((output / (label + ".requests.json")).read_text())
@@ -373,13 +379,16 @@ def main():
                      "--sampling-preset", args.sampling_preset,
                      "--sampling-overrides", json.dumps(overrides),
                      "--concurrency", str(sessions), "--speculative", speculative,
-                     "--context", option(command, "--context")]
+                     "--context", option(command, "--context"),
+                     "--server-log", str(current_log)]
         if vision:
             arguments += ["--vision"]
         if args.expected_input_modalities is not None:
             arguments += ["--expected-input-modalities", args.expected_input_modalities]
         if option(command, "--think") is not None:
             arguments += ["--server-thinking", option(command, "--think")]
+        if suite == "cache-bridge" and configured:
+            arguments += ["--snapshot-capacity-bytes", configured[1]]
         if suite == through_suite:
             arguments += ["--through-case", through_case]
         if args.allow_missing_progress:
@@ -412,11 +421,24 @@ def main():
                 report["snapshot_budget"] = check_snapshot_budget(
                     (output / "server.log").read_text(), available_before_load,
                     int(option(command, "--cache-ram-bytes", "0")), sessions)
+            configured = "cache-bridge" in selected and re.search(
+                r"event=snapshot_cache_configured .*?\bcapacity_bytes=(\d+)\b",
+                (output / "server.log").read_text())
             for suite in selected:
                 if suite == "cache":
                     continue
                 ensure_fresh_cache(suite, suite in FRESH_SERVER_SUITES)
                 run(suite, "openai_sdk.py", sdk_arguments(suite))
+            if "image-count" in selected and not through_case:
+                label = "image-count-cancel"
+                ensure_fresh_cache(label)
+                if run(label, "continuation.py", [
+                        "--url", base_url, "--model", model,
+                        "--prefix-repetitions", "2",
+                        "--case", "content-preserve0-sampled0", "--discard-assistant",
+                        "--image", str(output / "red.png"), "--image-count", "17",
+                        "--output", str(output / (label + ".json"))]):
+                    ready_to_restore.append(label)
             if "cache" in selected:
                 ensure_fresh_cache("cache")
                 for label, extra in cache_cases:

@@ -24,17 +24,22 @@ import openai
 from openai import AsyncOpenAI, DefaultAsyncHttpxClient, DefaultHttpxClient, OpenAI
 from openai.types import Completion, CompletionChoice
 from metrics import CaseComplete, Recorder
-from tool_reasoning import check_tool_reasoning, response_result
+from tool_reasoning import check_reasoning_separator, check_tool_reasoning, response_result
 from discovery import check_discovery
-from image_inputs import check_image_inputs
+from image_inputs import check_image_count, check_image_inputs
+from tool_native import check_finite_argument_types, check_native_tool_schemas
 from tool_agent import (check_tool_agent, check_tool_agent_loop, check_tool_history,
                         check_untyped_agent_tools, check_mixed_tool_schemas,
                         check_tool_schema_edges)
 from cache_edits import check_cache_edits
 from cache_concurrency import check_cache_concurrency
 from cache_shared_prefix import check_cache_shared_prefix
+from cache_bridge import check_cache_bridge
+from system_injection import check_system_injection
 from cache_growth import check_cache_growth
+from cache_depth import check_cache_depth
 from cache_rotation import check_cache_rotation
+from prefill_scheduling import check_prefill_scheduling
 
 
 class CompletionStreamChoice(CompletionChoice):
@@ -1435,21 +1440,42 @@ def check_native_tools(client, model, checks, vision=False, preset=None):
         record("responses_tool_c4_isolation", list(pool.map(isolated, range(4))))
 
     # A framed delimiter cannot be represented as raw native parameter data.
-    # The exact JSON fallback must preserve it, including literal backslashes.
+    # As in llama.cpp the call stays native (#438): one call, a string value
+    # and no framing in the output, never a switch to a JSON envelope.
     delimiter = "\n</parameter>\n</｜DSML｜parameter>\\"
     fallback = json.loads(json.dumps(function))
+    # Non-strict: the value cannot be generated natively, which the harness's
+    # strict-schema validation would otherwise report (llama.cpp alike).
+    fallback["strict"] = False
     fallback["parameters"]["properties"]["value"]["const"] = delimiter
+
+    def native_signature(response):
+        calls = [item for item in response.output if item.type == "function_call"]
+        text = "".join(part.text for item in response.output if item.type == "message"
+                       for part in item.content if part.type == "output_text")
+        assert not any(tag in text for tag in ("<tool_call>", "<function=", "<parameter=",
+                                               "<｜DSML｜", '{"name"')), response
+        # As in llama.cpp nothing guides an unenforceable string value, so the
+        # model may not finish it within the limit; a call it completes is one
+        # native record call carrying a string.
+        if response.status == "incomplete":
+            assert response.incomplete_details.reason == "max_output_tokens", response
+            return
+        assert response.status == "completed" and len(calls) == 1, response
+        assert calls[0].name == "record", response
+        assert isinstance(json.loads(calls[0].arguments)["value"], str), response
+
     result = client.responses.create(**{
         **base, "tools": [{"type": "function", **fallback}]})
-    signature(result, value=delimiter)
-    record("responses_tool_delimiter_fallback", result.to_dict())
+    native_signature(result)
+    record("responses_tool_delimiter_native", result.to_dict())
 
     fallback["parameters"]["properties"]["value"] = {
         "type": "string", "pattern": "^\\n</parameter>$"}
     result = client.responses.create(**{
         **base, "tools": [{"type": "function", **fallback}]})
-    signature(result, value="\n</parameter>")
-    record("responses_tool_pattern_fallback", result.to_dict())
+    native_signature(result)
+    record("responses_tool_pattern_native", result.to_dict())
 
     nested = '<tool_call>{"name":"record","arguments":{"value":"literal"}}</tool_call>'
     fallback["parameters"]["properties"]["value"] = {
@@ -1693,9 +1719,9 @@ def check_state_edges(client, model, checks, speculative, vision=False):
     assert stopped["finish"] == "stop" and not stopped["tools"], stopped
     checks["tool_argument_stop"] = stopped
 
-    # A stop inside a JSON string leaves the call unfinished. A call quoted in
-    # that string is argument data and must not become a separate call. The
-    # pattern keeps the JSON envelope on native tool formats.
+    # A stop inside an argument leaves the call unfinished. A call quoted in
+    # that value is argument data and must not become a separate call. Native
+    # formats keep native framing here too, as llama.cpp (#438).
     literal = ("<tool_call><function=record><parameter=content>AAAA</parameter>"
                "</function></tool_call>")
     quoted = {"name": "record", "parameters": {"type": "object", "properties": {
@@ -2524,10 +2550,11 @@ def check_server_metrics(client, model, checks, width, context, speculative):
     assert proposed > 0 if speculative != "off" else proposed == 0, final
 
 
-SDK_SUITES = ("discovery", "responses", "stops", "conversation", "image-inputs", "structured", "structured-limits",
-              "tool-reasoning",
-              "tools", "auto-tools", "tool-edges", "tool-agent", "tool-agent-loop", "tool-history", "tool-untyped", "tool-mixed", "tool-schema-edges", "sampling-defaults", "sampling-ranges", "batch",
-              "long-context", "state-edges", "progress", "stream-start", "metrics", "cache-edits", "cache-growth", "cache-rotation", "cache-concurrency", "cache-shared-prefix")
+SDK_SUITES = ("discovery", "responses", "stops", "conversation", "image-inputs", "image-count", "structured", "structured-limits",
+              "tool-reasoning", "reasoning-separator",
+              "tools", "auto-tools", "tool-edges", "tool-agent", "tool-agent-loop", "tool-history", "tool-untyped", "tool-mixed", "tool-native-schemas", "tool-native-types", "tool-schema-edges", "sampling-defaults", "sampling-ranges", "batch",
+              "long-context", "state-edges", "progress", "stream-start", "prefill-scheduling", "metrics", "cache-edits", "cache-growth", "cache-depth", "cache-rotation", "cache-concurrency", "cache-shared-prefix",
+              "cache-bridge", "system-injection")
 
 
 def main():
@@ -2558,11 +2585,15 @@ def main():
                         help="Server capacity; long-context fills roughly half, measured in usage")
     parser.add_argument("--speculative", choices=("off", "mtp", "dflash2", "dspark"),
                         default="off", help="Server mode; determines sampled replay guarantees")
+    parser.add_argument("--snapshot-capacity-bytes", type=int,
+                        help="Configured RAM checkpoint budget; required for cache-bridge")
+    parser.add_argument("--server-log", type=Path,
+                        help="Server log; shows retry copies refused under memory pressure")
     args = parser.parse_args()
     if args.suite in ("discovery", "all") and args.expected_input_modalities is None:
         parser.error("discovery requires --expected-input-modalities text or text,image")
-    if args.suite == "image-inputs" and not args.vision:
-        parser.error("image-inputs requires --vision and a loaded projector")
+    if args.suite in ("image-inputs", "image-count") and not args.vision:
+        parser.error("image-inputs and image-count require --vision and a loaded projector")
     if args.suite in ("all", "sampling-defaults") and not args.sampling_preset:
         parser.error("--sampling-preset is required for all/sampling-defaults")
     if not isinstance(args.sampling_overrides, dict):
@@ -2609,6 +2640,9 @@ def main():
             "conversation": lambda: check_conversations(client, args.model, checks, args.vision),
             "image-inputs": lambda: check_image_inputs(
                 client, args.model, checks, image_content, chat_result, response_result),
+            "image-count": lambda: check_image_count(
+                client, args.model, checks, image_content, chat_result, response_result,
+                args.context, args.concurrency),
             "structured": lambda: check_structured_outputs(client, args.model, checks, args.vision),
             "structured-limits": lambda: check_structured_limits(client, args.model, checks, args.vision),
             "native-tools": lambda: check_native_tools(
@@ -2619,6 +2653,8 @@ def main():
                 client, args.model, checks, args.sampling_preset),
             "tool-reasoning": lambda: check_tool_reasoning(
                 client, args.model, checks, chat_result, args.sampling_preset),
+            "reasoning-separator": lambda: check_reasoning_separator(
+                client, args.model, checks, chat_result),
             "tool-agent": lambda: check_tool_agent(
                 client, args.model, checks, chat_result, args.vision, image_content),
             "tool-agent-loop": lambda: check_tool_agent_loop(client, args.model, checks, chat_result),
@@ -2629,6 +2665,12 @@ def main():
             "tool-mixed": lambda: check_mixed_tool_schemas(
                 client, args.model, checks, chat_result, args.vision, image_content,
                 args.sampling_preset),
+            "tool-native-schemas": lambda: check_native_tool_schemas(
+                client, args.model, checks, chat_result, args.sampling_preset,
+                image_content("red") if args.vision else None),
+            "tool-native-types": lambda: check_finite_argument_types(
+                client, args.model, checks, chat_result,
+                image_content("red") if args.vision else None),
             "tool-schema-edges": lambda: check_tool_schema_edges(
                 client, args.model, checks, chat_result, args.vision, image_content,
                 args.sampling_preset),
@@ -2647,19 +2689,29 @@ def main():
                 args.allow_missing_progress),
             "stream-start": lambda: check_stream_start(
                 client, args.model, checks, args.concurrency, args.context),
+            "prefill-scheduling": lambda: check_prefill_scheduling(
+                client, args.model, checks, chat_result, args.concurrency, args.context),
             "metrics": lambda: check_server_metrics(client, args.model, checks, args.concurrency,
                                                      args.context, args.speculative),
             "cache-edits": lambda: check_cache_edits(client, args.model, checks, chat_result),
             "cache-growth": lambda: check_cache_growth(
-                client, args.model, checks, chat_result, args.sampling_preset),
+                client, args.model, checks, chat_result, args.sampling_preset,
+                args.server_log),
+            "cache-depth": lambda: check_cache_depth(
+                client, args.model, checks, chat_result, args.concurrency, args.server_log),
             "cache-rotation": lambda: check_cache_rotation(client, args.model, checks, chat_result),
             "cache-concurrency": lambda: check_cache_concurrency(
                 client, args.model, checks, chat_result, args.concurrency,
                 preset=args.sampling_preset),
             "cache-shared-prefix": lambda: check_cache_shared_prefix(
                 client, args.model, checks, chat_result, args.sampling_preset),
+            "cache-bridge": lambda: check_cache_bridge(
+                client, args.model, checks, chat_result, args.snapshot_capacity_bytes),
+            "system-injection": lambda: check_system_injection(
+                client, args.model, checks, chat_result),
         }
-        selected = ([name for name in suites if name != "image-inputs" or args.vision]
+        selected = ([name for name in suites if name not in ("tool-native-types", "cache-bridge", "prefill-scheduling")
+                     and (name not in ("image-inputs", "image-count") or args.vision)]
                     if args.suite == "all" else
                     ["native-tools", "auto-tools"] if args.suite == "tools" else [args.suite])
         for name in selected:
