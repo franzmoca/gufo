@@ -524,6 +524,22 @@ bool ReadTextMessages(const json::Value* input,
     messages->push_back(std::move(message));
   };
   for (const auto& item : input->items()) {
+    if (!responses && item.is_object() && item.find("content") &&
+        item.find("content")->is_array() &&
+        std::ranges::any_of(item.find("content")->items(),
+                            [](const auto& part) {
+                              return part.is_object() &&
+                                     (part.member_str("type") == "tool_use" ||
+                                      part.member_str("type") == "tool_result");
+                            })) {
+      std::string error;
+      if (!ParseAnthropicToolMessage(item, messages, &error)) {
+        if (parse_error && !error.empty())
+          *parse_error = std::move(error);
+        return false;
+      }
+      continue;
+    }
     if (responses && (item.member_str("type") == "function_call" ||
                       item.member_str("type") == "function_call_output")) {
       tokenization::ChatMessage message;
@@ -627,6 +643,8 @@ struct CompatibilityAllowances {
   bool response_controls{false};
   bool thinking{false};
   bool output_config{false};
+  /// Messages tools and tool_choice; Responses uses response_controls.
+  bool tools{false};
 };
 
 // Validate the text subset before dispatch so a client never gets an answer
@@ -688,6 +706,7 @@ std::optional<HttpResponse> ReadCompatibilityOptions(
         !(field == "ignore_eos" && allowances.ignore_eos) &&
         !(field == "thinking" && allowances.thinking) &&
         !(field == "output_config" && allowances.output_config) &&
+        !((field == "tools" || field == "tool_choice") && allowances.tools) &&
         body.contains(field) &&
         !(allowances.response_controls &&
           (field == "text" || field == "reasoning" || field == "tools" ||
@@ -1171,10 +1190,14 @@ HttpResponse AnthropicMessages(const HttpRequest& req,
           ReadCompatibilityOptions(body, b, "max_tokens", &max_tokens,
                                    &sampling_config, chat.reasoning.enabled,
                                    {.stop_field = "stop_sequences",
+                                    .stream = true,
                                     .thinking = true,
-                                    .output_config = true})) {
+                                    .output_config = true,
+                                    .tools = true})) {
     return std::move(*error);
   }
+  if (auto error = ParseAnthropicToolControls(body, &chat))
+    return std::move(*error);
 
   std::vector<tokenization::ChatMessage> messages;
   if (const auto* system = body.find("system")) {
@@ -1185,10 +1208,12 @@ HttpResponse AnthropicMessages(const HttpRequest& req,
     messages.push_back(
         {tokenization::ChatRole::kSystem, std::move(text), "", ""});
   }
-  if (!ReadTextMessages(body.find("messages"), &messages)) {
-    return InvalidCompatibilityRequest(
-        "'messages' must contain text messages; use /v1/chat/completions "
-        "for images and tools");
+  std::string messages_error =
+      "'messages' must contain text, thinking, tool_use or tool_result "
+      "blocks; use /v1/chat/completions for images";
+  if (!ReadTextMessages(body.find("messages"), &messages, false,
+                        &messages_error)) {
+    return InvalidCompatibilityRequest(messages_error);
   }
 
   chat.messages = std::move(messages);
@@ -1197,50 +1222,9 @@ HttpResponse AnthropicMessages(const HttpRequest& req,
                                             StopSequenceFormat::kAnthropic,
                                             &chat.stop_sequences))
     return InvalidCompatibilityRequest(*error);
-  const auto initial = b.initial_output_state(chat);
-  const auto res = b.chat(chat, max_tokens, sampling_config, req.is_cancelled);
-  const auto generated = SplitGeneratedText(
-      core::Utf8Decoder{}.Push(res.text, true), initial, b.output_markup());
-
-  json::Value resp = json::Value::object();
-  resp["id"] = "msg_" + RandomId();
-  resp["type"] = "message";
-  resp["role"] = "assistant";
-  resp["model"] = b.model_id();
-  json::Value content = json::Value::array();
-  if (!generated.reasoning.empty()) {
-    // Local reasoning is not signed; clients replay the block unchanged.
-    json::Value thinking = json::Value::object();
-    thinking["type"] = "thinking";
-    thinking["thinking"] = generated.reasoning;
-    thinking["signature"] = "";
-    content.push_back(std::move(thinking));
-  }
-  if (!generated.text.empty() || content.empty()) {
-    json::Value txt = json::Value::object();
-    txt["type"] = "text";
-    txt["text"] = generated.text;
-    content.push_back(std::move(txt));
-  }
-  resp["content"] = std::move(content);
-  resp["stop_reason"] =
-      res.finish_reason == TextGenerationBackend::FinishReason::kLength
-          ? "max_tokens"
-      : res.finish_reason == TextGenerationBackend::FinishReason::kStopSequence
-          ? "stop_sequence"
-          : "end_turn";
-  resp["stop_sequence"] =
-      res.finish_reason == TextGenerationBackend::FinishReason::kStopSequence
-          ? json::Value(res.stop_sequence)
-          : json::Value();
-  json::Value usage = json::Value::object();
-  usage["input_tokens"] = res.prompt_tokens;
-  usage["output_tokens"] = res.completion_tokens;
-  usage["cache_creation_input_tokens"] = 0;
-  usage["cache_read_input_tokens"] = res.cached_prompt_tokens;
-  resp["usage"] = std::move(usage);
-  resp["timings"] = GenerationTimings(res);
-  return WithTiming(Ok(resp), res);
+  return CreateAnthropicMessage(
+      req, b, chat, max_tokens, sampling_config,
+      body.find("stream") != nullptr && body.find("stream")->as_bool());
 } catch (const std::length_error& error) {
   return Err(400, "Bad Request", error.what(), "invalid_request_error",
              "context_length_exceeded");
