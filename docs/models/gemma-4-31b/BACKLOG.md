@@ -178,7 +178,7 @@ estimates, not measurements.
 
 | # | Lever | Speeds up | Est. gain | Quality risk | Effort |
 | ---: | --- | --- | --- | --- | --- |
-| L1 | Relaxed MTP acceptance | MTP decode | +15–30% prose, +5–10% code | Low–medium: output no longer equals greedy AR | Low–medium |
+| L1 | Relaxed MTP acceptance (tried 2026-10-20, failed for sampled reasoning) | MTP decode | Measured +5–23% sampled decode | High: sampled reasoning loops (26B DS4 21/24 → 9/24 at 0.5) | Done, opt-in |
 | L2 | 8-bit KV cache (open item 2) | Decode at depth, KV memory | AR +5% at 32K, +14% at 128K | Low | High |
 | L3 | Target output-head shortlist | AR and MTP decode | ~+3% | Medium: tokens outside the list become impossible | Low–medium |
 | L4 | Binary16 dot products in decode and verification attention | MTP verification at five or more rows | +2–4% at 32K, +5–8% at 128K | Very low | Medium |
@@ -189,17 +189,20 @@ estimates, not measurements.
 
 ### L1. Relaxed MTP acceptance
 
-Greedy verification accepts a draft only when it equals the target's argmax
-(`Session::FinishCycle`, `engine.cpp`); on prose at ~31K depth 42% of drafts
-pass (235/554). Many rejections are near-ties. Rule: accept the draft when
-p(draft) ≥ τ·p(top) and the target's entropy is above a threshold (Medusa's
-typical acceptance), top-1 only otherwise. The GPU argmax (`ReadArgmax`) would
-also return the top logit, the draft's logit and the log-sum-exp; the
-calibrated draft policy then learns the higher acceptance by itself. Measure
-before building: log per verified row the top-1, the draft's logit gap and the
-entropy, then replay thresholds offline for tokens per cycle against
-divergence from greedy. Sampled mode already uses exact rejection sampling; a
-relaxed variant there changes the output distribution.
+Built as `--relaxed-acceptance GAP` (off by default; the top-3 limit is
+`kRelaxedTop`): a draft the exact rule rejects is still accepted when it is
+among the target's three most likely tokens and at most GAP nats below the top
+one. It is fast (sampled decode +9–12% prose and essay at 0.5, up to +23% at
+2) but fails on quality: with thinking on, sampled 26B reasoning loops to the
+length cap (DS4 first 24 cases: 21 passed exact, 9 at 0.5, 7 at 1, 1 at 2),
+and greedy text leaves exact decoding within ~50 words. See EXPERIMENTS.md and
+`artifacts/mtp-relaxed-acceptance-2026-10-20.json`.
+
+Before revisiting: accept outright only with a probability (for example a
+relaxed ratio min(1, λ·p/q) that keeps the sampler's randomness) rather than
+deterministically; gate on the target's entropy; and check non-thinking chat
+and agent workloads, where loops may not appear. Any variant must pass the
+same 24-case thinking eval against exact before it is recommended.
 
 ### L2. 8-bit KV cache
 

@@ -1,0 +1,1226 @@
+{
+ "schema": "gufo-gemma4-relaxed-acceptance/1",
+ "metadata": {
+  "date": "2026-10-20",
+  "hardware": "AMD Ryzen AI MAX+ 395 / Radeon 8060S gfx1151, 128 GB unified memory",
+  "source": "feat/gemma-mtp at a663c494 (--relaxed-acceptance GAP: accept a rejected draft when it is among the target top 3 and at most GAP nats below the top; greedy: temperature-1 logits, sampled: the request sampling distribution, accepted before p/q verification)",
+  "models": {
+   "31b": "gemma-4-31B-it-UD-Q4_K_XL + gemma-4-31B-it-assistant.Q8_0",
+   "26b": "gemma-4-26B-A4B-it-UD-Q4_K_XL + Unsloth mtp-gemma-4-26B-A4B-it"
+  }
+ },
+ "offline_replay": "Exact-labelled 15-draft chains (calibration study dataset), top-3 + gap rule, tokens per cycle under the production policy: 31B sampled +8.2% (0.5), +10.9% (1), +17% (2); greedy +12% (1).",
+ "speed": {
+  "method": "HTTP, thinking off, sessions 1, arms exact/0.5/1/2/2/1/0.5/exact (ABBA, two runs per arm, rates pooled). Sampled at Gemma defaults (temperature 1, top-k 64, top-p 0.95): 6 prose x 256 tokens, 6 story x 128, 3 code-write x 384, 2 essay x 400 at ~31K depth (one seed each); greedy: 3 prose, code-write, code-edit, essay.",
+  "31b": {
+   "server": "/home/franz/projects/gufo/build/trace/gufo serve llm --port 8099 --model /home/franz/models/gemma-4/gemma-31b-it/gemma-4-31B-it-UD-Q4_K_XL.gguf --speculative mtp --mtp-model /home/franz/models/gemma-4/drafts/31b-assistant/gemma-4-31B-it-assistant.Q8_0.gguf --context 40960 --sessions 1 --think off --served-model-name bench",
+   "arms": {
+    "exact": {
+     "greedy/code-edit": {
+      "decode_tok_s": 111.7,
+      "drafts": 762,
+      "accepted": 710
+     },
+     "greedy/code-write": {
+      "decode_tok_s": 45.2,
+      "drafts": 1078,
+      "accepted": 616
+     },
+     "greedy/essay-31k": {
+      "decode_tok_s": 20.69,
+      "drafts": 1080,
+      "accepted": 464
+     },
+     "greedy/prose": {
+      "decode_tok_s": 25.81,
+      "drafts": 2476,
+      "accepted": 952
+     },
+     "sampled/code-write": {
+      "decode_tok_s": 42.67,
+      "drafts": 3296,
+      "accepted": 1842
+     },
+     "sampled/essay-31k": {
+      "decode_tok_s": 20.25,
+      "drafts": 2374,
+      "accepted": 966
+     },
+     "sampled/prose": {
+      "decode_tok_s": 25.35,
+      "drafts": 5124,
+      "accepted": 1970
+     },
+     "sampled/story": {
+      "decode_tok_s": 23.5,
+      "drafts": 2350,
+      "accepted": 910
+     }
+    },
+    "0.5": {
+     "greedy/code-edit": {
+      "decode_tok_s": 114.72,
+      "drafts": 764,
+      "accepted": 712,
+      "vs_exact_pct": 2.7
+     },
+     "greedy/code-write": {
+      "decode_tok_s": 46.08,
+      "drafts": 1106,
+      "accepted": 624,
+      "vs_exact_pct": 1.9
+     },
+     "greedy/essay-31k": {
+      "decode_tok_s": 21.22,
+      "drafts": 1120,
+      "accepted": 482,
+      "vs_exact_pct": 2.6
+     },
+     "greedy/prose": {
+      "decode_tok_s": 28.13,
+      "drafts": 2374,
+      "accepted": 1004,
+      "vs_exact_pct": 9.0
+     },
+     "sampled/code-write": {
+      "decode_tok_s": 42.07,
+      "drafts": 3700,
+      "accepted": 1842,
+      "vs_exact_pct": -1.4
+     },
+     "sampled/essay-31k": {
+      "decode_tok_s": 22.65,
+      "drafts": 2142,
+      "accepted": 1034,
+      "vs_exact_pct": 11.9
+     },
+     "sampled/prose": {
+      "decode_tok_s": 28.1,
+      "drafts": 4878,
+      "accepted": 2082,
+      "vs_exact_pct": 10.8
+     },
+     "sampled/story": {
+      "decode_tok_s": 25.2,
+      "drafts": 2232,
+      "accepted": 970,
+      "vs_exact_pct": 7.2
+     }
+    },
+    "1": {
+     "greedy/code-edit": {
+      "decode_tok_s": 114.41,
+      "drafts": 774,
+      "accepted": 712,
+      "vs_exact_pct": 2.4
+     },
+     "greedy/code-write": {
+      "decode_tok_s": 45.11,
+      "drafts": 1082,
+      "accepted": 622,
+      "vs_exact_pct": -0.2
+     },
+     "greedy/essay-31k": {
+      "decode_tok_s": 25.41,
+      "drafts": 1034,
+      "accepted": 548,
+      "vs_exact_pct": 22.8
+     },
+     "greedy/prose": {
+      "decode_tok_s": 28.97,
+      "drafts": 2366,
+      "accepted": 1028,
+      "vs_exact_pct": 12.2
+     },
+     "sampled/code-write": {
+      "decode_tok_s": 42.38,
+      "drafts": 3634,
+      "accepted": 1848,
+      "vs_exact_pct": -0.7
+     },
+     "sampled/essay-31k": {
+      "decode_tok_s": 22.51,
+      "drafts": 2206,
+      "accepted": 1040,
+      "vs_exact_pct": 11.2
+     },
+     "sampled/prose": {
+      "decode_tok_s": 26.51,
+      "drafts": 5050,
+      "accepted": 2034,
+      "vs_exact_pct": 4.6
+     },
+     "sampled/story": {
+      "decode_tok_s": 25.38,
+      "drafts": 2226,
+      "accepted": 964,
+      "vs_exact_pct": 8.0
+     }
+    },
+    "2": {
+     "greedy/code-edit": {
+      "decode_tok_s": 114.44,
+      "drafts": 774,
+      "accepted": 712,
+      "vs_exact_pct": 2.5
+     },
+     "greedy/code-write": {
+      "decode_tok_s": 50.18,
+      "drafts": 1122,
+      "accepted": 636,
+      "vs_exact_pct": 11.0
+     },
+     "greedy/essay-31k": {
+      "decode_tok_s": 24.83,
+      "drafts": 1078,
+      "accepted": 556,
+      "vs_exact_pct": 20.0
+     },
+     "greedy/prose": {
+      "decode_tok_s": 28.67,
+      "drafts": 2476,
+      "accepted": 1036,
+      "vs_exact_pct": 11.1
+     },
+     "sampled/code-write": {
+      "decode_tok_s": 47.33,
+      "drafts": 3444,
+      "accepted": 1914,
+      "vs_exact_pct": 10.9
+     },
+     "sampled/essay-31k": {
+      "decode_tok_s": 24.29,
+      "drafts": 2136,
+      "accepted": 1092,
+      "vs_exact_pct": 20.0
+     },
+     "sampled/prose": {
+      "decode_tok_s": 27.96,
+      "drafts": 4834,
+      "accepted": 2112,
+      "vs_exact_pct": 10.3
+     },
+     "sampled/story": {
+      "decode_tok_s": 25.31,
+      "drafts": 2218,
+      "accepted": 962,
+      "vs_exact_pct": 7.7
+     }
+    }
+   }
+  },
+  "26b": {
+   "server": "/home/franz/projects/gufo/build/trace/gufo serve llm --port 8099 --model /home/franz/models/gemma-4/gemma-26b-a4b-it/gemma-4-26B-A4B-it-UD-Q4_K_XL.gguf --speculative mtp --mtp-model /home/franz/models/gemma-4/drafts/26b-unsloth-mtp/mtp-gemma-4-26B-A4B-it.gguf --context 40960 --sessions 1 --think off --served-model-name bench",
+   "arms": {
+    "exact": {
+     "greedy/code-edit": {
+      "decode_tok_s": 237.63,
+      "drafts": 816,
+      "accepted": 696
+     },
+     "greedy/code-write": {
+      "decode_tok_s": 124.49,
+      "drafts": 840,
+      "accepted": 592
+     },
+     "greedy/essay-31k": {
+      "decode_tok_s": 75.38,
+      "drafts": 772,
+      "accepted": 478
+     },
+     "greedy/prose": {
+      "decode_tok_s": 83.23,
+      "drafts": 1640,
+      "accepted": 942
+     },
+     "sampled/code-write": {
+      "decode_tok_s": 122.73,
+      "drafts": 2447,
+      "accepted": 1777
+     },
+     "sampled/essay-31k": {
+      "decode_tok_s": 68.91,
+      "drafts": 1592,
+      "accepted": 901
+     },
+     "sampled/prose": {
+      "decode_tok_s": 76.34,
+      "drafts": 3160,
+      "accepted": 1726
+     },
+     "sampled/story": {
+      "decode_tok_s": 73.48,
+      "drafts": 1352,
+      "accepted": 757
+     }
+    },
+    "0.5": {
+     "greedy/code-edit": {
+      "decode_tok_s": 237.64,
+      "drafts": 816,
+      "accepted": 696,
+      "vs_exact_pct": 0.0
+     },
+     "greedy/code-write": {
+      "decode_tok_s": 124.49,
+      "drafts": 854,
+      "accepted": 596,
+      "vs_exact_pct": 0.0
+     },
+     "greedy/essay-31k": {
+      "decode_tok_s": 74.34,
+      "drafts": 814,
+      "accepted": 490,
+      "vs_exact_pct": -1.4
+     },
+     "greedy/prose": {
+      "decode_tok_s": 87.06,
+      "drafts": 1632,
+      "accepted": 982,
+      "vs_exact_pct": 4.6
+     },
+     "sampled/code-write": {
+      "decode_tok_s": 126.81,
+      "drafts": 2522,
+      "accepted": 1810,
+      "vs_exact_pct": 3.3
+     },
+     "sampled/essay-31k": {
+      "decode_tok_s": 78.25,
+      "drafts": 1560,
+      "accepted": 1026,
+      "vs_exact_pct": 13.6
+     },
+     "sampled/prose": {
+      "decode_tok_s": 83.43,
+      "drafts": 3286,
+      "accepted": 1924,
+      "vs_exact_pct": 9.3
+     },
+     "sampled/story": {
+      "decode_tok_s": 74.03,
+      "drafts": 1406,
+      "accepted": 780,
+      "vs_exact_pct": 0.7
+     }
+    },
+    "1": {
+     "greedy/code-edit": {
+      "decode_tok_s": 234.81,
+      "drafts": 830,
+      "accepted": 696,
+      "vs_exact_pct": -1.2
+     },
+     "greedy/code-write": {
+      "decode_tok_s": 130.67,
+      "drafts": 858,
+      "accepted": 612,
+      "vs_exact_pct": 5.0
+     },
+     "greedy/essay-31k": {
+      "decode_tok_s": 82.66,
+      "drafts": 798,
+      "accepted": 532,
+      "vs_exact_pct": 9.7
+     },
+     "greedy/prose": {
+      "decode_tok_s": 89.22,
+      "drafts": 1678,
+      "accepted": 1026,
+      "vs_exact_pct": 7.2
+     },
+     "sampled/code-write": {
+      "decode_tok_s": 127.43,
+      "drafts": 2570,
+      "accepted": 1834,
+      "vs_exact_pct": 3.8
+     },
+     "sampled/essay-31k": {
+      "decode_tok_s": 77.78,
+      "drafts": 1526,
+      "accepted": 1028,
+      "vs_exact_pct": 12.9
+     },
+     "sampled/prose": {
+      "decode_tok_s": 83.82,
+      "drafts": 3326,
+      "accepted": 1940,
+      "vs_exact_pct": 9.8
+     },
+     "sampled/story": {
+      "decode_tok_s": 73.21,
+      "drafts": 1422,
+      "accepted": 778,
+      "vs_exact_pct": -0.4
+     }
+    },
+    "2": {
+     "greedy/code-edit": {
+      "decode_tok_s": 233.63,
+      "drafts": 834,
+      "accepted": 696,
+      "vs_exact_pct": -1.7
+     },
+     "greedy/code-write": {
+      "decode_tok_s": 127.28,
+      "drafts": 908,
+      "accepted": 610,
+      "vs_exact_pct": 2.2
+     },
+     "greedy/essay-31k": {
+      "decode_tok_s": 84.7,
+      "drafts": 828,
+      "accepted": 552,
+      "vs_exact_pct": 12.4
+     },
+     "greedy/prose": {
+      "decode_tok_s": 88.09,
+      "drafts": 1674,
+      "accepted": 992,
+      "vs_exact_pct": 5.8
+     },
+     "sampled/code-write": {
+      "decode_tok_s": 122.75,
+      "drafts": 2834,
+      "accepted": 1830,
+      "vs_exact_pct": 0.0
+     },
+     "sampled/essay-31k": {
+      "decode_tok_s": 84.98,
+      "drafts": 1598,
+      "accepted": 1114,
+      "vs_exact_pct": 23.3
+     },
+     "sampled/prose": {
+      "decode_tok_s": 89.25,
+      "drafts": 3428,
+      "accepted": 2072,
+      "vs_exact_pct": 16.9
+     },
+     "sampled/story": {
+      "decode_tok_s": 78.27,
+      "drafts": 1592,
+      "accepted": 870,
+      "vs_exact_pct": 6.5
+     }
+    }
+   }
+  }
+ },
+ "greedy_divergence": "First differing word against exact: prose 12-49 at every gap on both models; essay-31k 13-46; code-write 14-160; code-edit identical. Each arm is deterministic across repeats.",
+ "quality": {
+  "method": "gufo eval DS4 subset, first 24 cases (8 GPQA Diamond, 8 SuperGPQA, 8 AIME2025), 26B, --think on, sampled at Gemma defaults, 16000 max completion tokens. Loop: a length-capped answer whose last 200 characters already occur in its preceding 1800.",
+  "26b": {
+   "exact": {
+    "cases": 24,
+    "passed": 21,
+    "length_finishes": 2,
+    "loops": 0,
+    "completion_tokens": 177359,
+    "per_case": [
+     {
+      "index": 0,
+      "source": "GPQA Diamond",
+      "verdict": "passed",
+      "status": "stop",
+      "completion_tokens": 15443,
+      "loop": false
+     },
+     {
+      "index": 1,
+      "source": "SuperGPQA",
+      "verdict": "passed",
+      "status": "stop",
+      "completion_tokens": 4011,
+      "loop": false
+     },
+     {
+      "index": 2,
+      "source": "AIME2025",
+      "verdict": "passed",
+      "status": "stop",
+      "completion_tokens": 3151,
+      "loop": false
+     },
+     {
+      "index": 3,
+      "source": "GPQA Diamond",
+      "verdict": "passed",
+      "status": "stop",
+      "completion_tokens": 13822,
+      "loop": false
+     },
+     {
+      "index": 4,
+      "source": "SuperGPQA",
+      "verdict": "passed",
+      "status": "stop",
+      "completion_tokens": 2678,
+      "loop": false
+     },
+     {
+      "index": 5,
+      "source": "AIME2025",
+      "verdict": "passed",
+      "status": "stop",
+      "completion_tokens": 4841,
+      "loop": false
+     },
+     {
+      "index": 6,
+      "source": "GPQA Diamond",
+      "verdict": "passed",
+      "status": "stop",
+      "completion_tokens": 3702,
+      "loop": false
+     },
+     {
+      "index": 7,
+      "source": "SuperGPQA",
+      "verdict": "passed",
+      "status": "stop",
+      "completion_tokens": 5865,
+      "loop": false
+     },
+     {
+      "index": 8,
+      "source": "AIME2025",
+      "verdict": "failed",
+      "status": "length",
+      "completion_tokens": 16000,
+      "loop": false
+     },
+     {
+      "index": 9,
+      "source": "GPQA Diamond",
+      "verdict": "passed",
+      "status": "stop",
+      "completion_tokens": 4656,
+      "loop": false
+     },
+     {
+      "index": 10,
+      "source": "SuperGPQA",
+      "verdict": "passed",
+      "status": "stop",
+      "completion_tokens": 5469,
+      "loop": false
+     },
+     {
+      "index": 11,
+      "source": "AIME2025",
+      "verdict": "passed",
+      "status": "stop",
+      "completion_tokens": 5352,
+      "loop": false
+     },
+     {
+      "index": 12,
+      "source": "GPQA Diamond (modified)",
+      "verdict": "passed",
+      "status": "stop",
+      "completion_tokens": 8208,
+      "loop": false
+     },
+     {
+      "index": 13,
+      "source": "SuperGPQA",
+      "verdict": "passed",
+      "status": "stop",
+      "completion_tokens": 1702,
+      "loop": false
+     },
+     {
+      "index": 14,
+      "source": "AIME2025",
+      "verdict": "failed",
+      "status": "length",
+      "completion_tokens": 16000,
+      "loop": false
+     },
+     {
+      "index": 15,
+      "source": "GPQA Diamond",
+      "verdict": "passed",
+      "status": "stop",
+      "completion_tokens": 6466,
+      "loop": false
+     },
+     {
+      "index": 16,
+      "source": "SuperGPQA",
+      "verdict": "failed",
+      "status": "stop",
+      "completion_tokens": 4161,
+      "loop": false
+     },
+     {
+      "index": 17,
+      "source": "AIME2025",
+      "verdict": "passed",
+      "status": "stop",
+      "completion_tokens": 8029,
+      "loop": false
+     },
+     {
+      "index": 18,
+      "source": "GPQA Diamond",
+      "verdict": "passed",
+      "status": "stop",
+      "completion_tokens": 7862,
+      "loop": false
+     },
+     {
+      "index": 19,
+      "source": "SuperGPQA",
+      "verdict": "passed",
+      "status": "stop",
+      "completion_tokens": 7594,
+      "loop": false
+     },
+     {
+      "index": 20,
+      "source": "AIME2025",
+      "verdict": "passed",
+      "status": "stop",
+      "completion_tokens": 8847,
+      "loop": false
+     },
+     {
+      "index": 21,
+      "source": "GPQA Diamond",
+      "verdict": "passed",
+      "status": "stop",
+      "completion_tokens": 2400,
+      "loop": false
+     },
+     {
+      "index": 22,
+      "source": "SuperGPQA",
+      "verdict": "passed",
+      "status": "stop",
+      "completion_tokens": 6939,
+      "loop": false
+     },
+     {
+      "index": 23,
+      "source": "AIME2025",
+      "verdict": "passed",
+      "status": "stop",
+      "completion_tokens": 14161,
+      "loop": false
+     }
+    ]
+   },
+   "0.5": {
+    "cases": 24,
+    "passed": 9,
+    "length_finishes": 14,
+    "loops": 8,
+    "completion_tokens": 309226,
+    "per_case": [
+     {
+      "index": 0,
+      "source": "GPQA Diamond",
+      "verdict": "failed",
+      "status": "length",
+      "completion_tokens": 16000,
+      "loop": false
+     },
+     {
+      "index": 1,
+      "source": "SuperGPQA",
+      "verdict": "failed",
+      "status": "length",
+      "completion_tokens": 16000,
+      "loop": true
+     },
+     {
+      "index": 2,
+      "source": "AIME2025",
+      "verdict": "failed",
+      "status": "length",
+      "completion_tokens": 16000,
+      "loop": true
+     },
+     {
+      "index": 3,
+      "source": "GPQA Diamond",
+      "verdict": "failed",
+      "status": "length",
+      "completion_tokens": 16000,
+      "loop": false
+     },
+     {
+      "index": 4,
+      "source": "SuperGPQA",
+      "verdict": "passed",
+      "status": "stop",
+      "completion_tokens": 5124,
+      "loop": false
+     },
+     {
+      "index": 5,
+      "source": "AIME2025",
+      "verdict": "passed",
+      "status": "stop",
+      "completion_tokens": 4358,
+      "loop": false
+     },
+     {
+      "index": 6,
+      "source": "GPQA Diamond",
+      "verdict": "passed",
+      "status": "stop",
+      "completion_tokens": 6044,
+      "loop": false
+     },
+     {
+      "index": 7,
+      "source": "SuperGPQA",
+      "verdict": "failed",
+      "status": "length",
+      "completion_tokens": 16000,
+      "loop": true
+     },
+     {
+      "index": 8,
+      "source": "AIME2025",
+      "verdict": "failed",
+      "status": "length",
+      "completion_tokens": 16000,
+      "loop": false
+     },
+     {
+      "index": 9,
+      "source": "GPQA Diamond",
+      "verdict": "passed",
+      "status": "stop",
+      "completion_tokens": 5981,
+      "loop": false
+     },
+     {
+      "index": 10,
+      "source": "SuperGPQA",
+      "verdict": "failed",
+      "status": "length",
+      "completion_tokens": 16000,
+      "loop": true
+     },
+     {
+      "index": 11,
+      "source": "AIME2025",
+      "verdict": "failed",
+      "status": "length",
+      "completion_tokens": 16000,
+      "loop": true
+     },
+     {
+      "index": 12,
+      "source": "GPQA Diamond (modified)",
+      "verdict": "failed",
+      "status": "length",
+      "completion_tokens": 16000,
+      "loop": false
+     },
+     {
+      "index": 13,
+      "source": "SuperGPQA",
+      "verdict": "failed",
+      "status": "length",
+      "completion_tokens": 16000,
+      "loop": true
+     },
+     {
+      "index": 14,
+      "source": "AIME2025",
+      "verdict": "failed",
+      "status": "length",
+      "completion_tokens": 16000,
+      "loop": false
+     },
+     {
+      "index": 15,
+      "source": "GPQA Diamond",
+      "verdict": "failed",
+      "status": "length",
+      "completion_tokens": 16000,
+      "loop": true
+     },
+     {
+      "index": 16,
+      "source": "SuperGPQA",
+      "verdict": "failed",
+      "status": "stop",
+      "completion_tokens": 8393,
+      "loop": false
+     },
+     {
+      "index": 17,
+      "source": "AIME2025",
+      "verdict": "passed",
+      "status": "stop",
+      "completion_tokens": 12619,
+      "loop": false
+     },
+     {
+      "index": 18,
+      "source": "GPQA Diamond",
+      "verdict": "passed",
+      "status": "stop",
+      "completion_tokens": 13114,
+      "loop": false
+     },
+     {
+      "index": 19,
+      "source": "SuperGPQA",
+      "verdict": "passed",
+      "status": "stop",
+      "completion_tokens": 11828,
+      "loop": false
+     },
+     {
+      "index": 20,
+      "source": "AIME2025",
+      "verdict": "passed",
+      "status": "stop",
+      "completion_tokens": 11129,
+      "loop": false
+     },
+     {
+      "index": 21,
+      "source": "GPQA Diamond",
+      "verdict": "passed",
+      "status": "stop",
+      "completion_tokens": 6636,
+      "loop": false
+     },
+     {
+      "index": 22,
+      "source": "SuperGPQA",
+      "verdict": "failed",
+      "status": "length",
+      "completion_tokens": 16000,
+      "loop": true
+     },
+     {
+      "index": 23,
+      "source": "AIME2025",
+      "verdict": "failed",
+      "status": "length",
+      "completion_tokens": 16000,
+      "loop": false
+     }
+    ]
+   },
+   "1": {
+    "cases": 24,
+    "passed": 7,
+    "length_finishes": 17,
+    "loops": 9,
+    "completion_tokens": 318863,
+    "per_case": [
+     {
+      "index": 0,
+      "source": "GPQA Diamond",
+      "verdict": "failed",
+      "status": "length",
+      "completion_tokens": 16000,
+      "loop": false
+     },
+     {
+      "index": 1,
+      "source": "SuperGPQA",
+      "verdict": "passed",
+      "status": "stop",
+      "completion_tokens": 4783,
+      "loop": false
+     },
+     {
+      "index": 2,
+      "source": "AIME2025",
+      "verdict": "passed",
+      "status": "stop",
+      "completion_tokens": 3002,
+      "loop": false
+     },
+     {
+      "index": 3,
+      "source": "GPQA Diamond",
+      "verdict": "failed",
+      "status": "length",
+      "completion_tokens": 16000,
+      "loop": true
+     },
+     {
+      "index": 4,
+      "source": "SuperGPQA",
+      "verdict": "failed",
+      "status": "length",
+      "completion_tokens": 16000,
+      "loop": true
+     },
+     {
+      "index": 5,
+      "source": "AIME2025",
+      "verdict": "failed",
+      "status": "length",
+      "completion_tokens": 16000,
+      "loop": true
+     },
+     {
+      "index": 6,
+      "source": "GPQA Diamond",
+      "verdict": "failed",
+      "status": "length",
+      "completion_tokens": 16000,
+      "loop": true
+     },
+     {
+      "index": 7,
+      "source": "SuperGPQA",
+      "verdict": "failed",
+      "status": "length",
+      "completion_tokens": 16000,
+      "loop": true
+     },
+     {
+      "index": 8,
+      "source": "AIME2025",
+      "verdict": "failed",
+      "status": "length",
+      "completion_tokens": 16000,
+      "loop": false
+     },
+     {
+      "index": 9,
+      "source": "GPQA Diamond",
+      "verdict": "passed",
+      "status": "stop",
+      "completion_tokens": 6881,
+      "loop": false
+     },
+     {
+      "index": 10,
+      "source": "SuperGPQA",
+      "verdict": "failed",
+      "status": "length",
+      "completion_tokens": 16000,
+      "loop": true
+     },
+     {
+      "index": 11,
+      "source": "AIME2025",
+      "verdict": "passed",
+      "status": "stop",
+      "completion_tokens": 3816,
+      "loop": false
+     },
+     {
+      "index": 12,
+      "source": "GPQA Diamond (modified)",
+      "verdict": "failed",
+      "status": "length",
+      "completion_tokens": 16000,
+      "loop": false
+     },
+     {
+      "index": 13,
+      "source": "SuperGPQA",
+      "verdict": "failed",
+      "status": "length",
+      "completion_tokens": 16000,
+      "loop": true
+     },
+     {
+      "index": 14,
+      "source": "AIME2025",
+      "verdict": "failed",
+      "status": "length",
+      "completion_tokens": 16000,
+      "loop": false
+     },
+     {
+      "index": 15,
+      "source": "GPQA Diamond",
+      "verdict": "failed",
+      "status": "length",
+      "completion_tokens": 16000,
+      "loop": false
+     },
+     {
+      "index": 16,
+      "source": "SuperGPQA",
+      "verdict": "failed",
+      "status": "length",
+      "completion_tokens": 16000,
+      "loop": true
+     },
+     {
+      "index": 17,
+      "source": "AIME2025",
+      "verdict": "passed",
+      "status": "stop",
+      "completion_tokens": 8489,
+      "loop": false
+     },
+     {
+      "index": 18,
+      "source": "GPQA Diamond",
+      "verdict": "passed",
+      "status": "stop",
+      "completion_tokens": 15192,
+      "loop": false
+     },
+     {
+      "index": 19,
+      "source": "SuperGPQA",
+      "verdict": "failed",
+      "status": "length",
+      "completion_tokens": 16000,
+      "loop": false
+     },
+     {
+      "index": 20,
+      "source": "AIME2025",
+      "verdict": "failed",
+      "status": "length",
+      "completion_tokens": 16000,
+      "loop": false
+     },
+     {
+      "index": 21,
+      "source": "GPQA Diamond",
+      "verdict": "passed",
+      "status": "stop",
+      "completion_tokens": 4700,
+      "loop": false
+     },
+     {
+      "index": 22,
+      "source": "SuperGPQA",
+      "verdict": "failed",
+      "status": "length",
+      "completion_tokens": 16000,
+      "loop": true
+     },
+     {
+      "index": 23,
+      "source": "AIME2025",
+      "verdict": "failed",
+      "status": "length",
+      "completion_tokens": 16000,
+      "loop": false
+     }
+    ]
+   },
+   "2": {
+    "cases": 24,
+    "passed": 1,
+    "length_finishes": 23,
+    "loops": 18,
+    "completion_tokens": 376064,
+    "per_case": [
+     {
+      "index": 0,
+      "source": "GPQA Diamond",
+      "verdict": "failed",
+      "status": "length",
+      "completion_tokens": 16000,
+      "loop": false
+     },
+     {
+      "index": 1,
+      "source": "SuperGPQA",
+      "verdict": "failed",
+      "status": "length",
+      "completion_tokens": 16000,
+      "loop": true
+     },
+     {
+      "index": 2,
+      "source": "AIME2025",
+      "verdict": "failed",
+      "status": "length",
+      "completion_tokens": 16000,
+      "loop": true
+     },
+     {
+      "index": 3,
+      "source": "GPQA Diamond",
+      "verdict": "failed",
+      "status": "length",
+      "completion_tokens": 16000,
+      "loop": false
+     },
+     {
+      "index": 4,
+      "source": "SuperGPQA",
+      "verdict": "failed",
+      "status": "length",
+      "completion_tokens": 16000,
+      "loop": true
+     },
+     {
+      "index": 5,
+      "source": "AIME2025",
+      "verdict": "failed",
+      "status": "length",
+      "completion_tokens": 16000,
+      "loop": true
+     },
+     {
+      "index": 6,
+      "source": "GPQA Diamond",
+      "verdict": "failed",
+      "status": "length",
+      "completion_tokens": 16000,
+      "loop": true
+     },
+     {
+      "index": 7,
+      "source": "SuperGPQA",
+      "verdict": "failed",
+      "status": "length",
+      "completion_tokens": 16000,
+      "loop": true
+     },
+     {
+      "index": 8,
+      "source": "AIME2025",
+      "verdict": "failed",
+      "status": "length",
+      "completion_tokens": 16000,
+      "loop": false
+     },
+     {
+      "index": 9,
+      "source": "GPQA Diamond",
+      "verdict": "passed",
+      "status": "stop",
+      "completion_tokens": 8064,
+      "loop": false
+     },
+     {
+      "index": 10,
+      "source": "SuperGPQA",
+      "verdict": "failed",
+      "status": "length",
+      "completion_tokens": 16000,
+      "loop": true
+     },
+     {
+      "index": 11,
+      "source": "AIME2025",
+      "verdict": "failed",
+      "status": "length",
+      "completion_tokens": 16000,
+      "loop": true
+     },
+     {
+      "index": 12,
+      "source": "GPQA Diamond (modified)",
+      "verdict": "failed",
+      "status": "length",
+      "completion_tokens": 16000,
+      "loop": true
+     },
+     {
+      "index": 13,
+      "source": "SuperGPQA",
+      "verdict": "failed",
+      "status": "length",
+      "completion_tokens": 16000,
+      "loop": true
+     },
+     {
+      "index": 14,
+      "source": "AIME2025",
+      "verdict": "failed",
+      "status": "length",
+      "completion_tokens": 16000,
+      "loop": true
+     },
+     {
+      "index": 15,
+      "source": "GPQA Diamond",
+      "verdict": "failed",
+      "status": "length",
+      "completion_tokens": 16000,
+      "loop": true
+     },
+     {
+      "index": 16,
+      "source": "SuperGPQA",
+      "verdict": "failed",
+      "status": "length",
+      "completion_tokens": 16000,
+      "loop": false
+     },
+     {
+      "index": 17,
+      "source": "AIME2025",
+      "verdict": "failed",
+      "status": "length",
+      "completion_tokens": 16000,
+      "loop": true
+     },
+     {
+      "index": 18,
+      "source": "GPQA Diamond",
+      "verdict": "failed",
+      "status": "length",
+      "completion_tokens": 16000,
+      "loop": true
+     },
+     {
+      "index": 19,
+      "source": "SuperGPQA",
+      "verdict": "failed",
+      "status": "length",
+      "completion_tokens": 16000,
+      "loop": true
+     },
+     {
+      "index": 20,
+      "source": "AIME2025",
+      "verdict": "failed",
+      "status": "length",
+      "completion_tokens": 16000,
+      "loop": true
+     },
+     {
+      "index": 21,
+      "source": "GPQA Diamond",
+      "verdict": "failed",
+      "status": "length",
+      "completion_tokens": 16000,
+      "loop": true
+     },
+     {
+      "index": 22,
+      "source": "SuperGPQA",
+      "verdict": "failed",
+      "status": "length",
+      "completion_tokens": 16000,
+      "loop": true
+     },
+     {
+      "index": 23,
+      "source": "AIME2025",
+      "verdict": "failed",
+      "status": "length",
+      "completion_tokens": 16000,
+      "loop": false
+     }
+    ]
+   }
+  }
+ },
+ "findings": [
+  "Sampled reasoning collapses at every tested gap: 21/24 passed exact, 9/24 at 0.5, 7/24 at 1, 1/24 at 2, mostly from answers that loop to the 16K cap; no case improved.",
+  "Surviving answers grow longer, cancelling the ~10% decode gain in time to answer.",
+  "Greedy with thinking loops even without relaxation, so greedy reasoning was not evaluated.",
+  "Kept as an opt-in lever, off by default; not recommended for sampled or reasoning use."
+ ]
+}

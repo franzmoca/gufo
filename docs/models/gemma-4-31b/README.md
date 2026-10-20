@@ -58,6 +58,8 @@ target's three most likely tokens and at most GAP nats below the top one
 (greedy: the temperature-1 logits; sampled: the request's sampling
 distribution). Greedy output then no longer equals autoregressive decoding,
 and sampled output no longer follows the model's distribution exactly.
+It is not recommended: sampled reasoning with thinking on loops far more
+often (26B DS4 subset: 21 of 24 passed exact, 9 at GAP 0.5).
 `--draft-trace PATH` (serve, prompt and bench) appends one JSON line per
 verification cycle: rows, copies and siblings, drafter steps, accepted and
 emitted tokens, the policy's prices, expected tokens, per-draft signals and
