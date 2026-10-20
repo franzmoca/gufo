@@ -1712,6 +1712,37 @@ __global__ void SoftcapKernel(float* logits, std::size_t count, float cap) {
   }
 }
 
+/// Block (row, slice): counts the slice's logits above the candidate's.
+constexpr std::uint32_t kStatSlices = 32;
+__global__ void __launch_bounds__(kThreads)
+    RowLogitStatsKernel(const float* logits, const std::uint32_t* argmax,
+                        const std::int32_t* candidates, RowLogitStats* stats,
+                        std::uint32_t vocab) {
+  __shared__ float scratch[kWaves];
+  const std::uint32_t row = blockIdx.x;
+  const std::int32_t candidate = candidates[row];
+  if (candidate < 0) {
+    return;
+  }
+  const float* l = logits + static_cast<std::size_t>(row) * vocab;
+  const float own = l[candidate];
+  const std::uint32_t slice = (vocab + kStatSlices - 1) / kStatSlices;
+  const std::uint32_t begin = blockIdx.y * slice;
+  const std::uint32_t end = min(vocab, begin + slice);
+  float count = 0.0F;
+  for (std::uint32_t i = begin + threadIdx.x; i < end; i += kThreads) {
+    count += l[i] > own ? 1.0F : 0.0F;
+  }
+  count = BlockSum(count, scratch);
+  if (threadIdx.x == 0) {
+    atomicAdd(&stats[row].greater, static_cast<std::uint32_t>(count));
+    if (blockIdx.y == 0) {
+      stats[row].top = l[argmax[row]];
+      stats[row].candidate = own;
+    }
+  }
+}
+
 __global__ void GatherRowsKernel(const float* src, const std::uint32_t* index,
                                  float* dst, std::uint32_t dim) {
   const float* s = src + static_cast<std::size_t>(index[blockIdx.x]) * dim;
@@ -1938,6 +1969,17 @@ void Scale(const float* x, float scale, float* y, std::size_t count,
 
 void Softcap(float* logits, std::size_t count, float cap, hipStream_t stream) {
   SoftcapKernel<<<Blocks(count), kThreads, 0, stream>>>(logits, count, cap);
+}
+
+void RowLogitStatsLaunch(const float* logits, const std::uint32_t* argmax,
+                         const std::int32_t* candidates, RowLogitStats* stats,
+                         std::uint32_t rows, std::uint32_t vocab,
+                         hipStream_t stream) {
+  if (rows == 0) {
+    return;
+  }
+  RowLogitStatsKernel<<<dim3(rows, kStatSlices), kThreads, 0, stream>>>(
+      logits, argmax, candidates, stats, vocab);
 }
 
 void GatherRows(const float* src, const std::uint32_t* index, float* dst,

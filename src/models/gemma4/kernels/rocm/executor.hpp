@@ -156,6 +156,11 @@ public:
   /// Argmax token id per row of the last Forward's `rows` logit rows.
   [[nodiscard]] std::span<const std::uint32_t> ReadArgmax(
       std::size_t rows) const;
+  /// After ReadArgmax over the same rows: per row r, the top logit, the
+  /// logit of candidates[r] and how many logits exceed it (relaxed draft
+  /// acceptance); rows with a negative candidate stay zero.
+  [[nodiscard]] std::span<const RowLogitStats> ReadRowStats(
+      std::span<const std::int32_t> candidates) const;
   /// Keeps logit row `row` of the last Forward in cache.logits.
   void CommitLogits(KvCache& cache, std::uint32_t row);
   /// Copies cache.logits to `out`.
@@ -343,6 +348,10 @@ private:
   std::uint32_t* draft_candidate_scratch_{nullptr};
   qwen38_flash_next::MtpCandidateLogits* draft_candidates_host_{nullptr};
   std::uint32_t* argmax_host_{nullptr};
+  /// ReadRowStats: candidates and results on the device, results on the host.
+  std::int32_t* row_candidates_{nullptr};
+  RowLogitStats* row_stats_{nullptr};
+  RowLogitStats* row_stats_host_{nullptr};
   mutable std::vector<float> logits_host_;
 };
 

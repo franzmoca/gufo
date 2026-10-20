@@ -34,6 +34,8 @@ struct CycleRecord {
   /// Accepted drafts and copies, whether a sibling was accepted, and the
   /// tokens the cycle emitted.
   std::uint32_t accepted{0};
+  /// Of those, drafts taken by relaxed acceptance.
+  std::uint32_t relaxed_accepted{0};
   bool sibling_accepted{false};
   std::uint32_t emitted{0};
   /// Calibrated policy: drafter and verification prices of the cycle and
@@ -70,6 +72,14 @@ struct CycleRecord {
   /// without repetition penalties) and q the proposal's probability (1 for
   /// a copy).
   std::vector<float> row_acceptance;
+  /// Per verified chain row: the target distribution's top probability, the
+  /// row token's probability and rank (0: the top) and the entropy (nats).
+  /// Sampled: the request sampler's distribution; greedy: the target's
+  /// temperature-1 softmax.
+  std::vector<float> row_target_top;
+  std::vector<float> row_draft_prob;
+  std::vector<std::uint32_t> row_draft_rank;
+  std::vector<float> row_target_entropy;
   /// Per MTP draft, the drafter's alternative beside it (-1: none), its
   /// signal, and the probability that verification accepts it as the
   /// sibling once the draft is rejected (a hit adds one token). Greedy: 1

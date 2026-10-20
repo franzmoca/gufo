@@ -4,6 +4,7 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <optional>
 #include <string_view>
 
 #include "src/models/qwen38_flash_next/mtp_sampling.hpp"
@@ -41,6 +42,11 @@ enum class DraftCalibrationScope : std::uint8_t {
     std::string_view name);
 [[nodiscard]] std::string_view DraftCalibrationScopeName(
     DraftCalibrationScope scope) noexcept;
+
+/// `--relaxed-acceptance`: empty leaves acceptance exact; otherwise a finite
+/// gap in nats >= 0. Throws std::invalid_argument otherwise.
+[[nodiscard]] std::optional<float> ParseRelaxedAcceptance(
+    std::string_view value);
 
 /// The drafter's confidence in its own step: AdaEDL's entropy bound
 /// 1 - sqrt(0.2 H) over the top-64 softmax, clamped to [0, 1].

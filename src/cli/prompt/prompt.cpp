@@ -173,6 +173,11 @@ static void RegisterTextOptions(ArgParser& parser, PromptOptions& opt,
                    "Gemma 4 MTP: append one JSON line per verification cycle "
                    "(prices, estimates, outcome, stage times) to PATH",
                    "Speculative", &opt.draft_trace_path);
+  parser.AddOption(
+      "", "--relaxed-acceptance", "GAP",
+      "Gemma 4 MTP, a quality trade: also accept a draft among the target's "
+      "top 3 tokens within GAP nats of the top one (default: exact)",
+      "Speculative", &opt.relaxed_acceptance);
   parser.AddOption("", "--dspark-model", "PATH",
                    "Path to the DeepSeek V4 Flash DSpark support GGUF file",
                    "Speculative", &opt.dspark_model_path);
@@ -660,7 +665,8 @@ std::shared_ptr<models::qwen38_flash_next::Model> LoadFlashNextModel(
       (!opt.speculative_backend.empty() && opt.speculative_backend != "mtp") ||
       (opt.speculative_backend == "mtp" &&
        (opt.min_draft_tokens != 1 || !opt.draft_policy.empty() ||
-        !opt.draft_calibration.empty() || !opt.draft_trace_path.empty()))) {
+        !opt.draft_calibration.empty() || !opt.draft_trace_path.empty() ||
+        !opt.relaxed_acceptance.empty()))) {
     std::cerr << "Flash-Next requires ROCm and supports MTP with "
                  "--min-draft-tokens 1 and no --draft-policy\n";
     return nullptr;
@@ -928,12 +934,14 @@ static std::optional<PromptOptions> ParseTextOptions(
   if ((!opt.draft_policy.empty() && backend != "mtp" &&
        (backend != "dflash2" ||
         (opt.draft_policy != "fixed" && opt.draft_policy != "adaptive"))) ||
-      ((!opt.draft_calibration.empty() || !opt.draft_trace_path.empty()) &&
+      ((!opt.draft_calibration.empty() || !opt.draft_trace_path.empty() ||
+        !opt.relaxed_acceptance.empty()) &&
        backend != "mtp")) {
     if (error_msg != nullptr)
       *error_msg =
           "--draft-policy requires DFlash2 (fixed or adaptive) or MTP; "
-          "--draft-calibration and --draft-trace require MTP";
+          "--draft-calibration, --draft-trace and --relaxed-acceptance "
+          "require MTP";
     return std::nullopt;
   }
   if (opt.min_draft_tokens != 1 && backend == "dflash2") {

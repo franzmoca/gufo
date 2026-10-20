@@ -274,6 +274,13 @@ std::shared_ptr<Model> Model::Load(const std::string& model_path,
     }
     m->draft_weights_ = std::make_unique<DraftWeights>(std::move(*draft));
   }
+  if (options.relaxed_acceptance &&
+      (!m->draft_weights_ || !std::isfinite(*options.relaxed_acceptance) ||
+       *options.relaxed_acceptance < 0.0F)) {
+    Fail(error_msg,
+         "gemma4 relaxed acceptance requires an MTP drafter and a gap >= 0");
+    return nullptr;
+  }
   if (!options.draft_trace_path.empty()) {
     if (!m->draft_weights_) {
       Fail(error_msg, "gemma4 draft trace requires an MTP drafter");
@@ -1232,15 +1239,22 @@ bool Session::DecodeStep(std::size_t max_tokens,
     }
     executor.Forward(*cache_, cycle.rows, cycle.position, logit_rows, {},
                      static_cast<std::uint32_t>(cycle.siblings.size()));
+    std::span<const rocm::RowLogitStats> relaxed;
     if (use_argmax) {
       argmax = executor.ReadArgmax(cycle.rows.size());
+      if (model_->options_.relaxed_acceptance) {
+        relaxed = executor.ReadRowStats(RelaxedCandidates(cycle));
+      }
     } else {
       logits = executor.ReadLogits(cycle.rows.size());
     }
     if (cycle.trace) {
       cycle.trace->verified_ns = CycleTrace::Now();
+      if (use_argmax) {
+        cycle.trace_logits = executor.ReadLogits(cycle.rows.size());
+      }
     }
-    FinishCycle(cycle, logits, argmax, 0);
+    FinishCycle(cycle, logits, argmax, 0, relaxed);
   } catch (const std::exception& e) {
     Reset();
     return Fail(error_msg, e.what());
@@ -1489,12 +1503,35 @@ void Session::TraceRows(Cycle& cycle, std::span<const float> logits,
     return static_cast<std::int32_t>(std::ranges::max_element(row) -
                                      row.begin());
   };
+  const std::span<const float> host =
+      logits.empty() ? cycle.trace_logits : logits;
   for (std::size_t r = 0; r + 1 < chain; ++r) {
     const bool beside = r < trace.runner_ups.size();
     const std::int32_t up = beside ? trace.runner_ups[r] : -1;
     if (!cycle.sampled) {
       const std::int32_t t = target(r);
       trace.row_acceptance.push_back(t == cycle.rows[r + 1] ? 1.0F : 0.0F);
+      if (!host.empty()) {
+        // The target's temperature-1 softmax at the row.
+        const auto row = host.subspan(r * vocab, vocab);
+        const float top = *std::ranges::max_element(row);
+        const float own = row[static_cast<std::size_t>(cycle.rows[r + 1])];
+        double total = 0.0;
+        double weighted = 0.0;
+        std::uint32_t rank = 0;
+        for (const float l : row) {
+          const double e = std::exp(static_cast<double>(l - top));
+          total += e;
+          weighted += e * static_cast<double>(l - top);
+          rank += l > own ? 1U : 0U;
+        }
+        trace.row_target_top.push_back(static_cast<float>(1.0 / total));
+        trace.row_draft_prob.push_back(static_cast<float>(
+            std::exp(static_cast<double>(own - top)) / total));
+        trace.row_draft_rank.push_back(rank);
+        trace.row_target_entropy.push_back(
+            static_cast<float>(std::log(total) - weighted / total));
+      }
       if (beside) {
         trace.runner_up_acceptance.push_back(up >= 0 && t == up ? 1.0F : 0.0F);
       }
@@ -1503,8 +1540,25 @@ void Session::TraceRows(Cycle& cycle, std::span<const float> logits,
     const auto& q = cycle.proposals[r];
     const auto p =
         cycle.sampler->Distribution(logits.subspan(r * vocab, vocab));
-    trace.row_acceptance.push_back(static_cast<float>(std::min(
-        1.0, p.probability(q.token) / static_cast<double>(q.probability))));
+    const double own = p.probability(q.token);
+    trace.row_acceptance.push_back(static_cast<float>(
+        std::min(1.0, own / static_cast<double>(q.probability))));
+    {
+      double top = 0.0;
+      double entropy = 0.0;
+      std::uint32_t rank = 0;
+      for (const auto& entry : p.entries()) {
+        top = std::max(top, entry.value);
+        rank += entry.value > own ? 1U : 0U;
+        if (entry.value > 0.0) {
+          entropy -= entry.value * std::log(entry.value);
+        }
+      }
+      trace.row_target_top.push_back(static_cast<float>(top));
+      trace.row_draft_prob.push_back(static_cast<float>(own));
+      trace.row_draft_rank.push_back(rank);
+      trace.row_target_entropy.push_back(static_cast<float>(entropy));
+    }
     if (!beside) {
       continue;
     }
@@ -1534,9 +1588,63 @@ void Session::TraceRows(Cycle& cycle, std::span<const float> logits,
   }
 }
 
+std::vector<std::int32_t> Session::RelaxedCandidates(const Cycle& cycle) {
+  const std::size_t chain = cycle.rows.size() - cycle.siblings.size();
+  std::vector<std::int32_t> candidates(cycle.rows.size(), -1);
+  for (std::size_t r = 0; r + 1 < chain; ++r) {
+    candidates[r] = cycle.rows[r + 1];
+  }
+  return candidates;
+}
+
+bool Session::RelaxedAccepts(
+    const Cycle& cycle, std::size_t row, std::span<const float> logits,
+    std::span<const rocm::RowLogitStats> relaxed) const {
+  const auto& delta = model_->options_.relaxed_acceptance;
+  if (!delta) {
+    return false;
+  }
+  const std::size_t vocab = model_->VocabSize();
+  if (cycle.sampled) {
+    // The request sampler's distribution, as verification draws from it.
+    const auto p =
+        cycle.sampler->Distribution(logits.subspan(row * vocab, vocab));
+    const double own = p.probability(cycle.proposals[row].token);
+    if (!(own > 0.0)) {
+      return false;
+    }
+    double top = 0.0;
+    std::uint32_t greater = 0;
+    for (const auto& entry : p.entries()) {
+      top = std::max(top, entry.value);
+      greater += entry.value > own ? 1U : 0U;
+    }
+    return greater < kRelaxedTop &&
+           std::log(own) >= std::log(top) - static_cast<double>(*delta);
+  }
+  // Greedy: the temperature-1 log-probability gap is the logit gap.
+  float top = 0.0F;
+  float own = 0.0F;
+  std::uint32_t greater = 0;
+  if (!relaxed.empty()) {
+    top = relaxed[row].top;
+    own = relaxed[row].candidate;
+    greater = relaxed[row].greater;
+  } else {
+    const auto l = logits.subspan(row * vocab, vocab);
+    own = l[static_cast<std::size_t>(cycle.rows[row + 1])];
+    top = *std::ranges::max_element(l);
+    for (const float x : l) {
+      greater += x > own ? 1U : 0U;
+    }
+  }
+  return greater < kRelaxedTop && own >= top - *delta;
+}
+
 void Session::FinishCycle(Cycle& cycle, std::span<const float> logits,
                           std::span<const std::uint32_t> argmax,
-                          std::uint32_t first_hidden_row) {
+                          std::uint32_t first_hidden_row,
+                          std::span<const rocm::RowLogitStats> relaxed) {
   auto& sampler = *cycle.sampler;
   auto* result = cycle.result;
   const auto& rows = cycle.rows;
@@ -1571,7 +1679,14 @@ void Session::FinishCycle(Cycle& cycle, std::span<const float> logits,
     const bool beside = row < siblings && row + 1 < chain;
     if (cycle.sampled && row + 1 < chain) {
       const auto row_logits = logits.subspan(row * vocab, vocab);
-      if (beside) {
+      if (RelaxedAccepts(cycle, row, logits, relaxed)) {
+        // Taken before p/q verification: no draw is consumed.
+        emit(rows[row + 1]);
+        agrees = true;
+        if (cycle.trace) {
+          ++cycle.trace->relaxed_accepted;
+        }
+      } else if (beside) {
         const auto verified = VerifyWithSibling(
             row_logits, cycle.proposals[row], cycle.siblings[row], sampler);
         emit(static_cast<TokenId>(verified.token));
@@ -1584,10 +1699,17 @@ void Session::FinishCycle(Cycle& cycle, std::span<const float> logits,
         agrees = verified.accepted;
       }
     } else {
-      emit(sample_row(row));
-      agrees = row + 1 < chain && result->tokens.back() == rows[row + 1];
-      sibling =
-          beside && !agrees && result->tokens.back() == cycle.siblings[row];
+      TokenId token = sample_row(row);
+      if (row + 1 < chain && token != rows[row + 1] &&
+          RelaxedAccepts(cycle, row, logits, relaxed)) {
+        token = rows[row + 1];
+        if (cycle.trace) {
+          ++cycle.trace->relaxed_accepted;
+        }
+      }
+      emit(token);
+      agrees = row + 1 < chain && token == rows[row + 1];
+      sibling = beside && !agrees && token == cycle.siblings[row];
     }
     if (!agrees || result->stop || result->tokens.size() >= cycle.max_tokens) {
       break;
@@ -1818,28 +1940,45 @@ bool Session::DecodeBatch(std::span<BatchDecode> decodes) {
       logit_rows[i] = i;
     }
     executor.Forward(segments, tokens, logit_rows);
+    std::span<const rocm::RowLogitStats> relaxed;
     if (use_argmax) {
       argmax = executor.ReadArgmax(tokens.size());
+      if (model.options_.relaxed_acceptance) {
+        std::vector<std::int32_t> candidates;
+        candidates.reserve(tokens.size());
+        for (const std::size_t i : active) {
+          const auto own = RelaxedCandidates(cycles[i]);
+          candidates.insert(candidates.end(), own.begin(), own.end());
+        }
+        relaxed = executor.ReadRowStats(candidates);
+      }
     } else {
       logits = executor.ReadLogits(tokens.size());
     }
+    const std::size_t vocab = model.VocabSize();
+    std::span<const float> traced;
     if (model.trace_) {
       const std::int64_t verified = CycleTrace::Now();
       for (const std::size_t i : active) {
         cycles[i].trace->verified_ns = verified;
       }
+      if (use_argmax) {
+        traced = executor.ReadLogits(tokens.size());
+      }
     }
-    const std::size_t vocab = model.VocabSize();
     std::uint32_t row0 = 0;
     for (const std::size_t i : active) {
       const std::size_t count = cycles[i].rows.size();
+      if (!traced.empty()) {
+        cycles[i].trace_logits = traced.subspan(row0 * vocab, count * vocab);
+      }
       decodes[i].session->FinishCycle(
           cycles[i],
           use_argmax ? std::span<const float>{}
                      : logits.subspan(row0 * vocab, count * vocab),
           use_argmax ? argmax.subspan(row0, count)
                      : std::span<const std::uint32_t>{},
-          row0);
+          row0, relaxed.empty() ? relaxed : relaxed.subspan(row0, count));
       row0 += static_cast<std::uint32_t>(count);
     }
   } catch (const std::exception& e) {

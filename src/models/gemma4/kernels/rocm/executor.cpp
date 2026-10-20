@@ -336,6 +336,10 @@ Executor::Executor(const DeviceModel& model, std::uint32_t max_rows,
         kMaxDraftSessions * sizeof(qwen38_flash_next::MtpCandidateLogits)));
   }
   HIP_CHECK(hipHostMalloc(&argmax_host_, kSplitRows * sizeof(std::uint32_t)));
+  HIP_CHECK(hipMalloc(&row_candidates_, kSplitRows * sizeof(std::int32_t)));
+  HIP_CHECK(hipMalloc(&row_stats_, kSplitRows * sizeof(RowLogitStats)));
+  HIP_CHECK(
+      hipHostMalloc(&row_stats_host_, kSplitRows * sizeof(RowLogitStats)));
   logits_host_.resize(std::size_t{max_logit_rows} * model.vocab_size());
   if (!logits_host_.empty()) {
     HIP_CHECK(hipHostRegister(logits_host_.data(),
@@ -350,6 +354,15 @@ Executor::~Executor() {
   }
   if (argmax_host_ != nullptr) {
     hip::LogCleanupError(hipHostFree(argmax_host_));
+  }
+  if (row_candidates_ != nullptr) {
+    hip::LogCleanupError(hipFree(row_candidates_));
+  }
+  if (row_stats_ != nullptr) {
+    hip::LogCleanupError(hipFree(row_stats_));
+  }
+  if (row_stats_host_ != nullptr) {
+    hip::LogCleanupError(hipHostFree(row_stats_host_));
   }
   if (copy_runs_ != nullptr) {
     hip::LogCleanupError(hipFree(copy_runs_));
@@ -1643,6 +1656,27 @@ std::span<const std::uint32_t> Executor::ReadArgmax(std::size_t rows) const {
                            stream_));
   HIP_CHECK(hipStreamSynchronize(stream_));
   return std::span<const std::uint32_t>(argmax_host_, rows);
+}
+
+std::span<const RowLogitStats> Executor::ReadRowStats(
+    std::span<const std::int32_t> candidates) const {
+  const std::size_t rows = candidates.size();
+  if (rows == 0 || rows > kSplitRows) {
+    throw std::invalid_argument("gemma4 row stats exceed capacity");
+  }
+  HIP_CHECK(hipMemcpyAsync(row_candidates_, candidates.data(),
+                           rows * sizeof(std::int32_t), hipMemcpyHostToDevice,
+                           stream_));
+  HIP_CHECK(
+      hipMemsetAsync(row_stats_, 0, rows * sizeof(RowLogitStats), stream_));
+  RowLogitStatsLaunch(logits_, logit_index_, row_candidates_, row_stats_,
+                      static_cast<std::uint32_t>(rows), model_.vocab_size(),
+                      stream_);
+  HIP_CHECK(hipMemcpyAsync(row_stats_host_, row_stats_,
+                           rows * sizeof(RowLogitStats), hipMemcpyDeviceToHost,
+                           stream_));
+  HIP_CHECK(hipStreamSynchronize(stream_));
+  return std::span<const RowLogitStats>(row_stats_host_, rows);
 }
 
 void Executor::CommitLogits(KvCache& cache, std::uint32_t row) {

@@ -210,6 +210,11 @@ void RegisterBenchOptions(ArgParser& parser, BenchOptions& opt,
                    "Gemma 4 MTP: append one JSON line per verification cycle "
                    "(prices, estimates, outcome, stage times) to PATH",
                    "Speculative", &opt.draft_trace_path);
+  parser.AddOption(
+      "", "--relaxed-acceptance", "GAP",
+      "Gemma 4 MTP, a quality trade: also accept a draft among the target's "
+      "top 3 tokens within GAP nats of the top one (default: exact)",
+      "Speculative", &opt.relaxed_acceptance);
   parser.AddOption("", "--dspark-model", "PATH",
                    "DeepSeek V4 Flash DSpark support GGUF", "Speculative",
                    &opt.dspark_model_path);
@@ -930,7 +935,8 @@ int RunQwen38FlashNextBenchmark(
   }
   if (mtp && (options.min_draft_tokens != 1 || !options.draft_policy.empty() ||
               !options.draft_calibration.empty() ||
-              !options.draft_trace_path.empty())) {
+              !options.draft_trace_path.empty() ||
+              !options.relaxed_acceptance.empty())) {
     std::cerr << "Error: Flash-Next MTP requires --min-draft-tokens 1 and no "
                  "--draft-policy\n";
     return 1;
@@ -1235,12 +1241,14 @@ std::optional<BenchOptions> ParseBenchOptions(std::span<const char* const> args,
   if ((!opt.draft_policy.empty() && opt.speculative_backend != "mtp" &&
        (opt.speculative_backend != "dflash2" ||
         (opt.draft_policy != "fixed" && opt.draft_policy != "adaptive"))) ||
-      ((!opt.draft_calibration.empty() || !opt.draft_trace_path.empty()) &&
+      ((!opt.draft_calibration.empty() || !opt.draft_trace_path.empty() ||
+        !opt.relaxed_acceptance.empty()) &&
        opt.speculative_backend != "mtp")) {
     if (error_msg != nullptr)
       *error_msg =
           "--draft-policy requires DFlash2 (fixed or adaptive) or MTP; "
-          "--draft-calibration and --draft-trace require MTP";
+          "--draft-calibration, --draft-trace and --relaxed-acceptance "
+          "require MTP";
     return std::nullopt;
   }
   if (opt.min_draft_tokens != 1 && opt.speculative_backend == "dflash2") {
@@ -1298,6 +1306,8 @@ int RunGemma4Benchmark(const BenchOptions& options,
     model_options.draft_policy = g4::ParseDraftPolicy(options.draft_policy);
     model_options.draft_calibration =
         g4::ParseDraftCalibrationScope(options.draft_calibration);
+    model_options.relaxed_acceptance =
+        g4::ParseRelaxedAcceptance(options.relaxed_acceptance);
   } catch (const std::invalid_argument& e) {
     std::cerr << "Error: " << e.what() << '\n';
     return 1;

@@ -2,7 +2,8 @@
 // post-processing (weighted and unweighted norms, NEOX rope with frequency
 // divisors, binary16 cache slots in linear and ring caches), the fused
 // residual norms, GeGLU and the logit softcap; the fused prefill
-// quantization writes the shared Q8_1 activation.
+// quantization writes the shared Q8_1 activation; relaxed acceptance's row
+// statistics count logits exactly.
 #include <hip/hip_runtime.h>
 
 #include <algorithm>
@@ -306,6 +307,55 @@ void CheckElementwise() {
   }
 }
 
+/// Relaxed acceptance's row statistics against a host count: the top
+/// logit, the candidate's, and how many logits exceed it (ties excluded),
+/// over a vocabulary not divisible by the slice count; a negative
+/// candidate leaves its row zero.
+void CheckRowLogitStats(std::mt19937& rng) {
+  constexpr std::uint32_t kRows = 5;
+  constexpr std::uint32_t kVocab = 262144 + 37;
+  std::normal_distribution<float> normal(0.0F, 3.0F);
+  std::vector<float> logits(std::size_t{kRows} * kVocab);
+  for (float& l : logits) {
+    l = std::round(normal(rng) * 8.0F) / 8.0F;  // frequent ties
+  }
+  std::vector<std::uint32_t> argmax(kRows);
+  std::vector<std::int32_t> candidates = {
+      0, 17, -1, 99999, static_cast<std::int32_t>(kVocab - 1)};
+  for (std::uint32_t r = 0; r < kRows; ++r) {
+    const auto* row = logits.data() + std::size_t{r} * kVocab;
+    argmax[r] =
+        static_cast<std::uint32_t>(std::max_element(row, row + kVocab) - row);
+  }
+  float* dl = Device(logits);
+  std::uint32_t* da = Device(argmax);
+  std::int32_t* dc = Device(candidates);
+  std::vector<k::RowLogitStats> zero(kRows);
+  k::RowLogitStats* ds = Device(zero);
+  k::RowLogitStatsLaunch(dl, da, dc, ds, kRows, kVocab, nullptr);
+  const auto stats = Host(ds, kRows);
+  for (std::uint32_t r = 0; r < kRows; ++r) {
+    const auto* row = logits.data() + std::size_t{r} * kVocab;
+    if (candidates[r] < 0) {
+      Require(stats[r].greater == 0 && stats[r].top == 0.0F,
+              "skipped row written");
+      continue;
+    }
+    const float own = row[candidates[r]];
+    const auto greater = static_cast<std::uint32_t>(
+        std::count_if(row, row + kVocab, [own](float l) { return l > own; }));
+    Require(stats[r].top == row[argmax[r]] && stats[r].candidate == own &&
+                stats[r].greater == greater,
+            "row stats " + std::to_string(r) + ": greater " +
+                std::to_string(stats[r].greater) + " want " +
+                std::to_string(greater));
+  }
+  for (void* p : {static_cast<void*>(dl), static_cast<void*>(da),
+                  static_cast<void*>(dc), static_cast<void*>(ds)}) {
+    HIP_CHECK(hipFree(p));
+  }
+}
+
 }  // namespace
 
 /// Prefill producers that write the Q8_1 activation directly match the FP32
@@ -436,5 +486,6 @@ int main() {
     CheckNorms(rng);
     CheckElementwise();
     CheckFusedQuantize(rng);
+    CheckRowLogitStats(rng);
   });
 }

@@ -31,6 +31,7 @@ std::string FormatCycleRecord(const CycleRecord& r) {
   v["step_cap"] = static_cast<std::size_t>(r.step_cap);
   v["small_head"] = r.small_head;
   v["accepted"] = static_cast<std::size_t>(r.accepted);
+  v["relaxed_accepted"] = static_cast<std::size_t>(r.relaxed_accepted);
   v["sibling_accepted"] = r.sibling_accepted;
   v["emitted"] = static_cast<std::size_t>(r.emitted);
   v["priced_draft_ms"] = static_cast<double>(r.priced_draft_ms);
@@ -47,6 +48,14 @@ std::string FormatCycleRecord(const CycleRecord& r) {
   v["pending_top"] = static_cast<double>(r.pending_top);
   v["pending_entropy"] = static_cast<double>(r.pending_entropy);
   v["row_acceptance"] = Floats(r.row_acceptance);
+  v["row_target_top"] = Floats(r.row_target_top);
+  v["row_draft_prob"] = Floats(r.row_draft_prob);
+  json::Value ranks = json::Value::array();
+  for (const std::uint32_t rank : r.row_draft_rank) {
+    ranks.push_back(static_cast<std::size_t>(rank));
+  }
+  v["row_draft_rank"] = std::move(ranks);
+  v["row_target_entropy"] = Floats(r.row_target_entropy);
   json::Value runner_ups = json::Value::array();
   for (const std::int32_t token : r.runner_ups) {
     runner_ups.push_back(static_cast<long long>(token));

@@ -593,6 +593,7 @@ void PrintServeHelp(std::string_view program_name,
     std::string draft_policy;
     std::string draft_calibration;
     std::string draft_trace_path;
+    std::string relaxed_acceptance;
     std::string dspark_model_path;
     std::string mtp_model_path;
     std::string vision_model_path;
@@ -688,6 +689,11 @@ void PrintServeHelp(std::string_view program_name,
                      "Gemma 4 MTP: append one JSON line per verification "
                      "cycle (prices, estimates, outcome, stage times) to PATH",
                      "Speculative", &draft_trace_path);
+    parser.AddOption("", "--relaxed-acceptance", "GAP",
+                     "Gemma 4 MTP, a quality trade: also accept a draft "
+                     "among the target's top 3 tokens within GAP nats of the "
+                     "top one (default: exact)",
+                     "Speculative", &relaxed_acceptance);
     parser.AddOption("", "--dspark-model", "PATH",
                      "Path to DeepSeek V4 Flash DSpark support GGUF file",
                      "Speculative", &dspark_model_path);
@@ -1164,6 +1170,7 @@ int RunServe(std::span<const char* const> args) {
     std::string draft_policy;
     std::string draft_calibration;
     std::string draft_trace_path;
+    std::string relaxed_acceptance;
     std::string dspark_model_path;
     std::string mtp_model_path;
     std::string vision_model_path;
@@ -1255,6 +1262,11 @@ int RunServe(std::span<const char* const> args) {
         "Gemma 4 MTP: append one JSON line per verification cycle (prices, "
         "estimates, outcome, stage times) to PATH",
         "Speculative", &draft_trace_path);
+    llm_parser.AddOption(
+        "", "--relaxed-acceptance", "GAP",
+        "Gemma 4 MTP, a quality trade: also accept a draft among the target's "
+        "top 3 tokens within GAP nats of the top one (default: exact)",
+        "Speculative", &relaxed_acceptance);
     llm_parser.AddOption("", "--dspark-model", "PATH",
                          "Path to DeepSeek V4 Flash DSpark support GGUF file",
                          "Speculative", &dspark_model_path);
@@ -1443,15 +1455,18 @@ int RunServe(std::span<const char* const> args) {
       if ((!draft_policy.empty() && !mtp &&
            speculative_config.backend !=
                server::TextSpeculativeBackend::kDFlash) ||
-          ((!draft_calibration.empty() || !draft_trace_path.empty()) && !mtp))
+          ((!draft_calibration.empty() || !draft_trace_path.empty() ||
+            !relaxed_acceptance.empty()) &&
+           !mtp))
         throw std::invalid_argument(
-            "--draft-policy requires DFlash2 or MTP; --draft-calibration and "
-            "--draft-trace require MTP");
+            "--draft-policy requires DFlash2 or MTP; --draft-calibration, "
+            "--draft-trace and --relaxed-acceptance require MTP");
       if (mtp) {
         // The MTP model validates its own policy names at load.
         speculative_config.mtp_draft_policy = draft_policy;
         speculative_config.mtp_draft_calibration = draft_calibration;
         speculative_config.mtp_draft_trace_path = draft_trace_path;
+        speculative_config.mtp_relaxed_acceptance = relaxed_acceptance;
       } else {
         speculative_config.dflash_policy =
             speculative::ParseDFlashDraftPolicy(draft_policy);

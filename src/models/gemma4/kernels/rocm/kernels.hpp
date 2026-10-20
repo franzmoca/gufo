@@ -211,6 +211,24 @@ void Scale(const float* x, float scale, float* y, std::size_t count,
 void Softcap(float* logits, std::size_t count, float cap, hipStream_t stream);
 
 /// Copies rows `src[index[i]]` into dst[i] (row width `dim` floats).
+/// One verified row's logits against a candidate token (relaxed draft
+/// acceptance): the top logit, the candidate's and how many logits exceed
+/// the candidate's (its rank; ties rank equal).
+struct RowLogitStats {
+  float top{0.0F};
+  float candidate{0.0F};
+  std::uint32_t greater{0};
+  std::uint32_t pad{0};
+};
+
+/// Fills stats[r] for row r of `logits` ([rows][vocab]) with argmax[r] the
+/// row's top token and candidates[r] the token to rank; rows with a
+/// negative candidate are left zero. stats must be zeroed first.
+void RowLogitStatsLaunch(const float* logits, const std::uint32_t* argmax,
+                         const std::int32_t* candidates, RowLogitStats* stats,
+                         std::uint32_t rows, std::uint32_t vocab,
+                         hipStream_t stream);
+
 void GatherRows(const float* src, const std::uint32_t* index, float* dst,
                 std::uint32_t rows, std::uint32_t dim, hipStream_t stream);
 

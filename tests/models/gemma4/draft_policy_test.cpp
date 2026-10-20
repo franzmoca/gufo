@@ -48,6 +48,21 @@ void CheckNames() {
           "request scope not parsed");
 }
 
+void CheckRelaxed() {
+  Require(!g4::ParseRelaxedAcceptance("").has_value(), "empty is not exact");
+  Require(g4::ParseRelaxedAcceptance("1.5") == 1.5F, "gap not parsed");
+  Require(g4::ParseRelaxedAcceptance("0") == 0.0F, "zero gap rejected");
+  for (const char* bad : {"-1", "abc", "1x", "inf", "nan"}) {
+    bool threw = false;
+    try {
+      (void)g4::ParseRelaxedAcceptance(bad);
+    } catch (const std::invalid_argument&) {
+      threw = true;
+    }
+    Require(threw, std::string("accepted relaxed gap ") + bad);
+  }
+}
+
 void CheckSignal() {
   // A flat top-64 has entropy ln 64: 1 - sqrt(0.2 ln 64) = 0.088.
   const float flat = g4::DraftSignal(Candidates(0.0F));
@@ -234,6 +249,7 @@ void CheckSiblings() {
 int main() {
   return gemma4_test::Run([] {
     CheckNames();
+    CheckRelaxed();
     CheckSignal();
     CheckCalibration();
     CheckCosts();

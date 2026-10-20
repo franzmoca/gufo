@@ -36,12 +36,16 @@ namespace rocm {
 class DeviceModel;
 class Executor;
 struct DraftHead;
+struct RowLogitStats;
 struct KvCache;
 }  // namespace rocm
 
 /// Draft tokens per cycle when the caller sets none: the longest chain, which
 /// the calibrated policy shortens by itself (rows cost little up to 16).
 inline constexpr std::uint32_t kDefaultDraftTokens = 15;
+/// Relaxed acceptance only takes drafts among the target's this many most
+/// likely tokens (ModelOptions::relaxed_acceptance).
+inline constexpr std::uint32_t kRelaxedTop = 3;
 
 struct ModelOptions {
   /// Largest context any session may use.
@@ -64,6 +68,12 @@ struct ModelOptions {
   /// Appends one JSON line per verification cycle here (CycleRecord);
   /// empty writes none.
   std::string draft_trace_path;
+  /// Relaxed draft acceptance (a quality trade, off when unset): a draft
+  /// the exact rule would reject is still accepted when it is among the
+  /// target's kRelaxedTop most likely tokens and its log-probability is at
+  /// most this many nats below the top token's. Greedy ranks the target's
+  /// temperature-1 logits, sampled the request sampler's distribution.
+  std::optional<float> relaxed_acceptance;
 };
 
 class Session;
@@ -434,6 +444,8 @@ private:
     float draft_ms{0.0F};
     /// Filled while the model traces cycles (ModelOptions::draft_trace_path).
     std::optional<CycleRecord> trace;
+    /// While tracing a greedy cycle verified by argmax: its rows' logits.
+    std::span<const float> trace_logits;
     /// Set while a batch's drafter chains are still to run (DecodeBatch).
     std::unique_ptr<CycleDraft> draft;
   };
@@ -448,9 +460,19 @@ private:
   /// Brings the draft vocabulary up to tokens_ (loading new table rows) and
   /// picks the head for a chain after `anchor`.
   rocm::DraftHead PrepareDraftHead(TokenId anchor);
+  /// `relaxed`: per row, greedy argmax verification's logit statistics for
+  /// relaxed acceptance (empty otherwise).
   void FinishCycle(Cycle& cycle, std::span<const float> logits,
                    std::span<const std::uint32_t> argmax,
-                   std::uint32_t first_hidden_row);
+                   std::uint32_t first_hidden_row,
+                   std::span<const rocm::RowLogitStats> relaxed = {});
+  /// Per verified row, the draft it judges (-1: none), for ReadRowStats.
+  [[nodiscard]] static std::vector<std::int32_t> RelaxedCandidates(
+      const Cycle& cycle);
+  /// Whether relaxed acceptance takes chain row `row`'s draft.
+  [[nodiscard]] bool RelaxedAccepts(
+      const Cycle& cycle, std::size_t row, std::span<const float> logits,
+      std::span<const rocm::RowLogitStats> relaxed) const;
   /// Records each chain row's acceptance probability and the greedy
   /// runner-up hits in the cycle's trace, before verification.
   void TraceRows(Cycle& cycle, std::span<const float> logits,

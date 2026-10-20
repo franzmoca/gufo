@@ -56,6 +56,8 @@ std::shared_ptr<g4::Model> LoadModel(
     options.draft_policy = g4::ParseDraftPolicy(opt.draft_policy);
     options.draft_calibration =
         g4::ParseDraftCalibrationScope(opt.draft_calibration);
+    options.relaxed_acceptance =
+        g4::ParseRelaxedAcceptance(opt.relaxed_acceptance);
   } catch (const std::invalid_argument& e) {
     std::cerr << e.what() << '\n';
     return nullptr;

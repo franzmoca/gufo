@@ -183,7 +183,8 @@ latest retained checkpoint before the change. With `--speculative mtp`, the
 `gemma4-assistant` drafter reads the target's KV and drafts up to
 `--draft-tokens`; `--draft-policy` (`calibrated` by default, `confidence` or
 `fixed`) and `--draft-calibration` choose how many a cycle verifies, and
-`--draft-trace PATH` records each cycle (see the
+`--draft-trace PATH` records each cycle; `--relaxed-acceptance GAP` is an
+opt-in quality trade that also accepts near-top drafts (see the
 [model card](models/gemma-4-31b/README.md)). Greedy
 output equals the same server's single-token decoding, but not necessarily an
 AR-only server's (different FP32 projection summation order). Reasoning appears as `reasoning_content` and Gemma

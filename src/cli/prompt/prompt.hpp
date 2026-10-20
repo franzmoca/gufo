@@ -42,6 +42,7 @@ struct PromptOptions {
   std::string draft_policy;
   std::string draft_calibration;
   std::string draft_trace_path;
+  std::string relaxed_acceptance;
   // DeepSeek V4 Flash DSpark support model. DSpark is DS4's own drafter and
   // is unrelated to the Qwen DFlash paths above.
   std::string dspark_model_path;

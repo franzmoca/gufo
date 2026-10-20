@@ -1,6 +1,7 @@
 #include "src/models/gemma4/draft_policy.hpp"
 
 #include <algorithm>
+#include <charconv>
 #include <cmath>
 #include <stdexcept>
 #include <string>
@@ -104,6 +105,21 @@ DraftCalibrationScope ParseDraftCalibrationScope(std::string_view name) {
 std::string_view DraftCalibrationScopeName(
     DraftCalibrationScope scope) noexcept {
   return scope == DraftCalibrationScope::kRequest ? "request" : "shared";
+}
+
+std::optional<float> ParseRelaxedAcceptance(std::string_view value) {
+  if (value.empty()) {
+    return std::nullopt;
+  }
+  float delta = 0.0F;
+  const auto [end, error] =
+      std::from_chars(value.data(), value.data() + value.size(), delta);
+  if (error != std::errc{} || end != value.data() + value.size() ||
+      !std::isfinite(delta) || delta < 0.0F) {
+    throw std::invalid_argument(
+        "relaxed acceptance must be a gap in nats >= 0");
+  }
+  return delta;
 }
 
 float DraftSignal(

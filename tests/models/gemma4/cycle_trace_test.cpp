@@ -41,6 +41,10 @@ g4::CycleRecord Sample() {
   r.pending_top = 0.75F;
   r.pending_entropy = 1.5F;
   r.row_acceptance = {1.0F, 0.5F};
+  r.row_target_top = {0.75F, 0.5F};
+  r.row_draft_prob = {0.75F, 0.25F};
+  r.row_draft_rank = {0, 1};
+  r.row_target_entropy = {0.5F, 1.0F};
   r.runner_ups = {42, -1};
   r.runner_up_signals = {0.25F, 0.0F};
   r.runner_up_acceptance = {0.0F, 1.0F};
@@ -78,6 +82,7 @@ void CheckFormat() {
   Require(ups != nullptr && ups->size() == 2 &&
               v.find("runner_up_acceptance")->size() == 2 &&
               v.find("row_acceptance")->size() == 2 &&
+              v.find("row_draft_rank")->size() == 2 &&
               v.find("proposal_signals")->size() == 3 &&
               v.find("proposal_q")->size() == 3 &&
               v.member_double("pending_entropy") == 1.5,

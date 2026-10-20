@@ -62,6 +62,8 @@ struct TextSpeculativeConfig {
   std::string mtp_draft_calibration;
   /// Gemma 4 MTP per-cycle trace file; empty writes none.
   std::string mtp_draft_trace_path;
+  /// Gemma 4 MTP relaxed acceptance gap in nats; empty keeps it exact.
+  std::string mtp_relaxed_acceptance;
 };
 
 struct TextDiskCacheConfig {
