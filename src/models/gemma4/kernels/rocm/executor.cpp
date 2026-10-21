@@ -492,6 +492,16 @@ std::optional<ExpertFormat> DenseHalfFormat(core::GgmlType type) {
   }
 }
 
+/// The shared batched GEMM returns without output for BF16 and FP32 weights;
+/// a projection must never reach it with one.
+void RequireQuantized(const DeviceTensor& w) {
+  if (w.type == core::GgmlType::kBF16 || w.type == core::GgmlType::kF32) {
+    throw std::runtime_error("gemma4 projection of a " +
+                             std::string(core::ToString(w.type)) +
+                             " matrix has no batched kernel");
+  }
+}
+
 /// Whether a prefill of `rows` reads w's prefill copy: binary16 weights
 /// only pay from 512 rows, where the weight reads stop dominating.
 bool PackedPrefill(const DeviceTensor& w, std::uint32_t rows) {
@@ -569,6 +579,7 @@ void Executor::Project(const DeviceTensor& w, const float* x, const void* xq,
       throw std::runtime_error(
           "gemma4 grouped weights reached a row-order GEMM");
     }
+    RequireQuantized(w);
     hip::LaunchBatchedQuantGEMMPreQuantized(w.type, w.data, xq, y, rows, w.rows,
                                             w.cols, stream_);
     return;
@@ -611,6 +622,7 @@ void Executor::Project(const DeviceTensor& w, const float* x, const void* xq,
                                       stream_)) {
       return;
     }
+    RequireQuantized(w);
     hip::LaunchBatchedQuantGEMMFp32(w.type, w.data, x, y, rows, w.rows, w.cols,
                                     stream_);
     return;
@@ -631,6 +643,7 @@ void Executor::Project(const DeviceTensor& w, const float* x, const void* xq,
     if (w.rows <= 4096 && w.type != core::GgmlType::kQ4_0) {
       hip::LaunchGEMV(w.data, w.type, x, y, w.rows, w.cols, stream_);
     } else {
+      RequireQuantized(w);
       hip::LaunchBatchedQuantGEMMFp32(w.type, w.data, x, y, 1, w.rows, w.cols,
                                       stream_);
     }

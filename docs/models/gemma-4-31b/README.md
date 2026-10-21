@@ -75,7 +75,9 @@ cycle copies nothing, matches do not reach back past the request's start, and
 copies stop at a stop token. Requests report proposed and accepted copies as
 `lookup_n` / `lookup_n_accepted`. `--sessions N` serves up to N concurrent requests; up to eight
 decode in one forward. The drafter attends to the target's own KV cache,
-so it adds no per-session cache.
+so it adds no per-session cache. Unsloth's BF16 and F16 drafters load too;
+their vocabulary head is read in binary16 (512 MB per draft step against the
+Q8_0 drafter's 144 MB Q4_K repack), about 3% slower at d0.
 With a drafter loaded, the target's projection weights are reordered at
 load into 128-row groups that the verification kernel reads as one stream
 (same bytes and results; MTP tg128 +3.4% on the 31B quants, about 0.3 s

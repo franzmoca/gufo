@@ -54,6 +54,11 @@ constexpr std::initializer_list<GgmlType> kProjection = {
 constexpr std::initializer_list<GgmlType> kEmbedding = {
     GgmlType::kBF16, GgmlType::kQ8_0, GgmlType::kQ4_0,
     GgmlType::kQ4_K, GgmlType::kQ5_K, GgmlType::kQ6_K};
+/// The drafter's vocabulary head: never an embedding lookup (the target's
+/// embedding feeds it), so binary16 joins the embedding formats.
+constexpr std::initializer_list<GgmlType> kDraftHead = {
+    GgmlType::kF16,  GgmlType::kBF16, GgmlType::kQ8_0, GgmlType::kQ4_0,
+    GgmlType::kQ4_K, GgmlType::kQ5_K, GgmlType::kQ6_K};
 constexpr std::initializer_list<GgmlType> kVector = {GgmlType::kF32};
 /// Routed expert formats with decode, verification and prefill kernels: the
 /// fused gate/up projection reduces over the hidden width, the down
@@ -311,7 +316,7 @@ std::optional<DraftWeights> DraftWeights::Bind(const core::GgufReader& reader,
   w.post_projection = b.Get("nextn.post_projection.weight", c.hidden_size,
                             target_hidden, kProjection);
   w.token_embd =
-      b.Get("token_embd.weight", c.hidden_size, target.vocab_size, kEmbedding);
+      b.Get("token_embd.weight", c.hidden_size, target.vocab_size, kDraftHead);
   w.output_norm = b.Get("output_norm.weight", c.hidden_size, 1, kVector);
   w.rope_factors = b.Factors(c);
   for (std::uint32_t l = 0; b.ok && l < c.num_layers; ++l) {

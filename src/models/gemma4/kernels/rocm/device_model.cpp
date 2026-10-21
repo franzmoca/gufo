@@ -353,6 +353,11 @@ std::unique_ptr<DeviceModel> DeviceModel::Upload(
     d.pre_projection = up.Copy(draft->pre_projection);
     d.post_projection = up.Copy(draft->post_projection);
     d.token_embd = up.Copy(draft->token_embd);
+    // BF16 drafters run as binary16 like BF16 layers: the head and the
+    // projections then take the binary16 GEMV at every width.
+    up.Half(d.pre_projection, draft->pre_projection.name);
+    up.Half(d.post_projection, draft->post_projection.name);
+    up.Half(d.token_embd, draft->token_embd.name);
     d.output_norm = up.Copy(draft->output_norm);
     d.rope_factors =
         up.Floats(draft->rope_factors.values, "draft rope factors");
