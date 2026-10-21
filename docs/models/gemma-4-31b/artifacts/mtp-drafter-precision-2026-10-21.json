@@ -1,0 +1,905 @@
+{
+ "date": "2026-10-21",
+ "description": "MTP drafter precision study: 31B UD-Q4_K_XL target with the assistant Q8_0 drafter (production), Unsloth BF16 and Unsloth Q8_0 drafters (unsloth/gemma-4-31B-it-GGUF MTP/, revision c1ac76e99d5513b141e8adde7288b85c3f9c32ec). Fixed 15-draft cycles with --draft-trace label every row exactly (greedy 0/1, sampled min(1, p/q)); expected accepted drafts per cycle = sum_i prod_{j<=i} a_j over drafted rows; cycles with prompt-lookup copies excluded; 95% intervals from 2000 bootstrap resamples over requests.",
+ "binary": "feat/gemma-mtp-drafter at c812aea8 (release preset)",
+ "dataset": "The 46 requests of the 2026-10-20 calibration study (draft_policy_bench.py workloads): sampled at temperature 1, top-k 64, top-p 0.95 (12 prose x 256, 12 story x 128, 6 code-write x 384, 3 code-edit x 384, 3 essay x 400 over a ~31K-token document) and greedy (6 prose, code-write, code-edit, repetitive, essay).",
+ "commands": {
+  "q8": [
+   "/tmp/gufo-study-c812aea8",
+   "serve",
+   "llm",
+   "--port",
+   "8099",
+   "--model",
+   "/home/franz/models/gemma-4/gemma-31b-it/gemma-4-31B-it-UD-Q4_K_XL.gguf",
+   "--speculative",
+   "mtp",
+   "--mtp-model",
+   "/home/franz/models/gemma-4/drafts/31b-assistant/gemma-4-31B-it-assistant.Q8_0.gguf",
+   "--context",
+   "40960",
+   "--sessions",
+   "1",
+   "--think",
+   "off",
+   "--served-model-name",
+   "bench",
+   "--draft-policy",
+   "fixed",
+   "--draft-tokens",
+   "15",
+   "--draft-trace",
+   "/tmp/g4-drafter-study/trace-q8.jsonl"
+  ],
+  "bf16": [
+   "/tmp/gufo-study-c812aea8",
+   "serve",
+   "llm",
+   "--port",
+   "8099",
+   "--model",
+   "/home/franz/models/gemma-4/gemma-31b-it/gemma-4-31B-it-UD-Q4_K_XL.gguf",
+   "--speculative",
+   "mtp",
+   "--mtp-model",
+   "/home/franz/models/gemma-4/drafts/31b-unsloth-mtp/MTP/mtp-gemma-4-31B-it-BF16.gguf",
+   "--context",
+   "40960",
+   "--sessions",
+   "1",
+   "--think",
+   "off",
+   "--served-model-name",
+   "bench",
+   "--draft-policy",
+   "fixed",
+   "--draft-tokens",
+   "15",
+   "--draft-trace",
+   "/tmp/g4-drafter-study/trace-bf16.jsonl"
+  ],
+  "q8u": [
+   "/tmp/gufo-study-c812aea8",
+   "serve",
+   "llm",
+   "--port",
+   "8099",
+   "--model",
+   "/home/franz/models/gemma-4/gemma-31b-it/gemma-4-31B-it-UD-Q4_K_XL.gguf",
+   "--speculative",
+   "mtp",
+   "--mtp-model",
+   "/home/franz/models/gemma-4/drafts/31b-unsloth-mtp/MTP/mtp-gemma-4-31B-it-Q8_0.gguf",
+   "--context",
+   "40960",
+   "--sessions",
+   "1",
+   "--think",
+   "off",
+   "--served-model-name",
+   "bench",
+   "--draft-policy",
+   "fixed",
+   "--draft-tokens",
+   "15",
+   "--draft-trace",
+   "/tmp/g4-drafter-study/trace-q8u.jsonl"
+  ]
+ },
+ "trace_sha256": {
+  "q8": "470dd340ed0ef6adea7d164ca266f40aa8af66904585c4a381486432b474d58c",
+  "bf16": "901a2012c4b8aa61267633342a7556b6b34aa4031a1ee9015d658f58ca19723e",
+  "q8u": "6b830ad968f87f4059d3277c33ef2590a5ba76279e00d3233feb6d493768a446"
+ },
+ "identical_arms": "q8 and q8u traces are byte-identical; q8 reproduces the 2026-10-20 study figures exactly",
+ "summary": {
+  "q8": {
+   "greedy (all)": {
+    "requests": 10,
+    "cycles": 724,
+    "expected_accepted": 2.270718232044199,
+    "ci95": [
+     1.884297520661157,
+     2.9732441471571907
+    ],
+    "position_acceptance": [
+     0.7472375690607734,
+     0.6546463245492372,
+     0.6430555555555556,
+     0.5949720670391061,
+     0.5893854748603352,
+     0.5490196078431373,
+     0.485273492286115,
+     0.5162659123055162
+    ]
+   },
+   "sampled (all)": {
+    "requests": 36,
+    "cycles": 2450,
+    "expected_accepted": 2.349401833235512,
+    "ci95": [
+     2.047008025604633,
+     2.6845966893838944
+    ],
+    "position_acceptance": [
+     0.7430216140845525,
+     0.6652976331773178,
+     0.6200218560761787,
+     0.6070265620507618,
+     0.5795151946924633,
+     0.5293348760478024,
+     0.5214890392111214,
+     0.517542635615744
+    ]
+   },
+   "prose greedy": {
+    "requests": 6,
+    "cycles": 512,
+    "expected_accepted": 1.986328125,
+    "ci95": [
+     1.8073394495412844,
+     2.1899791231732775
+    ],
+    "position_acceptance": [
+     0.728515625,
+     0.6490196078431373,
+     0.6365422396856582,
+     0.5841584158415841,
+     0.5504950495049505,
+     0.5376984126984127,
+     0.4671968190854871,
+     0.4939759036144578
+    ]
+   },
+   "prose sampled": {
+    "requests": 12,
+    "cycles": 1000,
+    "expected_accepted": 2.05114664512265,
+    "ci95": [
+     1.9208173862565077,
+     2.184245630242427
+    ],
+    "position_acceptance": [
+     0.7570417552832513,
+     0.6441321132280523,
+     0.6055798311417382,
+     0.5881906277179597,
+     0.5600903931020734,
+     0.493303794546987,
+     0.4898153908394407,
+     0.49709745273911976
+    ]
+   },
+   "story greedy": {
+    "requests": 0,
+    "cycles": 0,
+    "expected_accepted": NaN,
+    "ci95": [
+     NaN,
+     NaN
+    ],
+    "position_acceptance": [
+     NaN,
+     NaN,
+     NaN,
+     NaN,
+     NaN,
+     NaN,
+     NaN,
+     NaN
+    ]
+   },
+   "story sampled": {
+    "requests": 12,
+    "cycles": 572,
+    "expected_accepted": 1.6322850988195339,
+    "ci95": [
+     1.504360008688787,
+     1.767832715761843
+    ],
+    "position_acceptance": [
+     0.6680166307312495,
+     0.637403731501635,
+     0.5297580141778904,
+     0.541887071518699,
+     0.5111089645037511,
+     0.47357645338159426,
+     0.43445936746743824,
+     0.45790984906218046
+    ]
+   },
+   "code-write greedy": {
+    "requests": 1,
+    "cycles": 65,
+    "expected_accepted": 4.892307692307693,
+    "ci95": [
+     4.892307692307693,
+     4.892307692307693
+    ],
+    "position_acceptance": [
+     0.8769230769230769,
+     0.8,
+     0.8153846153846154,
+     0.7692307692307693,
+     0.8,
+     0.6923076923076923,
+     0.7230769230769231,
+     0.640625
+    ]
+   },
+   "code-write sampled": {
+    "requests": 6,
+    "cycles": 435,
+    "expected_accepted": 4.286463960662755,
+    "ci95": [
+     4.067563044915514,
+     4.510210453518934
+    ],
+    "position_acceptance": [
+     0.8448670530456236,
+     0.7861545326098078,
+     0.8021518647636411,
+     0.7497949466165069,
+     0.7386468045465114,
+     0.7386261422966802,
+     0.7200923187095065,
+     0.7013934227857209
+    ]
+   },
+   "code-edit greedy": {
+    "requests": 1,
+    "cycles": 5,
+    "expected_accepted": 9.2,
+    "ci95": [
+     9.2,
+     9.2
+    ],
+    "position_acceptance": [
+     1.0,
+     1.0,
+     1.0,
+     1.0,
+     1.0,
+     0.8,
+     0.8,
+     1.0
+    ]
+   },
+   "code-edit sampled": {
+    "requests": 3,
+    "cycles": 14,
+    "expected_accepted": 9.142857142857142,
+    "ci95": [
+     8.6,
+     9.75
+    ],
+    "position_acceptance": [
+     1.0,
+     1.0,
+     1.0,
+     1.0,
+     1.0,
+     0.7857142857142857,
+     0.8571428571428571,
+     0.9285714285714286
+    ]
+   },
+   "essay-31k greedy": {
+    "requests": 1,
+    "cycles": 141,
+    "expected_accepted": 1.822695035460993,
+    "ci95": [
+     1.822695035460993,
+     1.822695035460993
+    ],
+    "position_acceptance": [
+     0.7446808510638298,
+     0.5928571428571429,
+     0.5714285714285714,
+     0.5357142857142857,
+     0.6142857142857143,
+     0.5107913669064749,
+     0.4316546762589928,
+     0.5251798561151079
+    ]
+   },
+   "essay-31k sampled": {
+    "requests": 3,
+    "cycles": 429,
+    "expected_accepted": 1.8149392701428502,
+    "ci95": [
+     1.7244150150103248,
+     1.9977773129853746
+    ],
+    "position_acceptance": [
+     0.6986911850134757,
+     0.6182301088229759,
+     0.5752236775757278,
+     0.5773791382638386,
+     0.537651606426873,
+     0.46343376174772166,
+     0.49288629806684375,
+     0.43970935872002015
+    ]
+   },
+   "repetitive greedy": {
+    "requests": 1,
+    "cycles": 1,
+    "expected_accepted": 6.0,
+    "ci95": [
+     6.0,
+     6.0
+    ],
+    "position_acceptance": [
+     1.0,
+     1.0,
+     1.0,
+     1.0,
+     1.0,
+     1.0,
+     0.0,
+     0.0
+    ]
+   },
+   "repetitive sampled": {
+    "requests": 0,
+    "cycles": 0,
+    "expected_accepted": NaN,
+    "ci95": [
+     NaN,
+     NaN
+    ],
+    "position_acceptance": [
+     NaN,
+     NaN,
+     NaN,
+     NaN,
+     NaN,
+     NaN,
+     NaN,
+     NaN
+    ]
+   }
+  },
+  "bf16": {
+   "greedy (all)": {
+    "requests": 10,
+    "cycles": 723,
+    "expected_accepted": 2.2752420470262793,
+    "ci95": [
+     1.891348088531187,
+     2.958532695374801
+    ],
+    "position_acceptance": [
+     0.7482710926694329,
+     0.6513888888888889,
+     0.6453407510431154,
+     0.590782122905028,
+     0.586013986013986,
+     0.5483870967741935,
+     0.4957865168539326,
+     0.4985835694050991
+    ]
+   },
+   "sampled (all)": {
+    "requests": 36,
+    "cycles": 2419,
+    "expected_accepted": 2.387802083783528,
+    "ci95": [
+     2.0844751360011204,
+     2.7672989611532164
+    ],
+    "position_acceptance": [
+     0.7550138467626354,
+     0.656460990319164,
+     0.6337156849802659,
+     0.5997179570266161,
+     0.5905180025526163,
+     0.5355574897094679,
+     0.5195678322541551,
+     0.5159468447470489
+    ]
+   },
+   "prose greedy": {
+    "requests": 6,
+    "cycles": 515,
+    "expected_accepted": 1.9689320388349514,
+    "ci95": [
+     1.7617328519855595,
+     2.2100840336134455
+    ],
+    "position_acceptance": [
+     0.7262135922330097,
+     0.6413255360623782,
+     0.6328125,
+     0.5756385068762279,
+     0.5531496062992126,
+     0.5285996055226825,
+     0.4723320158102767,
+     0.4810379241516966
+    ]
+   },
+   "prose sampled": {
+    "requests": 12,
+    "cycles": 1007,
+    "expected_accepted": 2.0315367539044877,
+    "ci95": [
+     1.896604434084718,
+     2.1668364973577563
+    ],
+    "position_acceptance": [
+     0.7598980987516658,
+     0.6386204777924928,
+     0.6232180796284229,
+     0.562039334824063,
+     0.6014819139797387,
+     0.4973519056291898,
+     0.5042413103232655,
+     0.48206621578314385
+    ]
+   },
+   "story greedy": {
+    "requests": 0,
+    "cycles": 0,
+    "expected_accepted": NaN,
+    "ci95": [
+     NaN,
+     NaN
+    ],
+    "position_acceptance": [
+     NaN,
+     NaN,
+     NaN,
+     NaN,
+     NaN,
+     NaN,
+     NaN,
+     NaN
+    ]
+   },
+   "story sampled": {
+    "requests": 12,
+    "cycles": 557,
+    "expected_accepted": 1.7276995601811231,
+    "ci95": [
+     1.6097027533091042,
+     1.8569841137657743
+    ],
+    "position_acceptance": [
+     0.7355060879696207,
+     0.6095161497810461,
+     0.550619217226002,
+     0.5249623500216216,
+     0.4835131811758493,
+     0.4449210588664767,
+     0.4359842867479991,
+     0.4436863468647117
+    ]
+   },
+   "code-write greedy": {
+    "requests": 1,
+    "cycles": 65,
+    "expected_accepted": 4.892307692307693,
+    "ci95": [
+     4.892307692307693,
+     4.892307692307693
+    ],
+    "position_acceptance": [
+     0.8923076923076924,
+     0.7846153846153846,
+     0.8,
+     0.7846153846153846,
+     0.8153846153846154,
+     0.7076923076923077,
+     0.7076923076923077,
+     0.625
+    ]
+   },
+   "code-write sampled": {
+    "requests": 6,
+    "cycles": 427,
+    "expected_accepted": 4.4189741541673335,
+    "ci95": [
+     4.311260704038401,
+     4.536601418601857
+    ],
+    "position_acceptance": [
+     0.8498654298623914,
+     0.7899765791567762,
+     0.7929536253739806,
+     0.7808184089174248,
+     0.7207654317955694,
+     0.7416919657026999,
+     0.7238527831931909,
+     0.7161216690360258
+    ]
+   },
+   "code-edit greedy": {
+    "requests": 1,
+    "cycles": 6,
+    "expected_accepted": 7.5,
+    "ci95": [
+     7.5,
+     7.5
+    ],
+    "position_acceptance": [
+     0.8333333333333334,
+     1.0,
+     1.0,
+     1.0,
+     0.8333333333333334,
+     1.0,
+     0.6666666666666666,
+     0.6666666666666666
+    ]
+   },
+   "code-edit sampled": {
+    "requests": 3,
+    "cycles": 17,
+    "expected_accepted": 7.352941176470588,
+    "ci95": [
+     7.0,
+     7.6
+    ],
+    "position_acceptance": [
+     0.8235294117647058,
+     1.0,
+     1.0,
+     1.0,
+     0.8235294117647058,
+     1.0,
+     0.7647058823529411,
+     0.5882352941176471
+    ]
+   },
+   "essay-31k greedy": {
+    "requests": 1,
+    "cycles": 136,
+    "expected_accepted": 1.9264705882352942,
+    "ci95": [
+     1.9264705882352942,
+     1.9264705882352942
+    ],
+    "position_acceptance": [
+     0.7573529411764706,
+     0.6074074074074074,
+     0.6,
+     0.5333333333333333,
+     0.5851851851851851,
+     0.5223880597014925,
+     0.47761194029850745,
+     0.5
+    ]
+   },
+   "essay-31k sampled": {
+    "requests": 3,
+    "cycles": 411,
+    "expected_accepted": 1.839671802044277,
+    "ci95": [
+     1.6432097751058428,
+     1.9936748604935692
+    ],
+    "position_acceptance": [
+     0.6681062781643984,
+     0.6096255805098663,
+     0.5898356818732264,
+     0.5858818311380873,
+     0.5602788663874277,
+     0.514279828919441,
+     0.4441007406738253,
+     0.4803767084065677
+    ]
+   },
+   "repetitive greedy": {
+    "requests": 1,
+    "cycles": 1,
+    "expected_accepted": 6.0,
+    "ci95": [
+     6.0,
+     6.0
+    ],
+    "position_acceptance": [
+     1.0,
+     1.0,
+     1.0,
+     1.0,
+     1.0,
+     1.0,
+     0.0,
+     0.0
+    ]
+   },
+   "repetitive sampled": {
+    "requests": 0,
+    "cycles": 0,
+    "expected_accepted": NaN,
+    "ci95": [
+     NaN,
+     NaN
+    ],
+    "position_acceptance": [
+     NaN,
+     NaN,
+     NaN,
+     NaN,
+     NaN,
+     NaN,
+     NaN,
+     NaN
+    ]
+   }
+  },
+  "q8u": {
+   "greedy (all)": {
+    "requests": 10,
+    "cycles": 724,
+    "expected_accepted": 2.270718232044199,
+    "ci95": [
+     1.8817733990147782,
+     3.006675567423231
+    ],
+    "position_acceptance": [
+     0.7472375690607734,
+     0.6546463245492372,
+     0.6430555555555556,
+     0.5949720670391061,
+     0.5893854748603352,
+     0.5490196078431373,
+     0.485273492286115,
+     0.5162659123055162
+    ]
+   },
+   "sampled (all)": {
+    "requests": 36,
+    "cycles": 2450,
+    "expected_accepted": 2.349401833235512,
+    "ci95": [
+     2.045789194214896,
+     2.698838071749716
+    ],
+    "position_acceptance": [
+     0.7430216140845525,
+     0.6652976331773178,
+     0.6200218560761787,
+     0.6070265620507618,
+     0.5795151946924633,
+     0.5293348760478024,
+     0.5214890392111214,
+     0.517542635615744
+    ]
+   },
+   "prose greedy": {
+    "requests": 6,
+    "cycles": 512,
+    "expected_accepted": 1.986328125,
+    "ci95": [
+     1.8073394495412844,
+     2.19916142557652
+    ],
+    "position_acceptance": [
+     0.728515625,
+     0.6490196078431373,
+     0.6365422396856582,
+     0.5841584158415841,
+     0.5504950495049505,
+     0.5376984126984127,
+     0.4671968190854871,
+     0.4939759036144578
+    ]
+   },
+   "prose sampled": {
+    "requests": 12,
+    "cycles": 1000,
+    "expected_accepted": 2.05114664512265,
+    "ci95": [
+     1.9182930134518497,
+     2.1857491130710263
+    ],
+    "position_acceptance": [
+     0.7570417552832513,
+     0.6441321132280523,
+     0.6055798311417382,
+     0.5881906277179597,
+     0.5600903931020734,
+     0.493303794546987,
+     0.4898153908394407,
+     0.49709745273911976
+    ]
+   },
+   "story greedy": {
+    "requests": 0,
+    "cycles": 0,
+    "expected_accepted": NaN,
+    "ci95": [
+     NaN,
+     NaN
+    ],
+    "position_acceptance": [
+     NaN,
+     NaN,
+     NaN,
+     NaN,
+     NaN,
+     NaN,
+     NaN,
+     NaN
+    ]
+   },
+   "story sampled": {
+    "requests": 12,
+    "cycles": 572,
+    "expected_accepted": 1.6322850988195339,
+    "ci95": [
+     1.502993314804679,
+     1.7585933008056553
+    ],
+    "position_acceptance": [
+     0.6680166307312495,
+     0.637403731501635,
+     0.5297580141778904,
+     0.541887071518699,
+     0.5111089645037511,
+     0.47357645338159426,
+     0.43445936746743824,
+     0.45790984906218046
+    ]
+   },
+   "code-write greedy": {
+    "requests": 1,
+    "cycles": 65,
+    "expected_accepted": 4.892307692307693,
+    "ci95": [
+     4.892307692307693,
+     4.892307692307693
+    ],
+    "position_acceptance": [
+     0.8769230769230769,
+     0.8,
+     0.8153846153846154,
+     0.7692307692307693,
+     0.8,
+     0.6923076923076923,
+     0.7230769230769231,
+     0.640625
+    ]
+   },
+   "code-write sampled": {
+    "requests": 6,
+    "cycles": 435,
+    "expected_accepted": 4.286463960662755,
+    "ci95": [
+     4.087503666644986,
+     4.528572057425158
+    ],
+    "position_acceptance": [
+     0.8448670530456236,
+     0.7861545326098078,
+     0.8021518647636411,
+     0.7497949466165069,
+     0.7386468045465114,
+     0.7386261422966802,
+     0.7200923187095065,
+     0.7013934227857209
+    ]
+   },
+   "code-edit greedy": {
+    "requests": 1,
+    "cycles": 5,
+    "expected_accepted": 9.2,
+    "ci95": [
+     9.2,
+     9.2
+    ],
+    "position_acceptance": [
+     1.0,
+     1.0,
+     1.0,
+     1.0,
+     1.0,
+     0.8,
+     0.8,
+     1.0
+    ]
+   },
+   "code-edit sampled": {
+    "requests": 3,
+    "cycles": 14,
+    "expected_accepted": 9.142857142857142,
+    "ci95": [
+     8.6,
+     9.75
+    ],
+    "position_acceptance": [
+     1.0,
+     1.0,
+     1.0,
+     1.0,
+     1.0,
+     0.7857142857142857,
+     0.8571428571428571,
+     0.9285714285714286
+    ]
+   },
+   "essay-31k greedy": {
+    "requests": 1,
+    "cycles": 141,
+    "expected_accepted": 1.822695035460993,
+    "ci95": [
+     1.822695035460993,
+     1.822695035460993
+    ],
+    "position_acceptance": [
+     0.7446808510638298,
+     0.5928571428571429,
+     0.5714285714285714,
+     0.5357142857142857,
+     0.6142857142857143,
+     0.5107913669064749,
+     0.4316546762589928,
+     0.5251798561151079
+    ]
+   },
+   "essay-31k sampled": {
+    "requests": 3,
+    "cycles": 429,
+    "expected_accepted": 1.8149392701428502,
+    "ci95": [
+     1.7244150150103248,
+     1.9977773129853746
+    ],
+    "position_acceptance": [
+     0.6986911850134757,
+     0.6182301088229759,
+     0.5752236775757278,
+     0.5773791382638386,
+     0.537651606426873,
+     0.46343376174772166,
+     0.49288629806684375,
+     0.43970935872002015
+    ]
+   },
+   "repetitive greedy": {
+    "requests": 1,
+    "cycles": 1,
+    "expected_accepted": 6.0,
+    "ci95": [
+     6.0,
+     6.0
+    ],
+    "position_acceptance": [
+     1.0,
+     1.0,
+     1.0,
+     1.0,
+     1.0,
+     1.0,
+     0.0,
+     0.0
+    ]
+   },
+   "repetitive sampled": {
+    "requests": 0,
+    "cycles": 0,
+    "expected_accepted": NaN,
+    "ci95": [
+     NaN,
+     NaN
+    ],
+    "position_acceptance": [
+     NaN,
+     NaN,
+     NaN,
+     NaN,
+     NaN,
+     NaN,
+     NaN,
+     NaN
+    ]
+   }
+  }
+ },
+ "scripts": {
+  "collect.py": "# Complete-chain dataset for the calibration replay: fixed 15-draft cycles,\n# every row labelled (--draft-trace), sampled at Gemma defaults plus greedy.\nimport json, subprocess, sys, time, urllib.request\nfrom pathlib import Path\nROOT = Path('/home/franz/projects/gufo')\nsys.path.insert(0, str(ROOT / 'tools/gemma4'))\nimport draft_policy_bench as dpb\nOUT = Path('/tmp/g4-drafter-study')\nBIN = '/tmp/gufo-study-c812aea8'\nM = '/home/franz/models/gemma-4/'\nT31 = 'gemma-31b-it/gemma-4-31B-it-UD-Q4_K_XL.gguf'\nMODELS = {'q8': (T31, 'drafts/31b-assistant/gemma-4-31B-it-assistant.Q8_0.gguf'),\n          'bf16': (T31, 'drafts/31b-unsloth-mtp/MTP/mtp-gemma-4-31B-it-BF16.gguf'),\n          'q8u': (T31, 'drafts/31b-unsloth-mtp/MTP/mtp-gemma-4-31B-it-Q8_0.gguf')}\nDEFAULTS = {'temperature': 1.0, 'top_k': 64, 'top_p': 0.95, 'repeat_penalty': 1.0}\nDOC = Path('/tmp/opencode/mtp-exp/document.txt').read_text()\nESSAY = DOC + '\\n\\nWrite a short essay (about 400 words) on the engineering trade-offs the document above describes.'\nPORT = 8099\n\ndef requests():\n    w = {name: (n, reqs) for name, n, reqs in dpb.workloads()}\n    out = []\n    for i, r in enumerate(w['prose'][1]):\n        out.append(('prose', 'sampled', 256, r['prompt'], dict(DEFAULTS, seed=100 + i)))\n    for s in range(1, 13):\n        out.append(('story', 'sampled', 128, w['story'][1][0]['prompt'], dict(DEFAULTS, seed=s)))\n    for s in range(1, 7):\n        out.append(('code-write', 'sampled', 384, w['code-write'][1][0]['prompt'], dict(DEFAULTS, seed=s)))\n    for s in range(1, 4):\n        out.append(('code-edit', 'sampled', 384, w['code-edit'][1][0]['prompt'], dict(DEFAULTS, seed=s)))\n    for s in range(1, 4):\n        out.append(('essay-31k', 'sampled', 400, ESSAY, dict(DEFAULTS, seed=s)))\n    for i, r in enumerate(w['prose'][1][:6]):\n        out.append(('prose', 'greedy', 256, r['prompt'], {'temperature': 0}))\n    for name in ['code-write', 'code-edit', 'repetitive']:\n        out.append((name, 'greedy', w[name][0], w[name][1][0]['prompt'], {'temperature': 0}))\n    out.append(('essay-31k', 'greedy', 400, ESSAY, {'temperature': 0}))\n    return out\n\ndef post(body):\n    req = urllib.request.Request(f'http://127.0.0.1:{PORT}/v1/chat/completions', data=json.dumps(body).encode(),\n                                 headers={'Content-Type': 'application/json'})\n    with urllib.request.urlopen(req, timeout=1800) as r:\n        return json.loads(r.read())\n\nfor model in sys.argv[1].split(','):\n    target, draft = MODELS[model]\n    trace = OUT / f'trace-{model}.jsonl'\n    trace.unlink(missing_ok=True)\n    cmd = [BIN, 'serve', 'llm', '--port', str(PORT), '--model', M + target, '--speculative', 'mtp', '--mtp-model', M + draft,\n           '--context', '40960', '--sessions', '1', '--think', 'off', '--served-model-name', 'bench',\n           '--draft-policy', 'fixed', '--draft-tokens', '15', '--draft-trace', str(trace)]\n    meta = {'model': model, 'command': cmd, 'requests': []}\n    with (OUT / f'server-{model}.log').open('w') as log:\n        srv = subprocess.Popen(cmd, stdout=log, stderr=subprocess.STDOUT)\n        try:\n            for _ in range(900):\n                if srv.poll() is not None: raise RuntimeError('server exited')\n                try: urllib.request.urlopen(f'http://127.0.0.1:{PORT}/ready', timeout=2); break\n                except Exception: time.sleep(1)\n            post({'model': 'bench', 'max_tokens': 8, 'messages': [{'role': 'user', 'content': 'Hi'}]})\n            for name, mode, n, prompt, sampling in requests():\n                t0 = time.monotonic_ns()\n                r = post({'model': 'bench', 'max_tokens': n, **sampling, 'messages': [{'role': 'user', 'content': prompt}]})\n                meta['requests'].append({'workload': name, 'mode': mode, 'sampling': sampling, 'start_ns': t0,\n                                         'end_ns': time.monotonic_ns(), 'timings': r['timings']})\n                print(model, name, mode, sampling.get('seed'), r['timings']['predicted_n'], flush=True)\n                (OUT / f'meta-{model}.json').write_text(json.dumps(meta, indent=1))\n        finally:\n            srv.terminate()\n            try: srv.wait(timeout=60)\n            except subprocess.TimeoutExpired: srv.kill(); srv.wait()\n",
+  "analyze.py": "\"\"\"Per-drafter acceptance from fixed 15-draft traces (collect.py output).\n\nCycles with prompt-lookup copies are dropped (they mix copied and drafted\nrows). Per cycle, E[accepted] = sum_i prod_{j<=i} a_j over its drafted rows;\na_i is the row's acceptance given the rows before it accepted (greedy 0/1,\nsampled min(1, p/q)). Intervals: 2000 bootstrap resamples over requests.\n\"\"\"\nimport json, random, sys\nfrom pathlib import Path\nfrom collections import defaultdict\n\nD = Path(sys.argv[1])\narms = sys.argv[2].split(',')\nrandom.seed(20261021)\n\n\ndef load(arm):\n    meta = json.loads((D / f'meta-{arm}.json').read_text())\n    reqs = meta['requests']\n    cycles = defaultdict(list)  # request index -> list of row_acceptance\n    for line in (D / f'trace-{arm}.jsonl').open():\n        r = json.loads(line)\n        if r.get('copied', 0) != 0 or not r['row_acceptance']:\n            continue\n        t = r['begin_ns']\n        for i, q in enumerate(reqs):\n            if q['start_ns'] <= t <= q['end_ns']:\n                cycles[i].append(r['row_acceptance'])\n                break\n    return reqs, cycles\n\n\ndef expected(rows):\n    total, prod = 0.0, 1.0\n    for a in rows:\n        prod *= a\n        total += prod\n    return total\n\n\ndef summarize(reqs, cycles, select):\n    ids = [i for i, q in enumerate(reqs) if select(q) and cycles.get(i)]\n    per = {i: [expected(c) for c in cycles[i]] for i in ids}\n    pos = {i: cycles[i] for i in ids}\n\n    def stat(sample):\n        vals = [v for i in sample for v in per[i]]\n        return sum(vals) / len(vals) if vals else float('nan')\n\n    def pos_stat(sample, k):\n        vals = [c[k] for i in sample for c in pos[i] if len(c) > k]\n        return sum(vals) / len(vals) if vals else float('nan')\n\n    point = stat(ids)\n    boots = sorted(stat([random.choice(ids) for _ in ids]) for _ in range(2000))\n    return {'requests': len(ids), 'cycles': sum(len(per[i]) for i in ids),\n            'expected_accepted': point, 'ci95': (boots[50], boots[1949]),\n            'position_acceptance': [pos_stat(ids, k) for k in range(8)]}\n\n\ngroups = {\n    'greedy (all)': lambda q: q['mode'] == 'greedy',\n    'sampled (all)': lambda q: q['mode'] == 'sampled',\n}\nfor w in ['prose', 'story', 'code-write', 'code-edit', 'essay-31k', 'repetitive']:\n    for mode in ['greedy', 'sampled']:\n        groups[f'{w} {mode}'] = (lambda w, mode: lambda q: q['workload'] == w and q['mode'] == mode)(w, mode)\n\nout = {}\nfor arm in arms:\n    if not (D / f'meta-{arm}.json').exists():\n        continue\n    reqs, cycles = load(arm)\n    out[arm] = {g: summarize(reqs, cycles, f) for g, f in groups.items()}\nprint(f\"{'group':22s} \" + ' '.join(f'{a:>26s}' for a in out))\nfor g in groups:\n    cells = []\n    for a in out:\n        s = out[a][g]\n        if s['requests'] == 0:\n            cells.append(f\"{'-':>26s}\")\n            continue\n        cells.append(f\"{s['expected_accepted']:6.3f} [{s['ci95'][0]:5.3f},{s['ci95'][1]:5.3f}] n={s['cycles']:4d}\")\n    if any(c.strip() != '-' for c in cells):\n        print(f'{g:22s} ' + ' '.join(cells))\nprint('\\nposition acceptance (1..8), all greedy / all sampled:')\nfor a in out:\n    for g in ['greedy (all)', 'sampled (all)']:\n        print(f\"{a:5s} {g:14s} \" + ' '.join(f'{v:.3f}' for v in out[a][g]['position_acceptance']))\njson.dump(out, open(D / 'summary.json', 'w'), indent=1)\n"
+ }
+}

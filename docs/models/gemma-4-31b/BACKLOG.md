@@ -337,6 +337,12 @@ an NPU load.
 
 ## Housekeeping
 
+- 4-bit MTP drafter: Q8_0 measured as good as BF16 (EXPERIMENTS.md,
+  2026-10-21), so quantize the drafter's layers and projections from the BF16
+  file (`llama-quantize` from `.#llama-cpp-reference`) and repeat the
+  fixed-chain acceptance study. The head is already read as Q4_K; the layers
+  and projections are ~200 MB per draft step, so expect +1–2% MTP decode on
+  31B, more on 26B.
 - Model card refresh: BENCHMARKS.md is from 2026-10-07 and holds none of the
   2026-10-17 gains; one full sweep (the `benchmark-model` skill) at the end of
   the round.
