@@ -29,6 +29,7 @@ struct BenchOptions {
   std::string draft_trace_path;
   /// Gemma 4 prefill weight copies (ParsePrefillWeights); empty is off.
   std::string prefill_weights;
+  std::string prefill_sidecar;
   std::string dspark_model_path;
   std::uint32_t draft_tokens{7};
   /// --draft-tokens was given (Gemma 4 otherwise uses its own default).

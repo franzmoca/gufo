@@ -58,6 +58,7 @@ std::shared_ptr<g4::Model> LoadModel(
         g4::ParseDraftCalibrationScope(opt.draft_calibration);
     options.prefill_weights =
         g4::ParsePrefillWeightsOption(opt.prefill_weights);
+    options.prefill_sidecar = opt.prefill_sidecar;
   } catch (const std::invalid_argument& e) {
     std::cerr << e.what() << '\n';
     return nullptr;

@@ -22,6 +22,11 @@ struct DeviceTensor {
   void* prefill{nullptr};
   PrefillLayout prefill_layout{PrefillLayout::kNone};
   ExpertFormat prefill_format{ExpertFormat::kQ4_K};
+  /// Int4 prefill copy from a --prefill-sidecar file (w4a4.hpp): codes,
+  /// binary16 scales and the input's rotation signs; null without one.
+  const void* w4a4_codes{nullptr};
+  const void* w4a4_scales{nullptr};
+  const float* w4a4_vec{nullptr};
   /// `data` holds the grouped layout (wmma_gemv.hpp), not GGUF rows.
   bool grouped{false};
   core::GgmlType type{core::GgmlType::kF32};
@@ -77,6 +82,7 @@ public:
       const ModelWeights& weights, const core::GgufReader& reader,
       const DraftWeights* draft, const core::GgufReader* draft_reader,
       std::span<const std::int32_t> draft_order, PrefillWeights prefill_weights,
+      const core::GgufReader* prefill_sidecar = nullptr,
       std::string* error_msg = nullptr);
 
   [[nodiscard]] const Config& config() const noexcept { return config_; }
@@ -129,6 +135,8 @@ public:
   /// Whether prefill runs on binary16 activations: expert models, and dense
   /// models whose every projection has a binary16 prefill GEMM.
   [[nodiscard]] bool half_prefill() const noexcept { return half_prefill_; }
+  /// Whether the projections carry int4 prefill copies (--prefill-sidecar).
+  [[nodiscard]] bool w4a4_prefill() const noexcept { return w4a4_prefill_; }
 
 private:
   DeviceModel() = default;
@@ -149,6 +157,7 @@ private:
   std::size_t max_cols_{0};
   std::size_t max_half_cols_{0};
   bool half_prefill_{false};
+  bool w4a4_prefill_{false};
 };
 
 }  // namespace gufo::models::gemma4::rocm

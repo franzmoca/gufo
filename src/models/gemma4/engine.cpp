@@ -292,9 +292,19 @@ std::shared_ptr<Model> Model::Load(const std::string& model_path,
       m->draft_weights_ && m->weights_->config.HasExperts()
           ? DraftHeadOrder(*m->tokenizer_)
           : std::vector<TokenId>{};
+  std::unique_ptr<core::GgufReader> sidecar;
+  if (!options.prefill_sidecar.empty()) {
+    sidecar = core::GgufReader::OpenFile(options.prefill_sidecar, &error);
+    if (!sidecar) {
+      Fail(error_msg, "--prefill-sidecar: " + error);
+      return nullptr;
+    }
+  }
   m->device_ = rocm::DeviceModel::Upload(
       *m->weights_, *m->reader_, m->draft_weights_.get(),
-      m->draft_reader_.get(), draft_order, options.prefill_weights, &error);
+      m->draft_reader_.get(), draft_order, options.prefill_weights,
+      sidecar.get(), &error);
+  sidecar.reset();
   if (!m->device_) {
     Fail(error_msg, error);
     return nullptr;
@@ -354,8 +364,8 @@ std::size_t Model::ResidentBytes() const noexcept {
          rocm::Executor::ScratchBytes(
              config(), HasMtp() ? &draft_weights_->config : nullptr,
              VocabSize(), device_->max_cols(), device_->max_half_cols(),
-             options_.prefill_chunk + rocm::kSplitRows, options_.max_logit_rows,
-             options_.max_context);
+             device_->w4a4_prefill(), options_.prefill_chunk + rocm::kSplitRows,
+             options_.max_logit_rows, options_.max_context);
 }
 
 std::size_t Model::SessionBytes(std::uint32_t context) const noexcept {

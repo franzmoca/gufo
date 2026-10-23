@@ -66,6 +66,23 @@ activations with FP32 accumulation).
 | Greedy MTP vs single-token decode, batched sessions, session state | Identical token IDs; bit-for-bit continuation (`gemma4.target`) |
 | Image sessions | `gemma4.vision_session` passes |
 
+## Int4 prefill sidecar (2026-10-23)
+
+`--prefill-sidecar` (UD-Q4_K_XL with the calibration-v6 sidecar built by
+`tools/gemma4/quant_sim/sidecar.py`), `gemma4.prefill_sidecar`:
+
+| Check | Result |
+| --- | --- |
+| GPU decode / eight-row verification vs scalar reference | Unchanged: mean KL 1.11695e-6 / 1.35631e-6, top-1 22/22 |
+| Int4 prefill vs scalar reference, 22-token chat prompt | Mean KL 0.50 (limit 1.0), max 4.3, top-1 20/22 |
+| Int4 bulk prefill vs exact rows, 1542-token conversation | Mean KL 1.15 (limit 2.3), top-1 1047/1542. The simulator gives the same copy 1.18 against BF16 (top-1 0.67) on this fixture, where UD-Q4_K_XL itself is 0.36 (BF16 perplexity 538) |
+| Decoding the conversation's last 256 tokens after an int4 prefill of the rest, vs exact rows | Mean KL 0.10 (limit 0.2), top-1 234/256 |
+| Simulated chat replies (24 BF16-generated replies, reply tokens, KL vs BF16) | 0.027–0.028 with the int4 prompt copy, 0.021 for UD-Q4_K_XL alone (WEIGHT-FORMATS.md) |
+
+`gemma4.w4a4_ops` checks the activation quantization against the
+simulator's rule (no differing block on 13.7K blocks) and the GEMM against
+FP64 (2e-8 of the absolute sum).
+
 ## Reproduce
 
 ```sh

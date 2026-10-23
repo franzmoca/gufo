@@ -67,6 +67,11 @@ struct ModelOptions {
   std::string draft_trace_path;
   /// Prefill copies of the dense projections (memory for prefill speed).
   PrefillWeights prefill_weights = PrefillWeights::kOff;
+  /// Int4 prefill copies of the dense projections built for this model
+  /// (tools/gemma4/quant_sim/sidecar.py); prompt chunks project through them
+  /// and decode keeps the GGUF weights. Lossy: prefill no longer matches the
+  /// GGUF's arithmetic. Empty loads none.
+  std::string prefill_sidecar;
 };
 
 class Session;

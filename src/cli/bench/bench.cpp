@@ -90,6 +90,13 @@ void RegisterBenchOptions(ArgParser& parser, BenchOptions& opt,
       "copy of the weights) or decoded (binary16 where it pays; about 2.3 "
       "copies) (default: off)",
       "Model", &opt.prefill_weights);
+  parser.AddOption(
+      "", "--prefill-sidecar", "PATH",
+      "Gemma 4 31B int4 prefill weights (a sidecar GGUF built from the "
+      "BF16 checkpoint by tools/gemma4/quant_sim/sidecar.py): prompt "
+      "chunks project through them, decode keeps the GGUF weights; "
+      "lossy, about 14 GiB (default: none)",
+      "Model", &opt.prefill_sidecar);
 
   parser.AddCustomOption(
       "-p", "--n-prompt", "n,n,...",
@@ -1307,6 +1314,7 @@ int RunGemma4Benchmark(const BenchOptions& options,
         g4::ParseDraftCalibrationScope(options.draft_calibration);
     model_options.prefill_weights =
         g4::ParsePrefillWeightsOption(options.prefill_weights);
+    model_options.prefill_sidecar = options.prefill_sidecar;
   } catch (const std::invalid_argument& e) {
     std::cerr << "Error: " << e.what() << '\n';
     return 1;

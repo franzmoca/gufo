@@ -21,11 +21,17 @@
 #include "src/models/gemma4/kernels/rocm/executor.hpp"
 #include "src/models/gemma4/reference.hpp"
 #include "tests/models/gemma4/check.hpp"
+#include "tests/models/gemma4/model_logits.hpp"
 
 void LimitReportedDeviceFree(std::size_t bytes);
 
 namespace g4 = gufo::models::gemma4;
+using gemma4_test::Compare;
+using gemma4_test::ConversationTokens;
+using gemma4_test::GpuLogits;
+using gemma4_test::PromptTokens;
 using gemma4_test::Require;
+using gemma4_test::Stats;
 
 namespace {
 
@@ -49,68 +55,6 @@ constexpr Limits kDense{1e-5, 0.015, 0.15};
 /// activations (observed 3.2e-5 to 4.0e-5); the conversation, whose exact
 /// rows move with the same flips, 0.016 to 0.029.
 constexpr Limits kExperts{1e-4, 1e-3, 0.06};
-
-struct Stats {
-  double mean_kl{0.0};
-  double max_kl{0.0};
-  std::size_t top1{0};
-  std::size_t rows{0};
-};
-
-Stats Compare(const std::vector<float>& ref, const std::vector<float>& got,
-              std::size_t vocab) {
-  Stats s;
-  s.rows = ref.size() / vocab;
-  for (std::size_t r = 0; r < s.rows; ++r) {
-    const float* a = &ref[r * vocab];
-    const float* b = &got[r * vocab];
-    double ma = -INFINITY, mb = -INFINITY;
-    std::size_t aa = 0, ab = 0;
-    for (std::size_t i = 0; i < vocab; ++i) {
-      Require(std::isfinite(b[i]), "non-finite GPU logit");
-      if (a[i] > ma) {
-        ma = a[i];
-        aa = i;
-      }
-      if (b[i] > mb) {
-        mb = b[i];
-        ab = i;
-      }
-    }
-    double za = 0.0, zb = 0.0;
-    for (std::size_t i = 0; i < vocab; ++i) {
-      za += std::exp(a[i] - ma);
-      zb += std::exp(b[i] - mb);
-    }
-    const double la = std::log(za) + ma, lb = std::log(zb) + mb;
-    double kl = 0.0;
-    for (std::size_t i = 0; i < vocab; ++i) {
-      const double pa = a[i] - la;
-      kl += std::exp(pa) * (pa - (b[i] - lb));
-    }
-    s.mean_kl += kl / static_cast<double>(s.rows);
-    s.max_kl = std::max(s.max_kl, kl);
-    s.top1 += aa == ab ? 1 : 0;
-  }
-  return s;
-}
-
-std::vector<float> GpuLogits(g4::Model& model,
-                             const std::vector<g4::TokenId>& tokens,
-                             std::size_t chunk) {
-  std::string error;
-  auto session = model.CreateSession(0, &error);
-  Require(session != nullptr, error);
-  std::vector<float> all, part;
-  for (std::size_t begin = 0; begin < tokens.size(); begin += chunk) {
-    const std::size_t count = std::min(chunk, tokens.size() - begin);
-    Require(session->EvaluateAll(std::span(tokens).subspan(begin, count), &part,
-                                 &error),
-            error);
-    all.insert(all.end(), part.begin(), part.end());
-  }
-  return all;
-}
 
 /// Tokens from autoregressive evaluation and from DecodeStep (greedy by
 /// default).
@@ -198,53 +142,6 @@ void CheckSpeculativeLogits(g4::Model& model,
   const auto& stats = session->Statistics();
   stats_out->siblings += stats.siblings;
   stats_out->siblings_accepted += stats.siblings_accepted;
-}
-
-/// The fixture conversation: turns separated by "@@ user" / "@@ model".
-std::vector<g4::TokenId> ConversationTokens(const g4::Model& model) {
-  std::ifstream in(std::string(GUFO_GEMMA4_FIXTURES) +
-                   "/long_conversation.txt");
-  Require(in.good(), "long_conversation.txt is missing");
-  std::vector<gufo::tokenization::ChatMessage> messages;
-  std::string line;
-  std::string text;
-  auto role = gufo::tokenization::ChatRole::kUser;
-  bool open = false;
-  const auto flush = [&] {
-    if (open) {
-      while (!text.empty() && text.back() == '\n') {
-        text.pop_back();
-      }
-      messages.emplace_back(role, text);
-    }
-    text.clear();
-  };
-  while (std::getline(in, line)) {
-    if (line == "@@ user" || line == "@@ model") {
-      flush();
-      role = line == "@@ user" ? gufo::tokenization::ChatRole::kUser
-                               : gufo::tokenization::ChatRole::kAssistant;
-      open = true;
-    } else {
-      text += line + "\n";
-    }
-  }
-  flush();
-  std::string error;
-  const auto rendered = g4::ChatTemplate::Render(messages, {}, {}, &error);
-  Require(rendered.has_value(), error);
-  return model.Tokenize(rendered->text);
-}
-
-std::vector<g4::TokenId> PromptTokens(const g4::Model& model,
-                                      const std::string& text) {
-  gufo::tokenization::ChatMessage message(gufo::tokenization::ChatRole::kUser,
-                                          text);
-  std::string error;
-  const auto rendered =
-      g4::ChatTemplate::Render(std::span(&message, 1), {}, {}, &error);
-  Require(rendered.has_value(), error);
-  return model.Tokenize(rendered->text);
 }
 
 }  // namespace

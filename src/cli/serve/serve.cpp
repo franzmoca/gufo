@@ -594,6 +594,7 @@ void PrintServeHelp(std::string_view program_name,
     std::string draft_calibration;
     std::string draft_trace_path;
     std::string prefill_weights;
+    std::string prefill_sidecar;
     std::string dspark_model_path;
     std::string mtp_model_path;
     std::string vision_model_path;
@@ -637,6 +638,13 @@ void PrintServeHelp(std::string_view program_name,
         "copy of the weights) or decoded (binary16 where it pays; about 2.3 "
         "copies) (default: off)",
         "Model", &prefill_weights);
+    parser.AddOption(
+        "", "--prefill-sidecar", "PATH",
+        "Gemma 4 31B int4 prefill weights (a sidecar GGUF built from the "
+        "BF16 checkpoint by tools/gemma4/quant_sim/sidecar.py): prompt "
+        "chunks project through them, decode keeps the GGUF weights; "
+        "lossy, about 14 GiB (default: none)",
+        "Model", &prefill_sidecar);
     parser.AddOption("", "--image-tokens", "N",
                      "Gemma 4 soft tokens per image: 70, 140, 280, 560 or "
                      "1120 (default: 280)",
@@ -1173,6 +1181,7 @@ int RunServe(std::span<const char* const> args) {
     std::string draft_calibration;
     std::string draft_trace_path;
     std::string prefill_weights;
+    std::string prefill_sidecar;
     std::string dspark_model_path;
     std::string mtp_model_path;
     std::string vision_model_path;
@@ -1217,6 +1226,13 @@ int RunServe(std::span<const char* const> args) {
         "copy of the weights) or decoded (binary16 where it pays; about 2.3 "
         "copies) (default: off)",
         "Model", &prefill_weights);
+    llm_parser.AddOption(
+        "", "--prefill-sidecar", "PATH",
+        "Gemma 4 31B int4 prefill weights (a sidecar GGUF built from the "
+        "BF16 checkpoint by tools/gemma4/quant_sim/sidecar.py): prompt "
+        "chunks project through them, decode keeps the GGUF weights; "
+        "lossy, about 14 GiB (default: none)",
+        "Model", &prefill_sidecar);
     llm_parser.AddOption("", "--image-tokens", "N",
                          "Gemma 4 soft tokens per image: 70, 140, 280, 560 or "
                          "1120 (default: 280)",
@@ -1505,6 +1521,7 @@ int RunServe(std::span<const char* const> args) {
     // so supervisors see a loading server rather than a refused connection.
     server::LoadingResponder loading(host, port);
     backend->set_gemma_prefill_weights(prefill_weights);
+    backend->set_gemma_prefill_sidecar(prefill_sidecar);
     const bool load_ok = backend->load(
         model, &err, max_context, session_count,
         server::TextPrefillPolicy{

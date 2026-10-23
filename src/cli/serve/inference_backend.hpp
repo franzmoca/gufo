@@ -93,6 +93,10 @@ public:
   void set_gemma_prefill_weights(std::string mode) {
     gemma_prefill_weights_ = std::move(mode);
   }
+  /// Gemma 4 --prefill-sidecar path for the next load (empty is none).
+  void set_gemma_prefill_sidecar(std::string path) {
+    gemma_prefill_sidecar_ = std::move(path);
+  }
 
   /// Loads weights from a GGUF file. Returns false and sets *error on failure.
   bool load(const std::string& model_path, std::string* error,
@@ -219,6 +223,7 @@ private:
   struct Impl;
   std::unique_ptr<Impl> impl_;
   std::string gemma_prefill_weights_;
+  std::string gemma_prefill_sidecar_;
 };
 
 }  // namespace gufo::server

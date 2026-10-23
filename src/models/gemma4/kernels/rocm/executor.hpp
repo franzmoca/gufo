@@ -103,8 +103,9 @@ public:
 
   [[nodiscard]] static std::size_t ScratchBytes(
       const Config& config, const Config* draft, std::uint32_t vocab,
-      std::size_t max_cols, std::size_t max_half_cols, std::uint32_t max_rows,
-      std::uint32_t max_logit_rows, std::uint32_t max_context);
+      std::size_t max_cols, std::size_t max_half_cols, bool w4a4_prefill,
+      std::uint32_t max_rows, std::uint32_t max_logit_rows,
+      std::uint32_t max_context);
   /// Per-session cache bytes for per-layer K row widths (KeyWidths).
   [[nodiscard]] static std::size_t CacheBytes(
       const Config& config, std::uint32_t max_context, std::uint32_t ring,
@@ -309,6 +310,11 @@ private:
   bool half_prefill_{false};
   void* x_half_{nullptr};
   void* moe_x_half_{nullptr};
+  /// Int4 prefill rows (w4a4.hpp) and the input they hold: q/k/v and
+  /// gate/up quantize their shared input once.
+  void* w4a4_x_{nullptr};
+  const void* w4a4_x_source_{nullptr};
+  const float* w4a4_x_vec_{nullptr};
   // Routed expert scratch (present on mixture-of-experts models).
   float* moe_h_{nullptr};  ///< Expert input rows
   float* moe_logits_{nullptr};

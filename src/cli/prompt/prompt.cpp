@@ -104,6 +104,13 @@ static void RegisterTextOptions(ArgParser& parser, PromptOptions& opt,
       "copy of the weights) or decoded (binary16 where it pays; about 2.3 "
       "copies) (default: off)",
       "Model", &opt.prefill_weights);
+  parser.AddOption(
+      "", "--prefill-sidecar", "PATH",
+      "Gemma 4 31B int4 prefill weights (a sidecar GGUF built from the "
+      "BF16 checkpoint by tools/gemma4/quant_sim/sidecar.py): prompt "
+      "chunks project through them, decode keeps the GGUF weights; "
+      "lossy, about 14 GiB (default: none)",
+      "Model", &opt.prefill_sidecar);
   RegisterImageOptions(parser, opt);
 
   // Prompt & Formatting

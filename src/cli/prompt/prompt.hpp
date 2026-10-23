@@ -44,6 +44,7 @@ struct PromptOptions {
   std::string draft_trace_path;
   /// Gemma 4 prefill weight copies (ParsePrefillWeights); empty is off.
   std::string prefill_weights;
+  std::string prefill_sidecar;
   // DeepSeek V4 Flash DSpark support model. DSpark is DS4's own drafter and
   // is unrelated to the Qwen DFlash paths above.
   std::string dspark_model_path;

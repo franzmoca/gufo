@@ -17,6 +17,7 @@
 #include "src/models/gemma4/kernels/rocm/gemv.hpp"
 #include "src/models/gemma4/kernels/rocm/kernels.hpp"
 #include "src/models/gemma4/kernels/rocm/moe.hpp"
+#include "src/models/gemma4/kernels/rocm/w4a4.hpp"
 #include "src/models/gemma4/kernels/rocm/wmma_gemv.hpp"
 #include "src/models/qwen/hip/ops/gemm.hpp"
 #include "src/models/qwen/hip/ops/token.hpp"
@@ -34,7 +35,7 @@ std::size_t AlignUp(std::size_t n) {
 
 struct Layout {
   std::size_t tokens, logit_index, key_ends, x, h, q, k, v, attn, o, gate, up,
-      hsel, logits, partials, q8, act, wmma;
+      hsel, logits, partials, q8, act, wmma, w4a4;
   std::size_t x_half, moe_x_half, moe_sync, moe_h, moe_logits, moe_ids,
       moe_weights, moe_groups, moe_gu, moe_act, moe_out, moe_counts, moe_bounds,
       moe_cursors, moe_rows_token, moe_rows_slot, moe_tiles;
@@ -74,8 +75,9 @@ constexpr std::uint32_t kRoutedKQuantTileRows = kRoutedHalfTileRows;
 bool HalfExperts(const DeviceLayer& l, const Config& c);
 
 Layout Plan(const Config& c, const Config* draft, std::uint32_t vocab,
-            std::size_t max_cols, std::size_t max_half_cols, std::uint32_t rows,
-            std::uint32_t logit_rows, std::uint32_t max_context) {
+            std::size_t max_cols, std::size_t max_half_cols, bool w4a4,
+            std::uint32_t rows, std::uint32_t logit_rows,
+            std::uint32_t max_context) {
   const std::size_t f = sizeof(float);
   const std::uint32_t ring = RingSlots(c, rows);
   const std::size_t partial_floats = std::max(
@@ -118,6 +120,11 @@ Layout Plan(const Config& c, const Config* draft, std::uint32_t vocab,
   const std::size_t half_cols = c.HasExperts() ? max_cols : max_half_cols;
   l.x_half =
       take(q8_rows > kSplitRows ? std::size_t{q8_rows} * half_cols * 2 : 0);
+  // Int4 prefill inputs (--prefill-sidecar), quantized from x_half.
+  l.w4a4 =
+      take(w4a4 && rows > kSplitRows
+               ? W4A4ActivationBytes(rows, static_cast<std::uint32_t>(max_cols))
+               : 0);
   if (c.HasExperts()) {
     // Prefill stages binary16 activations; the expert buffers hold FP32 rows
     // at grouped widths and binary16 rows in prefill.
@@ -192,12 +199,12 @@ std::uint32_t RingSlots(const Config& config, std::uint32_t max_rows) noexcept {
 
 std::size_t Executor::ScratchBytes(const Config& config, const Config* draft,
                                    std::uint32_t vocab, std::size_t max_cols,
-                                   std::size_t max_half_cols,
+                                   std::size_t max_half_cols, bool w4a4_prefill,
                                    std::uint32_t max_rows,
                                    std::uint32_t max_logit_rows,
                                    std::uint32_t max_context) {
-  return Plan(config, draft, vocab, max_cols, max_half_cols, max_rows,
-              max_logit_rows, max_context)
+  return Plan(config, draft, vocab, max_cols, max_half_cols, w4a4_prefill,
+              max_rows, max_logit_rows, max_context)
       .total;
 }
 
@@ -251,7 +258,7 @@ Executor::Executor(const DeviceModel& model, std::uint32_t max_rows,
   const Layout l =
       Plan(model.config(), model.has_draft() ? &model.draft().config : nullptr,
            model.vocab_size(), model.max_cols(), model.max_half_cols(),
-           max_rows, max_logit_rows, max_context);
+           model.w4a4_prefill(), max_rows, max_logit_rows, max_context);
   if (const Config& c = model.config();
       c.HasExperts() &&
       (c.hidden_size % 128 != 0 || c.hidden_size > kMaxRouterHidden ||
@@ -292,6 +299,7 @@ Executor::Executor(const DeviceModel& model, std::uint32_t max_rows,
   q8_ = base + l.q8;
   wmma_ = base + l.wmma;
   x_half_ = base + l.x_half;
+  w4a4_x_ = base + l.w4a4;
   half_prefill_ = model.half_prefill();
   if (model.config().HasExperts()) {
     const Config& c = model.config();
@@ -540,6 +548,20 @@ void Executor::Project(const DeviceTensor& w, const float* x, const void* xq,
     return;
   }
   if (rows > kSplitRows) {
+    if (half_prefill_ && w.w4a4_codes != nullptr) {
+      // Int4 prefill copy: the binary16 input rotates and quantizes once
+      // per forward input (q/k/v and gate/up share theirs).
+      if (w4a4_x_source_ != xq || w4a4_x_vec_ != w.w4a4_vec) {
+        LaunchW4A4Quantize(xq, w.w4a4_vec, w4a4_x_, rows, w.cols, stream_);
+        w4a4_x_source_ = xq;
+        w4a4_x_vec_ = w.w4a4_vec;
+      }
+      if (!LaunchW4A4Gemm(w.w4a4_codes, w.w4a4_scales, w4a4_x_, y, rows, w.rows,
+                          w.cols, stream_)) {
+        throw std::runtime_error("gemma4 int4 prefill shape unsupported");
+      }
+      return;
+    }
     if (half_prefill_) {
       if (PackedPrefill(w, rows) &&
           LaunchPackedPrefillGemm(w.prefill_format, w.prefill_layout, w.prefill,
@@ -741,6 +763,9 @@ void Executor::Forward(std::span<const Segment> segments,
     s.cache->written_to =
         std::max(s.cache->written_to, s.first_position + s.rows);
   }
+  // The previous forward's int4 rows are stale.
+  w4a4_x_source_ = nullptr;
+  w4a4_x_vec_ = nullptr;
   // Several sessions share a forward only at decode widths, where every
   // projection keeps its single-session arithmetic.
   if (n == 0 || n > max_rows_ || total != n ||
@@ -998,8 +1023,9 @@ void Executor::Forward(std::span<const Segment> segments,
     WmmaPackOut down_pack{};
     const auto gate_up_half = DenseHalfFormat(L.ffn_gate_up.type);
     const bool gate_up_packed = PackedPrefill(L.ffn_gate_up, n);
-    if (!L.ffn_gate_up.empty() && half && (gate_up_half || gate_up_packed) &&
-        half_only({&L.ffn_down}) &&
+    // An int4 [gate | up] copy writes FP32 rows; GeGLU follows below.
+    if (!L.ffn_gate_up.empty() && half && L.ffn_gate_up.w4a4_codes == nullptr &&
+        (gate_up_half || gate_up_packed) && half_only({&L.ffn_down}) &&
         ((gate_up_packed &&
           LaunchPackedPrefillGemm(
               L.ffn_gate_up.prefill_format, L.ffn_gate_up.prefill_layout,

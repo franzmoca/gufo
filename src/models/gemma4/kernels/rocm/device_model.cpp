@@ -8,6 +8,7 @@
 #include <optional>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 #include "src/core/hip/managed_alloc.hpp"
@@ -278,6 +279,131 @@ struct Uploader {
   }
 };
 
+/// Uploads the int4 prefill copies of a --prefill-sidecar file
+/// (tools/gemma4/quant_sim/sidecar.py) beside the GGUF projections: one
+/// copy per tensor prefill projects (fused ones, not their views), parts
+/// stacked along the rows inside each 128-value block.
+bool UploadSidecar(Uploader& up, const core::GgufReader& sidecar,
+                   const Config& c, std::vector<DeviceLayer>& layers) {
+  const auto meta = [&](const char* key) {
+    return sidecar.GetMetadataUint32(key);
+  };
+  if (meta("gufo.w4a4.version") != 1U || meta("gufo.w4a4.rotation") != 128U ||
+      meta("gufo.w4a4.weight_group") != 128U ||
+      meta("gufo.w4a4.block_count") != c.num_layers ||
+      meta("gufo.w4a4.embedding_length") != c.hidden_size) {
+    up.Fail(
+        "--prefill-sidecar: not a version 1 int4 prefill sidecar of this "
+        "model's shape");
+    return false;
+  }
+  std::vector<std::pair<std::string, const float*>> vectors;
+  const auto vector = [&](const std::string& name,
+                          std::uint32_t k) -> const float* {
+    for (const auto& [n, p] : vectors) {
+      if (n == name) {
+        return p;
+      }
+    }
+    const core::GgufTensorInfo* t = sidecar.FindTensor(name);
+    if (t == nullptr || t->type != core::GgmlType::kF32 ||
+        t->dimensions != std::vector<std::uint64_t>{k}) {
+      up.Fail("--prefill-sidecar: missing or misshapen " + name);
+      return nullptr;
+    }
+    auto* p = static_cast<float*>(up.Allocate(t->size_bytes, name));
+    if (p != nullptr && hipMemcpy(p, t->data, t->size_bytes,
+                                  hipMemcpyHostToDevice) != hipSuccess) {
+      up.Fail("copy failed for " + name);
+    }
+    vectors.emplace_back(name, p);
+    return p;
+  };
+  // `parts` (sidecar projection names) stack into t's rows in order.
+  const auto attach = [&](DeviceTensor& t, std::uint32_t l, const char* input,
+                          std::initializer_list<const char*> parts) {
+    if (t.empty() || !up.ok) {
+      return;
+    }
+    const std::string prefix = "blk." + std::to_string(l) + ".";
+    const std::uint32_t blocks = t.cols / 128;
+    std::vector<const core::GgufTensorInfo*> codes;
+    std::vector<const core::GgufTensorInfo*> scales;
+    std::uint64_t rows = 0;
+    for (const char* part : parts) {
+      const std::string base = prefix + part + ".w4a4.";
+      const auto* q = sidecar.FindTensor(base + "codes");
+      const auto* s = sidecar.FindTensor(base + "scales");
+      if (q == nullptr || s == nullptr || q->type != core::GgmlType::kI32 ||
+          s->type != core::GgmlType::kF16 || q->dimensions.size() != 3 ||
+          q->dimensions[0] != 16 || q->dimensions[2] != blocks ||
+          s->dimensions !=
+              std::vector<std::uint64_t>{q->dimensions[1], blocks}) {
+        up.Fail("--prefill-sidecar: missing or misshapen " + base + "*");
+        return;
+      }
+      codes.push_back(q);
+      scales.push_back(s);
+      rows += q->dimensions[1];
+    }
+    if (t.cols % 128 != 0 || rows != t.rows) {
+      up.Fail("--prefill-sidecar: " + prefix + parts.begin()[0] +
+              " does not match the model's rows");
+      return;
+    }
+    const std::string name = prefix + parts.begin()[0] + ".w4a4";
+    auto* q = static_cast<std::uint8_t*>(
+        up.Allocate(std::size_t{blocks} * t.rows * 64, name));
+    auto* s = static_cast<std::uint8_t*>(
+        up.Allocate(std::size_t{blocks} * t.rows * 2, name));
+    if (q == nullptr || s == nullptr) {
+      return;
+    }
+    std::size_t row = 0;
+    for (std::size_t i = 0; i < codes.size(); ++i) {
+      const std::size_t m = codes[i]->dimensions[1];
+      if (hipMemcpy2D(q + row * 64, std::size_t{t.rows} * 64, codes[i]->data,
+                      m * 64, m * 64, blocks,
+                      hipMemcpyHostToDevice) != hipSuccess ||
+          hipMemcpy2D(s + row * 2, std::size_t{t.rows} * 2, scales[i]->data,
+                      m * 2, m * 2, blocks,
+                      hipMemcpyHostToDevice) != hipSuccess) {
+        up.Fail("copy failed for " + name);
+        return;
+      }
+      row += m;
+    }
+    t.w4a4_codes = q;
+    t.w4a4_scales = s;
+    t.w4a4_vec = vector(prefix + input + ".w4a4.vec", t.cols);
+  };
+  for (std::uint32_t l = 0; l < layers.size(); ++l) {
+    DeviceLayer& d = layers[l];
+    if (!d.attn_qkv.empty()) {
+      const bool with_v = d.attn_qkv.rows != d.attn_q.rows + d.attn_k.rows;
+      if (with_v) {
+        attach(d.attn_qkv, l, "attn_qkv", {"attn_q", "attn_k", "attn_v"});
+      } else {
+        attach(d.attn_qkv, l, "attn_qkv", {"attn_q", "attn_k"});
+        attach(d.attn_v, l, "attn_qkv", {"attn_v"});
+      }
+    } else {
+      attach(d.attn_q, l, "attn_qkv", {"attn_q"});
+      attach(d.attn_k, l, "attn_qkv", {"attn_k"});
+      attach(d.attn_v, l, "attn_qkv", {"attn_v"});
+    }
+    attach(d.attn_output, l, "attn_output", {"attn_output"});
+    if (!d.ffn_gate_up.empty()) {
+      attach(d.ffn_gate_up, l, "ffn_gate_up", {"ffn_gate", "ffn_up"});
+    } else {
+      attach(d.ffn_gate, l, "ffn_gate_up", {"ffn_gate"});
+      attach(d.ffn_up, l, "ffn_gate_up", {"ffn_up"});
+    }
+    attach(d.ffn_down, l, "ffn_down", {"ffn_down"});
+  }
+  return up.ok;
+}
+
 }  // namespace
 
 DeviceModel::~DeviceModel() {
@@ -290,7 +416,7 @@ std::unique_ptr<DeviceModel> DeviceModel::Upload(
     const ModelWeights& weights, const core::GgufReader& reader,
     const DraftWeights* draft, const core::GgufReader* draft_reader,
     std::span<const std::int32_t> draft_order, PrefillWeights prefill_weights,
-    std::string* error_msg) {
+    const core::GgufReader* prefill_sidecar, std::string* error_msg) {
   std::unique_ptr<DeviceModel> m(new DeviceModel());
   m->config_ = weights.config;
   m->vocab_ = weights.vocab_size;
@@ -449,6 +575,21 @@ std::unique_ptr<DeviceModel> DeviceModel::Upload(
       up.Fail("prefill weight packing failed");
       return nullptr;
     }
+  }
+  if (prefill_sidecar != nullptr) {
+    // The int4 copies quantize the binary16 rows of the binary16 prefill.
+    if (!m->half_prefill_ || m->config_.HasExperts()) {
+      up.Fail(
+          "--prefill-sidecar needs a dense model whose every projection has a "
+          "binary16 prefill GEMM");
+      return nullptr;
+    }
+    if (!UploadSidecar(up, *prefill_sidecar, m->config_, m->layers_) ||
+        hipDeviceSynchronize() != hipSuccess) {
+      up.Fail("--prefill-sidecar upload failed");
+      return nullptr;
+    }
+    m->w4a4_prefill_ = true;
   }
   // With a drafter every decode width runs the WMMA projections, which read
   // the grouped layout 2-10% faster; prefill's GEMMs (and the copies above,

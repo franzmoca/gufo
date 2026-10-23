@@ -42,7 +42,7 @@ if (ENGINE_ENABLE_HIP)
 endif()
 
 if (ENGINE_ENABLE_HIP)
-  foreach(name IN ITEMS attention_ops kernel_ops moe_ops projection_ops)
+  foreach(name IN ITEMS attention_ops kernel_ops moe_ops projection_ops w4a4_ops)
     add_gemma4_test(${name} gufo_gemma4 "hip;gpu;gfx1151")
   endforeach()
   add_executable(gemma4_target_test EXCLUDE_FROM_ALL target_test.cpp
@@ -54,6 +54,18 @@ if (ENGINE_ENABLE_HIP)
     GUFO_GEMMA4_FIXTURES="${PROJECT_SOURCE_DIR}/tests/models/gemma4/fixtures")
   add_test(NAME gemma4.target COMMAND gemma4_target_test)
   set_tests_properties(gemma4.target PROPERTIES
+    LABELS "gemma4;hip;gpu;gfx1151;quality;external-model;slow"
+    SKIP_RETURN_CODE 77 RESOURCE_LOCK gemma4)
+  add_executable(gemma4_prefill_sidecar_test EXCLUDE_FROM_ALL
+    prefill_sidecar_test.cpp)
+  target_link_libraries(gemma4_prefill_sidecar_test PRIVATE gufo_gemma4
+    gufo_gemma4_reference)
+  set_source_files_properties(prefill_sidecar_test.cpp PROPERTIES
+    COMPILE_OPTIONS "-O2")
+  target_compile_definitions(gemma4_prefill_sidecar_test PRIVATE
+    GUFO_GEMMA4_FIXTURES="${PROJECT_SOURCE_DIR}/tests/models/gemma4/fixtures")
+  add_test(NAME gemma4.prefill_sidecar COMMAND gemma4_prefill_sidecar_test)
+  set_tests_properties(gemma4.prefill_sidecar PROPERTIES
     LABELS "gemma4;hip;gpu;gfx1151;quality;external-model;slow"
     SKIP_RETURN_CODE 77 RESOURCE_LOCK gemma4)
   add_executable(gemma4_continuation_test EXCLUDE_FROM_ALL
@@ -90,7 +102,8 @@ if (ENGINE_ENABLE_HIP)
     vision_generate_probe.cpp)
   target_link_libraries(gemma4_vision_generate_probe PRIVATE gufo_gemma4)
   add_custom_target(gemma4_model_tests DEPENDS gemma4_target_test
-    gemma4_vision_session_test gemma4_continuation_test)
+    gemma4_vision_session_test gemma4_continuation_test
+    gemma4_prefill_sidecar_test)
   add_executable(gemma4_gpu_probe EXCLUDE_FROM_ALL gpu_probe.cpp)
   target_link_libraries(gemma4_gpu_probe PRIVATE gufo_gemma4)
 endif()
