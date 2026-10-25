@@ -22,6 +22,13 @@ if(ENGINE_ENABLE_HIP)
     LABELS "gpu;hip;gfx1151;ds41;quality"
     SKIP_RETURN_CODE 77)
 
+  add_executable(ds41_candidate_mask_test candidate_mask_test.cpp)
+  target_link_libraries(ds41_candidate_mask_test PRIVATE gufo_deepseek_v41_flash)
+  add_test(NAME ds41.candidate_mask COMMAND ds41_candidate_mask_test)
+  set_tests_properties(ds41.candidate_mask PROPERTIES
+    LABELS "gpu;hip;gfx1151;ds41;quality"
+    SKIP_RETURN_CODE 77)
+
   add_executable(ds41_gemv_bench EXCLUDE_FROM_ALL gemv_bench.cpp)
   target_link_libraries(ds41_gemv_bench PRIVATE gufo_deepseek_v41_flash)
 
