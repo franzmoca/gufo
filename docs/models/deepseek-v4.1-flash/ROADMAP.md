@@ -178,7 +178,7 @@ Open performance items are tracked in [BACKLOG.md](BACKLOG.md).
   is unchanged; the draft width follows measured acceptance and cycle
   times. Greedy decode +21% on a document prompt, +61-67% on a coding
   request ([BENCHMARKS.md](BENCHMARKS.md#dspark-speculative-decoding)).
-  The drafter's rings ride in the session snapshot.
+  The drafter's rings are a private component of the component cache.
 - Memory: Lucebox Q2_K/Q4_K takes 4.71 GiB and leaves 4.7 GiB of host
   memory after load; unsloth Q8_0 (7.42 GiB) leaves 2.1 GiB for similar
   speed, so Q2_K/Q4_K is the recommended drafter. Not used:
@@ -186,8 +186,10 @@ Open performance items are tracked in [BACKLOG.md](BACKLOG.md).
   BF16 (7.92 GiB), Lucebox `-MXFP4-Q8.gguf` (7.42 GiB) and the
   [peasantsmith](https://huggingface.co/peasantsmith/DeepSeek-V4.1-Flash-1017-Maya-GGUF)
   `.bin` drafters (not GGUF).
-- Drafter rings as component-cache private state, so sessions with DSpark
-  use the component cache instead of whole-state snapshots.
+- Component cache with DSpark (done): the automatic cache budget may use
+  the 4 GiB host reserve that explicit limits keep (as whole-state
+  snapshots already did), and cache backing may pin down to 1 GiB of free
+  device heap instead of the 4 GiB dispatch reserve.
 - Prompt lookup (`src/core/speculative/prompt_lookup.hpp`) as for Gemma 4.
   It shares DSpark's multi-token verification and the rollback of rejected
   tokens (SWA rings, compressor frontiers, rows), and its state joins the

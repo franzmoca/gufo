@@ -53,9 +53,21 @@ token-identical to plain decoding ([QUALITY.md](QUALITY.md)).
 `gufo serve --dspark-model` (Q2_K/Q4_K, 32K context), 70-token thinking
 prompt, 400 tokens: greedy 26.4 tok/s (155 of 277 drafts accepted),
 temperature 1.0 23.6-24.6 tok/s (49-52% accepted), against tg64 23.88
-without a drafter. The drafter adds 4.71 GiB (Q2_K/Q4_K) or 7.42 GiB (Q8_0/MXFP4) of
-GTT; with Q2_K/Q4_K and a 32K session 3.3 GiB of host memory stays
-available.
+without a drafter. The drafter adds 4.59 GiB (Q2_K/Q4_K) or 7.42 GiB
+(Q8_0/MXFP4) of GTT.
+
+DSpark sessions use the component cache; the drafter rings are one more
+private component. With Q2_K/Q4_K, 32K context and one session, the cache
+commits 1.5 GB of pinned backing and 1.8 GiB of host memory stays
+available. A 27,559-token prompt prefilled at 568 tok/s; its capture took
+9.5 ms (101 MB), and repeating the request restored it in 2.9 ms with the
+same reply. Short turns capture in 0.9-4.2 ms (24 MB) and restore in
+0.8 ms; whole-state snapshots took 14-16 ms for the same turns.
+
+Host memory freed for the cache: the drafter's F16 Markov tables stay F16
+(4.71 → 4.59 GiB, bit-identical drafts), and the DeepSeek cache keeps 16
+transfer streams instead of 64 (each HIP stream holds about 9 MiB of host
+memory; 0.38 GiB less resident).
 
 ## Memory
 
