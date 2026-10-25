@@ -296,6 +296,11 @@ int gemv_slices(uint32_t rows, uint32_t k) {
 
 bool gemv_type(uint32_t type) { return type == DS41_TENSOR_Q5_K || type == DS41_TENSOR_Q8_0; }
 
+/* Batches of Q5_K rows run on the FP16 matrix cores (ds41_v41_dense_f16). */
+bool dense_f16(uint32_t type, uint32_t rows, uint32_t k, uint32_t n) {
+  return n > 8 && type == DS41_TENSOR_Q5_K && rows % 128 == 0 && k % 256 == 0;
+}
+
 /* out[t] = W x[t] for n tokens and a [rows, k] weight at `p` of `type`. */
 bool linear_raw(uint32_t type, const void* p, uint32_t rows, uint32_t k, const float* x, float* out, uint32_t n) {
   if (!p) return false;
@@ -307,7 +312,9 @@ bool linear_raw(uint32_t type, const void* p, uint32_t rows, uint32_t k, const f
   default:
     /* One token: FP32 activations, no Q8_1 pass. */
     if (n == 1 && gemv_type(type)) return ds41_v41_gemv((int)type, p, x, out, rows, k, 0, gemv_slices(rows, k)) == 0;
-    if (n > 8 && mmq_batched(type)) return ds41_mmq_dense_typed((int)type, p, x, out, (int)rows, (int)n, (int)k, 0) == 0;
+    if (dense_f16(type, rows, k, n)) return ds41_v41_dense_f16((int)type, p, x, out, rows, n, k, 1) == 0;
+    if (n > 8 && mmq_batched(type))
+      return ds41_mmq_dense_typed((int)type, p, x, out, (int)rows, (int)n, (int)k, 0) == 0;
     for (uint32_t t = 0; t < n; t += 8) {
       const uint32_t cols = std::min(8u, n - t);
       if (ds41_mmq_dense_vec_typed((int)type, p, x + (uint64_t)t * k, out + (uint64_t)t * rows, (int)rows, (int)cols,
@@ -327,7 +334,8 @@ bool linear(const ds41_decoder* d, const ds41_tensor* w, const float* x, float* 
 bool linear_pair(const ds41_decoder* d, const ds41_tensor* w1, float* out1, const ds41_tensor* w2, float* out2,
                  const float* x, uint32_t n) {
   const uint32_t k = (uint32_t)w1->dim[0];
-  if (n > 8 && w1->type == w2->type && w2->dim[0] == k && mmq_batched(w1->type)) {
+  if (n > 8 && w1->type == w2->type && w2->dim[0] == k && mmq_batched(w1->type) &&
+      !dense_f16(w1->type, (uint32_t)(w1->elements / k), k, n)) {
     const void* p1 = dev(d, w1);
     const void* p2 = dev(d, w2);
     return p1 && p2 &&
@@ -525,8 +533,8 @@ bool attention(ds41_decoder* d, uint32_t il, uint32_t n) {
     }
     if (source_layer && emitted &&
         (ds41_v41_rope_tail(d->latent, emitted, kHeadDim, kRot, freq, r0 * ratio, 1, ratio, 0) ||
-         ds41_v41_fp4_store(d->latent, s.comp + (uint64_t)r0 * kCompCodeBytes, s.comp_scale + (uint64_t)r0 * kCompScaleBytes,
-                            emitted * kHeadDim, 16, 1)))
+         ds41_v41_fp4_store(d->latent, s.comp + (uint64_t)r0 * kCompCodeBytes,
+                            s.comp_scale + (uint64_t)r0 * kCompScaleBytes, emitted * kHeadDim, 16, 1)))
       return false;
     comp = {source.comp, source.comp_scale};
   }
@@ -556,7 +564,13 @@ bool attention(ds41_decoder* d, uint32_t il, uint32_t n) {
       return false;
     return linear(d, l->attn_output_b, d->oa, d->attn_out, n);
   }
-  /* Batches take all groups as MMQ channels: one input quantization and one launch. */
+  /* Batches take all groups in one launch: the FP16 kernel's grid groups,
+   * or MMQ channels with one input quantization. */
+  if (dense_f16(wo_a->type, DS41_N_LORA_O, kGroupDim, n)) {
+    if (ds41_v41_dense_f16((int)wo_a->type, wo_a_dev, d->o, d->oa, DS41_N_LORA_O, n, kGroupDim, DS41_N_OUT_GROUP))
+      return false;
+    return linear(d, l->attn_output_b, d->oa, d->attn_out, n);
+  }
   if (n > 8 && mmq_batched(wo_a->type)) {
     if (ds41_mmq_dense_grouped_typed((int)wo_a->type, wo_a_dev, d->o, d->oa, DS41_N_LORA_O, (int)n, kGroupDim,
                                      DS41_N_OUT_GROUP, 0))

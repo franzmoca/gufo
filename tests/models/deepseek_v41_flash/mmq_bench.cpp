@@ -11,6 +11,7 @@
  *
  *   ds41_mmq_bench [--type 19|29|16|22] [--counts FILE] [--line N] [--reps N]
  *                  [--f16 1]
+ *   ds41_mmq_bench --type 13|8 --dense M,K[,GROUPS] [--tokens N] [--reps N]
  */
 #include <hip/hip_runtime.h>
 
@@ -104,10 +105,79 @@ std::vector<unsigned int> Counts(const char* path, int line, int tokens,
   return counts;
 }
 
+/* Dense projection of `kTokens` tokens (2048 by default), MMQ against the FP16
+ * kernel, over `groups` [m, k] matrices with their own input columns (Q5_K or
+ * Q8_0). */
+int DenseBench(int type, int m, int k, int groups, int reps, int kTokens) {
+  const int block = type == 13 ? 176 : 34, values = type == 13 ? 256 : 32;
+  std::mt19937 rng(7);
+  std::vector<uint8_t> w(static_cast<std::size_t>(groups) * m * k / values *
+                         block);
+  for (std::size_t at = 0; at < w.size(); ++at)
+    w[at] = static_cast<uint8_t>(rng());
+  for (std::size_t at = 0; at < w.size(); at += block) {
+    const uint16_t d = 0x2000 | (rng() & 0x03ff);
+    std::memcpy(&w[at], &d, 2);
+    if (type == 13)
+      std::memcpy(&w[at + 2], &d, 2);
+  }
+  std::vector<float> x(static_cast<std::size_t>(kTokens) * groups * k);
+  std::normal_distribution<float> normal;
+  for (auto& v : x)
+    v = normal(rng);
+  void *dw = nullptr, *dx = nullptr, *out = nullptr;
+  (void)hipMalloc(&dw, w.size());
+  (void)hipMalloc(&dx, x.size() * 4);
+  (void)hipMalloc(&out, static_cast<std::size_t>(kTokens) * groups * m * 4);
+  (void)hipMemcpy(dw, w.data(), w.size(), hipMemcpyHostToDevice);
+  (void)hipMemcpy(dx, x.data(), x.size() * 4, hipMemcpyHostToDevice);
+  hipEvent_t e0, e1;
+  (void)hipEventCreate(&e0);
+  (void)hipEventCreate(&e1);
+  for (int path = 0; path < 2; ++path) {
+    std::vector<float> ms;
+    for (int r = 0; r < reps + 1; ++r) {
+      (void)hipEventRecord(e0, 0);
+      int rc;
+      if (path == 1)
+        rc =
+            ds41_v41_dense_f16(type, dw, static_cast<float*>(dx),
+                               static_cast<float*>(out), m, kTokens, k, groups);
+      else if (groups > 1)
+        rc = ds41_mmq_dense_grouped_typed(type, dw, static_cast<float*>(dx),
+                                          static_cast<float*>(out), m, kTokens,
+                                          k, groups, 0);
+      else
+        rc = ds41_mmq_dense_typed(type, dw, static_cast<float*>(dx),
+                                  static_cast<float*>(out), m, kTokens, k, 0);
+      (void)hipEventRecord(e1, 0);
+      (void)hipEventSynchronize(e1);
+      if (rc) {
+        std::printf("%s: launch failed\n", path ? "f16" : "mmq");
+        break;
+      }
+      float t = 0.0f;
+      (void)hipEventElapsedTime(&t, e0, e1);
+      if (r > 0)
+        ms.push_back(t);
+    }
+    if (ms.empty())
+      continue;
+    std::sort(ms.begin(), ms.end());
+    const float t = ms[ms.size() / 2];
+    std::printf("dense type %d m %d k %d groups %d %s: %.3f ms (%.1f TOPS)\n",
+                type, m, k, groups, path ? "f16" : "mmq", t,
+                2.0 * kTokens * m * k * groups / t / 1e9);
+  }
+  ds41_mmq_cleanup();
+  return 0;
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
   int type = 19, line = 0, reps = 5, f16 = 0;
+  int dense_m = 0, dense_k = 0, dense_groups = 1, dense_tokens = 2048;
   const char* counts_path = nullptr;
   for (int i = 1; i + 1 < argc; i += 2) {
     if (!std::strcmp(argv[i], "--type"))
@@ -120,7 +190,13 @@ int main(int argc, char** argv) {
       reps = std::atoi(argv[i + 1]);
     else if (!std::strcmp(argv[i], "--f16"))
       f16 = std::atoi(argv[i + 1]);
+    else if (!std::strcmp(argv[i], "--tokens"))
+      dense_tokens = std::atoi(argv[i + 1]);
+    else if (!std::strcmp(argv[i], "--dense"))
+      std::sscanf(argv[i + 1], "%d,%d,%d", &dense_m, &dense_k, &dense_groups);
   }
+  if (dense_m > 0)
+    return DenseBench(type, dense_m, dense_k, dense_groups, reps, dense_tokens);
   if (!BlockBytes(type)) {
     std::fprintf(stderr, "unsupported type %d\n", type);
     return 1;

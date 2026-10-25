@@ -583,6 +583,45 @@ bool SwigluCase(const TypeCase& t, int M, int K, std::mt19937& rng) {
   return e < 1e-6;
 }
 
+/* The FP16 matrix-core dense kernel against the FP32-activation GEMV per
+ * token, over `groups` matrices with their own input columns. */
+bool DenseF16Case(const TypeCase& t, int M, int N, int K, int groups,
+                  std::mt19937& rng) {
+  const auto w = RandomBlocks(
+      t, static_cast<std::size_t>(groups) * M * K / t.block_values, rng);
+  std::normal_distribution<float> normal;
+  std::vector<float> x(static_cast<std::size_t>(N) * groups * K);
+  for (auto& v : x)
+    v = normal(rng);
+  auto* dw = Device(w);
+  auto* dx = Device(x);
+  const std::size_t n_out = static_cast<std::size_t>(N) * groups * M;
+  float *got = nullptr, *want = nullptr;
+  (void)hipMalloc(&got, sizeof(float) * n_out);
+  (void)hipMalloc(&want, sizeof(float) * n_out);
+  const std::size_t matrix_bytes =
+      static_cast<std::size_t>(M) * K / t.block_values * t.block_bytes;
+  bool ok = ds41_v41_dense_f16(t.type, dw, dx, got, M, N, K, groups) == 0;
+  for (int token = 0; ok && token < N; ++token)
+    for (int z = 0; ok && z < groups; ++z)
+      ok = ds41_v41_gemv(
+               t.type,
+               static_cast<const uint8_t*>(static_cast<void*>(dw)) +
+                   z * matrix_bytes,
+               dx + (static_cast<std::size_t>(token) * groups + z) * K,
+               want + (static_cast<std::size_t>(token) * groups + z) * M, M, K,
+               0, 4) == 0;
+  const double e =
+      ok ? RelativeError(Host(got, n_out), Host(want, n_out)) : INFINITY;
+  std::printf("dense f16 %-8s M=%d N=%d K=%d groups=%d rel_err=%.2e\n", t.name,
+              M, N, K, groups, e);
+  (void)hipFree(dw);
+  (void)hipFree(dx);
+  (void)hipFree(got);
+  (void)hipFree(want);
+  return e < 2e-3;
+}
+
 /* The FP16 matrix-core routed kernel against the FP32-activation expert
  * GEMV: the gate/up pair with its SwiGLU store (FP16 or FP32) over
  * per-token inputs, and the single projection over per-slot inputs. */
@@ -704,6 +743,11 @@ int main() {
   for (const auto& t : kTypes) {
     ok = DenseCase(t, 256, 37, 1024, rng) && ok;
     ok = DenseCase(t, 384, 130, 2304, rng) && ok;
+    if (t.type == 13) {
+      ok = DenseF16Case(t, 256, 37, 1280, 1, rng) && ok;
+      ok = DenseF16Case(t, 384, 300, 2304, 1, rng) && ok;
+      ok = DenseF16Case(t, 128, 130, 512, 4, rng) && ok;
+    }
     if (t.type == 8 || t.type == 13) {
       ok = GemvCase(t, 300, 1280, 0, rng) && ok;
       ok = GemvCase(t, 256, 4096, 64, rng) && ok;
