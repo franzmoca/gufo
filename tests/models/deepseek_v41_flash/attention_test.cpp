@@ -180,6 +180,54 @@ double IndexerCase(uint32_t pos0, uint32_t n, uint32_t ratio,
   return worst;
 }
 
+/* ds41_v41_q_kv_norm against ds41_v41_rms_norm and ds41_v41_rope_fp8 (the
+ * same loops, so identical values; the tolerance only admits reassociation
+ * under fast-math, well below an FP8 step); returns the largest absolute
+ * difference. */
+double QkvNormCase(uint32_t pos0, uint32_t n, std::mt19937& rng) {
+  constexpr uint32_t q_dim = 1280, kv_dim = 512, rope = 64;
+  std::normal_distribution<float> normal;
+  std::vector<float> qa((std::size_t)n * q_dim), kv((std::size_t)n * kv_dim),
+      qw(q_dim), kw(kv_dim), freq(rope / 2);
+  for (auto* v : {&qa, &kv, &qw, &kw})
+    for (float& x : *v)
+      x = normal(rng);
+  for (uint32_t i = 0; i < rope / 2; i++)
+    freq[i] = std::pow(10000.0f, -2.0f * i / rope);
+  float *d_qa = Device(qa), *d_kv = Device(kv), *d_qw = Device(qw),
+        *d_kw = Device(kw), *d_freq = Device(freq);
+  float *qr[2] = {}, *kvn[2] = {};
+  for (int i = 0; i < 2; i++) {
+    (void)hipMalloc(&qr[i], qa.size() * sizeof(float));
+    (void)hipMalloc(&kvn[i], kv.size() * sizeof(float));
+  }
+  const float eps = 1e-6f;
+  if (ds41_v41_rms_norm(d_qa, d_qw, qr[0], n, q_dim, eps) ||
+      ds41_v41_rms_norm(d_kv, d_kw, kvn[0], n, kv_dim, eps) ||
+      ds41_v41_rope_fp8(kvn[0], n, kv_dim, rope, d_freq, pos0, 1, 1, 0) ||
+      ds41_v41_q_kv_norm(d_qa, d_qw, qr[1], q_dim, d_kv, d_kw, kvn[1], kv_dim,
+                         rope, d_freq, pos0, n, eps) ||
+      hipDeviceSynchronize() != hipSuccess) {
+    std::fprintf(stderr, "q kv norm launch failed\n");
+    return INFINITY;
+  }
+  double worst = 0.0;
+  for (int which = 0; which < 2; which++) {
+    const std::size_t count = which ? kv.size() : qa.size();
+    std::vector<float> a(count), b(count);
+    (void)hipMemcpy(a.data(), which ? kvn[0] : qr[0], count * sizeof(float),
+                    hipMemcpyDeviceToHost);
+    (void)hipMemcpy(b.data(), which ? kvn[1] : qr[1], count * sizeof(float),
+                    hipMemcpyDeviceToHost);
+    for (std::size_t i = 0; i < count; i++)
+      worst = std::max(worst, (double)std::fabs(a[i] - b[i]));
+  }
+  for (float* p :
+       {d_qa, d_kv, d_qw, d_kw, d_freq, qr[0], qr[1], kvn[0], kvn[1]})
+    (void)hipFree(p);
+  return worst;
+}
+
 }  // namespace
 
 int main() {
@@ -220,6 +268,11 @@ int main() {
     std::printf("indexer pos0=%u n=%u ratio=%u rel_err=%.2e\n", s.pos0, s.n,
                 s.ratio, e);
     ok = e < s.tolerance && ok;
+  }
+  for (const uint32_t n : {1u, 37u}) {
+    const double e = QkvNormCase(5000, n, rng);
+    std::printf("q kv norm n=%u max_abs_diff=%.2e\n", n, e);
+    ok = e < 1e-5 && ok;
   }
   std::printf("%s\n", ok ? "PASS" : "FAIL");
   return ok ? 0 : 1;
