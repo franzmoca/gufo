@@ -110,6 +110,22 @@ layers (~30 ms); Q8_0 projections still go through MMQ and its Q8_1 pass
 (77 ms); the shared-expert SwiGLU (9 ms) could use the dense up pass's
 store.
 
+### 6. Engram reads (not on the critical path)
+
+Rows are read on up to 32 `pread` threads, started when the batch starts.
+Measured with `gufo bench -p 2048 -n 64`:
+
+- Prefill: a 2,048-token batch reads layer 1's rows in 12 ms and layer 14's
+  in 21 ms. The host reaches those layers after 49 ms and 971 ms and waits
+  0.04 ms.
+- Decode: each layer's reads take 0.31 ms (p95 0.6 ms, rare 10 ms outliers).
+  The host waits 0.33 ms per token on average at layer 1, while block 0
+  still runs on the GPU.
+
+Sorted, deduplicated reads, `O_DIRECT` and a pinned row cache stay unbuilt
+until a measurement shows reads stalling the GPU, for example under SSD
+contention once M3 streams experts.
+
 ## Memory
 
 Resident weights take 112.27 GiB GTT. A session at the native 1M context

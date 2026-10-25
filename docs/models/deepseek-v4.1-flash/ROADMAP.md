@@ -21,7 +21,7 @@ same GGUF.
 |---|---|
 | M0 Oracle and loader | done |
 | M1 Correct AR decode on IQ1_M | done |
-| M2 Resident performance | in progress |
+| M2 Resident performance | done |
 | M3 SSD expert streaming (IQ2_XXS) | planned |
 | M4 Component cache and serving | planned |
 | M5 DSpark and approximations | planned |
@@ -126,15 +126,19 @@ Open performance items are tracked in [BACKLOG.md](BACKLOG.md).
 - Done: `deepseek41` in `gufo prompt` and `gufo bench`
   ([BENCHMARKS.md](BENCHMARKS.md)); candidate-block parity beyond 16K
   tokens ([QUALITY.md](QUALITY.md)).
-- Batched layer-major prefill; fused gate/up + SwiGLU for IQ1/IQ2 experts;
-  LDS padding and bank-conflict passes.
-- Engram v2: start row reads as soon as token ids are known (layer 1 overlaps
-  embedding and block 0, layer 14 overlaps blocks 1-13); sorted, deduplicated
-  reads per prefill chunk through `pread`/io_uring workers with `O_DIRECT`;
-  a small pinned row cache. OS-specific I/O goes in a `src/core/platform/` leaf.
-- Profile with `tools/prof/prof.py`; check ceilings with
-  `tools/bench/gfx1151_peak.hip`.
-- `BENCHMARKS.md`: prompt and generation speed at depths 0/8K/32K/131K.
+- Done: batched layer-major prefill on the FP16 matrix cores (routed experts,
+  dense projections, attention), fused gate/up + SwiGLU, the fused batched
+  mHC state pass and `--prefill-batch`. pp2048 703 tok/s and tg64 23.9 tok/s
+  at depth 0, 372 and 21.0 at 131K ([BENCHMARKS.md](BENCHMARKS.md)).
+- Done: Engram reads start with the batch on parallel `pread` threads and
+  overlap the GPU work. Measured waits are 0.04 ms per prefill batch and
+  0.33 ms per decode token, so sorted reads, `O_DIRECT` and a row cache are
+  deferred ([BACKLOG.md](BACKLOG.md)).
+- Done: per-kernel prefill and decode time breakdowns
+  ([BACKLOG.md](BACKLOG.md)) and ceilings from `tools/bench/gfx1151_peak.hip`
+  ([EXPERIMENTS.md](EXPERIMENTS.md)).
+- Done: functional suites and the Pi agent replay on the M2 build
+  ([QUALITY.md](QUALITY.md)); Devlab plans cover the model.
 
 ### M3 SSD expert streaming (IQ2_XXS)
 

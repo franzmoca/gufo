@@ -9,6 +9,8 @@ gufo bench -m DeepSeek-V4.1-Flash-1017-GSQ-RCO-IQ1_M-00001-of-00004.gguf \
   -p 2048 -n 64 -d 0,8192,32768 -r 2
 ```
 
+The 131K rows come from a separate `-d 131072 -r 2` run of the same build.
+
 | Test | t/s |
 |---|---:|
 | pp2048 | 703.07 ± 10.04 |
@@ -17,6 +19,8 @@ gufo bench -m DeepSeek-V4.1-Flash-1017-GSQ-RCO-IQ1_M-00001-of-00004.gguf \
 | tg64 @ d8192 | 23.44 ± 0.02 |
 | pp2048 @ d32768 | 585.30 ± 1.84 |
 | tg64 @ d32768 | 22.92 ± 0.01 |
+| pp2048 @ d131072 | 372.21 ± 1.26 |
+| tg64 @ d131072 | 21.03 ± 0.06 |
 
 `--prefill-batch 4096` (default 2048) prefills a 4096-token prompt at
 720 tok/s instead of 694 (`gufo bench -p 4096 -r 3`) for about 1.2 GiB more
@@ -49,5 +53,3 @@ prefill peaks 0.3 GiB above the idle session.
 chat prompt prefilled at 307 tok/s in six chunks of up to 2,048 tokens, then
 decoded at 19.8 tok/s; repeating it reused all 9,160 prompt tokens from the
 cache.
-
-Depth 131K is not measured yet.
