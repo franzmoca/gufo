@@ -83,6 +83,16 @@ int ds41_mmq_moe_typed(int type, const void * W, const float * X_f32,
                        const int32_t * ids, float * out_f32, int M, int K,
                        int n_tokens, int n_experts, int n_expert_used,
                        hipStream_t stream);
+// Routed gate and up of one weight type over the same rows (input quantized
+// once): gate_f32 receives the gate rows, and the up pass stores
+// mid = router_weights[row] * silu(min(gate, clamp)) * clamp(up, +-clamp)
+// (no clamp when clamp <= 1e-6; non-finite gate/up read as 0).
+int ds41_mmq_moe_swiglu_typed(int type, const void * W_gate, const void * W_up,
+                              const float * X_f32, const int32_t * ids,
+                              const float * router_weights, float * gate_f32,
+                              float * mid_f32, int M, int K, int n_tokens,
+                              int n_experts, int n_expert_used, float clamp,
+                              hipStream_t stream);
 
 // Dense matmul entry points. Per-type wrappers that all share the same
 // underlying mul_mat_q template, parameterised by the weight quant type.
