@@ -20,6 +20,13 @@ extern "C" {
 int ds41_v41_matmul_bf16(const uint16_t* w, const float* x, float* out, uint32_t rows, uint32_t k, uint32_t n);
 int ds41_v41_matmul_f32(const float* w, const float* x, float* out, uint32_t rows, uint32_t k, uint32_t n);
 
+/* Single-token projection y[r] = W[r] . x for Q5_K (13) or Q8_0 (8) W
+ * ([m][k] in GGUF blocks, k % 256 == 0) and FP32 activations; row r reads x +
+ * (r / rows_per_x) * k (0: every row reads x). `slices` (1, 2, 4, 8; <= 0
+ * picks the default) waves share a row group. Returns 1 for other types. */
+int ds41_v41_gemv(int type, const void* w, const float* x, float* y, uint32_t m, uint32_t k, uint32_t rows_per_x,
+                  int slices);
+
 /* dst[r, 0:cols] = src[r, 0:cols] for `rows` rows with the given strides (floats). */
 int ds41_v41_copy_rows(float* dst, uint64_t dst_stride, const float* src, uint64_t src_stride, uint32_t rows,
                        uint32_t cols);

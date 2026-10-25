@@ -242,6 +242,16 @@ bool mmq_batched(uint32_t type) {
   }
 }
 
+/* Waves per row group of the single-token GEMV, from a slice sweep over the
+ * V4.1 shapes: short rows split fewer ways, so more rows run per block. */
+int gemv_slices(uint32_t rows, uint32_t k) {
+  if (k <= 2304) return 2;
+  if (k <= 5120 && rows <= 4096) return 4;
+  return 8;
+}
+
+bool gemv_type(uint32_t type) { return type == DS41_TENSOR_Q5_K || type == DS41_TENSOR_Q8_0; }
+
 /* out[t] = W x[t] for n tokens and a [rows, k] weight at `p` of `type`. */
 bool linear_raw(uint32_t type, const void* p, uint32_t rows, uint32_t k, const float* x, float* out, uint32_t n) {
   if (!p) return false;
@@ -251,6 +261,8 @@ bool linear_raw(uint32_t type, const void* p, uint32_t rows, uint32_t k, const f
   case DS41_TENSOR_F32:
     return ds41_v41_matmul_f32((const float*)p, x, out, rows, k, n) == 0;
   default:
+    /* One token: FP32 activations, no Q8_1 pass. */
+    if (n == 1 && gemv_type(type)) return ds41_v41_gemv((int)type, p, x, out, rows, k, 0, gemv_slices(rows, k)) == 0;
     if (n > 8 && mmq_batched(type)) return ds41_mmq_dense_typed((int)type, p, x, out, (int)rows, (int)n, (int)k, 0) == 0;
     for (uint32_t t = 0; t < n; t += 8) {
       const uint32_t cols = std::min(8u, n - t);
@@ -457,6 +469,12 @@ bool attention(ds41_decoder* d, uint32_t il, uint32_t n) {
   const uint8_t* wo_a_dev = (const uint8_t*)dev(d, wo_a);
   if (!wo_a_dev) return false;
   /* Small batches take all groups in one matvec launch. */
+  if (n == 1 && gemv_type(wo_a->type)) {
+    if (ds41_v41_gemv((int)wo_a->type, wo_a_dev, d->o, d->oa, DS41_N_OUT_GROUP * DS41_N_LORA_O, kGroupDim,
+                      DS41_N_LORA_O, gemv_slices(DS41_N_OUT_GROUP * DS41_N_LORA_O, kGroupDim)))
+      return false;
+    return linear(d, l->attn_output_b, d->oa, d->attn_out, n);
+  }
   if (n <= 8 && mmq_batched(wo_a->type)) {
     if (ds41_mmq_grouped_vec_typed((int)wo_a->type, wo_a_dev, d->o, d->oa, DS41_N_LORA_O, (int)n, kGroupDim,
                                    DS41_N_OUT_GROUP, 0))
