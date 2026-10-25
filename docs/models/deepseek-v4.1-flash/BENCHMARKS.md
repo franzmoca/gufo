@@ -36,6 +36,27 @@ prefills at 384 tok/s with a prompt-sized context, 386 tok/s in a
 131K-token context (was 245 with 409-token batches) and 381 tok/s in the
 native 1M context (was ~120 with 51-token batches).
 
+## DSpark speculative decoding
+
+`ds41_load_probe --dspark-generate`, greedy, release kernels on the
+`gpu-test` build; plain decoding of the same tokens as control. Output is
+token-identical to plain decoding ([QUALITY.md](QUALITY.md)).
+
+| Prompt | Drafter | Plain | DSpark | Accepted | Tokens/cycle |
+|---|---|---:|---:|---:|---:|
+| Roadmap document, 1,871 tokens, 256 generated | Q2_K/Q4_K | 23.46 | 28.49 | 66.4% | 2.46 |
+| Roadmap document, 128 generated | Q2_K/Q4_K | 23.33 | 27.57 | 52.6% | 2.72 |
+| Roadmap document, 128 generated | Q8_0/MXFP4 | 23.04 | 26.49 | 51.7% | 2.56 |
+| Chat coding request, 45 tokens, 384 generated | Q2_K/Q4_K | 23.5 | 37.85 | 76.3% | 3.84 |
+| Chat coding request, 384 generated | Q8_0/MXFP4 | 23.5 | 39.17 | 76.3% | 4.09 |
+
+`gufo serve --dspark-model` (Q2_K/Q4_K, 32K context), 70-token thinking
+prompt, 400 tokens: greedy 26.4 tok/s (155 of 277 drafts accepted),
+temperature 1.0 23.6-24.6 tok/s (49-52% accepted), against tg64 23.88
+without a drafter. The drafter adds 4.71 GiB (Q2_K/Q4_K) or 7.42 GiB (Q8_0/MXFP4) of
+GTT; with Q2_K/Q4_K and a 32K session 3.3 GiB of host memory stays
+available.
+
 ## Memory
 
 GTT in use (`ds41_load_probe --upload` and `gufo serve`, native 1M context):

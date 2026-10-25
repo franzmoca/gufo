@@ -23,7 +23,7 @@ same GGUF.
 | M1 Correct AR decode on IQ1_M | done |
 | M2 Resident performance | done |
 | M4 Component cache and serving | done |
-| M5 DSpark, prompt lookup and approximations | next |
+| M5 DSpark, prompt lookup and approximations | in progress: DSpark done |
 | M6 Vision | planned |
 | M3 SSD expert streaming (IQ2_XXS) | planned, after M6 |
 | M7 Higher-precision Engram tables | planned |
@@ -171,19 +171,23 @@ Open performance items are tracked in [BACKLOG.md](BACKLOG.md).
 - Start with a memory budget. With one session at 1M context about 9.5 GiB
   of host memory is free; the drafter, the M4 caches and the M6 projector
   come out of it.
-- Drafter GGUFs (3 SWA blocks, 128-expert MoE, Markov head, confidence head;
-  block-of-5 non-causal drafts), largest first:
-  - [unsloth](https://huggingface.co/unsloth/DeepSeek-V4.1-Flash-1017-GGUF):
-    `dspark/dspark-DeepSeek-V4.1-Flash-1017-BF16.gguf` (7.92 GiB),
-    `dspark-DeepSeek-V4.1-Flash-1017-Q8_0.gguf` (7.43 GiB).
-  - If those do not fit:
-    [Lucebox](https://huggingface.co/Lucebox/DeepSeek-V4.1-Flash-1017-ROCMFP-GGUF)
-    `DeepSeek-V4.1-Flash-1017-DSpark-draft-Q2K-Q4K.gguf` (4.58 GiB) or
-    `-MXFP4-Q8.gguf` (7.42 GiB);
-    [peasantsmith](https://huggingface.co/peasantsmith/DeepSeek-V4.1-Flash-1017-Maya-GGUF)
-    `dspark/dspark-xs.bin` (3.17 GiB) and `dspark-xs2.bin` (3.96 GiB), which
-    are not GGUF files and need their format checked first.
-  - Compare acceptance rate and decode speed against the drafter's memory.
+- DSpark drafter (done): `gufo serve --dspark-model` loads the unsloth
+  (`dflash`) or Lucebox (`deepseek41-dflash-draft`) layout, Q8_0, Q2_K,
+  Q4_K, MXFP4 and F16/BF16 tensors. Drafts of up to 5 tokens are verified
+  in one batch with decode numerics and the request's sampler, so output
+  is unchanged; the draft width follows measured acceptance and cycle
+  times. Greedy decode +21% on a document prompt, +61-67% on a coding
+  request ([BENCHMARKS.md](BENCHMARKS.md#dspark-speculative-decoding)).
+  The drafter's rings ride in the session snapshot.
+- Memory: Lucebox Q2_K/Q4_K takes 4.71 GiB and leaves 4.7 GiB of host
+  memory after load; unsloth Q8_0 (7.42 GiB) leaves 2.1 GiB for similar
+  speed, so Q2_K/Q4_K is the recommended drafter. Not used:
+  [unsloth](https://huggingface.co/unsloth/DeepSeek-V4.1-Flash-1017-GGUF)
+  BF16 (7.92 GiB), Lucebox `-MXFP4-Q8.gguf` (7.42 GiB) and the
+  [peasantsmith](https://huggingface.co/peasantsmith/DeepSeek-V4.1-Flash-1017-Maya-GGUF)
+  `.bin` drafters (not GGUF).
+- Drafter rings as component-cache private state, so sessions with DSpark
+  use the component cache instead of whole-state snapshots.
 - Prompt lookup (`src/core/speculative/prompt_lookup.hpp`) as for Gemma 4.
   It shares DSpark's multi-token verification and the rollback of rejected
   tokens (SWA rings, compressor frontiers, rows), and its state joins the

@@ -135,6 +135,16 @@ monotonic in the batch size: 7 tokens from position 8,469 take 136 ms and
 10 tokens take 160 ms and 12 take 143. Find which kernels switch paths
 between these sizes (`tools/prof/prof.py` on the two shapes).
 
+### 8. DSpark verification cost
+
+A DSpark cycle at 1.9K context costs 12.5 ms of drafting plus the
+verification batch: one-draft cycles take 69.6 ms, five-draft cycles
+117 ms, against 42.4 ms for a plain step, so each row beyond the second adds
+about 12 ms. Batches of 2-8 tokens use the decode kernels for identical
+numerics; a multi-column GEMV that reads each weight row once for all
+columns while keeping the per-column sum order would cut the extra rows'
+cost and let the width policy draft longer blocks.
+
 ## Memory
 
 Resident weights take 112.27 GiB GTT. A session at the native 1M context
