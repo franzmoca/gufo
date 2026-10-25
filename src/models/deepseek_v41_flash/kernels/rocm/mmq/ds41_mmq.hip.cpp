@@ -243,6 +243,7 @@ static bool ds41_should_use_mmq_impl(enum ggml_type type, int cc, int64_t ne11, 
         case GGML_TYPE_IQ3_XXS:
         case GGML_TYPE_IQ3_S:
         case GGML_TYPE_IQ1_S:
+        case GGML_TYPE_IQ1_M:
         case GGML_TYPE_IQ4_XS:
         case GGML_TYPE_IQ4_NL:
             mmq_supported = true;
@@ -929,7 +930,7 @@ int ds41_mmq_moe_impl(
         }
     }
 
-    const mmq_args args = {
+    mmq_args args = {
         /*x=*/(const char *)W,
         /*type_x=*/type,
         /*y=*/(const int *)src1_q8_1.get(),
@@ -957,6 +958,10 @@ int ds41_mmq_moe_impl(
         /*x_soa=*/x_soa,
         /*soa_blocks=*/soa_blocks,
     };
+    /* The caller's bucket bounds, as on the routed pair path (see
+     * ds41_mmq_set_routed_max_expert_rows / _tile_cols). */
+    args.ncols_grid_max = g_routed_max_expert_rows;
+    args.mmq_x_request = g_routed_tile_cols;
 
     mul_mat_q_case<type>(*ctx, args, stream);
 
@@ -2007,7 +2012,7 @@ int ds41_mmq_moe_vec_impl(
 
     ds41_ggml_hip_mm_fusion_args_device fusion = {};
 
-    hipMemsetAsync(out_f32, 0, (size_t)M * (size_t)n_tokens * (size_t)n_expert_used * sizeof(float), stream);
+    /* mmvq stores every (token, slot) output, zeroing non-finite values. */
 
     // FD Inc2a: one mmvq launch serves at most col_cap columns -- the moe
     // kernel runs one warp per column (block.y = ncols_dst) under
@@ -2053,7 +2058,6 @@ int ds41_mmq_moe_vec_impl(
         }
     }
 
-    ds41_mmq_sanitize_f32(out_f32, (uint64_t)M * (uint64_t)n_tokens * (uint64_t)n_expert_used, stream);
     return 0;
 }
 
@@ -2698,7 +2702,11 @@ int ds41_mmq_dense_vec_impl(
         int           M,
         int           N,
         int           K,
-        hipStream_t  stream) {
+        hipStream_t  stream,
+        /* ds41: `groups` independent matvecs in one launch. X is
+         * [N, groups, K], W holds the groups' [M, K] blocks back to back and
+         * out is [N, groups, M]. */
+        int           groups = 1) {
 
     if (!W || !X_f32 || !out_f32) {
         fprintf(stderr, "%s: null pointer\n", tag);
@@ -2731,7 +2739,7 @@ int ds41_mmq_dense_vec_impl(
 
     // Dense: no MoE, ids=null. Layout [K, N, 1, 1] for src1.
     const int64_t ne10_padded = GGML_PAD((int64_t)K, MATRIX_ROW_PADDING);
-    const size_t  nbytes_q8_1 = (size_t)N * ne10_padded *
+    const size_t  nbytes_q8_1 = (size_t)groups * N * ne10_padded *
                                 sizeof(block_q8_1) / QK8_1;
     ds41_ggml_hip_pool_alloc<char> src1_q8_1(ctx->pool(), nbytes_q8_1);
 
@@ -2739,8 +2747,8 @@ int ds41_mmq_dense_vec_impl(
     ds41_quantize_row_q8_1_hip(
         X_f32, /*ids=*/nullptr, (void *)src1_q8_1.get(),
         type, /*ne00=*/K,
-        /*s11=*/(int64_t)K, /*s12=*/(int64_t)K * N, /*s13=*/(int64_t)K * N,
-        /*ne0=*/ne10_padded, /*ne1=*/N, /*ne2=*/1, /*ne3=*/1,
+        /*s11=*/(int64_t)K * groups, /*s12=*/(int64_t)K, /*s13=*/(int64_t)K * N * groups,
+        /*ne0=*/ne10_padded, /*ne1=*/N, /*ne2=*/groups, /*ne3=*/1,
         stream);
 
     hipError_t err = hipGetLastError();
@@ -2760,12 +2768,12 @@ int ds41_mmq_dense_vec_impl(
     const int64_t s01_row   = (int64_t)K / blck;
     const int64_t s11_y     = ne10_padded / QK8_1;
     const int64_t s12_y     = (int64_t)N * s11_y;
-    const int64_t s1_dst    = (int64_t)M;
+    const int64_t s1_dst    = (int64_t)M * groups;
 
     ds41_ggml_hip_mm_fusion_args_device fusion = {};
 
-    hipMemsetAsync(out_f32, 0, (size_t)M * (size_t)N * sizeof(float), stream);
-
+    /* mmvq stores every output, zeroing non-finite values; no clear or
+     * sanitize pass. */
     mul_mat_vec_q_switch_type(
         /*vx=*/W, /*type_x=*/type,
         /*vy=*/(const void *)src1_q8_1.get(),
@@ -2775,12 +2783,12 @@ int ds41_mmq_dense_vec_impl(
         /*stride_row_x=*/(int)s01_row,
         /*stride_col_y=*/(int)s11_y,
         /*stride_col_dst=*/(int)s1_dst,
-        /*nchannels_x=*/1,
-        /*nchannels_y=*/1,
-        /*nchannels_dst=*/1,
-        /*stride_channel_x=*/0,
+        /*nchannels_x=*/groups,
+        /*nchannels_y=*/groups,
+        /*nchannels_dst=*/groups,
+        /*stride_channel_x=*/(int)(s01_row * M),
         /*stride_channel_y=*/(int)s12_y,
-        /*stride_channel_dst=*/0,
+        /*stride_channel_dst=*/M,
         /*nsamples_x=*/1, /*nsamples_dst=*/1,
         /*stride_sample_x=*/0, /*stride_sample_y=*/0, /*stride_sample_dst=*/0,
         /*ids_stride=*/0, stream);
@@ -2791,7 +2799,6 @@ int ds41_mmq_dense_vec_impl(
                 tag, hipGetErrorString(err));
         return -3;
     }
-    ds41_mmq_sanitize_f32(out_f32, (uint64_t)M * (uint64_t)N, stream);
     return 0;
 }
 
@@ -4282,6 +4289,23 @@ extern "C" int ds41_mmq_dense_vec_typed(int type, const void* W, const float* X,
   }
 }
 
+extern "C" int ds41_mmq_grouped_vec_typed(int type, const void* W, const float* X,
+                                          float* out, int M, int N, int K,
+                                          int groups, hipStream_t stream) {
+  if (groups <= 0) return -1;
+  switch ((ggml_type)type) {
+#define DS41_CASE(T)                                                                     \
+  case T:                                                                                \
+    return ds41_mmq_dense_vec_impl<T>("ds41_mmq_grouped_vec_typed", W, X, out, M, N, K, \
+                                      stream, groups);
+    DS41_MMQ_TYPED_CASES(DS41_CASE)
+#undef DS41_CASE
+    default:
+      fprintf(stderr, "ds41_mmq_grouped_vec_typed: unsupported type %d\n", type);
+      return -1;
+  }
+}
+
 extern "C" int ds41_mmq_moe_vec_typed(int type, const void* W, const float* X,
                                       const int32_t* ids, float* out, int M,
                                       int K, int n_tokens, int n_experts,
@@ -4295,6 +4319,48 @@ extern "C" int ds41_mmq_moe_vec_typed(int type, const void* W, const float* X,
 #undef DS41_CASE
     default:
       fprintf(stderr, "ds41_mmq_moe_vec_typed: unsupported type %d\n", type);
+      return -1;
+  }
+}
+
+// V4.1 Flash batched GEMMs on the mmq tiles of each weight type. The tiles
+// for types outside the V4 set are instantiated in ds41_mmq_v41_types.hip.cpp.
+#define DS41_MMQ_BATCH_CASES(X) \
+  X(GGML_TYPE_Q8_0)             \
+  X(GGML_TYPE_Q5_K)             \
+  X(GGML_TYPE_IQ1_S)            \
+  X(GGML_TYPE_IQ1_M)            \
+  X(GGML_TYPE_IQ2_XXS)          \
+  X(GGML_TYPE_IQ2_S)
+
+extern "C" int ds41_mmq_dense_typed(int type, const void* W, const float* X,
+                                    float* out, int M, int N, int K,
+                                    hipStream_t stream) {
+  switch ((ggml_type)type) {
+#define DS41_CASE(T) \
+  case T:            \
+    return ds41_mmq_dense_impl<T>("ds41_mmq_dense_typed", W, X, out, M, N, K, stream);
+    DS41_MMQ_BATCH_CASES(DS41_CASE)
+#undef DS41_CASE
+    default:
+      fprintf(stderr, "ds41_mmq_dense_typed: unsupported type %d\n", type);
+      return -1;
+  }
+}
+
+extern "C" int ds41_mmq_moe_typed(int type, const void* W, const float* X,
+                                  const int32_t* ids, float* out, int M, int K,
+                                  int n_tokens, int n_experts,
+                                  int n_expert_used, hipStream_t stream) {
+  switch ((ggml_type)type) {
+#define DS41_CASE(T)                                                                \
+  case T:                                                                           \
+    return ds41_mmq_moe_impl<T>("ds41_mmq_moe_typed", W, X, ids, out, M, K, n_tokens, \
+                                n_experts, n_expert_used, stream);
+    DS41_MMQ_BATCH_CASES(DS41_CASE)
+#undef DS41_CASE
+    default:
+      fprintf(stderr, "ds41_mmq_moe_typed: unsupported type %d\n", type);
       return -1;
   }
 }
