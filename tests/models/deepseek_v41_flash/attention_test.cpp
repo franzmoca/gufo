@@ -1,6 +1,6 @@
 // Batched (matrix-core) and split decode attention against a double
 // precision reference of the plain softmax-with-sink over window and
-// compressed rows.
+// compressed rows; the indexer scores against the same kind of reference.
 #include <hip/hip_runtime.h>
 
 #include <algorithm>
@@ -127,6 +127,59 @@ double Case(uint32_t pos0, uint32_t n, uint32_t ratio, uint32_t comp_rows,
   return worst;
 }
 
+/* Indexer scores sum_h w[h] * scale * relu(q[h] . key[j]) for n tokens at
+ * pos0 against double precision; returns the worst relative RMS error. */
+double IndexerCase(uint32_t pos0, uint32_t n, uint32_t ratio,
+                   std::mt19937& rng) {
+  constexpr uint32_t heads = 32, dim = 128;
+  const uint32_t len = (pos0 + n) / ratio;
+  const uint64_t stride = len + 16;
+  std::normal_distribution<float> normal;
+  std::vector<float> q((std::size_t)n * heads * dim),
+      keys((std::size_t)len * dim), w((std::size_t)n * heads);
+  for (auto* v : {&q, &keys, &w})
+    for (float& x : *v)
+      x = normal(rng);
+  const float scale = 0.0625f;
+  float* d_q = Device(q);
+  float* d_keys = Device(keys);
+  float* d_w = Device(w);
+  float* d_score = nullptr;
+  (void)hipMalloc(&d_score, (std::size_t)n * stride * sizeof(float));
+  if (!d_q || !d_keys || !d_w || !d_score ||
+      ds41_v41_indexer_score(d_q, d_keys, d_w, scale, d_score, stride, pos0, n,
+                             ratio, heads, dim) ||
+      hipDeviceSynchronize() != hipSuccess) {
+    std::fprintf(stderr, "indexer launch failed\n");
+    return INFINITY;
+  }
+  std::vector<float> score((std::size_t)n * stride);
+  (void)hipMemcpy(score.data(), d_score, score.size() * sizeof(float),
+                  hipMemcpyDeviceToHost);
+  for (float* p : {d_q, d_keys, d_w, d_score})
+    (void)hipFree(p);
+  double worst = 0.0;
+  for (uint32_t t = 0; t < n; t++) {
+    const uint32_t visible = (pos0 + t + 1) / ratio;
+    double err = 0.0, ref = 0.0;
+    for (uint32_t j = 0; j < visible; j++) {
+      double acc = 0.0;
+      for (uint32_t h = 0; h < heads; h++) {
+        double dot = 0.0;
+        for (uint32_t d = 0; d < dim; d++)
+          dot += (double)q[((std::size_t)t * heads + h) * dim + d] *
+                 keys[(std::size_t)j * dim + d];
+        acc += std::max(dot, 0.0) * w[(std::size_t)t * heads + h] * scale;
+      }
+      const double diff = score[t * stride + j] - acc;
+      err += diff * diff;
+      ref += acc * acc;
+    }
+    worst = std::max(worst, std::sqrt(err / std::max(ref, 1e-30)));
+  }
+  return worst;
+}
+
 }  // namespace
 
 int main() {
@@ -152,6 +205,20 @@ int main() {
     const double e = Case(s.pos0, s.n, s.ratio, s.comp_rows, rng);
     std::printf("pos0=%u n=%u ratio=%u comp=%u rel_err=%.2e\n", s.pos0, s.n,
                 s.ratio, s.comp_rows, e);
+    ok = e < s.tolerance && ok;
+  }
+  /* Indexer scores: fp32 below five tokens, half operands on the matrix
+   * cores above. */
+  const Shape indexer[] = {
+      {2047, 1, 1, 0, 1e-5},
+      {101, 3, 2, 0, 1e-5},
+      {3000, 4, 1, 0, 1e-5},
+      {500, 20, 1, 0, 2e-3},
+  };
+  for (const Shape& s : indexer) {
+    const double e = IndexerCase(s.pos0, s.n, s.ratio, rng);
+    std::printf("indexer pos0=%u n=%u ratio=%u rel_err=%.2e\n", s.pos0, s.n,
+                s.ratio, e);
     ok = e < s.tolerance && ok;
   }
   std::printf("%s\n", ok ? "PASS" : "FAIL");

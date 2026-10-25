@@ -106,7 +106,8 @@ of the attention output turn rounding-level differences into small logit
 changes. The smoke continuation keeps all 9 greedy tokens, KL ≤ 5.4e-3 per step.
 
 Kernel checks: `ds41.candidate_mask` (above, plus the indexer top-k with tied scores); `ds41.attention` compares both attention paths with an fp64
-reference (split decode 1.6e-7, batched 3e-4 relative error);
+reference (split decode 1.6e-7, batched 3e-4 relative error), and the indexer scores (fp32
+decode 2.4e-7, matrix-core batches 3.7e-4);
 `ds41.mmq_typed` compares batched, bounded-routed and grouped matvec launches
 with the matvec path for every V4.1 weight type, and the single-token Q5_K/Q8_0
 GEMV with an fp64 dot of the dequantized rows, and the IQ routed-expert GEMV
