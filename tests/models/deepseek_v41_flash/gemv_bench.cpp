@@ -1,5 +1,6 @@
-// Decode matvec bandwidth on the V4.1 Flash dense Q5_K shapes: the vendored
-// mmvq path (Q8_1 activations) against ds41_v41_gemv at every slice count.
+// Decode matvec bandwidth on the V4.1 Flash dense Q5_K shapes and routed
+// expert shapes: the vendored mmvq path (Q8_1 activations) against
+// ds41_v41_gemv at every slice count and ds41_v41_gemv_experts.
 // Weights rotate through copies larger than the caches, so every launch reads
 // DRAM. Rows differ by the Q8_1 activation rounding of mmvq.
 #include <hip/hip_runtime.h>
@@ -114,6 +115,89 @@ int main() {
     (void)hipFree(x);
     (void)hipFree(y0);
     (void)hipFree(y1);
+  }
+  // Routed experts: six of 384, a different six per launch so the reads stay
+  // DRAM-cold; gate/up share one input, down has one input per slot. Random
+  // blocks: the timings do not depend on the values.
+  struct Expert {
+    const char* name;
+    int type, block_bytes, m, k;
+    bool per_slot;
+  };
+  const Expert experts[] = {
+      {"iq1s_up", 19, 50, 2304, 5120, false},
+      {"iq1s_down", 19, 50, 5120, 2304, true},
+      {"iq1m_up", 29, 56, 2304, 5120, false},
+      {"iq1m_down", 29, 56, 5120, 2304, true},
+      {"iq2xxs_up", 16, 66, 2304, 5120, false},
+      {"iq2xxs_down", 16, 66, 5120, 2304, true},
+      {"iq2s_down", 22, 82, 5120, 2304, true},
+  };
+  constexpr int kExperts = 384;
+  constexpr int kRounds = 64;
+  std::vector<int32_t> idh(static_cast<std::size_t>(kRounds) * 6);
+  for (int r = 0; r < kRounds; ++r)
+    for (int j = 0; j < 6; ++j)
+      idh[r * 6 + j] = static_cast<int32_t>((r * 6 + j) * 61 % kExperts);
+  for (const Expert& e : experts) {
+    const std::size_t per_expert =
+        static_cast<std::size_t>(e.m) * e.k / 256 * e.block_bytes;
+    std::vector<uint8_t> host(per_expert * kExperts);
+    for (auto& b : host)
+      b = static_cast<uint8_t>(rng());
+    std::vector<float> xh(static_cast<std::size_t>(e.per_slot ? 6 : 1) * e.k);
+    std::normal_distribution<float> normal;
+    for (auto& v : xh)
+      v = normal(rng);
+    void* w = nullptr;
+    float *x = nullptr, *y = nullptr;
+    int32_t* ids = nullptr;
+    (void)hipMalloc(&w, host.size());
+    (void)hipMalloc(&x, xh.size() * sizeof(float));
+    (void)hipMalloc(&y, static_cast<std::size_t>(e.m) * 6 * sizeof(float));
+    (void)hipMalloc(&ids, idh.size() * sizeof(int32_t));
+    (void)hipMemcpy(w, host.data(), host.size(), hipMemcpyHostToDevice);
+    (void)hipMemcpy(x, xh.data(), xh.size() * sizeof(float),
+                    hipMemcpyHostToDevice);
+    (void)hipMemcpy(ids, idh.data(), idh.size() * sizeof(int32_t),
+                    hipMemcpyHostToDevice);
+    auto launch = [&](int r, bool fp32) {
+      if (fp32)
+        ds41_v41_gemv_experts(e.type, w, per_expert, ids + r * 6, 6, x,
+                              e.per_slot ? e.k : 0, y, e.m, e.k);
+      else if (e.per_slot)
+        ds41_mmq_moe_vec_typed(e.type, w, x, ids + r * 6, y, e.m, e.k, 6,
+                               kExperts, 1, 0);
+      else
+        ds41_mmq_moe_vec_typed(e.type, w, x, ids + r * 6, y, e.m, e.k, 1,
+                               kExperts, 6, 0);
+    };
+    std::printf("%-12s %5dx%-5d x6 %5.1f MB", e.name, e.m, e.k,
+                6.0 * per_expert / 1e6);
+    for (const bool fp32 : {false, true}) {
+      hipEvent_t a, b;
+      (void)hipEventCreate(&a);
+      (void)hipEventCreate(&b);
+      for (int r = 0; r < 8; ++r)
+        launch(r, fp32);
+      (void)hipEventRecord(a, 0);
+      for (int r = 0; r < kRounds; ++r)
+        launch(r, fp32);
+      (void)hipEventRecord(b, 0);
+      (void)hipEventSynchronize(b);
+      float ms = 0;
+      (void)hipEventElapsedTime(&ms, a, b);
+      const double us = ms * 1000.0 / kRounds;
+      std::printf("  %s %6.1f us %5.1f GB/s", fp32 ? "fp32" : "mmvq", us,
+                  6.0 * per_expert / us / 1e3);
+      (void)hipEventDestroy(a);
+      (void)hipEventDestroy(b);
+    }
+    std::printf("\n");
+    (void)hipFree(w);
+    (void)hipFree(x);
+    (void)hipFree(y);
+    (void)hipFree(ids);
   }
   ds41_mmq_cleanup();
   return 0;

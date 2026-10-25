@@ -273,6 +273,58 @@ bool MoeCase(const TypeCase& t, int M, int K, int n_tokens, int n_experts,
   return e < 2e-3;
 }
 
+/* Routed-expert GEMV against the ggml matvec (Q8_1 activations, so the
+ * agreement is at that rounding, ~5e-3): one shared input (gate/up) or one
+ * input per slot (down), with a dropped slot (id -1) that must write 0. */
+bool ExpertGemvCase(const TypeCase& t, int M, int K, bool per_slot,
+                    std::mt19937& rng) {
+  constexpr int kExperts = 24;
+  constexpr int kSlots = 6;
+  const std::size_t expert_bytes =
+      static_cast<std::size_t>(M) * K / t.block_values * t.block_bytes;
+  const auto w = RandomBlocks(
+      t, static_cast<std::size_t>(kExperts) * M * K / t.block_values, rng);
+  std::normal_distribution<float> normal;
+  std::vector<float> x(static_cast<std::size_t>(per_slot ? kSlots : 1) * K);
+  for (auto& v : x)
+    v = normal(rng);
+  const std::vector<int32_t> ids = {3, 17, 0, 23, -1, 9};
+  std::vector<int32_t> live = ids;
+  live[4] = 0;
+  auto* dw = Device(w);
+  auto* dx = Device(x);
+  auto* dids = Device(ids);
+  auto* dlive = Device(live);
+  const std::size_t n_out = static_cast<std::size_t>(M) * kSlots;
+  float *got = nullptr, *want = nullptr;
+  (void)hipMalloc(&got, sizeof(float) * n_out);
+  (void)hipMalloc(&want, sizeof(float) * n_out);
+  bool ok = ds41_v41_gemv_experts(t.type, dw, expert_bytes, dids, kSlots, dx,
+                                  per_slot ? K : 0, got, M, K) == 0;
+  ok =
+      ok && (per_slot ? ds41_mmq_moe_vec_typed(t.type, dw, dx, dlive, want, M,
+                                               K, kSlots, kExperts, 1, 0)
+                      : ds41_mmq_moe_vec_typed(t.type, dw, dx, dlive, want, M,
+                                               K, 1, kExperts, kSlots, 0)) == 0;
+  std::vector<float> g = ok ? Host(got, n_out) : std::vector<float>();
+  std::vector<float> r = ok ? Host(want, n_out) : std::vector<float>();
+  bool dropped_zero = ok;
+  for (int i = 0; ok && i < M; ++i) {
+    dropped_zero = dropped_zero && g[4 * M + i] == 0.0f;
+    g[4 * M + i] = r[4 * M + i] = 0.0f;
+  }
+  const double e = ok ? RelativeError(g, r) : INFINITY;
+  std::printf("experts %-8s M=%d K=%d per_slot=%d rel_err=%.2e dropped=%s\n",
+              t.name, M, K, per_slot, e, dropped_zero ? "0" : "NONZERO");
+  (void)hipFree(dw);
+  (void)hipFree(dx);
+  (void)hipFree(dids);
+  (void)hipFree(dlive);
+  (void)hipFree(got);
+  (void)hipFree(want);
+  return e < 2e-2 && dropped_zero;
+}
+
 }  // namespace
 
 int main() {
@@ -291,6 +343,10 @@ int main() {
     if (t.type == 8 || t.type == 13) {
       ok = GemvCase(t, 300, 1280, 0, rng) && ok;
       ok = GemvCase(t, 256, 4096, 64, rng) && ok;
+    }
+    if (t.type != 8 && t.type != 13) {
+      ok = ExpertGemvCase(t, 2304, 5120, false, rng) && ok;
+      ok = ExpertGemvCase(t, 512, 2304, true, rng) && ok;
     }
     ok = GroupedCase(t, 128, 1, 1024, 8, rng) && ok;
     ok = GroupedCase(t, 256, 3, 512, 8, rng) && ok;
