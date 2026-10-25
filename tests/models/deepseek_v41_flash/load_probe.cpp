@@ -229,14 +229,16 @@ int SpeculativeProbe(ds41_engine* engine, const std::vector<int>& prompt,
 }  // namespace
 
 /* --dspark-generate N: greedy decode of N tokens after the prompt, first
- * token by token, then in DSpark cycles; the outputs must match.
+ * token by token, then in speculative cycles (prompt lookup, plus DSpark
+ * drafts with --dspark); the outputs must match.
  * --dspark-sweep repeats the DSpark run with at most 1 to 5 drafts. */
 int DsparkProbe(ds41_engine* engine, const std::vector<int>& prompt,
                 uint32_t context, int n_tokens, bool sweep) {
   const int ctx =
       (int)std::max<std::size_t>(context, prompt.size() + n_tokens + 16);
   ds41_session* session = nullptr;
-  if (ds41_session_create(&session, engine, ctx, true) != 0) {
+  if (ds41_session_create(&session, engine, ctx,
+                          ds41_engine_has_dspark(engine)) != 0) {
     std::fprintf(stderr, "DSpark session creation failed\n");
     return 1;
   }

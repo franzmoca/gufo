@@ -190,11 +190,12 @@ Open performance items are tracked in [BACKLOG.md](BACKLOG.md).
   the 4 GiB host reserve that explicit limits keep (as whole-state
   snapshots already did), and cache backing may pin down to 1 GiB of free
   device heap instead of the 4 GiB dispatch reserve.
-- Prompt lookup (done in DSpark sessions): `src/core/speculative/prompt_lookup.hpp`
-  copies up to six tokens that followed an earlier occurrence of the
-  context; they replace that cycle's draft and share DSpark's verification
-  and rollback. Its state joins snapshots and the component cache
-  metadata. File edit 43.9 → 56.4 tok/s with identical output.
+- Prompt lookup (done): `src/core/speculative/prompt_lookup.hpp` copies up
+  to six tokens that followed an earlier occurrence of the context; they
+  replace that cycle's draft and share DSpark's verification and rollback,
+  with or without a drafter. Its state joins snapshots and the component
+  cache metadata. File edit: 23.6 → 54.6 tok/s without a drafter, 43.9 →
+  56.4 tok/s with DSpark, identical output.
 - Evaluate decoder SWA bounded replay (layers 20-39 over only the last 128
   prompt tokens), which roughly halves prefill; adopt only if quality holds.
 

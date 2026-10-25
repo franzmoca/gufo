@@ -129,16 +129,19 @@ public:
   [[nodiscard]] bool DsparkStep(std::size_t max_tokens,
                                 std::vector<int>* emitted,
                                 std::string* error_msg = nullptr);
-  /// Runs one speculative cycle; a sampler makes it a sampled cycle.
+  /// Runs one speculative cycle; a sampler makes it a sampled cycle. A cycle
+  /// verifies prompt-lookup copies where the context repeats earlier tokens,
+  /// otherwise the drafter's block; without either it is a plain step. Also
+  /// valid for sessions without a drafter.
   [[nodiscard]] bool DsparkStep(std::size_t max_tokens,
                                 std::uint32_t max_draft_tokens,
                                 std::vector<int>* emitted,
                                 std::string* error_msg = nullptr,
                                 const ds41_dspark_sampler* sampler = nullptr,
                                 bool stop_at_eos = false);
-  /// Returns and clears the token a sampled cycle drew but has not emitted,
-  /// or -1. An exact target step must emit it instead of sampling again.
-  [[nodiscard]] int TakePendingDsparkToken();
+  /// A speculative step's last emitted token stays unevaluated until the next
+  /// step. Evaluates it so that plain steps (Evaluate) can continue.
+  [[nodiscard]] bool EvaluatePending(std::string* error_msg = nullptr);
   struct DsparkStats {
     std::uint64_t verifier_rows{0};
     std::uint64_t verifier_accepted{0};

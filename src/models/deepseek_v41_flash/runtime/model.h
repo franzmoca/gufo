@@ -137,10 +137,11 @@ bool ds41_engine_has_dspark(const ds41_engine* engine);
 int ds41_sessions_dspark_step_batch(const ds41_session_dspark_batch_item* items,
                                     size_t item_count, char* error,
                                     size_t error_capacity);
-/* Returns and clears the sampled token a DSpark cycle rejected, or -1. The
- * token is the request's next output; an exact target step must emit it
- * instead of sampling the frontier logits again. */
-int ds41_session_dspark_take_pending_anchor(ds41_session* session);
+/* A speculative step leaves its last emitted token unevaluated (the next
+ * step's anchor). Evaluates it, so plain steps can continue; a no-op without
+ * one. ds41_session_eval refuses while such a token is outstanding. */
+int ds41_session_flush(ds41_session* session, char* error,
+                       size_t error_capacity);
 void ds41_session_dspark_stats(const ds41_session* session, uint64_t* drafted,
                                uint64_t* accepted, uint64_t* support_drafted,
                                uint64_t* support_accepted,
