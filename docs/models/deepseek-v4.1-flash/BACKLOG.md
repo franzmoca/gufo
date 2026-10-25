@@ -138,12 +138,15 @@ between these sizes (`tools/prof/prof.py` on the two shapes).
 ### 8. DSpark verification cost
 
 A DSpark cycle at 1.9K context costs 12.5 ms of drafting plus the
-verification batch: one-draft cycles take 69.6 ms, five-draft cycles
-117 ms, against 42.4 ms for a plain step, so each row beyond the second adds
-about 12 ms. Batches of 2-8 tokens use the decode kernels for identical
-numerics; a multi-column GEMV that reads each weight row once for all
-columns while keeping the per-column sum order would cut the extra rows'
-cost and let the width policy draft longer blocks.
+verification batch. `--spec-bench` puts 1-8 rows at 41.8 / 54.9 / 65.9 /
+76.1 / 87.1 / 96.1 / 107.7 / 109.3 ms, so each row beyond the first adds
+about 11 ms. Batches of 2-8 tokens use the decode kernels for identical
+numerics. In a 6-row pass the dense Q5_K GEMVs take 34.2 ms (22.4 ms for
+one row) and the routed experts 47.5 ms (10 ms for one row; reading the 21.2
+distinct experts per layer bounds them near 36 ms). The grouped IQ1_S
+kernel is limited by per-column decode and activation work rather than
+weight bandwidth; occupancy, wider rows per lane, column tiling and
+cross-iteration prefetch were all slower (see EXPERIMENTS.md).
 
 ## Memory
 

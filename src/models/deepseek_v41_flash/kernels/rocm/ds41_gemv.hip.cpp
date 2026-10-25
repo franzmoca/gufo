@@ -27,6 +27,9 @@ template <>
 struct Format<13> {  // Q5_K
   static constexpr int kBlockBytes = 176;
   static constexpr int kTasks = 8;
+  using Raw = RawQ45K;
+  static __device__ __forceinline__ Raw Load(const uint8_t* b, int t) { return LoadQ45K<true>(b, t); }
+  static __device__ __forceinline__ void Decode(const Raw& r, int t, float (&w)[32]) { DecodeQ45K<true>(r, t, w); }
   static __device__ __forceinline__ void Decode(const uint8_t* b, int t, float (&w)[32]) { DecodeQ45K<true>(b, t, w); }
   static __device__ __forceinline__ float Dot(float acc, const float (&w)[32], int t, const float* x) {
     return DotQ45K(acc, w, t, x);
@@ -76,6 +79,34 @@ __global__ void __launch_bounds__(kWave* kWaves)
     const uint64_t offset = (uint64_t)(second ? row - m1 : row) * blocks_per_row * F::kBlockBytes;
     const uint8_t* base = (second ? w2 : w) + offset;
     const float* xr = x + (uint64_t)(row / rows_per_x) * k;
+    if constexpr (kCols > 1 && requires { typename F::Raw; }) {
+      /* Several tokens make each block's FMAs long; the next block's
+       * weights load before this block is decoded. */
+      const uint8_t* base_up = kSwiGLU ? w_up + offset : nullptr;
+      typename F::Raw next{}, next_up{};
+      if (slice < (int)blocks_per_row) {
+        next = F::Load(base + (uint64_t)slice * F::kBlockBytes, t);
+        if constexpr (kSwiGLU) next_up = F::Load(base_up + (uint64_t)slice * F::kBlockBytes, t);
+      }
+      for (uint32_t blk = slice; blk < blocks_per_row; blk += S) {
+        const typename F::Raw raw = next, raw_up = next_up;
+        if (blk + S < blocks_per_row) {
+          next = F::Load(base + (uint64_t)(blk + S) * F::kBlockBytes, t);
+          if constexpr (kSwiGLU) next_up = F::Load(base_up + (uint64_t)(blk + S) * F::kBlockBytes, t);
+        }
+        float wv[32];
+        F::Decode(raw, t, wv);
+#pragma unroll
+        for (int c = 0; c < kCols; ++c)
+          if (c < (int)n) acc[c] = F::Dot(acc[c], wv, t, xr + c * x_stride + blk * 256);
+        if constexpr (kSwiGLU) {
+          F::Decode(raw_up, t, wv);
+#pragma unroll
+          for (int c = 0; c < kCols; ++c)
+            if (c < (int)n) acc_up[c] = F::Dot(acc_up[c], wv, t, xr + c * x_stride + blk * 256);
+        }
+      }
+    } else
 #pragma unroll 2
     for (uint32_t blk = slice; blk < blocks_per_row; blk += S) {
       float wv[32];
