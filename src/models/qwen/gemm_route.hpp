@@ -59,6 +59,7 @@ struct QwenGemmFormatCapabilities {
     core::GgmlType type) noexcept {
   switch (type) {
     case core::GgmlType::kI32:
+    case core::GgmlType::kI64:
       return {};
     case core::GgmlType::kF32:
     case core::GgmlType::kBF16:
@@ -94,7 +95,12 @@ struct QwenGemmFormatCapabilities {
     case core::GgmlType::kQ5_1:
     case core::GgmlType::kQ8_1:
     case core::GgmlType::kQ2_K:
+    case core::GgmlType::kIQ1_S:
+    case core::GgmlType::kIQ1_M:
     case core::GgmlType::kIQ2_XXS:
+    case core::GgmlType::kIQ2_XS:
+    case core::GgmlType::kIQ2_S:
+    case core::GgmlType::kIQ3_XXS:
       return {.quantized = true};
   }
   return {};

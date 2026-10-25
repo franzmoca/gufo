@@ -55,7 +55,7 @@ struct ChatTemplateOptions {
 
 [[nodiscard]] std::string_view GenerationPrompt(bool enable_thinking);
 
-/// Renders the pinned DeepSeek V4 Flash 0731 conversation format.
+/// Renders the pinned DeepSeek V4.1 Flash 1017 conversation format.
 [[nodiscard]] std::string RenderChat(std::span<const ChatMessage> messages,
                                      const ChatTemplateOptions& options = {});
 [[nodiscard]] std::string RenderChat(std::span<const ChatMessage> messages,
@@ -68,15 +68,15 @@ struct ChatTemplateOptions {
                                         std::string* error_msg = nullptr);
 
 [[nodiscard]] constexpr std::string_view ChatTemplateId() noexcept {
-  return "deepseek-v4-flash-0731-compiled-v3";
+  return "deepseek-v4.1-flash-1017-compiled-v1";
 }
 
 [[nodiscard]] constexpr std::string_view ArtifactTemplateSha256() noexcept {
-  return "872492071c22c8d2025238120309ffbddddb666b49f4433f55c19b69bf51af27";
+  return "6f9bd1f87d9dad376b4c79683934b4254396d826ae514ab0244efa904ce1d1a4";
 }
 
 [[nodiscard]] constexpr std::string_view EncoderReferenceSha256() noexcept {
-  return "abc0d26120250dda0ae077dc64aa28836026e61e970854aaeb792445e6a0dde6";
+  return "13231c592e958fb39e2af6001dae69d90e7a36b265702b9b390236fb387599e2";
 }
 
 /// Native DeepSeek effort name after mapping provider-neutral effort levels.

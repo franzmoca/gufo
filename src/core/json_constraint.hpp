@@ -23,7 +23,10 @@ namespace gufo::sampling {
 // verification.
 class JsonConstraint {
 public:
-  enum class ToolFormat { kJson, kQwen, kDeepSeek, kGemma4 };
+  // kDeepSeek is V4 Flash DSML (`<｜DSML｜tool_calls>`); kDeepSeek41 is the
+  // V4.1 Flash form, which writes each tag name after a space and names the
+  // block `calls` (`<｜DSML｜ calls>`).
+  enum class ToolFormat { kJson, kQwen, kDeepSeek, kDeepSeek41, kGemma4 };
   struct Stack {
     std::vector<std::uint32_t> symbols;
     std::string lexeme;

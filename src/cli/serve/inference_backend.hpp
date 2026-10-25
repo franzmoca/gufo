@@ -22,6 +22,10 @@ namespace gufo::models::deepseek_v4_flash {
 class Model;
 }
 
+namespace gufo::models::deepseek_v41_flash {
+class Model;
+}
+
 namespace gufo::models::gemma4 {
 class Model;
 namespace vision {
@@ -127,6 +131,14 @@ public:
             TextSpeculativeConfig speculative_config = {},
             TextDiskCacheConfig disk_cache_config = {},
             TextRunnerRamCacheOptions ram_cache_config = {});
+  bool load(std::shared_ptr<models::deepseek_v41_flash::Model> model,
+            std::string* error, std::uint32_t max_context = 0,
+            std::size_t session_count = 1,
+            TextPrefillPolicy prefill_policy = {},
+            TextSchedulerPolicy scheduler_policy = {},
+            TextSpeculativeConfig speculative_config = {},
+            TextDiskCacheConfig disk_cache_config = {},
+            TextRunnerRamCacheOptions ram_cache_config = {});
 
   /// Installs a previously loaded Qwen3.8-Flash-Next model with
   /// request-owned sessions, the model's tokenizer, and host-memory
@@ -221,6 +233,15 @@ public:
       const ChatRequest& request) const override;
 
 private:
+  template<class Ds>
+  bool LoadDeepSeek(std::shared_ptr<typename Ds::Model> model,
+                    std::string* error, std::uint32_t max_context,
+                    std::size_t session_count, TextPrefillPolicy prefill_policy,
+                    TextSchedulerPolicy scheduler_policy,
+                    TextSpeculativeConfig speculative_config,
+                    TextDiskCacheConfig disk_cache_config,
+                    TextRunnerRamCacheOptions ram_cache_config);
+
   struct Impl;
   std::unique_ptr<Impl> impl_;
   std::string gemma_prefill_weights_;

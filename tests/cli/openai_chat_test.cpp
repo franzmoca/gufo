@@ -3219,14 +3219,19 @@ void TestStopInsideToolArguments() {
 void TestNativeToolImplicitReasoningEnd() {
   using Format = gufo::sampling::JsonConstraint::ToolFormat;
   using Finish = gufo::server::TextGenerationBackend::FinishReason;
-  for (const auto format : {Format::kQwen, Format::kDeepSeek}) {
+  for (const auto format :
+       {Format::kQwen, Format::kDeepSeek, Format::kDeepSeek41}) {
     const bool qwen = format == Format::kQwen;
     const std::string call =
         qwen ? "<tool_call>\n<function=read>\n<parameter=path>\nfile.txt\n"
                "</parameter>\n</function>\n</tool_call>"
-             : "<｜DSML｜tool_calls>\n<｜DSML｜invoke name=\"read\">\n"
-               "<｜DSML｜parameter name=\"path\" string=\"true\">file.txt"
-               "</｜DSML｜parameter>\n</｜DSML｜invoke>\n</｜DSML｜tool_calls>";
+        : format == Format::kDeepSeek
+            ? "<｜DSML｜tool_calls>\n<｜DSML｜invoke name=\"read\">\n"
+              "<｜DSML｜parameter name=\"path\" string=\"true\">file.txt"
+              "</｜DSML｜parameter>\n</｜DSML｜invoke>\n</｜DSML｜tool_calls>"
+            : "<｜DSML｜ calls>\n<｜DSML｜ invoke name=\"read\">\n"
+              "<｜DSML｜ parameter name=\"path\" string=\"true\">file.txt"
+              "</｜DSML｜ parameter>\n</｜DSML｜ invoke>\n</｜DSML｜ calls>";
     for (const bool responses : {false, true})
       for (const bool stream : {false, true})
         for (const bool quoted : {false, true})

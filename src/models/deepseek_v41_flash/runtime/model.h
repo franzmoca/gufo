@@ -3,6 +3,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <vector>
 
 struct ds41_tokens {
   int* v;
@@ -153,5 +154,27 @@ int ds41_session_pos(const ds41_session* session);
 int ds41_session_ctx(const ds41_session* session);
 uint32_t ds41_session_prefill_capacity(const ds41_session* session);
 uint64_t ds41_session_payload_bytes(const ds41_session* session);
+
+/* Single-sequence V4.1 decoder: one token per step from position 0. */
+struct ds41_decoder;
+/* Called after each block with the [hc, dim] residual streams and the routed
+ * expert ids of that layer, both in host memory. */
+typedef void (*ds41_decoder_layer_fn)(void* ctx, uint32_t layer,
+                                      const float* hidden,
+                                      const int32_t* experts);
+ds41_decoder* ds41_decoder_create(ds41_engine* engine, uint32_t context);
+void ds41_decoder_destroy(ds41_decoder* decoder);
+/* Evaluates `token` at the next position and writes vocabulary logits. */
+int ds41_decoder_step(ds41_decoder* decoder, int token, float* logits,
+                      ds41_decoder_layer_fn layer_fn, void* ctx);
+uint32_t ds41_decoder_pos(const ds41_decoder* decoder);
+uint32_t ds41_decoder_context(const ds41_decoder* decoder);
+/* Returns to position 0; rows past the position are never read again. */
+int ds41_decoder_reset(ds41_decoder* decoder);
+/* Appends the decoder state to `out`; load consumes it from `data`. */
+uint64_t ds41_decoder_state_bytes(const ds41_decoder* decoder);
+int ds41_decoder_save(const ds41_decoder* decoder, std::vector<uint8_t>* out);
+int ds41_decoder_load(ds41_decoder* decoder, const uint8_t* data, uint64_t size,
+                      uint64_t* consumed);
 
 #endif  // GUFO_MODELS_DEEPSEEK_V41_FLASH_RUNTIME_MODEL_H_

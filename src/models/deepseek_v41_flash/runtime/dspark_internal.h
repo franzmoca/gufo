@@ -64,7 +64,8 @@ inline constexpr ds41_dspark_attention_span ds41_dspark_visible_span(
  * A coordinator lazily grows to eight such independent request blocks. */
 inline constexpr uint32_t DS41_SPEC_SESSION_MAX_ROWS =
     DS41_DSPARK_MAX_BLOCK + 1u;
-inline constexpr uint32_t DS41_SPEC_MAX_ROWS = 8u * DS41_SPEC_SESSION_MAX_ROWS;
+inline constexpr uint32_t DS41_SPEC_MAX_ROWS =
+    8u * DS41_SPEC_SESSION_MAX_ROWS;
 
 // Per-request controller state is durable for an exact snapshot continuation.
 // A new request reusing the prefix resets it while retaining the support KV.
@@ -95,41 +96,41 @@ struct ds41_dspark_request_state {
 };
 
 struct ds41_dspark_stage_weights {
-  /* Present on the first stage only: fuses the target's sampled layers. */
-  ds41_tensor* main_proj;
-  ds41_tensor* main_norm;
+    /* Present on the first stage only: fuses the target's sampled layers. */
+    ds41_tensor *main_proj;
+    ds41_tensor *main_norm;
 
-  /* Present on the last stage only. */
-  ds41_tensor* norm;
-  ds41_tensor* hc_head_base;
-  ds41_tensor* hc_head_fn;
-  ds41_tensor* hc_head_scale;
-  ds41_tensor* markov_w1;
-  ds41_tensor* markov_w2;
-  ds41_tensor* confidence;
-  /* Every stage is a DS4 block with no compressor and no indexer, so it
-   * binds into the same layout the target's ratio-0 layers use. */
-  ds41_layer_weights block;
+    /* Present on the last stage only. */
+    ds41_tensor *norm;
+    ds41_tensor *hc_head_base;
+    ds41_tensor *hc_head_fn;
+    ds41_tensor *hc_head_scale;
+    ds41_tensor *markov_w1;
+    ds41_tensor* markov_w2;
+    ds41_tensor* confidence;
+    /* Every stage is a DS4 block with no compressor and no indexer, so it
+     * binds into the same layout the target's ratio-0 layers use. */
+    ds41_layer_weights block;
 };
 
 struct ds41_dspark_model {
-  ds41_model* model;
-  uint32_t n_stages;
-  uint32_t block_size;
-  uint32_t markov_rank;
-  uint32_t noise_token_id;
-  uint32_t n_target_layers;
-  uint32_t target_layer_ids[DS41_DSPARK_MAX_TARGET_LAYERS];
-  ds41_dspark_stage_weights stage[DS41_DSPARK_MAX_STAGES];
+    ds41_model *model;
+    uint32_t n_stages;
+    uint32_t block_size;
+    uint32_t markov_rank;
+    uint32_t noise_token_id;
+    uint32_t n_target_layers;
+    uint32_t target_layer_ids[DS41_DSPARK_MAX_TARGET_LAYERS];
+    ds41_dspark_stage_weights stage[DS41_DSPARK_MAX_STAGES];
 };
 
 /* Loads and strictly validates a DSpark support GGUF, then makes its tensor
  * spans GPU-visible through the selected residency policy. Returns 0 on
  * success. */
-int ds41_dspark_open(ds41_dspark_model** out, const char* path);
-void ds41_dspark_close(ds41_dspark_model* dspark);
+int ds41_dspark_open(ds41_dspark_model **out, const char *path);
+void ds41_dspark_close(ds41_dspark_model *dspark);
 
 /* Total concatenated target feature width consumed by main_proj. */
-uint32_t ds41_dspark_feature_width(const ds41_dspark_model* dspark);
+uint32_t ds41_dspark_feature_width(const ds41_dspark_model *dspark);
 
 #endif  // GUFO_MODELS_DEEPSEEK_V41_FLASH_RUNTIME_DSPARK_INTERNAL_H_

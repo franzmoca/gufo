@@ -163,8 +163,7 @@ __device__ static void dev_dot_iq2_xxs_q8_K_block8_deq_lut(
     // Constant indices keep q8, bsum and acc in registers; see the callers.
 #pragma unroll
     for (uint32_t p = 0; p < 8u; p++) {
-      if (p >= n)
-        break;
+      if (p >= n) break;
       const int8_t* q = q8[p] + ib32 * 32;
       int32_t sumi = 0;
       sumi = __dp4a(w[0], *(const int32_t*)(q + 0), sumi);
@@ -181,8 +180,7 @@ __device__ static void dev_dot_iq2_xxs_q8_K_block8_deq_lut(
   const hip_block_q8_K* ys[8] = {y0, y1, y2, y3, y4, y5, y6, y7};
 #pragma unroll
   for (uint32_t p = 0; p < 8u; p++) {
-    if (p >= n)
-      break;
+    if (p >= n) break;
     // Preserve the scalar LUT kernel's scale-product rounding before FMA.
     acc[p] = fmaf(__fmul_rn(0.125f * xd, ys[p]->d), (float)bsum[p], acc[p]);
   }

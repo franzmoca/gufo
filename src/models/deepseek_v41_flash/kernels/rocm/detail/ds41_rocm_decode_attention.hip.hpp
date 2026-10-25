@@ -257,8 +257,7 @@ __global__ static void attention_decode_indexed_mixed_one_fast_oldhip_kernel(
   if (tid == 0u) {
     comp_count_s = 0;
     for (uint32_t i = 0;
-         i < top_k && comp_count_s < DS41_ROCM_ATTENTION_INDEXED_TOPK_CAP;
-         i++) {
+         i < top_k && comp_count_s < DS41_ROCM_ATTENTION_INDEXED_TOPK_CAP; i++) {
       const int32_t ci = topk[i];
       if (ci < 0)
         continue;

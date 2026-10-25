@@ -189,6 +189,22 @@ std::size_t QuantizedRowBytes(core::GgmlType type,
     case core::GgmlType::kIQ2_XXS:
       block_bytes = 66;
       break;
+    // Storage only: the DeepSeek V4.1 Flash runtime has the compute kernels.
+    case core::GgmlType::kIQ1_S:
+      block_bytes = 50;
+      break;
+    case core::GgmlType::kIQ1_M:
+      block_bytes = 56;
+      break;
+    case core::GgmlType::kIQ2_XS:
+      block_bytes = 74;
+      break;
+    case core::GgmlType::kIQ2_S:
+      block_bytes = 82;
+      break;
+    case core::GgmlType::kIQ3_XXS:
+      block_bytes = 98;
+      break;
     case core::GgmlType::kQ3_K:
       block_bytes = sizeof(block_q3_K);
       break;
@@ -238,6 +254,12 @@ std::size_t EncodedSizeBytes(core::GgmlType type,
         return 0;
       }
       return elements * sizeof(std::int32_t);
+    case core::GgmlType::kI64:
+      if (elements >
+          std::numeric_limits<std::size_t>::max() / sizeof(std::int64_t)) {
+        return 0;
+      }
+      return elements * sizeof(std::int64_t);
     case core::GgmlType::kF32:
       if (elements > std::numeric_limits<std::size_t>::max() / sizeof(float)) {
         return 0;

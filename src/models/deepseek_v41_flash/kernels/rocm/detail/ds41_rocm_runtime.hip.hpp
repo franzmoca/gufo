@@ -1116,6 +1116,14 @@ extern "C" int ds41_gpu_set_model_map_range(const void* model_map,
   return 1;
 }
 
+extern "C" const void *ds41_gpu_model_ptr(const void *model_map, uint64_t offset, uint64_t bytes) {
+    return hip_model_range_ptr(model_map, offset, bytes, "tensor");
+}
+
+extern "C" void *ds41_gpu_tensor_ptr(ds41_gpu_tensor *tensor) {
+    return tensor ? tensor->ptr : NULL;
+}
+
 extern "C" int ds41_gpu_set_model_shards(const int* fds,
                                          const uint64_t* offsets,
                                          const uint64_t* sizes,

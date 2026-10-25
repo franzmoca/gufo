@@ -42,16 +42,16 @@ std::shared_ptr<Model> Model::Load(const std::string& model_path,
                                    const ModelOptions& options,
                                    std::string* error_msg) {
   if (model_path.empty()) {
-    AssignError(error_msg, "DeepSeek V4 Flash model path is empty");
+    AssignError(error_msg, "DeepSeek V4.1 Flash model path is empty");
     return nullptr;
   }
   if (options.max_context < 2) {
-    AssignError(error_msg, "DeepSeek V4 Flash context must be at least 2");
+    AssignError(error_msg, "DeepSeek V4.1 Flash context must be at least 2");
     return nullptr;
   }
   if (options.max_context >
       static_cast<std::uint32_t>(std::numeric_limits<int>::max())) {
-    AssignError(error_msg, "DeepSeek V4 Flash context exceeds engine limits");
+    AssignError(error_msg, "DeepSeek V4.1 Flash context exceeds engine limits");
     return nullptr;
   }
 
@@ -63,7 +63,7 @@ std::shared_ptr<Model> Model::Load(const std::string& model_path,
 
   ds41_engine* engine = nullptr;
   if (ds41_engine_open(&engine, &engine_options) != 0 || engine == nullptr) {
-    AssignError(error_msg, "failed to load DeepSeek V4 Flash GGUF");
+    AssignError(error_msg, "failed to load DeepSeek V4.1 Flash GGUF");
     return nullptr;
   }
 
@@ -77,7 +77,7 @@ std::unique_ptr<Session> Model::CreateSession(core::SessionMode mode,
       max_context >
           static_cast<std::uint32_t>(std::numeric_limits<int>::max())) {
     AssignError(error_msg,
-                "DeepSeek V4 Flash session context is outside model limits");
+                "DeepSeek V4.1 Flash session context is outside model limits");
     return nullptr;
   }
 
@@ -85,7 +85,7 @@ std::unique_ptr<Session> Model::CreateSession(core::SessionMode mode,
   if (ds41_session_create(&session, engine_, static_cast<int>(max_context),
                           mode == core::SessionMode::kSpeculative) != 0 ||
       session == nullptr) {
-    AssignError(error_msg, "failed to create DeepSeek V4 Flash session");
+    AssignError(error_msg, "failed to create DeepSeek V4.1 Flash session");
     return nullptr;
   }
 
@@ -176,7 +176,7 @@ bool Model::DsparkStepBatch(std::span<const SessionDsparkBatchItem> items,
     AssignError(error_msg,
                 error[0] != '\0'
                     ? error.data()
-                    : "DeepSeek V4 Flash speculative batch step failed");
+                    : "DeepSeek V4.1 Flash speculative batch step failed");
     return false;
   }
   for (std::size_t index = 0; index < items.size(); ++index) {
@@ -265,17 +265,17 @@ Session::~Session() {
 
 bool Session::Sync(std::span<const int> prompt, std::string* error_msg) {
   if (prompt.empty()) {
-    AssignError(error_msg, "DeepSeek V4 Flash prompt is empty");
+    AssignError(error_msg, "DeepSeek V4.1 Flash prompt is empty");
     return false;
   }
   if (prompt.size() >= static_cast<std::size_t>(ContextSize())) {
     AssignError(error_msg,
-                "DeepSeek V4 Flash prompt does not fit in session context");
+                "DeepSeek V4.1 Flash prompt does not fit in session context");
     return false;
   }
   if (prompt.size() >
       static_cast<std::size_t>(std::numeric_limits<int>::max())) {
-    AssignError(error_msg, "DeepSeek V4 Flash prompt is too large");
+    AssignError(error_msg, "DeepSeek V4.1 Flash prompt is too large");
     return false;
   }
 
@@ -290,7 +290,7 @@ bool Session::Sync(std::span<const int> prompt, std::string* error_msg) {
   if (result != 0) {
     AssignError(error_msg, error[0] != '\0'
                                ? error.data()
-                               : "DeepSeek V4 Flash prefill failed");
+                               : "DeepSeek V4.1 Flash prefill failed");
     return false;
   }
   return true;
@@ -317,7 +317,7 @@ bool Session::Evaluate(int token, std::string* error_msg) {
   if (ds41_session_eval(session_, token, error.data(), error.size()) != 0) {
     AssignError(error_msg, error[0] != '\0'
                                ? error.data()
-                               : "DeepSeek V4 Flash decode failed");
+                               : "DeepSeek V4.1 Flash decode failed");
     return false;
   }
   return true;
@@ -377,13 +377,13 @@ Session::DsparkStats Session::DsparkStatistics() const {
 std::vector<float> Session::CopyLogits(std::string* error_msg) const {
   const int vocab_size = model_->VocabSize();
   if (vocab_size <= 0) {
-    AssignError(error_msg, "DeepSeek V4 Flash vocabulary size is invalid");
+    AssignError(error_msg, "DeepSeek V4.1 Flash vocabulary size is invalid");
     return {};
   }
   std::vector<float> logits(static_cast<std::size_t>(vocab_size));
   if (ds41_session_copy_logits(session_, logits.data(), vocab_size) !=
       vocab_size) {
-    AssignError(error_msg, "failed to copy DeepSeek V4 Flash logits");
+    AssignError(error_msg, "failed to copy DeepSeek V4.1 Flash logits");
     return {};
   }
   return logits;

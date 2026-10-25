@@ -1,33 +1,29 @@
 #pragma once
 
 #define HIP_DISABLE_WARP_SYNC_BUILTINS 1
-#include <hip/hip_bf16.h>
-#include <hip/hip_fp16.h>
 #include <hip/hip_runtime.h>
 #include <hipblas/hipblas.h>
+#include <hip/hip_fp16.h>
+#include <hip/hip_bf16.h>
 
 #if defined(GGML_HIP_ROCWMMA_FATTN)
 #include <rocwmma/rocwmma-version.hpp>
 #endif
 
+
 #define __shfl_sync(mask, var, laneMask, width) __shfl(var, laneMask, width)
-#define __shfl_down_sync(mask, var, delta, ...) \
-  __shfl_down(var, delta, ##__VA_ARGS__)
-#define __shfl_up_sync(mask, var, laneMask, width) \
-  __shfl_up(var, laneMask, width)
-#define __shfl_xor_sync(mask, var, laneMask, width) \
-  __shfl_xor(var, laneMask, width)
+#define __shfl_down_sync(mask, var, delta, ...) __shfl_down(var, delta, ##__VA_ARGS__)
+#define __shfl_up_sync(mask, var, laneMask, width) __shfl_up(var, laneMask, width)
+#define __shfl_xor_sync(mask, var, laneMask, width) __shfl_xor(var, laneMask, width)
 #define __all_sync(mask, var) __all(var)
 #define __any_sync(mask, var) __any(var)
-#define __trap()             \
-  do {                       \
-    abort();                 \
-    __builtin_unreachable(); \
-  } while (0)
+#define __trap() do { abort(); __builtin_unreachable(); } while (0)
+
 
 #if !defined(__HIP_PLATFORM_AMD__)
 #error "The HIP backend supports only AMD targets"
 #endif
+
 
 #if defined(__gfx900__) || defined(__gfx906__)
 #define GCN5
@@ -77,9 +73,8 @@
 #define RDNA3_0
 #endif
 
-#if defined(__gfx1030__) || defined(__gfx1031__) || defined(__gfx1032__) || \
-    defined(__gfx1033__) || defined(__gfx1034__) || defined(__gfx1035__) || \
-    defined(__gfx1036__) || defined(__gfx1037__)
+#if defined(__gfx1030__) || defined(__gfx1031__) || defined(__gfx1032__) || defined(__gfx1033__) || \
+    defined(__gfx1034__) || defined(__gfx1035__) || defined(__gfx1036__) || defined(__gfx1037__)
 #define RDNA2
 #endif
 
@@ -108,53 +103,49 @@ typedef int8_t int8x4_t __attribute__((ext_vector_type(4)));
 typedef uint8_t uint8x4_t __attribute__((ext_vector_type(4)));
 
 static __device__ __forceinline__ int __vsubss4(const int a, const int b) {
-  const int8x4_t va = reinterpret_cast<const int8x4_t&>(a);
-  const int8x4_t vb = reinterpret_cast<const int8x4_t&>(b);
+    const int8x4_t va = reinterpret_cast<const int8x4_t &>(a);
+    const int8x4_t vb = reinterpret_cast<const int8x4_t &>(b);
 #if __has_builtin(__builtin_elementwise_sub_sat)
-  const int8x4_t c = __builtin_elementwise_sub_sat(va, vb);
-  return reinterpret_cast<const int&>(c);
+    const int8x4_t c = __builtin_elementwise_sub_sat(va, vb);
+    return reinterpret_cast<const int &>(c);
 #else
-  int8x4_t c;
-  int16_t tmp;
+    int8x4_t c;
+    int16_t tmp;
 #pragma unroll
-  for (int i = 0; i < 4; i++) {
-    tmp = va[i] - vb[i];
-    if (tmp > std::numeric_limits<int8_t>::max())
-      tmp = std::numeric_limits<int8_t>::max();
-    if (tmp < std::numeric_limits<int8_t>::min())
-      tmp = std::numeric_limits<int8_t>::min();
-    c[i] = tmp;
-  }
-  return reinterpret_cast<int&>(c);
+    for (int i = 0; i < 4; i++) {
+        tmp = va[i] - vb[i];
+        if (tmp > std::numeric_limits<int8_t>::max()) tmp = std::numeric_limits<int8_t>::max();
+        if (tmp < std::numeric_limits<int8_t>::min()) tmp = std::numeric_limits<int8_t>::min();
+        c[i] = tmp;
+    }
+    return reinterpret_cast<int &>(c);
 #endif
 }
 
 static __device__ __forceinline__ int __vsub4(const int a, const int b) {
-  return __vsubss4(a, b);
+    return __vsubss4(a, b);
 }
 
-static __device__ __forceinline__ unsigned int __vcmpeq4(unsigned int a,
-                                                         unsigned int b) {
-  const uint8x4_t& va = reinterpret_cast<const uint8x4_t&>(a);
-  const uint8x4_t& vb = reinterpret_cast<const uint8x4_t&>(b);
-  unsigned int c;
-  uint8x4_t& vc = reinterpret_cast<uint8x4_t&>(c);
+static __device__ __forceinline__ unsigned int __vcmpeq4(unsigned int a, unsigned int b) {
+    const uint8x4_t &va = reinterpret_cast<const uint8x4_t &>(a);
+    const uint8x4_t &vb = reinterpret_cast<const uint8x4_t &>(b);
+    unsigned int c;
+    uint8x4_t &vc = reinterpret_cast<uint8x4_t &>(c);
 #pragma unroll
-  for (int i = 0; i < 4; ++i) {
-    vc[i] = va[i] == vb[i] ? 0xff : 0x00;
-  }
-  return c;
+    for (int i = 0; i < 4; ++i) {
+        vc[i] = va[i] == vb[i] ? 0xff : 0x00;
+    }
+    return c;
 }
 
-static __device__ __forceinline__ unsigned int __vcmpne4(unsigned int a,
-                                                         unsigned int b) {
-  const uint8x4_t& va = reinterpret_cast<const uint8x4_t&>(a);
-  const uint8x4_t& vb = reinterpret_cast<const uint8x4_t&>(b);
-  unsigned int c;
-  uint8x4_t& vc = reinterpret_cast<uint8x4_t&>(c);
+static __device__ __forceinline__ unsigned int __vcmpne4(unsigned int a, unsigned int b) {
+    const uint8x4_t &va = reinterpret_cast<const uint8x4_t &>(a);
+    const uint8x4_t &vb = reinterpret_cast<const uint8x4_t &>(b);
+    unsigned int c;
+    uint8x4_t &vc = reinterpret_cast<uint8x4_t &>(c);
 #pragma unroll
-  for (int i = 0; i < 4; ++i) {
-    vc[i] = va[i] == vb[i] ? 0x00 : 0xff;
-  }
-  return c;
+    for (int i = 0; i < 4; ++i) {
+        vc[i] = va[i] == vb[i] ? 0x00 : 0xff;
+    }
+    return c;
 }
