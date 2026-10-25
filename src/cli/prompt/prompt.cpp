@@ -22,6 +22,9 @@
 #include "src/core/crypto/sha256.hpp"
 #include "src/core/gguf_reader.hpp"
 #include "src/core/image.hpp"
+#include "src/models/deepseek_v41_flash/chat_template.hpp"
+#include "src/models/deepseek_v41_flash/dspark_sampler.hpp"
+#include "src/models/deepseek_v41_flash/engine.hpp"
 #include "src/models/deepseek_v4_flash/dspark_sampler.hpp"
 #include "src/models/deepseek_v4_flash/engine.hpp"
 #include "src/models/qwen/chat_template.hpp"
@@ -278,6 +281,10 @@ bool IsDeepSeekV4Flash(const core::GgufReader& reader) {
   return reader.GetMetadataString("general.architecture") == "deepseek4";
 }
 
+bool IsDeepSeekV41Flash(const core::GgufReader& reader) {
+  return reader.GetMetadataString("general.architecture") == "deepseek41";
+}
+
 std::optional<ReasoningEffort> ParseReasoningEffort(std::string_view value) {
   if (value == "minimal") {
     return ReasoningEffort::kMinimal;
@@ -304,7 +311,8 @@ void ResolvePromptSampling(const core::GgufReader& reader, PromptOptions* opt) {
   sampling::TextModelPreset preset = sampling::TextModelPreset::kUnspecified;
   const auto artifact_architecture =
       reader.GetMetadataString("general.architecture");
-  if (artifact_architecture == "deepseek4") {
+  if (artifact_architecture == "deepseek4" ||
+      artifact_architecture == "deepseek41") {
     preset = sampling::TextModelPreset::kDeepSeekV4Flash;
   } else if (artifact_architecture == "qwen4exp") {
     preset = sampling::TextModelPreset::kQwen38;
@@ -321,17 +329,49 @@ void ResolvePromptSampling(const core::GgufReader& reader, PromptOptions* opt) {
 #if defined(ENGINE_ENABLE_HIP)
 constexpr std::uint32_t kDefaultContext = 4096;
 
-std::shared_ptr<models::deepseek_v4_flash::Model> LoadDeepSeekModel(
+struct DeepSeekV4FlashPrompt {
+  using Model = models::deepseek_v4_flash::Model;
+  using ModelOptions = models::deepseek_v4_flash::ModelOptions;
+  using Session = models::deepseek_v4_flash::Session;
+  using ChatMessage = models::deepseek_v4_flash::ChatMessage;
+  using DsparkSamplerBridge = models::deepseek_v4_flash::DsparkSamplerBridge;
+  static constexpr std::string_view kName = "DeepSeek V4 Flash";
+  static bool ValidateGgufTemplate(const core::GgufReader& reader,
+                                   std::string* error) {
+    return models::deepseek_v4_flash::ValidateGgufTemplate(reader, error);
+  }
+  static auto ResolveChatOptions(const ReasoningOptions& reasoning) {
+    return models::deepseek_v4_flash::ResolveDeepSeekChatOptions(reasoning);
+  }
+};
+
+struct DeepSeekV41FlashPrompt {
+  using Model = models::deepseek_v41_flash::Model;
+  using ModelOptions = models::deepseek_v41_flash::ModelOptions;
+  using Session = models::deepseek_v41_flash::Session;
+  using ChatMessage = models::deepseek_v41_flash::ChatMessage;
+  using DsparkSamplerBridge = models::deepseek_v41_flash::DsparkSamplerBridge;
+  static constexpr std::string_view kName = "DeepSeek V4.1 Flash";
+  static bool ValidateGgufTemplate(const core::GgufReader& reader,
+                                   std::string* error) {
+    return models::deepseek_v41_flash::ValidateGgufTemplate(reader, error);
+  }
+  static auto ResolveChatOptions(const ReasoningOptions& reasoning) {
+    return models::deepseek_v41_flash::ResolveDeepSeekChatOptions(reasoning);
+  }
+};
+
+template<typename Ds>
+std::shared_ptr<typename Ds::Model> LoadDeepSeekModel(
     const PromptOptions& opt, const core::GgufReader& reader,
     std::chrono::steady_clock::time_point load_start) {
   if (opt.force_cpu) {
-    std::cerr << "DeepSeek V4 Flash is supported only by the ROCm backend\n";
+    std::cerr << Ds::kName << " is supported only by the ROCm backend\n";
     PrintModelLoadTime(load_start, false);
     return nullptr;
   }
   std::string template_error;
-  if (!models::deepseek_v4_flash::ValidateGgufTemplate(reader,
-                                                       &template_error)) {
+  if (!Ds::ValidateGgufTemplate(reader, &template_error)) {
     std::cerr << "Unsupported DeepSeek chat template: " << template_error
               << '\n';
     PrintModelLoadTime(load_start, false);
@@ -339,7 +379,7 @@ std::shared_ptr<models::deepseek_v4_flash::Model> LoadDeepSeekModel(
   }
   const bool dspark_requested = opt.speculative_backend == "dspark";
   if (!opt.speculative_backend.empty() && !dspark_requested) {
-    std::cerr << "DeepSeek V4 Flash supports only --speculative dspark\n";
+    std::cerr << Ds::kName << " supports only --speculative dspark\n";
     PrintModelLoadTime(load_start, false);
     return nullptr;
   }
@@ -355,15 +395,15 @@ std::shared_ptr<models::deepseek_v4_flash::Model> LoadDeepSeekModel(
   }
 
   std::string error;
-  auto model = models::deepseek_v4_flash::Model::Load(
+  auto model = Ds::Model::Load(
       opt.model_path,
-      models::deepseek_v4_flash::ModelOptions{
+      typename Ds::ModelOptions{
           .max_context = kDefaultContext,
           .dspark_model_path = dspark_requested ? opt.dspark_model_path : "",
       },
       &error);
   if (model == nullptr) {
-    std::cerr << "Error creating DeepSeek V4 Flash model: " << error << '\n';
+    std::cerr << "Error creating " << Ds::kName << " model: " << error << '\n';
     PrintModelLoadTime(load_start, false);
     return nullptr;
   }
@@ -372,11 +412,12 @@ std::shared_ptr<models::deepseek_v4_flash::Model> LoadDeepSeekModel(
   return model;
 }
 
-int GenerateDeepSeekResponse(
-    const PromptOptions& opt,
-    const std::shared_ptr<models::deepseek_v4_flash::Model>& model,
-    models::deepseek_v4_flash::Session& session,
-    std::span<const int> prompt_tokens, std::string* reply = nullptr) {
+template<typename Ds>
+int GenerateDeepSeekResponse(const PromptOptions& opt,
+                             const std::shared_ptr<typename Ds::Model>& model,
+                             typename Ds::Session& session,
+                             std::span<const int> prompt_tokens,
+                             std::string* reply = nullptr) {
   std::string error;
   const bool dspark_requested = model->HasDspark();
   const auto emit = [&](int token) {
@@ -386,18 +427,19 @@ int GenerateDeepSeekResponse(
     std::cout << piece << std::flush;
   };
   if (prompt_tokens.empty()) {
-    std::cerr << "DeepSeek V4 Flash prompt produced no tokens\n";
+    std::cerr << Ds::kName << " prompt produced no tokens\n";
     return 1;
   }
   if (prompt_tokens.size() >= kDefaultContext ||
       opt.max_tokens >= kDefaultContext - prompt_tokens.size()) {
-    std::cerr << "DeepSeek V4 Flash prompt and output exceed the 4096-token "
+    std::cerr << Ds::kName
+              << " prompt and output exceed the 4096-token "
                  "CLI context\n";
     return 1;
   }
 
   if (!session.Sync(prompt_tokens, &error)) {
-    std::cerr << "DeepSeek V4 Flash prefill failed: " << error << '\n';
+    std::cerr << Ds::kName << " prefill failed: " << error << '\n';
     return 1;
   }
   // Chat can extend an existing prefix. A new turn keeps its support KV but
@@ -405,7 +447,7 @@ int GenerateDeepSeekResponse(
   session.BeginRequest();
 
   if (opt.verbose) {
-    std::cout << "[Engine]: DeepSeek V4 Flash ROCm (gfx1151)\n"
+    std::cout << "[Engine]: " << Ds::kName << " ROCm (gfx1151)\n"
               << "Model: " << model->ModelName() << '\n'
               << "Prompt tokens: " << prompt_tokens.size() << '\n'
               << "Max tokens: " << opt.max_tokens << '\n'
@@ -416,7 +458,7 @@ int GenerateDeepSeekResponse(
   sampling_history.reserve(prompt_tokens.size());
   for (const int token : prompt_tokens) {
     if (token < 0) {
-      std::cerr << "DeepSeek V4 Flash produced an invalid prompt token\n";
+      std::cerr << Ds::kName << " produced an invalid prompt token\n";
       return 1;
     }
     sampling_history.push_back(static_cast<sampling::TokenId>(token));
@@ -432,13 +474,14 @@ int GenerateDeepSeekResponse(
     std::vector<int> emitted;
     bool stop = false;
     while (generated < opt.max_tokens && !stop) {
-      std::optional<models::deepseek_v4_flash::DsparkSamplerBridge> bridge;
+      std::optional<typename Ds::DsparkSamplerBridge> bridge;
       if (!opt.sampling.can_use_unmodified_argmax())
         bridge.emplace(sampler);
       if (!session.DsparkStep(opt.max_tokens - generated, opt.draft_tokens,
                               &emitted, &error,
                               bridge ? bridge->hook() : nullptr, true)) {
-        std::cerr << "\nDeepSeek V4 Flash speculative decode failed: " << error
+        std::cerr << "\n"
+                  << Ds::kName << " speculative decode failed: " << error
                   << '\n';
         return 1;
       }
@@ -462,8 +505,8 @@ int GenerateDeepSeekResponse(
     for (; generated < opt.max_tokens; ++generated) {
       const auto logits = session.CopyLogits(&error);
       if (logits.empty()) {
-        std::cerr << "\nDeepSeek V4 Flash token selection failed: " << error
-                  << '\n';
+        std::cerr << "\n"
+                  << Ds::kName << " token selection failed: " << error << '\n';
         return 1;
       }
       const int token = static_cast<int>(sampler.Sample(logits));
@@ -479,7 +522,7 @@ int GenerateDeepSeekResponse(
       // prefill changes that call's boundary and numerical trajectory.
       if ((reply != nullptr || generated + 1 < opt.max_tokens) &&
           !session.Evaluate(token, &error)) {
-        std::cerr << "\nDeepSeek V4 Flash decode failed: " << error << '\n';
+        std::cerr << "\n" << Ds::kName << " decode failed: " << error << '\n';
         return 1;
       }
     }
@@ -527,9 +570,10 @@ int GenerateDeepSeekResponse(
   }
   return 0;
 }
+template<typename Ds>
 int RunDeepSeekPrompt(const PromptOptions& opt, const core::GgufReader& reader,
                       std::chrono::steady_clock::time_point load_start) {
-  auto model = LoadDeepSeekModel(opt, reader, load_start);
+  auto model = LoadDeepSeekModel<Ds>(opt, reader, load_start);
   if (!model)
     return 1;
   std::string error;
@@ -544,7 +588,7 @@ int RunDeepSeekPrompt(const PromptOptions& opt, const core::GgufReader& reader,
   std::vector<int> prompt_tokens;
   if (opt.use_chat_template) {
     const auto reasoning = PromptReasoningOptions(opt);
-    std::vector<models::deepseek_v4_flash::ChatMessage> messages;
+    std::vector<typename Ds::ChatMessage> messages;
     if (!opt.system_prompt.empty()) {
       messages.push_back({.role = "system",
                           .content = opt.system_prompt,
@@ -555,15 +599,15 @@ int RunDeepSeekPrompt(const PromptOptions& opt, const core::GgufReader& reader,
                         .content = opt.prompt_text,
                         .reasoning_content = {},
                         .tool_calls = {}});
-    prompt_tokens = model->EncodeChat(
-        messages,
-        models::deepseek_v4_flash::ResolveDeepSeekChatOptions(reasoning));
+    prompt_tokens =
+        model->EncodeChat(messages, Ds::ResolveChatOptions(reasoning));
   } else {
     prompt_tokens = model->Tokenize(opt.prompt_text);
   }
-  return GenerateDeepSeekResponse(opt, model, *session, prompt_tokens);
+  return GenerateDeepSeekResponse<Ds>(opt, model, *session, prompt_tokens);
 }
 
+template<typename Ds>
 int RunDeepSeekChat(const PromptOptions& opt, const core::GgufReader& reader,
                     std::chrono::steady_clock::time_point load_start) {
   if (!opt.use_chat_template) {
@@ -571,7 +615,7 @@ int RunDeepSeekChat(const PromptOptions& opt, const core::GgufReader& reader,
                  "--raw for raw text\n";
     return 1;
   }
-  auto model = LoadDeepSeekModel(opt, reader, load_start);
+  auto model = LoadDeepSeekModel<Ds>(opt, reader, load_start);
   if (!model)
     return 1;
   std::string error;
@@ -583,7 +627,7 @@ int RunDeepSeekChat(const PromptOptions& opt, const core::GgufReader& reader,
     std::cerr << "DeepSeek session creation failed: " << error << '\n';
     return 1;
   }
-  std::vector<models::deepseek_v4_flash::ChatMessage> history;
+  std::vector<typename Ds::ChatMessage> history;
   if (!opt.system_prompt.empty()) {
     history.push_back({.role = "system",
                        .content = opt.system_prompt,
@@ -591,9 +635,8 @@ int RunDeepSeekChat(const PromptOptions& opt, const core::GgufReader& reader,
                        .tool_calls = {}});
   }
   const auto reasoning = PromptReasoningOptions(opt);
-  const auto chat_options =
-      models::deepseek_v4_flash::ResolveDeepSeekChatOptions(reasoning);
-  std::cout << "=== Gufo Interactive Chat (DeepSeek V4 Flash) ===\n"
+  const auto chat_options = Ds::ResolveChatOptions(reasoning);
+  std::cout << "=== Gufo Interactive Chat (" << Ds::kName << ") ===\n"
             << "Type 'exit' or Ctrl+D to quit.\n\n";
   for (std::string input;;) {
     std::cout << ">>> User: " << std::flush;
@@ -608,9 +651,9 @@ int RunDeepSeekChat(const PromptOptions& opt, const core::GgufReader& reader,
     const auto tokens = model->EncodeChat(history, chat_options);
     std::cout << "<<< Assistant: ";
     std::string reply;
-    if (GenerateDeepSeekResponse(opt, model, *session, tokens, &reply) != 0)
+    if (GenerateDeepSeekResponse<Ds>(opt, model, *session, tokens, &reply) != 0)
       return 1;
-    models::deepseek_v4_flash::ChatMessage response{};
+    typename Ds::ChatMessage response{};
     response.role = "assistant";
     if (chat_options.enable_thinking) {
       constexpr std::string_view end = "</think>";
@@ -1051,15 +1094,19 @@ int RunPrompt(std::span<const char* const> args) {
     std::cerr << "--image-tokens applies to Gemma 4 models\n";
     return 2;
   }
-  if (IsDeepSeekV4Flash(*reader)) {
+  if (IsDeepSeekV4Flash(*reader) || IsDeepSeekV41Flash(*reader)) {
     if (!opt.image_paths.empty() || !opt.vision_model_path.empty()) {
       std::cerr << "DeepSeek does not support image input\n";
       return 2;
     }
-    return RunDeepSeekPrompt(opt, *reader, model_load_start);
+    return IsDeepSeekV41Flash(*reader)
+               ? RunDeepSeekPrompt<DeepSeekV41FlashPrompt>(opt, *reader,
+                                                           model_load_start)
+               : RunDeepSeekPrompt<DeepSeekV4FlashPrompt>(opt, *reader,
+                                                          model_load_start);
   }
 #else
-  if (IsDeepSeekV4Flash(*reader)) {
+  if (IsDeepSeekV4Flash(*reader) || IsDeepSeekV41Flash(*reader)) {
     std::cerr << "DeepSeek V4 Flash requires ENGINE_ENABLE_HIP=ON\n";
     PrintModelLoadTime(model_load_start, false);
     return 1;
@@ -1281,15 +1328,19 @@ int RunChat(std::span<const char* const> args) {
     std::cerr << "--image-tokens applies to Gemma 4 models\n";
     return 2;
   }
-  if (IsDeepSeekV4Flash(*reader)) {
+  if (IsDeepSeekV4Flash(*reader) || IsDeepSeekV41Flash(*reader)) {
     if (!opt.image_paths.empty() || !opt.vision_model_path.empty()) {
       std::cerr << "DeepSeek does not support image input\n";
       return 2;
     }
-    return RunDeepSeekChat(opt, *reader, model_load_start);
+    return IsDeepSeekV41Flash(*reader)
+               ? RunDeepSeekChat<DeepSeekV41FlashPrompt>(opt, *reader,
+                                                         model_load_start)
+               : RunDeepSeekChat<DeepSeekV4FlashPrompt>(opt, *reader,
+                                                        model_load_start);
   }
 #else
-  if (IsDeepSeekV4Flash(*reader)) {
+  if (IsDeepSeekV4Flash(*reader) || IsDeepSeekV41Flash(*reader)) {
     std::cerr << "DeepSeek V4 Flash requires ENGINE_ENABLE_HIP=ON\n";
     return 1;
   }
