@@ -26,6 +26,10 @@ int ds41_v41_matmul_f32(const float* w, const float* x, float* out, uint32_t row
  * picks the default) waves share a row group. Returns 1 for other types. */
 int ds41_v41_gemv(int type, const void* w, const float* x, float* y, uint32_t m, uint32_t k, uint32_t rows_per_x,
                   int slices);
+/* Two matrices of one type and width k over the same x in one launch:
+ * y1 = W1 x (m1 rows), y2 = W2 x (m2 rows). */
+int ds41_v41_gemv_pair(int type, const void* w1, float* y1, uint32_t m1, const void* w2, float* y2, uint32_t m2,
+                       const float* x, uint32_t k, int slices);
 /* Gate and up matrices of the same type and shape over one x, fused with the
  * SwiGLU of ds41_v41_swiglu (no weight): y = silu(min(gate x, limit)) *
  * clamp(up x, +-limit). */
@@ -65,6 +69,11 @@ int ds41_v41_rope_tail(float* x, uint32_t rows, uint32_t row_dim, uint32_t rope_
 int ds41_v41_rope_fp8(float* x, uint32_t rows, uint32_t row_dim, uint32_t rope_dim, const float* inv_freq,
                       uint32_t pos0, uint32_t rows_per_pos, uint32_t pos_step, int inverse);
 int ds41_v41_fp4_fake_quant(float* x, uint32_t n, uint32_t block, int e4m3_scale);
+/* qr = RMSNorm(qa) * q_weight, and kvn = RMSNorm(kv) * kv_weight followed by
+ * ds41_v41_rope_fp8 (token t at pos0 + t), for n tokens in one launch. */
+int ds41_v41_q_kv_norm(const float* qa, const float* q_weight, float* qr, uint32_t q_dim, const float* kv,
+                       const float* kv_weight, float* kvn, uint32_t kv_dim, uint32_t rope_dim, const float* inv_freq,
+                       uint32_t pos0, uint32_t n, float eps);
 
 /* mHC per token. mixes[t, 24] = (fn . flatten(h[t])) * rsqrt(mean(h[t]^2) + eps). */
 int ds41_v41_hc_mixes(const float* fn, const float* h, float* mixes, uint32_t hc, uint32_t dim, float eps,
@@ -82,6 +91,9 @@ int ds41_v41_hc_collapse_norm(const float* h, const float* pre, const float* wei
 /* out[t, b, i] = post[t, b] * y[t, i] + sum_a comb[t, a, b] * residual[t, a, i]. */
 int ds41_v41_hc_expand(const float* y, const float* residual, const float* post, const float* comb, float* out,
                        uint32_t hc, uint32_t dim, uint32_t n);
+/* ds41_v41_hc_expand with y[t] = extra[t] + sum_r x[t, r, :]; extra may be NULL. */
+int ds41_v41_hc_expand_sum(const float* x, const float* extra, uint32_t rows, const float* residual, const float* post,
+                           const float* comb, float* out, uint32_t hc, uint32_t dim, uint32_t n);
 
 /* Ratio-r compressor over n tokens: token t stores (kv[t], score[t]) in
  * frontier slot (pos0 + t) % r; each token that completes a group appends
@@ -130,8 +142,6 @@ int ds41_v41_route(const float* logits, const float* bias, int32_t* ids, float* 
 /* out[s, i] = weight[s] * silu(min(gate, limit)) * clamp(up, -limit, limit); weight may be NULL. */
 int ds41_v41_swiglu(const float* gate, const float* up, const float* weight, float* out, uint32_t rows,
                     uint32_t n, float limit);
-/* out[t, i] = extra[t, i] + sum_r x[t, r, i]; extra may be NULL. */
-int ds41_v41_sum_rows(const float* x, const float* extra, float* out, uint32_t rows, uint32_t dim, uint32_t n);
 
 /* Engram: kv[t] holds hc keys then one value of `dim` each. Per copy c,
  * h[t, c] += sigmoid(signed_sqrt(dot)) * value. q/k are BF16 [hc, dim]. */

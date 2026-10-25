@@ -201,22 +201,12 @@ __global__ void rope_tail_kernel(float* x, uint32_t rows, uint32_t row_dim, uint
   p[1] = re * s + im * c;
 }
 
-/* Thread per 32-value block: the rope_tail rotation of the block's pairs
- * when it lies in the rope tail, then the FP8 fake quantization. */
-__global__ void rope_fp8_kernel(float* x, uint32_t blocks, uint32_t row_dim, uint32_t rope_dim,
-                                const float* inv_freq, uint32_t pos0, uint32_t rows_per_pos, uint32_t pos_step,
-                                int inverse) {
-  const uint32_t b = blockIdx.x * blockDim.x + threadIdx.x;
-  if (b >= blocks) return;
-  const uint32_t per_row = row_dim / 32;
-  const uint32_t row = b / per_row;
-  const uint32_t col = (b % per_row) * 32;
-  float* p = x + (uint64_t)b * 32;
-  float v[32];
-#pragma unroll
-  for (int i = 0; i < 32; i++) v[i] = p[i];
+/* The 32 values at column col of a row at position pos: the rope_tail
+ * rotation of their pairs when they lie in the rope tail, then the FP8 fake
+ * quantization, stored to out. */
+__device__ __forceinline__ void rope_fp8_block(float (&v)[32], float* out, uint32_t col, uint32_t row_dim,
+                                               uint32_t rope_dim, const float* inv_freq, uint32_t pos, int inverse) {
   if (col >= row_dim - rope_dim) {
-    const uint32_t pos = pos0 + (row / rows_per_pos) * pos_step;
     const uint32_t pair0 = (col - (row_dim - rope_dim)) / 2;
 #pragma unroll
     for (int k = 0; k < 16; k++) {
@@ -234,7 +224,58 @@ __global__ void rope_fp8_kernel(float* x, uint32_t blocks, uint32_t row_dim, uin
   for (int i = 0; i < 32; i++) amax = fmaxf(amax, fabsf(v[i]));
   const float scale = pow2_ceil(fmaxf(amax, 1.0e-4f) / 448.0f);
 #pragma unroll
-  for (int i = 0; i < 32; i++) p[i] = round_e4m3(fminf(fmaxf(v[i] / scale, -448.0f), 448.0f)) * scale;
+  for (int i = 0; i < 32; i++) out[i] = round_e4m3(fminf(fmaxf(v[i] / scale, -448.0f), 448.0f)) * scale;
+}
+
+/* Thread per 32-value block. */
+__global__ void rope_fp8_kernel(float* x, uint32_t blocks, uint32_t row_dim, uint32_t rope_dim,
+                                const float* inv_freq, uint32_t pos0, uint32_t rows_per_pos, uint32_t pos_step,
+                                int inverse) {
+  const uint32_t b = blockIdx.x * blockDim.x + threadIdx.x;
+  if (b >= blocks) return;
+  const uint32_t per_row = row_dim / 32;
+  const uint32_t row = b / per_row;
+  float* p = x + (uint64_t)b * 32;
+  float v[32];
+#pragma unroll
+  for (int i = 0; i < 32; i++) v[i] = p[i];
+  rope_fp8_block(v, p, (b % per_row) * 32, row_dim, rope_dim, inv_freq, pos0 + (row / rows_per_pos) * pos_step,
+                 inverse);
+}
+
+/* Block (part, token): part 0 writes qr = RMSNorm(qa) * q_weight; part 1
+ * writes kvn = RMSNorm(kv) * kv_weight followed by rope_fp8 at position
+ * pos0 + token. The norm loops are rms_norm_kernel's, so the values match
+ * the separate launches; the KV row passes through shared memory to its
+ * 32-value blocks. */
+constexpr uint32_t kQkvThreads = 256;
+constexpr uint32_t kQkvMaxKv = 1024;
+__global__ void __launch_bounds__(kQkvThreads)
+    q_kv_norm_kernel(const float* qa, const float* q_weight, float* qr, uint32_t q_dim, const float* kv,
+                     const float* kv_weight, float* kvn, uint32_t kv_dim, uint32_t rope_dim, const float* inv_freq,
+                     uint32_t pos0, float eps) {
+  const uint32_t token = blockIdx.y;
+  const bool is_kv = blockIdx.x == 1;
+  const uint32_t n = is_kv ? kv_dim : q_dim;
+  const float* r = (is_kv ? kv : qa) + (uint64_t)token * n;
+  const float* weight = is_kv ? kv_weight : q_weight;
+  float ss = 0.0f;
+  for (uint32_t i = threadIdx.x; i < n; i += blockDim.x) ss += r[i] * r[i];
+  const float scale = rsqrtf(block_sum(ss) / (float)n + eps);
+  if (!is_kv) {
+    float* o = qr + (uint64_t)token * n;
+    for (uint32_t i = threadIdx.x; i < n; i += blockDim.x) o[i] = weight[i] * (r[i] * scale);
+    return;
+  }
+  __shared__ float row[kQkvMaxKv];
+  for (uint32_t i = threadIdx.x; i < n; i += blockDim.x) row[i] = weight[i] * (r[i] * scale);
+  __syncthreads();
+  const uint32_t col = threadIdx.x * 32;
+  if (col >= n) return;
+  float b[32];
+#pragma unroll
+  for (int i = 0; i < 32; i++) b[i] = row[col + i];
+  rope_fp8_block(b, kvn + (uint64_t)token * n + col, col, n, rope_dim, inv_freq, pos0 + token, 0);
 }
 
 __global__ void fp4_fake_quant_kernel(float* x, uint32_t blocks, uint32_t block, int e4m3_scale) {
@@ -533,6 +574,24 @@ __global__ void __launch_bounds__(kCollapseThreads)
   for (uint32_t j = 0; j < kCollapsePer; j++) {
     const uint32_t i = threadIdx.x + j * kCollapseThreads;
     if (i < dim) out[t * dim + i] = weight[i] * (v[j] * scale);
+  }
+}
+
+/* hc_expand of y = extra + sum_r x[r]. */
+__global__ void hc_expand_sum_kernel(const float* x, const float* extra, uint32_t rows, const float* residual,
+                                     const float* post, const float* comb, float* out, uint32_t hc, uint32_t dim) {
+  const uint32_t i = blockIdx.x * blockDim.x + threadIdx.x;
+  if (i >= dim) return;
+  const uint64_t t = blockIdx.y;
+  float y = extra ? extra[t * dim + i] : 0.0f;
+  for (uint32_t r = 0; r < rows; r++) y += x[(t * rows + r) * dim + i];
+  const float* rt = residual + t * hc * dim;
+  const float* ct = comb + t * hc * hc;
+  float* ot = out + t * hc * dim;
+  for (uint32_t b = 0; b < hc; b++) {
+    float acc = post[t * hc + b] * y;
+    for (uint32_t a = 0; a < hc; a++) acc += ct[a * hc + b] * rt[(uint64_t)a * dim + i];
+    ot[(uint64_t)b * dim + i] = acc;
   }
 }
 
@@ -1261,15 +1320,6 @@ __global__ void swiglu_kernel(const float* gate, const float* up, const float* w
   out[i] = weight ? weight[i / n] * h : h;
 }
 
-__global__ void sum_rows_kernel(const float* x, const float* extra, float* out, uint32_t rows, uint32_t dim) {
-  const uint32_t i = blockIdx.x * blockDim.x + threadIdx.x;
-  if (i >= dim) return;
-  const uint64_t t = blockIdx.y;
-  float acc = extra ? extra[t * dim + i] : 0.0f;
-  for (uint32_t r = 0; r < rows; r++) acc += x[(t * rows + r) * dim + i];
-  out[t * dim + i] = acc;
-}
-
 /* Block (copy, token). */
 __global__ void engram_gate_kernel(float* h, const float* kv, const uint16_t* q, const uint16_t* k, uint32_t dim,
                                    uint32_t hc, float eps) {
@@ -1357,6 +1407,17 @@ extern "C" int ds41_v41_rope_fp8(float* x, uint32_t rows, uint32_t row_dim, uint
   return launch_ok("rope fp8 quant");
 }
 
+extern "C" int ds41_v41_q_kv_norm(const float* qa, const float* q_weight, float* qr, uint32_t q_dim, const float* kv,
+                                  const float* kv_weight, float* kvn, uint32_t kv_dim, uint32_t rope_dim,
+                                  const float* inv_freq, uint32_t pos0, uint32_t n, float eps) {
+  if (kv_dim > kQkvMaxKv || kv_dim % 32 != 0 || rope_dim % 32 != 0 || rope_dim > kv_dim)
+    return 1;
+  if (n == 0) return 0;
+  q_kv_norm_kernel<<<dim3(2, n), kQkvThreads>>>(qa, q_weight, qr, q_dim, kv, kv_weight, kvn, kv_dim, rope_dim,
+                                                inv_freq, pos0, eps);
+  return launch_ok("q kv norm");
+}
+
 extern "C" int ds41_v41_fp4_fake_quant(float* x, uint32_t n, uint32_t block, int e4m3_scale) {
   if (n == 0) return 0;
   fp4_fake_quant_kernel<<<blocks_for(n / block), kThreads>>>(x, n / block, block, e4m3_scale);
@@ -1405,6 +1466,13 @@ extern "C" int ds41_v41_hc_expand(const float* y, const float* residual, const f
                                   float* out, uint32_t hc, uint32_t dim, uint32_t n) {
   hc_expand_kernel<<<dim3(blocks_for(dim), n), kThreads>>>(y, residual, post, comb, out, hc, dim);
   return launch_ok("hc expand");
+}
+
+extern "C" int ds41_v41_hc_expand_sum(const float* x, const float* extra, uint32_t rows, const float* residual,
+                                      const float* post, const float* comb, float* out, uint32_t hc, uint32_t dim,
+                                      uint32_t n) {
+  hc_expand_sum_kernel<<<dim3(blocks_for(dim), n), kThreads>>>(x, extra, rows, residual, post, comb, out, hc, dim);
+  return launch_ok("hc expand sum");
 }
 
 extern "C" int ds41_v41_compress_pool(const float* kv, const float* score, float* state_kv, float* state_score,
@@ -1503,12 +1571,6 @@ extern "C" int ds41_v41_swiglu(const float* gate, const float* up, const float* 
                                uint32_t n, float limit) {
   swiglu_kernel<<<blocks_for((uint64_t)rows * n), kThreads>>>(gate, up, weight, out, rows, n, limit);
   return launch_ok("swiglu");
-}
-
-extern "C" int ds41_v41_sum_rows(const float* x, const float* extra, float* out, uint32_t rows, uint32_t dim,
-                                 uint32_t n) {
-  sum_rows_kernel<<<dim3(blocks_for(dim), n), kThreads>>>(x, extra, out, rows, dim);
-  return launch_ok("sum rows");
 }
 
 extern "C" int ds41_v41_engram_gate(float* h, const float* kv, const uint16_t* q, const uint16_t* k, uint32_t hc,

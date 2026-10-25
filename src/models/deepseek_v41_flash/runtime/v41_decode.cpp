@@ -202,7 +202,7 @@ struct ds41_decoder {
   float *router = nullptr, *route_w = nullptr;
   int32_t* route_ids = nullptr;
   float *g6 = nullptr, *u6 = nullptr, *mid6 = nullptr, *down6 = nullptr;
-  float *sg = nullptr, *su = nullptr, *sm = nullptr, *sd = nullptr, *moe_out = nullptr;
+  float *sg = nullptr, *su = nullptr, *sm = nullptr, *sd = nullptr;
   float *engram_in = nullptr, *engram_kv = nullptr, *logits = nullptr;
   /* Pinned staging for the Engram rows of batches up to kEngramPinnedTokens,
    * per Engram layer, so the upload does not wait for the queue to drain.
@@ -396,15 +396,23 @@ bool attention(ds41_decoder* d, uint32_t il, uint32_t n) {
   const float* freq = layer_freq(d, il);
   const float eps = DS41_RMS_EPS;
 
-  if (!linear(d, l->attn_q_a, d->xn, d->qa, n) ||
-      ds41_v41_rms_norm(d->qa, f32(d, l->attn_q_a_norm), d->qr, n, DS41_N_LORA_Q, eps) ||
+  /* q_a and kv share the input; one token takes both in one launch. */
+  const ds41_tensor* wqa = l->attn_q_a;
+  const ds41_tensor* wkv = l->attn_kv;
+  const bool pair = n == 1 && wqa->type == wkv->type && wqa->dim[0] == wkv->dim[0] && gemv_type(wqa->type);
+  if (pair) {
+    const uint32_t k = (uint32_t)wqa->dim[0];
+    const uint32_t m = (uint32_t)((wqa->elements + wkv->elements) / k);
+    if (ds41_v41_gemv_pair((int)wqa->type, dev(d, wqa), d->qa, DS41_N_LORA_Q, dev(d, wkv), d->kv, kHeadDim, d->xn, k,
+                           gemv_slices(m, k)))
+      return false;
+  } else if (!linear(d, wqa, d->xn, d->qa, n) || !linear(d, wkv, d->xn, d->kv, n)) {
+    return false;
+  }
+  if (ds41_v41_q_kv_norm(d->qa, f32(d, l->attn_q_a_norm), d->qr, DS41_N_LORA_Q, d->kv, f32(d, l->attn_kv_a_norm),
+                         d->kvn, kHeadDim, kRot, freq, pos0, n, eps) ||
       !linear(d, l->attn_q_b, d->qr, d->q, n) ||
       ds41_v41_rope_tail(d->q, n * DS41_N_HEAD, kHeadDim, kRot, freq, pos0, DS41_N_HEAD, 1, 0))
-    return false;
-
-  if (!linear(d, l->attn_kv, d->xn, d->kv, n) ||
-      ds41_v41_rms_norm(d->kv, f32(d, l->attn_kv_a_norm), d->kvn, n, kHeadDim, eps) ||
-      ds41_v41_rope_fp8(d->kvn, n, kHeadDim, kRot, freq, pos0, 1, 1, 0))
     return false;
 
   const float* comp = nullptr;
@@ -617,8 +625,8 @@ bool moe(ds41_decoder* d, uint32_t il, uint32_t n) {
              ds41_v41_swiglu(d->sg, d->su, nullptr, d->sm, n, DS41_N_FF_EXP, kSwigluLimit)) {
     return false;
   }
-  if (!linear(d, l->ffn_down_shexp, d->sm, d->sd, n)) return false;
-  return ds41_v41_sum_rows(d->down6, d->sd, d->moe_out, used, kDim, n) == 0;
+  /* The routed rows (down6) and the shared output (sd) are summed by block()'s hc expand. */
+  return linear(d, l->ffn_down_shexp, d->sm, d->sd, n);
 }
 
 bool block(ds41_decoder* d, uint32_t il, int prev, int next, uint32_t n) {
@@ -634,7 +642,8 @@ bool block(ds41_decoder* d, uint32_t il, int prev, int next, uint32_t n) {
   if (!hc_mix(d, l->hc_ffn_fn, l->hc_ffn_scale, l->hc_ffn_base, d->h2, d->pre[prev], d->ffn_post, d->ffn_comb, n) ||
       ds41_v41_hc_collapse_norm(d->h2, d->pre[next], f32(d, l->ffn_norm), d->xn, kHc, kDim, eps, n) ||
       !moe(d, il, n) ||
-      ds41_v41_hc_expand(d->moe_out, d->h2, d->ffn_post, d->ffn_comb, d->h, kHc, kDim, n))
+      ds41_v41_hc_expand_sum(d->down6, d->sd, DS41_N_EXPERT_USED, d->h2, d->ffn_post, d->ffn_comb, d->h, kHc, kDim,
+                             n))
     return false;
   return true;
 }
@@ -719,7 +728,6 @@ ds41_decoder* ds41_decoder_create(ds41_engine* engine, uint32_t context) {
       {&d->su, cap * DS41_N_FF_EXP},
       {&d->sm, cap * DS41_N_FF_EXP},
       {&d->sd, cap * kDim},
-      {&d->moe_out, cap * kDim},
       {&d->engram_in, cap * kEngramIn},
       {&d->engram_kv, cap * kEngramOut},
       {&d->logits, (uint64_t)kLogitRows * DS41_N_VOCAB},

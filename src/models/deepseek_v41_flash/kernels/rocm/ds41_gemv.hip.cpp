@@ -40,13 +40,15 @@ struct Format<8> {  // Q8_0, eight 34-byte blocks per 256 values
   }
 };
 
-/* Row r reads x + (r / rows_per_x) * k. With kSwiGLU, w_up holds a second
- * matrix of the same shape whose rows are taken in the same pass, and row r
- * stores silu(min(gate, limit)) * clamp(up, +-limit). */
+/* Row r reads x + (r / rows_per_x) * k. Rows from m1 on come from w2 and go
+ * to y2 (row r - m1). With kSwiGLU, w_up holds a second matrix of the same
+ * shape whose rows are taken in the same pass, and row r stores
+ * silu(min(gate, limit)) * clamp(up, +-limit). */
 template <int kType, int S, bool kSwiGLU>
 __global__ void __launch_bounds__(kWave* kWaves)
     gemv_kernel(const uint8_t* __restrict__ w, const uint8_t* __restrict__ w_up, float limit,
-                const float* __restrict__ x, float* __restrict__ y, uint32_t m, uint32_t k, uint32_t rows_per_x) {
+                const float* __restrict__ x, float* __restrict__ y, uint32_t m, uint32_t k, uint32_t rows_per_x,
+                const uint8_t* __restrict__ w2, float* __restrict__ y2, uint32_t m1) {
   using F = Format<kType>;
   constexpr int kRowsPerWave = kWave / F::kTasks;
   constexpr int kGroups = kWaves / S;
@@ -61,9 +63,10 @@ __global__ void __launch_bounds__(kWave* kWaves)
   const uint32_t blocks_per_row = k / 256;
   float acc = 0.0f;
   float acc_up = 0.0f;
+  const bool second = row >= m1;
   if (row < m) {
-    const uint64_t offset = (uint64_t)row * blocks_per_row * F::kBlockBytes;
-    const uint8_t* base = w + offset;
+    const uint64_t offset = (uint64_t)(second ? row - m1 : row) * blocks_per_row * F::kBlockBytes;
+    const uint8_t* base = (second ? w2 : w) + offset;
     const float* xr = x + (uint64_t)(row / rows_per_x) * k;
 #pragma unroll 2
     for (uint32_t blk = slice; blk < blocks_per_row; blk += S) {
@@ -96,40 +99,50 @@ __global__ void __launch_bounds__(kWave* kWaves)
       g = fminf(g, limit);
     }
     y[row] = g / (1.0f + expf(-g)) * u;
+  } else if (second) {
+    y2[row - m1] = acc;
   } else {
     y[row] = acc;
   }
 }
 
+/* The second matrix of a pair (w2, y2 from row m1), or none (m1 = m). */
+struct Second {
+  const void* w;
+  float* y;
+  uint32_t m1;
+};
+
 template <int kType, int S>
 void launch(const void* w, const void* w_up, float limit, const float* x, float* y, uint32_t m, uint32_t k,
-            uint32_t rows_per_x) {
+            uint32_t rows_per_x, Second second) {
   constexpr uint32_t kRows = (kWave / Format<kType>::kTasks) * (kWaves / S);
   const uint32_t blocks = (m + kRows - 1) / kRows;
+  const auto* w2 = static_cast<const uint8_t*>(second.w);
   if (w_up)
     gemv_kernel<kType, S, true><<<blocks, kWave * kWaves>>>(static_cast<const uint8_t*>(w),
                                                              static_cast<const uint8_t*>(w_up), limit, x, y, m, k,
-                                                             rows_per_x);
+                                                             rows_per_x, w2, second.y, second.m1);
   else
     gemv_kernel<kType, S, false><<<blocks, kWave * kWaves>>>(static_cast<const uint8_t*>(w), nullptr, 0.0f, x, y, m,
-                                                              k, rows_per_x);
+                                                              k, rows_per_x, w2, second.y, second.m1);
 }
 
 template <int kType>
 int dispatch(const void* w, const void* w_up, float limit, const float* x, float* y, uint32_t m, uint32_t k,
-             uint32_t rows_per_x, int slices) {
+             uint32_t rows_per_x, int slices, Second second) {
   switch (slices) {
   case 1:
-    launch<kType, 1>(w, w_up, limit, x, y, m, k, rows_per_x);
+    launch<kType, 1>(w, w_up, limit, x, y, m, k, rows_per_x, second);
     break;
   case 2:
-    launch<kType, 2>(w, w_up, limit, x, y, m, k, rows_per_x);
+    launch<kType, 2>(w, w_up, limit, x, y, m, k, rows_per_x, second);
     break;
   case 4:
-    launch<kType, 4>(w, w_up, limit, x, y, m, k, rows_per_x);
+    launch<kType, 4>(w, w_up, limit, x, y, m, k, rows_per_x, second);
     break;
   case 8:
-    launch<kType, 8>(w, w_up, limit, x, y, m, k, rows_per_x);
+    launch<kType, 8>(w, w_up, limit, x, y, m, k, rows_per_x, second);
     break;
   default:
     return 1;
@@ -145,15 +158,16 @@ int dispatch(const void* w, const void* w_up, float limit, const float* x, float
 namespace {
 
 int run(int type, const void* w, const void* w_up, float limit, const float* x, float* y, uint32_t m, uint32_t k,
-        uint32_t rows_per_x, int slices) {
+        uint32_t rows_per_x, int slices, Second second = {nullptr, nullptr, 0}) {
   if (k % 256 != 0 || m == 0) return 1;
   if (rows_per_x == 0) rows_per_x = m;
   if (slices <= 0) slices = 8;
+  if (!second.w) second.m1 = m;
   switch (type) {
   case 13:
-    return dispatch<13>(w, w_up, limit, x, y, m, k, rows_per_x, slices);
+    return dispatch<13>(w, w_up, limit, x, y, m, k, rows_per_x, slices, second);
   case 8:
-    return dispatch<8>(w, w_up, limit, x, y, m, k, rows_per_x, slices);
+    return dispatch<8>(w, w_up, limit, x, y, m, k, rows_per_x, slices, second);
   default:
     return 1;
   }
@@ -164,6 +178,12 @@ int run(int type, const void* w, const void* w_up, float limit, const float* x, 
 extern "C" int ds41_v41_gemv(int type, const void* w, const float* x, float* y, uint32_t m, uint32_t k,
                              uint32_t rows_per_x, int slices) {
   return run(type, w, nullptr, 0.0f, x, y, m, k, rows_per_x, slices);
+}
+
+extern "C" int ds41_v41_gemv_pair(int type, const void* w1, float* y1, uint32_t m1, const void* w2, float* y2,
+                                  uint32_t m2, const float* x, uint32_t k, int slices) {
+  if (!w2 || m2 == 0) return 1;
+  return run(type, w1, nullptr, 0.0f, x, y1, m1 + m2, k, 0, slices, Second{w2, y2, m1});
 }
 
 extern "C" int ds41_v41_gemv_swiglu(int type, const void* gate, const void* up, const float* x, float* y, uint32_t m,
