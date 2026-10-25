@@ -157,6 +157,27 @@ Flags that remain, from alternating runs:
   and concurrent decodes count up to one step more while the requests end
   sooner (cache-concurrency `identical`: 8,107 against 8,124-8,140 ms).
 
+## DSpark drafter (M5)
+
+`tools/ds41/dspark_reference.py` recomputes a draft on the CPU from the
+features and anchor that `ds41_load_probe --dspark-dump` writes, following
+the official DSpark block. On the 1,871-token roadmap prompt with the
+unsloth Q8_0 drafter (MXFP4 experts) the five drafts match the GPU exactly;
+head logits before the Markov bias agree to cosine 0.9995-0.9998 (max
+|diff| 0.3-0.7 on logits up to 13-21).
+
+Drafts never change the output: the target evaluates the anchor and the
+drafts in one batch with decode numerics, the request's sampler draws every
+row, and the first rejected draw becomes the next token. Greedy generation
+with DSpark is token-identical to plain decoding in every probe run (128,
+256 and 384 tokens, both drafters, every draft width) and over HTTP, also
+when the request follows a sampled one and restores from the cache.
+
+`ds41.attention` checks the drafter's block attention (ring rows with
+wrap-around plus every block row, with sinks) against an fp64 reference
+(≤ 7e-7 relative), the hc mean exactly and the Markov argmax (first index
+of equal maxima, non-finite values skipped).
+
 ## Batched prefill and M2 kernels
 
 The same 3K positions scored through 2048-token batches (matrix-core
