@@ -66,8 +66,6 @@ pinned memory; hc collapse + RMSNorm, rope + FP8 quantization and (below
   copyBuffer 46, the q_a and KV RMSNorms 40 each.
 - hc mixes read 2 MB of F32 weights in ~14 µs (80 per token) regardless of
   how many blocks share a row.
-- `topk_kernel` takes 41-45 µs per call at 2K context on the indexer layers
-  and grows with context.
 - ~90 µs of host work at the start of each step (embedding dequant and two
   synchronous uploads take ~70 µs); a device-side embedding lookup would
   remove most of it.

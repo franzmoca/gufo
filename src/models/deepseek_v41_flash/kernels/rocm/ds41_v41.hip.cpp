@@ -641,7 +641,8 @@ __device__ __forceinline__ uint32_t ordered_key(float v) {
  * above it and the lowest-index ties, both in index order. */
 __global__ void topk_kernel(const float* all_score, uint64_t score_stride, uint32_t* all_out, uint32_t k_max,
                             uint32_t pos0, uint32_t ratio, uint32_t div) {
-  __shared__ uint32_t threshold;
+  __shared__ uint32_t hist[256];
+  __shared__ uint32_t sel_prefix, sel_rank;
   const uint32_t token = blockIdx.x;
   const uint32_t n = (comp_len(pos0 + token, ratio) + div - 1) / div;
   const uint32_t k = min(k_max, n);
@@ -651,23 +652,54 @@ __global__ void topk_kernel(const float* all_score, uint64_t score_stride, uint3
   const uint32_t per = (n + blockDim.x - 1) / blockDim.x;
   const uint32_t begin = min(n, threadIdx.x * per);
   const uint32_t end = min(n, begin + per);
-  uint32_t lo = 0u;
-  uint32_t hi = 0xffffffffu;
-  /* Largest t with count(key >= t) >= k. */
-  while (lo < hi) {
-    const uint32_t mid = lo + (uint32_t)(((uint64_t)hi - lo + 1u) / 2u);
-    uint32_t count = 0;
-    for (uint32_t i = begin; i < end; i++) count += ordered_key(score[i]) >= mid;
-    uint32_t total = 0;
-    (void)block_exclusive_scan(count, &total);
-    if (total >= k)
-      lo = mid;
-    else
-      hi = mid - 1u;
+  /* The k-th largest key, a byte per pass from the top: histogram the keys
+   * that match the bytes chosen so far, then one wave finds the byte holding
+   * the rank (lane L scans digits 255 - 8L down to 248 - 8L). */
+  uint32_t prefix = 0u;
+  uint32_t mask = 0u;
+  uint32_t rank = k;
+  for (int shift = 24; shift >= 0; shift -= 8) {
+    for (uint32_t i = threadIdx.x; i < 256; i += blockDim.x) hist[i] = 0u;
+    __syncthreads();
+    for (uint32_t i = begin; i < end; i++) {
+      const uint32_t key = ordered_key(score[i]);
+      if ((key & mask) == prefix) atomicAdd(&hist[(key >> shift) & 255u], 1u);
+    }
+    __syncthreads();
+    if (threadIdx.x < 32) {
+      const uint32_t lane = threadIdx.x;
+      uint32_t c[8];
+      uint32_t sum = 0u;
+#pragma unroll
+      for (uint32_t j = 0; j < 8; j++) {
+        c[j] = hist[255u - 8u * lane - j];
+        sum += c[j];
+      }
+      uint32_t incl = sum;
+#pragma unroll
+      for (int o = 1; o < 32; o <<= 1) {
+        const uint32_t up = __shfl_up(incl, o, 32);
+        if ((int)lane >= o) incl += up;
+      }
+      uint32_t acc = incl - sum;
+      if (acc < rank && rank <= incl) {
+#pragma unroll
+        for (uint32_t j = 0; j < 8; j++) {
+          if (acc + c[j] >= rank) {
+            sel_prefix = prefix | ((255u - 8u * lane - j) << shift);
+            sel_rank = rank - acc;
+            break;
+          }
+          acc += c[j];
+        }
+      }
+    }
+    __syncthreads();
+    prefix = sel_prefix;
+    rank = sel_rank;
+    mask |= 255u << shift;
   }
-  if (threadIdx.x == 0) threshold = lo;
-  __syncthreads();
-  const uint32_t t = threshold;
+  const uint32_t t = prefix;
   uint32_t above = 0;
   uint32_t equal = 0;
   for (uint32_t i = begin; i < end; i++) {
