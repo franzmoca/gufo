@@ -25,12 +25,14 @@ same GGUF.
 | M4 Component cache and serving | next |
 | M5 DSpark and approximations | planned |
 | M6 Vision | planned |
+| M3 SSD expert streaming (IQ2_XXS) | planned, after M6 |
 | M7 Higher-precision Engram tables | planned |
-| M3 SSD expert streaming (IQ2_XXS) | deferred until after M7 |
 
-Order: M4, M5, M6, M7, then M3. Everything through M7 builds on the resident
-IQ1_M model; streaming experts would compete with the Engram reads for the SSD
-and with DSpark's multi-token verification for expert reuse.
+Order: M4, M5, M6, M3, then M7. M4-M6 build on the resident IQ1_M model;
+M3 then measures streamed IQ2_XXS experts against it, with DSpark and the
+Engram reads already in place, since both compete with streaming (DSpark's
+multi-token verification for expert reuse, Engram for the SSD). M7 measures
+Engram table formats on the final configuration.
 
 ## Memory budget
 
