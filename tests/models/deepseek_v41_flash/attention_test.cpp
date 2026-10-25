@@ -9,6 +9,7 @@
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <random>
 #include <vector>
@@ -21,6 +22,7 @@ constexpr uint32_t kHeads = 64;
 constexpr uint32_t kDim = 512;
 constexpr uint32_t kWindow = 128;
 constexpr uint32_t kTopK = 512;
+constexpr uint32_t kRope = 64;
 
 template<typename T>
 T* Device(const std::vector<T>& host) {
@@ -84,10 +86,48 @@ ds41_fp4_rows Fp4(std::vector<float>& v, uint32_t block, bool e4m3,
   return {dcodes, dscales};
 }
 
+/* The FP8 rounding of ds41_v41_rope_fp8 on 32-value blocks. */
+void HostFp8(float* v) {
+  float amax = 0.0f;
+  for (int i = 0; i < 32; i++)
+    amax = std::max(amax, std::fabs(v[i]));
+  int e = 0;
+  const float m = std::frexp(std::max(amax, 1.0e-4f) / 448.0f, &e);
+  const float scale = std::ldexp(1.0f, m == 0.5f ? e - 1 : e);
+  for (int i = 0; i < 32; i++) {
+    const float x = std::min(std::max(v[i] / scale, -448.0f), 448.0f);
+    const float a = std::fabs(x);
+    float step = 0.001953125f;
+    if (a >= 0.015625f) {
+      std::frexp(a, &e);
+      step = std::ldexp(1.0f, e - 4);
+    }
+    v[i] =
+        std::copysign(std::min(std::rint(a / step) * step, 448.0f), x) * scale;
+  }
+}
+
+/* Rotates the tail kRope values of a row at position pos as
+ * ds41_v41_rope_tail does (inverse: the opposite angle). */
+void HostRope(float* row, const std::vector<float>& freq, uint32_t pos,
+              bool inverse) {
+  for (uint32_t i = 0; i < kRope / 2; i++) {
+    const float angle = (float)pos * freq[i];
+    const float c = std::cos(angle);
+    const float s = inverse ? -std::sin(angle) : std::sin(angle);
+    float* x = row + (kDim - kRope) + 2 * i;
+    const float re = x[0], im = x[1];
+    x[0] = re * c - im * s;
+    x[1] = re * s + im * c;
+  }
+}
+
 /* n tokens at pos0 with `comp_rows` compressed rows at the given ratio;
- * returns the worst relative RMS error over tokens. */
+ * returns the worst relative RMS error over tokens. With `rope`, q is
+ * rotated first and the output gets the inverse rotation and the FP8
+ * rounding. */
 double Case(uint32_t pos0, uint32_t n, uint32_t ratio, uint32_t comp_rows,
-            std::mt19937& rng) {
+            bool rope, std::mt19937& rng) {
   std::normal_distribution<float> normal;
   auto fill = [&](std::size_t count, float scale) {
     std::vector<float> v(count);
@@ -125,19 +165,25 @@ double Case(uint32_t pos0, uint32_t n, uint32_t ratio, uint32_t comp_rows,
   std::vector<float> partial_host((std::size_t)n * kHeads *
                                   DS41_V41_ATTN_PARTIAL_PER_HEAD);
   auto* dpartial = Device(partial_host);
-  float* dout = nullptr;
+  std::vector<float> freq(kRope / 2);
+  for (uint32_t i = 0; i < kRope / 2; i++)
+    freq[i] = std::pow(160000.0f, -(float)(2 * i) / kRope);
+  auto* dfreq = Device(freq);
+  float *dout = nullptr, *dtable = nullptr;
   (void)hipMalloc(&dout, sizeof(float) * n * kHeads * kDim);
+  (void)hipMalloc(&dtable, sizeof(float) * n * kRope);
   const float scale = 1.0f / std::sqrt((float)kDim);
   const int rc =
       ds41_v41_attention(dq, dring, dchunk, kWindow, dcomp, didx, kTopK, ratio,
-                         dsinks, dout, dpartial, pos0, n, kHeads, kDim, scale);
+                         dsinks, dout, dpartial, pos0, n, kHeads, kDim, scale,
+                         rope ? dfreq : nullptr, kRope, dtable);
   std::vector<float> out((std::size_t)n * kHeads * kDim);
   (void)hipDeviceSynchronize();
   (void)hipMemcpy(out.data(), dout, out.size() * sizeof(float),
                   hipMemcpyDeviceToHost);
-  for (void* p :
-       {(void*)dq, (void*)dring, (void*)dchunk, (void*)dcodes, (void*)dscales,
-        (void*)dsinks, (void*)didx, (void*)dpartial, (void*)dout})
+  for (void* p : {(void*)dq, (void*)dring, (void*)dchunk, (void*)dcodes,
+                  (void*)dscales, (void*)dsinks, (void*)didx, (void*)dpartial,
+                  (void*)dout, (void*)dfreq, (void*)dtable})
     (void)hipFree(p);
   if (rc != 0)
     return INFINITY;
@@ -157,7 +203,11 @@ double Case(uint32_t pos0, uint32_t n, uint32_t ratio, uint32_t comp_rows,
           &comp[(std::size_t)idx[(std::size_t)t * kTopK + j] * kDim]);
     double err = 0.0, ref = 0.0;
     for (uint32_t h = 0; h < kHeads; h++) {
-      const float* qh = &q[((std::size_t)t * kHeads + h) * kDim];
+      std::vector<float> qrot(&q[((std::size_t)t * kHeads + h) * kDim],
+                              &q[((std::size_t)t * kHeads + h + 1) * kDim]);
+      if (rope)
+        HostRope(qrot.data(), freq, p, false);
+      const float* qh = qrot.data();
       std::vector<double> s(keys.size());
       double m = sinks[h];
       for (std::size_t j = 0; j < keys.size(); j++) {
@@ -170,11 +220,20 @@ double Case(uint32_t pos0, uint32_t n, uint32_t ratio, uint32_t comp_rows,
       double den = std::exp(sinks[h] - m);
       for (auto& v : s)
         den += (v = std::exp(v - m));
+      std::vector<float> o(kDim);
       for (uint32_t d = 0; d < kDim; d++) {
         double want = 0.0;
         for (std::size_t j = 0; j < keys.size(); j++)
           want += s[j] * keys[j][d];
-        want /= den;
+        o[d] = (float)(want / den);
+      }
+      if (rope) {
+        HostRope(o.data(), freq, p, true);
+        for (uint32_t d = 0; d < kDim; d += 32)
+          HostFp8(&o[d]);
+      }
+      for (uint32_t d = 0; d < kDim; d++) {
+        const double want = o[d];
         const double got = out[((std::size_t)t * kHeads + h) * kDim + d];
         if (!std::isfinite(got))
           return INFINITY;
@@ -348,38 +407,119 @@ double Bf16MatmulCase(uint32_t rows, uint32_t k, uint32_t n,
 
 }  // namespace
 
-int main() {
+/* Times the attention of n tokens at pos0 (ratio 0, 1 or 2, top-k rows
+ * drawn at random per token); returns the mean milliseconds per call. */
+double Bench(uint32_t pos0, uint32_t n, uint32_t ratio, bool rope,
+             std::mt19937& rng) {
+  const uint32_t comp_rows = ratio ? (pos0 + n) / ratio : 0;
+  std::vector<float> q((std::size_t)n * kHeads * kDim, 0.01f);
+  std::vector<float> ring((std::size_t)kWindow * kDim, 0.5f);
+  std::vector<float> chunk((std::size_t)n * kDim, 0.5f);
+  std::vector<uint8_t> codes((std::size_t)std::max(comp_rows, 1u) * kDim / 2);
+  std::vector<uint8_t> scales((std::size_t)std::max(comp_rows, 1u) * kDim / 16,
+                              0x38);
+  for (auto& c : codes)
+    c = static_cast<uint8_t>(rng());
+  std::vector<uint32_t> idx((std::size_t)n * kTopK, 0);
+  std::vector<uint32_t> rows(comp_rows);
+  for (uint32_t t = 0; t < n; t++) {
+    const uint32_t len = ratio ? (pos0 + t + 1) / ratio : 0;
+    for (uint32_t j = 0; j < len; j++)
+      rows[j] = j;
+    std::shuffle(rows.begin(), rows.begin() + len, rng);
+    for (uint32_t j = 0; j < std::min(len, kTopK); j++)
+      idx[(std::size_t)t * kTopK + j] = rows[j];
+  }
+  std::vector<float> sinks(kHeads, 0.0f), freq(32);
+  for (uint32_t i = 0; i < 32; i++)
+    freq[i] = std::pow(10000.0f, -(float)i / 32.0f);
+  auto* dq = Device(q);
+  auto* dring = Device(ring);
+  auto* dchunk = Device(chunk);
+  auto* dcodes = Device(codes);
+  auto* dscales = Device(scales);
+  auto* didx = Device(idx);
+  auto* dsinks = Device(sinks);
+  auto* dfreq = Device(freq);
+  float *dout = nullptr, *dtable = nullptr;
+  (void)hipMalloc(&dout, sizeof(float) * n * kHeads * kDim);
+  (void)hipMalloc(&dtable, sizeof(float) * n * 64);
+  const float scale = 1.0f / std::sqrt((float)kDim);
+  auto run = [&] {
+    return ds41_v41_attention(dq, dring, dchunk, kWindow, {dcodes, dscales},
+                              didx, kTopK, ratio, dsinks, dout, nullptr, pos0,
+                              n, kHeads, kDim, scale, rope ? dfreq : nullptr,
+                              64, dtable);
+  };
+  double ms = INFINITY;
+  if (run() == 0 && hipDeviceSynchronize() == hipSuccess) {
+    hipEvent_t start, stop;
+    (void)hipEventCreate(&start);
+    (void)hipEventCreate(&stop);
+    constexpr int kReps = 5;
+    (void)hipEventRecord(start);
+    for (int i = 0; i < kReps; i++)
+      (void)run();
+    (void)hipEventRecord(stop);
+    (void)hipEventSynchronize(stop);
+    float total = 0.0f;
+    (void)hipEventElapsedTime(&total, start, stop);
+    ms = total / kReps;
+  }
+  for (void* p :
+       {(void*)dq, (void*)dring, (void*)dchunk, (void*)dcodes, (void*)dscales,
+        (void*)didx, (void*)dsinks, (void*)dfreq, (void*)dout, (void*)dtable})
+    (void)hipFree(p);
+  return ms;
+}
+
+int main(int argc, char** argv) {
   int devices = 0;
   if (hipGetDeviceCount(&devices) != hipSuccess || devices == 0) {
     std::printf("no HIP device\n");
     return 77;
   }
+  /* --bench POS0 N RATIO [ROPE]: timing only. */
+  if (argc >= 5 && !std::strcmp(argv[1], "--bench")) {
+    std::mt19937 rng(7);
+    const uint32_t pos0 = (uint32_t)std::atoi(argv[2]);
+    const uint32_t n = (uint32_t)std::atoi(argv[3]);
+    const uint32_t ratio = (uint32_t)std::atoi(argv[4]);
+    const bool rope = argc >= 6 && std::atoi(argv[5]) != 0;
+    std::printf("attention pos0=%u n=%u ratio=%u rope=%d %.3f ms\n", pos0, n,
+                ratio, rope ? 1 : 0, Bench(pos0, n, ratio, rope, rng));
+    return 0;
+  }
   struct Shape {
     uint32_t pos0, n, ratio, comp_rows;
+    bool rope;
     double tolerance;  // split decode is fp32; the batched form stages half
-                       // operands
+                       // operands; the FP8 rounding flips a few steps
   };
   const Shape shapes[] = {
-      {12, 1, 0, 0, 1e-5},      {12, 1, 2, 6, 1e-5},
-      {700, 1, 2, 350, 1e-5},   {2047, 1, 1, 2048, 1e-5},
-      {3000, 3, 1, 3003, 1e-5}, {0, 37, 2, 18, 2e-3},
-      {200, 64, 1, 264, 2e-3},  {2048, 40, 1, 2088, 2e-3},
+      {12, 1, 0, 0, false, 1e-5},      {12, 1, 2, 6, false, 1e-5},
+      {700, 1, 2, 350, false, 1e-5},   {2047, 1, 1, 2048, false, 1e-5},
+      {3000, 3, 1, 3003, false, 1e-5}, {0, 37, 2, 18, false, 2e-3},
+      {200, 64, 1, 264, false, 2e-3},  {2048, 40, 1, 2088, false, 2e-3},
+      {300, 9, 0, 0, false, 2e-3},     {700, 1, 2, 350, true, 2e-2},
+      {3000, 3, 1, 3003, true, 2e-2},  {0, 37, 2, 18, true, 2e-2},
+      {2048, 40, 1, 2088, true, 2e-2},
   };
   std::mt19937 rng(41);
   bool ok = true;
   for (const Shape& s : shapes) {
-    const double e = Case(s.pos0, s.n, s.ratio, s.comp_rows, rng);
-    std::printf("pos0=%u n=%u ratio=%u comp=%u rel_err=%.2e\n", s.pos0, s.n,
-                s.ratio, s.comp_rows, e);
+    const double e = Case(s.pos0, s.n, s.ratio, s.comp_rows, s.rope, rng);
+    std::printf("pos0=%u n=%u ratio=%u comp=%u rope=%d rel_err=%.2e\n", s.pos0,
+                s.n, s.ratio, s.comp_rows, s.rope ? 1 : 0, e);
     ok = e < s.tolerance && ok;
   }
   /* Indexer scores: fp32 below five tokens, half operands on the matrix
    * cores above. */
   const Shape indexer[] = {
-      {2047, 1, 1, 0, 1e-5},
-      {101, 3, 2, 0, 1e-5},
-      {3000, 4, 1, 0, 1e-5},
-      {500, 20, 1, 0, 2e-3},
+      {2047, 1, 1, 0, false, 1e-5},
+      {101, 3, 2, 0, false, 1e-5},
+      {3000, 4, 1, 0, false, 1e-5},
+      {500, 20, 1, 0, false, 2e-3},
   };
   for (const Shape& s : indexer) {
     const double e = IndexerCase(s.pos0, s.n, s.ratio, rng);

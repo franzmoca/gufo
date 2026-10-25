@@ -1141,170 +1141,355 @@ __global__ void attention_kernel(const float* q, const float* ring, const float*
   }
 }
 
-/* The same attention for 32 heads per block on the matrix cores, from the V4
- * engine's attention_mixed_heads32_wmma_kernel: Q and each 16-row KV tile are
- * staged as half, scores and the online softmax stay in fp32, and the output
- * accumulates in fp32 across one pass over the rows. Grid (n, heads / 32),
- * 1024 threads; head_dim 512, window <= 256, k <= 512. */
-__global__ __launch_bounds__(1024, 1) void attention_heads32_wmma_kernel(
-    const float* q, const float* ring, const float* chunk, uint32_t window, ds41_fp4_rows comp,
-    const uint32_t* all_idx, uint32_t k, uint32_t ratio, const float* sinks, float* out, uint32_t pos0,
-    uint32_t heads, float scale) {
-  constexpr uint32_t BM = 16, BN = 16, BK = 16;
-  constexpr uint32_t HEADS = 32, ROWS = 16, DIM = 512, LDS_DIM = DIM + 4;
-  constexpr uint32_t QT_PITCH = HEADS + 2;
+/* (cos, sin) of each rope pair of n positions from pos0: table[t * half + i]. */
+__global__ void rope_table_kernel(const float* inv_freq, float2* table, uint32_t half, uint32_t pos0, uint32_t n) {
+  const uint32_t i = blockIdx.x * blockDim.x + threadIdx.x;
+  if (i >= n * half) return;
+  const float angle = (float)(pos0 + i / half) * inv_freq[i % half];
+  table[i] = make_float2(cosf(angle), sinf(angle));
+}
+
+/* pow2_ceil(x) = 2^pow2_ceil_exp(x). */
+__device__ __forceinline__ int pow2_ceil_exp(float x) {
+  int e = 0;
+  const float m = frexpf(x, &e);
+  return m == 0.5f ? e - 1 : e;
+}
+
+/* round_e4m3(clamp(v / 2^eb, -448, 448)) * 2^eb, with the power-of-two
+ * divisions as exact exponent shifts. */
+__device__ __forceinline__ float fp8_round_scaled(float v, int eb) {
+  const float x = fminf(fmaxf(ldexpf(v, -eb), -448.0f), 448.0f);
+  const float a = fabsf(x);
+  int e = 0;
+  frexpf(a, &e);
+  const int se = a < 0.015625f ? -9 : e - 4;
+  return copysignf(ldexpf(fminf(ldexpf(rintf(ldexpf(a, -se)), se), 448.0f), eb), x);
+}
+
+/* Max and sum over the 16 lanes of each half-wave (DPP quad permutes, then
+ * the half-row and row mirrors). */
+template <int kCtrl>
+__device__ __forceinline__ float dpp_f32(float v) {
+  return __int_as_float(__builtin_amdgcn_update_dpp(0, __float_as_int(v), kCtrl, 0xf, 0xf, false));
+}
+__device__ __forceinline__ float max16(float v) {
+  v = fmaxf(v, dpp_f32<0xb1>(v));
+  v = fmaxf(v, dpp_f32<0x4e>(v));
+  v = fmaxf(v, dpp_f32<0x141>(v));
+  return fmaxf(v, dpp_f32<0x140>(v));
+}
+__device__ __forceinline__ float sum16(float v) {
+  v += dpp_f32<0xb1>(v);
+  v += dpp_f32<0x4e>(v);
+  v += dpp_f32<0x141>(v);
+  return v + dpp_f32<0x140>(v);
+}
+
+constexpr uint32_t kAttnRope = 64;  // the fused rotations' rope_dim
+constexpr uint32_t kAttnRows = 16;
+constexpr uint32_t kAttnRowPitch = 512 + 8;  // halves per staged KV row
+constexpr uint32_t kAttnProbPitch = 16 + 8;  // halves per probability row
+typedef _Float16 attn_half16 __attribute__((ext_vector_type(16)));
+typedef _Float16 attn_half2 __attribute__((ext_vector_type(2)));
+typedef float attn_float8 __attribute__((ext_vector_type(8)));
+
+__device__ __forceinline__ attn_half16 lds_half16(const _Float16* p) {
+  const uint4 a = reinterpret_cast<const uint4*>(p)[0], b = reinterpret_cast<const uint4*>(p)[1];
+  const uint32_t w[8] = {a.x, a.y, a.z, a.w, b.x, b.y, b.z, b.w};
+  return __builtin_bit_cast(attn_half16, w);
+}
+
+/* The opposite half-wave's copy of a fragment. */
+__device__ __forceinline__ attn_half16 swap_halves(attn_half16 v) {
+  uint32_t w[8];
+  __builtin_memcpy(w, &v, sizeof(w));
+#pragma unroll
+  for (int i = 0; i < 8; i++) w[i] = __builtin_amdgcn_permlanex16(w[i], w[i], 0x76543210u, 0xfedcba98u, false, false);
+  return __builtin_bit_cast(attn_half16, w);
+}
+
+/* A workgroup barrier that waits for the LDS accesses only (__syncthreads
+ * also waits for the outstanding global loads, the next tile's prefetch). */
+__device__ __forceinline__ void lds_barrier() { asm volatile("s_waitcnt lgkmcnt(0)\n\ts_barrier" ::: "memory"); }
+
+/* The same attention for 32 heads per block on the matrix cores: block
+ * (token, 32 heads), 256 threads; head_dim 512, window a power of two
+ * <= 256, k <= 512. The window rows and the compressed rows run as separate
+ * 16-row tiles. Thread t stages dimensions 2 t, 2 t + 1 of each tile,
+ * loaded into registers one tile ahead: as FP16 rows in LDS for the scores,
+ * and as two FP16 columns of 16 rows in its own registers for the output
+ * products. Wave w scores heads 16 (w % 2) .. + 15 over dimensions
+ * 128 (w / 2) .. + 127 with its Q fragments in registers; the four partial
+ * scores meet in LDS for the online softmax (scores and sums in fp32, half a
+ * wave per head). Wave w accumulates the output of all 32 heads over the
+ * dimensions its lanes stage, 64 w .. 64 w + 63, in fp32 registers: each
+ * half of a wave multiplies by its own B operand copy, so a product with
+ * the lanes' own columns and one with the opposite half's (permlanex16)
+ * cover them. With `rope` (rope_table_kernel at pos0 for the batch), q's
+ * tail kAttnRope dimensions are rotated as ds41_v41_rope_tail does, and the
+ * output gets ds41_v41_rope_fp8's inverse rotation and FP8 rounding. The
+ * kernel's code is kept within the instruction cache (a rolled epilogue,
+ * DPP reductions, table decoding); larger code ran several times slower. */
+__global__ __launch_bounds__(256) void attention_f16_kernel(const float* q, const float* ring, const float* chunk,
+                                                            uint32_t window, ds41_fp4_rows comp,
+                                                            const uint32_t* all_idx, uint32_t k, uint32_t ratio,
+                                                            const float* sinks, float* out, uint32_t pos0,
+                                                            uint32_t heads, float scale, const float2* rope) {
+  constexpr uint32_t DIM = 512, HEADS = 32, ROWS = kAttnRows, ROPE = kAttnRope, TAIL = DIM - ROPE;
   const uint32_t token = blockIdx.x;
   const uint32_t head0 = blockIdx.y * HEADS;
-  const uint32_t tid = threadIdx.x;
-  const uint32_t wave = tid / 32;
-  const uint32_t lane = tid % 32;
+  const uint32_t tid = threadIdx.x, wave = tid / 32, lane = tid % 32, h = lane / 16, l16 = lane % 16;
   const uint32_t p = pos0 + token;
   const uint32_t lo = p + 1 > window ? p + 1 - window : 0u;
   const uint32_t n_window = p - lo + 1;
   const uint32_t n_comp = min(k, comp_len(p, ratio));
   const uint32_t n_score = n_window + n_comp;
 
-  __shared__ uint32_t rows[256 + 512];
-  /* Q transposed as [d][head], so both score operands are row-major. */
-  __shared__ half qt_half[DIM * QT_PITCH];
-  __shared__ half kv_half[ROWS * LDS_DIM];
-  __shared__ float scores[HEADS * ROWS];
-  __shared__ float qk_part[2 * BM * ROWS];
-  __shared__ half probs[HEADS * ROWS];
-  __shared__ float softmax_max[HEADS];
-  __shared__ float softmax_den[HEADS];
+  __shared__ uint32_t fp4_pairs[256];  // code byte -> its two E2M1 values as FP16
+  __shared__ uint16_t e4m3_half[256];  // scale byte -> FP16
+  __shared__ __attribute__((aligned(16))) _Float16 kv_row[ROWS * kAttnRowPitch];
+  __shared__ __attribute__((aligned(16))) _Float16 probs[HEADS * kAttnProbPitch];
+  __shared__ float part[4][ROWS][HEADS + 1];
   __shared__ float softmax_rescale[HEADS];
+  __shared__ float softmax_den[HEADS];
 
-  /* Row r < n_window is window position lo + r: chunk row (pos - pos0) when
-   * it is in this batch, else ring slot pos % window, tagged with bit 31.
-   * Later rows are compressed rows. */
-  for (uint32_t r = tid; r < n_window; r += blockDim.x) {
-    const uint32_t pos = lo + r;
-    rows[r] = pos < pos0 ? (pos % window) | 0x80000000u : pos - pos0;
+  /* The window's positions lo .. p fill the first window tiles (chunk row
+   * pos - pos0 when the position is in this batch, else ring slot
+   * pos % window), the compressed rows idx[0 .. n_comp) the tiles after
+   * them. A tile's rows past the end repeat its last row; the softmax masks
+   * them. The products of E2M1 values and E4M3 scales are exact in FP16. */
+  const uint32_t* idx = all_idx + (uint64_t)token * k;
+  const uint32_t window_tiles = (n_window + ROWS - 1) / ROWS;
+  const uint32_t tiles = window_tiles + (n_comp + ROWS - 1) / ROWS;
+  {
+    const _Float16 lo_value = (_Float16)e2m1_value(tid), hi_value = (_Float16)e2m1_value(tid >> 4);
+    fp4_pairs[tid] = (uint32_t)__builtin_bit_cast(uint16_t, lo_value) |
+                     (uint32_t)__builtin_bit_cast(uint16_t, hi_value) << 16;
+    e4m3_half[tid] = __builtin_bit_cast(uint16_t, (_Float16)e4m3_value(tid));
   }
-  for (uint32_t r = tid; r < n_comp; r += blockDim.x) rows[n_window + r] = all_idx[(uint64_t)token * k + r];
-  for (uint32_t j = tid; j < HEADS * DIM; j += blockDim.x) {
-    const uint32_t h = j / DIM;
-    const uint32_t d = j - h * DIM;
-    qt_half[d * QT_PITCH + h] = __float2half(q[((uint64_t)token * heads + head0 + h) * DIM + d]);
+
+  /* Q fragments (B operand: lane = head, 16 dimensions per step). */
+  const uint32_t qk_heads = 16 * (wave % 2), qk_dim = 128 * (wave / 2);
+  attn_half16 qf[8];
+  {
+    const float* qrow = q + ((uint64_t)token * heads + head0 + qk_heads + l16) * DIM;
+    float2 cs[8][8];  // rope dimensions only
+    /* Only the last quarter holds rope dimensions. */
+    const bool rotate = rope && qk_dim == DIM - 128;
+    if (rotate) {
+#pragma unroll
+      for (uint32_t i = 8 - ROPE / 16; i < 8; i++)
+#pragma unroll
+        for (uint32_t j = 0; j < 8; j++) cs[i][j] = rope[token * (ROPE / 2) + (16 * i - (128 - ROPE)) / 2 + j];
+    }
+#pragma unroll
+    for (uint32_t i = 0; i < 8; i++) {
+      const uint32_t d0 = qk_dim + 16 * i;
+      float v[16];
+#pragma unroll
+      for (uint32_t c = 0; c < 4; c++) {
+        const float4 f = reinterpret_cast<const float4*>(qrow + d0)[c];
+        v[4 * c] = f.x;
+        v[4 * c + 1] = f.y;
+        v[4 * c + 2] = f.z;
+        v[4 * c + 3] = f.w;
+      }
+      if (i >= 8 - ROPE / 16 && rotate) {
+#pragma unroll
+        for (uint32_t j = 0; j < 8; j++) {
+          const float c = cs[i][j].x;
+          const float s = cs[i][j].y;
+          const float re = v[2 * j];
+          const float im = v[2 * j + 1];
+          v[2 * j] = re * c - im * s;
+          v[2 * j + 1] = re * s + im * c;
+        }
+      }
+#pragma unroll
+      for (uint32_t j = 0; j < 16; j++) qf[i][j] = (_Float16)v[j];
+    }
   }
-  if (tid < HEADS) {
-    softmax_max[tid] = sinks[head0 + tid];
-    softmax_den[tid] = 1.0f;
+  /* Softmax state of the heads this half-wave owns (4 wave + 2 jj + h). */
+  float soft_max[2], soft_den[2];
+#pragma unroll
+  for (uint32_t jj = 0; jj < 2; jj++) {
+    soft_max[jj] = sinks[head0 + 4 * wave + 2 * jj + h];
+    soft_den[jj] = 1.0f;
+  }
+  /* acc[4 hb + s]: heads 16 hb .. + 15 by the lanes' own even (s 0) and odd
+   * (s 1) dimensions, then the opposite half's (s 2, 3). */
+  attn_float8 acc[8];
+#pragma unroll
+  for (uint32_t j = 0; j < 8; j++) acc[j] = attn_float8{};
+  __syncthreads();
+
+  /* Staging: two floats of window rows, (code byte, scale byte) of
+   * compressed rows. */
+  uint2 raw[ROWS];
+  const auto fetch = [&](uint32_t tile) {
+    if (tile < window_tiles) {
+#pragma unroll
+      for (uint32_t r = 0; r < ROWS; r++) {
+        const uint32_t pos = lo + min(tile * ROWS + r, n_window - 1);
+        const float* src =
+            pos < pos0 ? ring + (uint64_t)(pos & (window - 1)) * DIM : chunk + (uint64_t)(pos - pos0) * DIM;
+        raw[r] = *reinterpret_cast<const uint2*>(src + 2 * tid);
+      }
+    } else {
+      const uint32_t c0 = (tile - window_tiles) * ROWS;
+#pragma unroll
+      for (uint32_t r = 0; r < ROWS; r++) {
+        const uint64_t row = idx[min(c0 + r, n_comp - 1)];
+        raw[r] = make_uint2(comp.codes[row * (DIM / 2) + tid], comp.scales[row * (DIM / 16) + tid / 8]);
+      }
+    }
+  };
+  /* The tile's columns 2 t (even) and 2 t + 1 (odd) as B operands. */
+  attn_half16 col_even, col_odd;
+  const auto store = [&](uint32_t tile) {
+    const bool window_tile = tile < window_tiles;
+#pragma unroll
+    for (uint32_t r = 0; r < ROWS; r++) {
+      uint32_t pair;
+      if (window_tile) {
+        const _Float16 a = (_Float16)__uint_as_float(raw[r].x), b = (_Float16)__uint_as_float(raw[r].y);
+        pair = (uint32_t)__builtin_bit_cast(uint16_t, a) | (uint32_t)__builtin_bit_cast(uint16_t, b) << 16;
+      } else {
+        const _Float16 sc = __builtin_bit_cast(_Float16, e4m3_half[raw[r].y]);
+        const attn_half2 v = __builtin_bit_cast(attn_half2, fp4_pairs[raw[r].x]) * attn_half2{sc, sc};
+        pair = __builtin_bit_cast(uint32_t, v);
+      }
+      const attn_half2 v = __builtin_bit_cast(attn_half2, pair);
+      col_even[r] = v.x;
+      col_odd[r] = v.y;
+      *reinterpret_cast<uint32_t*>(&kv_row[r * kAttnRowPitch + 2 * tid]) = pair;
+    }
+  };
+
+  /* Tile -1 only prefetches tile 0 (one copy of the staging code). */
+  for (int32_t tile = -1; tile < (int32_t)tiles; tile++) {
+    if (tile >= 0) {
+      store(tile);
+      lds_barrier();
+    }
+    if (tile + 1 < (int32_t)tiles) fetch(tile + 1);
+    if (tile < 0) continue;
+    const uint32_t nr = tile < (int32_t)window_tiles ? min(ROWS, n_window - tile * ROWS)
+                                                     : min(ROWS, n_comp - (tile - window_tiles) * ROWS);
+
+    /* Partial scores: rows (A operand: lane = row) by this wave's heads. */
+    {
+      attn_float8 s = attn_float8{};
+#pragma unroll
+      for (uint32_t i = 0; i < 8; i++)
+        s = __builtin_amdgcn_wmma_f32_16x16x16_f16_w32(lds_half16(&kv_row[l16 * kAttnRowPitch + qk_dim + 16 * i]),
+                                                       qf[i], s);
+      /* Accumulator element e of a lane is (row 2 e + lane / 16, head lane % 16). */
+#pragma unroll
+      for (uint32_t e = 0; e < 8; e++) part[wave / 2][2 * e + h][qk_heads + l16] = s[e];
+    }
+    lds_barrier();
+
+    /* Online softmax: half-wave per head, lane = row. */
+#pragma unroll
+    for (uint32_t jj = 0; jj < 2; jj++) {
+      const uint32_t head = 4 * wave + 2 * jj + h;
+      const float s =
+          l16 < nr ? (part[0][l16][head] + part[1][l16][head] + part[2][l16][head] + part[3][l16][head]) * scale
+                   : -INFINITY;
+      const float m_new = fmaxf(soft_max[jj], max16(s));
+      const float e = l16 < nr ? expf(s - m_new) : 0.0f;
+      const float sum = sum16(e);
+      const float factor = expf(soft_max[jj] - m_new);
+      soft_den[jj] = soft_den[jj] * factor + sum;
+      soft_max[jj] = m_new;
+      if (l16 == 0) softmax_rescale[head] = factor;
+      probs[head * kAttnProbPitch + l16] = (_Float16)e;
+    }
+    lds_barrier();
+
+    /* Output: probabilities (A operand: lane = head) by the staged columns. */
+    {
+      const attn_half16 cols[4] = {col_even, col_odd, swap_halves(col_even), swap_halves(col_odd)};
+#pragma unroll
+      for (uint32_t hb = 0; hb < 2; hb++) {
+        const attn_half16 pa = lds_half16(&probs[(16 * hb + l16) * kAttnProbPitch]);
+        float factor[8];
+#pragma unroll
+        for (uint32_t e = 0; e < 8; e++) factor[e] = softmax_rescale[16 * hb + 2 * e + h];
+#pragma unroll
+        for (uint32_t c = 0; c < 4; c++) {
+#pragma unroll
+          for (uint32_t e = 0; e < 8; e++) acc[4 * hb + c][e] *= factor[e];
+          acc[4 * hb + c] = __builtin_amdgcn_wmma_f32_16x16x16_f16_w32(pa, cols[c], acc[4 * hb + c]);
+        }
+      }
+    }
+    /* The next store overwrites kv_row and the next softmax probs. */
+    lds_barrier();
+  }
+
+  if (l16 == 0) {
+    softmax_den[4 * wave + h] = soft_den[0];
+    softmax_den[4 * wave + 2 + h] = soft_den[1];
   }
   __syncthreads();
 
-  using frag_a = rocwmma::fragment<rocwmma::matrix_a, BM, BN, BK, half, rocwmma::row_major>;
-  using frag_b = rocwmma::fragment<rocwmma::matrix_b, BM, BN, BK, half, rocwmma::row_major>;
-  using frag_c = rocwmma::fragment<rocwmma::accumulator, BM, BN, BK, float>;
-  frag_c out0, out1;
-  rocwmma::fill_fragment(out0, 0.0f);
-  rocwmma::fill_fragment(out1, 0.0f);
-  /* Accumulator element (row, col) of a wave32 16x16 F32 fragment on gfx1151
-   * is (2 * e + lane / 16, lane % 16); out0 rows are heads 0..15, out1 16..31. */
-  const uint32_t acc_row_base = lane / 16;
-
-  for (uint32_t row0 = 0; row0 < n_score; row0 += ROWS) {
-    const uint32_t nr = min(ROWS, n_score - row0);
-    constexpr uint32_t DIM8 = DIM / 8;
-    for (uint32_t j = tid; j < ROWS * DIM8; j += blockDim.x) {
-      const uint32_t rr = j / DIM8;
-      const uint32_t d = (j - rr * DIM8) * 8;
-      uint2 a = make_uint2(0u, 0u), b = a;
-      if (rr < nr) {
-        const uint32_t sr = row0 + rr;
-        const uint32_t row = rows[sr];
-        float4 lo, hi;
-        if (sr >= n_window) {
-          kv_load8(comp, row, d, DIM, &lo, &hi);
-        } else {
-          const float4* src = reinterpret_cast<const float4*>(
-              ((row & 0x80000000u) ? ring + (uint64_t)(row & 0x7fffffffu) * DIM : chunk + (uint64_t)row * DIM) + d);
-          lo = src[0];
-          hi = src[1];
+  /* Accumulator element e of a lane is head 16 hb + 2 e + lane / 16 at
+   * dimensions (d, d + 1): d = 64 wave + 32 h + 2 (lane % 16) for the own
+   * columns and 64 wave + 32 (1 - h) + 2 (lane % 16) for the opposite
+   * half's. */
+  const uint32_t d_own = 64 * wave + 32 * h + 2 * l16, d_other = 64 * wave + 32 * (1 - h) + 2 * l16;
+  /* The rope dimensions are the last wave's. */
+  const bool rotate = rope && wave == 7;
+  float2 cs_own = make_float2(1.0f, 0.0f), cs_other = cs_own;
+  if (rotate && d_own >= TAIL) cs_own = rope[token * (ROPE / 2) + (d_own - TAIL) / 2];
+  if (rotate && d_other >= TAIL) cs_other = rope[token * (ROPE / 2) + (d_other - TAIL) / 2];
+#pragma unroll
+  for (uint32_t hb = 0; hb < 2; hb++) {
+    /* Element 0 of the accumulators, rotated after each head (a rolled
+     * loop keeps the kernel's code within the instruction cache). */
+#pragma unroll 1
+    for (uint32_t e = 0; e < 8; e++) {
+      const uint32_t head = 16 * hb + 2 * e + h;
+      const float den = softmax_den[head];
+      float v[4];
+#pragma unroll
+      for (uint32_t c = 0; c < 4; c++) {
+        v[c] = acc[4 * hb + c][0] / den;
+        acc[4 * hb + c] = __builtin_shufflevector(acc[4 * hb + c], acc[4 * hb + c], 1, 2, 3, 4, 5, 6, 7, 0);
+      }
+      if (rotate) {
+#pragma unroll
+        for (uint32_t pr = 0; pr < 2; pr++) {
+          const float2 cs = pr ? cs_other : cs_own;
+          if ((pr ? d_other : d_own) >= TAIL) {
+            const float c = cs.x;
+            const float s = -cs.y;
+            const float re = v[2 * pr];
+            const float im = v[2 * pr + 1];
+            v[2 * pr] = re * c - im * s;
+            v[2 * pr + 1] = re * s + im * c;
+          }
         }
-        a = half4_bits(lo);
-        b = half4_bits(hi);
       }
-      *reinterpret_cast<uint2*>(&kv_half[rr * LDS_DIM + d]) = a;
-      *reinterpret_cast<uint2*>(&kv_half[rr * LDS_DIM + d + 4]) = b;
-    }
-    __syncthreads();
-
-    /* scoresT = KV . Q^T over two K halves per head block (waves 0..3). */
-    const uint32_t qk_head_block = wave / 2;
-    const uint32_t qk_group = wave % 2;
-    if (wave < 4) {
-      frag_c score_acc;
-      rocwmma::fill_fragment(score_acc, 0.0f);
-      for (uint32_t k0 = qk_group * (DIM / 2); k0 < (qk_group + 1) * (DIM / 2); k0 += BK) {
-        frag_a ka;
-        frag_b qb;
-        rocwmma::load_matrix_sync(ka, kv_half + k0, LDS_DIM);
-        rocwmma::load_matrix_sync(qb, qt_half + k0 * QT_PITCH + qk_head_block * BM, QT_PITCH);
-        rocwmma::mma_sync(score_acc, ka, qb, score_acc);
-      }
-      if (qk_group == 0)
-        rocwmma::store_matrix_sync(scores + qk_head_block * BM, score_acc, HEADS, rocwmma::mem_row_major);
-      else
-        rocwmma::store_matrix_sync(qk_part + qk_head_block * BM * ROWS, score_acc, ROWS, rocwmma::mem_row_major);
-    }
-    __syncthreads();
-    for (uint32_t j = tid; j < 2 * BM * ROWS; j += blockDim.x) {
-      const uint32_t b = j / (BM * ROWS);
-      const uint32_t o = j - b * (BM * ROWS);
-      const uint32_t r = o / BM;
-      scores[r * HEADS + b * BM + (o - r * BM)] += qk_part[j];
-    }
-    __syncthreads();
-
-    /* Online softmax: one wave per head, one row per lane. */
-    {
-      const float s = lane < nr ? scores[lane * HEADS + wave] * scale : -INFINITY;
-      float m_new = s;
-      for (int off = 16; off > 0; off >>= 1) m_new = fmaxf(m_new, __shfl_xor(m_new, off, 32));
-      const float m_old = softmax_max[wave];
-      m_new = fmaxf(m_old, m_new);
-      const float e = lane < nr ? expf(s - m_new) : 0.0f;
-      float block_sum = e;
-      for (int off = 16; off > 0; off >>= 1) block_sum += __shfl_xor(block_sum, off, 32);
-      if (lane == 0) {
-        const float factor = expf(m_old - m_new);
-        softmax_den[wave] = softmax_den[wave] * factor + block_sum;
-        softmax_max[wave] = m_new;
-        softmax_rescale[wave] = factor;
-      }
-      if (lane < ROWS) probs[wave * ROWS + lane] = __float2half(e);
-    }
-    __syncthreads();
-
-    if (row0 != 0) {
+      if (rope) {
+        /* FP8 blocks of 32 dimensions: the own columns of a half-wave form
+         * one, the opposite half's the other. */
 #pragma unroll
-      for (uint32_t e = 0; e < out0.num_elements; e++) {
-        const uint32_t r = 2 * e + acc_row_base;
-        out0.x[e] *= softmax_rescale[r];
-        out1.x[e] *= softmax_rescale[BM + r];
-      }
-    }
-    frag_a p0, p1;
-    frag_b vb;
-    rocwmma::load_matrix_sync(p0, probs, ROWS);
-    rocwmma::load_matrix_sync(p1, probs + BM * ROWS, ROWS);
-    rocwmma::load_matrix_sync(vb, kv_half + wave * BN, LDS_DIM);
-    rocwmma::mma_sync(out0, p0, vb, out0);
-    rocwmma::mma_sync(out1, p1, vb, out1);
-    __syncthreads();
-  }
-
+        for (uint32_t pr = 0; pr < 2; pr++) {
+          const float amax = max16(fmaxf(fabsf(v[2 * pr]), fabsf(v[2 * pr + 1])));
+          const int eb = pow2_ceil_exp(fmaxf(amax, 1.0e-4f) / 448.0f);
 #pragma unroll
-  for (uint32_t e = 0; e < out0.num_elements; e++) {
-    const uint32_t r = 2 * e + acc_row_base;
-    out0.x[e] /= softmax_den[r];
-    out1.x[e] /= softmax_den[BM + r];
+          for (uint32_t c = 0; c < 2; c++) v[2 * pr + c] = fp8_round_scaled(v[2 * pr + c], eb);
+        }
+      }
+      float* o = out + ((uint64_t)token * heads + head0 + head) * DIM;
+      *reinterpret_cast<float2*>(o + d_own) = make_float2(v[0], v[1]);
+      *reinterpret_cast<float2*>(o + d_other) = make_float2(v[2], v[3]);
+    }
   }
-  float* o = out + ((uint64_t)token * heads + head0) * DIM;
-  rocwmma::store_matrix_sync(o + wave * BN, out0, DIM, rocwmma::mem_row_major);
-  rocwmma::store_matrix_sync(o + BM * DIM + wave * BN, out1, DIM, rocwmma::mem_row_major);
 }
 
 /* Decode attention split over the rows (flash decoding): block (group, split,
@@ -1718,29 +1903,43 @@ extern "C" int ds41_v41_apply_mask(float* score, uint64_t score_stride, const ui
   return launch_ok("apply mask");
 }
 
-extern "C" int ds41_v41_attention(const float* q, const float* ring, const float* chunk, uint32_t window,
+extern "C" int ds41_v41_attention(float* q, const float* ring, const float* chunk, uint32_t window,
                                   ds41_fp4_rows comp, const uint32_t* idx, uint32_t k, uint32_t ratio,
                                   const float* sinks, float* out, float* partial, uint32_t pos0, uint32_t n,
-                                  uint32_t heads, uint32_t head_dim, float scale) {
+                                  uint32_t heads, uint32_t head_dim, float scale, const float* inv_freq,
+                                  uint32_t rope_dim, float* rope_scratch) {
   static_assert(DS41_V41_ATTN_PARTIAL_PER_HEAD == kAttnSplits * kAttnPartial, "partial layout");
+  if (inv_freq && (rope_dim % 32 != 0 || rope_dim > head_dim)) return 1;
+  /* The matrix-core form once there are enough blocks to fill the device;
+   * it applies the rotations itself. */
+  if (n >= DS41_V41_ATTN_SPLIT_TOKENS && head_dim == 512 && heads % 32 == 0 && window <= 256 &&
+      (window & (window - 1)) == 0 &&
+      (ratio == 0 || k <= 512) && (!inv_freq || rope_dim == kAttnRope)) {
+    float2* rope = nullptr;
+    if (inv_freq) {
+      if (!rope_scratch) return 1;
+      rope = reinterpret_cast<float2*>(rope_scratch);
+      rope_table_kernel<<<blocks_for((uint64_t)n * rope_dim / 2), kThreads>>>(inv_freq, rope, rope_dim / 2, pos0, n);
+    }
+    attention_f16_kernel<<<dim3(n, heads / 32), 256>>>(q, ring, chunk, window, comp, idx, k, ratio, sinks, out, pos0,
+                                                       heads, scale, rope);
+    return launch_ok("attention");
+  }
+  if (inv_freq && ds41_v41_rope_tail(q, n * heads, head_dim, rope_dim, inv_freq, pos0, heads, 1, 0)) return 1;
   if (n < DS41_V41_ATTN_SPLIT_TOKENS && partial && head_dim == 512 && heads % kAttnSplitHeads == 0) {
     attention_split_kernel<<<dim3(heads / kAttnSplitHeads, kAttnSplits, n), 32 * kAttnSplitHeads>>>(
         q, ring, chunk, window, comp, idx, k, ratio, partial, pos0, heads, scale);
     if (launch_ok("attention split")) return 1;
     attention_combine_kernel<<<dim3(heads, n), 128>>>(partial, sinks, out, heads);
-    return launch_ok("attention combine");
+    if (launch_ok("attention combine")) return 1;
+  } else {
+    const size_t shared = (size_t)(window + (ratio ? k : 0)) * sizeof(float);
+    if (shared > 60 * 1024) return 1;
+    attention_kernel<<<dim3(heads, n), kThreads, shared>>>(q, ring, chunk, window, comp, idx, k, ratio, sinks, out,
+                                                           pos0, heads, head_dim, scale);
+    if (launch_ok("attention")) return 1;
   }
-  /* The matrix-core form once there are enough blocks to fill the device. */
-  if (n >= DS41_V41_ATTN_SPLIT_TOKENS && head_dim == 512 && heads % 32 == 0 && window <= 256 && (ratio == 0 || k <= 512)) {
-    attention_heads32_wmma_kernel<<<dim3(n, heads / 32), 1024>>>(q, ring, chunk, window, comp, idx, k, ratio, sinks,
-                                                                 out, pos0, heads, scale);
-    return launch_ok("attention");
-  }
-  const size_t shared = (size_t)(window + (ratio ? k : 0)) * sizeof(float);
-  if (shared > 60 * 1024) return 1;
-  attention_kernel<<<dim3(heads, n), kThreads, shared>>>(q, ring, chunk, window, comp, idx, k, ratio, sinks, out,
-                                                         pos0, heads, head_dim, scale);
-  return launch_ok("attention");
+  return inv_freq ? ds41_v41_rope_fp8(out, n * heads, head_dim, rope_dim, inv_freq, pos0, heads, 1, 1) : 0;
 }
 
 extern "C" int ds41_v41_route(const float* logits, const float* bias, int32_t* ids, float* weights,
