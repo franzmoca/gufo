@@ -1,0 +1,157 @@
+#ifndef GUFO_MODELS_DEEPSEEK_V41_FLASH_RUNTIME_MODEL_H_
+#define GUFO_MODELS_DEEPSEEK_V41_FLASH_RUNTIME_MODEL_H_
+
+#include <cstddef>
+#include <cstdint>
+
+struct ds41_tokens {
+  int* v;
+  int len;
+  int cap;
+};
+
+struct ds41_engine;
+struct ds41_session;
+
+using ds41_session_cancel_fn = bool (*)(void* user_data);
+
+struct ds41_engine_options {
+  const char* model_path;
+  /* Optional DSpark support model. NULL leaves speculative decoding off and
+   * the engine byte-for-byte identical to a non-speculative build. */
+  const char* dspark_model_path;
+  /* Engram GGUF. NULL opens deepseek41.engram.file beside the first shard. */
+  const char* engram_path;
+  /* Parse, validate and bind the artifacts without uploading any weights. */
+  bool validate_only;
+};
+
+struct ds41_session_snapshot {
+  uint8_t* ptr;
+  uint64_t len;
+  uint64_t cap;
+};
+
+struct ds41_session_batch_item {
+  ds41_session* session;
+  int token;
+};
+
+inline constexpr uint32_t DS41_DSPARK_CANDIDATES = 8;
+
+struct ds41_dspark_candidates {
+  int32_t ids[DS41_DSPARK_CANDIDATES];
+  float logits[DS41_DSPARK_CANDIDATES];
+  float confidence;
+};
+
+/* Request sampler for a DSpark cycle. NULL keeps the greedy argmax cycle.
+ *
+ * `sample` draws the next token from one row of target logits with the
+ * request's sampling configuration and RNG. Every drawn token is eventually
+ * emitted in draw order (accepted rows now, a rejected row as the next cycle's
+ * anchor), so the callee may record it as request history immediately.
+ * `accept` reports a token the runtime emits without drawing it: the anchor
+ * carried over from the previous cycle's rejected row.
+ *
+ * Optional paired callbacks `propose`/`verify` implement stochastic proposals.
+ * `propose` retains the normalized q actually used to draw this position;
+ * `verify` returns either that draft (accepted) or an exact residual draw.
+ * Each callback and its probability rows belong to one request and one cycle.
+ * Greedy-with-penalties and legacy callers retain the point-mass path. */
+struct ds41_dspark_sampler {
+  void* ctx;
+  int (*sample)(void* ctx, const float* logits, uint32_t vocabulary_size);
+  void (*accept)(void* ctx, int token);
+  int (*propose)(void* ctx, uint32_t row,
+                 const ds41_dspark_candidates* candidates) = nullptr;
+  int (*verify)(void* ctx, uint32_t row, const float* logits,
+                uint32_t vocabulary_size, int draft) = nullptr;
+  // Accept an already-computed target argmax only when it is also the exact
+  // request selection. A false result must leave sampler state unchanged.
+  bool (*try_accept_argmax)(void* ctx, int token) = nullptr;
+};
+
+struct ds41_session_dspark_batch_item {
+  ds41_session* session;
+  int* emitted;
+  int emitted_cap;
+  uint32_t max_draft_tokens;
+  int* n_emitted;
+  const ds41_dspark_sampler* sampler;
+  bool stop_at_eos = false;
+};
+
+inline constexpr int DS41_SESSION_SYNC_INTERRUPTED = 2;
+inline constexpr std::uint32_t DS41_SESSION_PAYLOAD_VERSION = 4;
+
+int ds41_engine_open(ds41_engine** out, const ds41_engine_options* options);
+void ds41_engine_close(ds41_engine* engine);
+int ds41_engine_vocab_size(const ds41_engine* engine);
+const char* ds41_engine_model_name(const ds41_engine* engine);
+
+void ds41_tokens_free(ds41_tokens* tokens);
+void ds41_tokenize_text(ds41_engine* engine, const char* text,
+                        ds41_tokens* out);
+void ds41_tokenize_rendered_chat(ds41_engine* engine, const char* text,
+                                 ds41_tokens* out);
+void ds41_encode_chat_prompt(ds41_engine* engine, const char* system,
+                             const char* prompt, ds41_tokens* out);
+void ds41_chat_begin(ds41_engine* engine, ds41_tokens* tokens);
+void ds41_chat_append_message(ds41_engine* engine, ds41_tokens* tokens,
+                              const char* role, const char* content);
+void ds41_chat_append_assistant_prefix(ds41_engine* engine,
+                                       ds41_tokens* tokens);
+char* ds41_token_text(ds41_engine* engine, int token, size_t* length);
+int ds41_token_eos(const ds41_engine* engine);
+bool ds41_token_is_stop(const ds41_engine* engine, int token);
+
+int ds41_session_create(ds41_session** out, ds41_engine* engine,
+                        int context_size, bool use_dspark);
+void ds41_session_free(ds41_session* session);
+bool ds41_session_dspark_enabled(const ds41_session* session);
+int ds41_session_sync(ds41_session* session, const ds41_tokens* prompt,
+                      char* error, size_t error_capacity);
+int ds41_session_argmax(const ds41_session* session);
+int ds41_session_sample(const ds41_session* session, float temperature,
+                        int top_k, float top_p, float min_p,
+                        uint64_t* rng_state);
+int ds41_session_eval(ds41_session* session, int token, char* error,
+                      size_t error_capacity);
+int ds41_sessions_eval_batch(const ds41_session_batch_item* items,
+                             size_t item_count, char* error,
+                             size_t error_capacity);
+void ds41_session_begin_request(ds41_session* session);
+void ds41_session_prepare_batch_execution(ds41_session* session);
+bool ds41_engine_has_dspark(const ds41_engine* engine);
+int ds41_sessions_dspark_step_batch(const ds41_session_dspark_batch_item* items,
+                                    size_t item_count, char* error,
+                                    size_t error_capacity);
+/* Returns and clears the sampled token a DSpark cycle rejected, or -1. The
+ * token is the request's next output; an exact target step must emit it
+ * instead of sampling the frontier logits again. */
+int ds41_session_dspark_take_pending_anchor(ds41_session* session);
+void ds41_session_dspark_stats(const ds41_session* session, uint64_t* drafted,
+                               uint64_t* accepted, uint64_t* support_drafted,
+                               uint64_t* support_accepted,
+                               uint64_t* positional_accepted, uint64_t* anchors,
+                               uint64_t* full_blocks, uint64_t* steps,
+                               uint64_t* skipped, uint32_t* context_tokens);
+int ds41_session_copy_logits(const ds41_session* session, float* out,
+                             int capacity);
+int ds41_session_save_snapshot(const ds41_session* session,
+                               ds41_session_snapshot* snapshot, char* error,
+                               size_t error_capacity);
+int ds41_session_load_snapshot(ds41_session* session,
+                               const ds41_session_snapshot* snapshot,
+                               char* error, size_t error_capacity);
+void ds41_session_snapshot_free(ds41_session_snapshot* snapshot);
+void ds41_session_set_cancel(ds41_session* session,
+                             ds41_session_cancel_fn callback, void* user_data);
+void ds41_session_invalidate(ds41_session* session);
+int ds41_session_pos(const ds41_session* session);
+int ds41_session_ctx(const ds41_session* session);
+uint32_t ds41_session_prefill_capacity(const ds41_session* session);
+uint64_t ds41_session_payload_bytes(const ds41_session* session);
+
+#endif  // GUFO_MODELS_DEEPSEEK_V41_FLASH_RUNTIME_MODEL_H_
