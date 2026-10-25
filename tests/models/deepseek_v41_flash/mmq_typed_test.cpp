@@ -416,7 +416,7 @@ int main() {
     if (t.type != 8 && t.type != 13) {
       ok = ExpertGemvCase(t, 2304, 5120, false, rng) && ok;
       ok = ExpertGemvCase(t, 512, 2304, true, rng) && ok;
-      if (t.type == 19 || t.type == 29)
+      if (t.type == 19 || t.type == 29 || t.type == 16)
         ok = SwigluCase(t, 2304, 5120, rng) && ok;
     }
     ok = GroupedCase(t, 128, 1, 1024, 8, rng) && ok;
