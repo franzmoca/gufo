@@ -5,12 +5,13 @@
  * prefill), or are drawn at random. Weights are random blocks, larger than
  * the caches, so the reads stay DRAM-cold.
  *
- * With --f16 (IQ1_S only) the same passes run through the FP16 matrix-core
- * kernel. Either path is checked against the FP32-activation expert GEMV on
- * the first slots.
+ * With --f16 the same passes run through the FP16 matrix-core kernel
+ * (IQ1_S, IQ1_M, IQ2_XXS). Either path is checked against the
+ * FP32-activation expert GEMV on the first slots. --tokens sets the batch
+ * (2048 by default).
  *
  *   ds41_mmq_bench [--type 19|29|16|22] [--counts FILE] [--line N] [--reps N]
- *                  [--f16 1]
+ *                  [--f16 1] [--tokens N]
  *   ds41_mmq_bench --type 13|8 --dense M,K[,GROUPS] [--tokens N] [--reps N]
  */
 #include <hip/hip_runtime.h>
@@ -201,9 +202,14 @@ int main(int argc, char** argv) {
     std::fprintf(stderr, "unsupported type %d\n", type);
     return 1;
   }
-  constexpr int tokens = 2048;
+  /* With --counts, --tokens N scales the recorded 2048-token line by
+   * N / 2048. */
+  const int tokens = dense_tokens;
   std::mt19937 rng(41);
-  const auto counts = Counts(counts_path, line, tokens, rng);
+  auto counts = Counts(counts_path, line, counts_path ? 2048 : tokens, rng);
+  if (counts_path)
+    for (auto& c : counts)
+      c = c * (unsigned)tokens / 2048u;
   /* Slot ids with exactly these counts, spread over the tokens. */
   std::vector<int32_t> ids;
   for (int e = 0; e < kExperts; ++e)
