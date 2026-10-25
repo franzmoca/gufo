@@ -107,6 +107,12 @@ static void RegisterTextOptions(ArgParser& parser, PromptOptions& opt,
       "copy of the weights) or decoded (binary16 where it pays; about 2.3 "
       "copies) (default: off)",
       "Model", &opt.prefill_weights);
+  parser.AddOption(
+      "", "--prefill-batch", "N",
+      "DeepSeek V4.1 Flash: most prompt tokens per prefill batch, 16 to "
+      "4096; 4096 prefills about 5% faster for about 1.2 GiB more memory "
+      "(default: 2048)",
+      "Model", &opt.prefill_batch);
   RegisterImageOptions(parser, opt);
 
   // Prompt & Formatting
@@ -394,14 +400,14 @@ std::shared_ptr<typename Ds::Model> LoadDeepSeekModel(
     return nullptr;
   }
 
+  typename Ds::ModelOptions model_options{
+      .max_context = kDefaultContext,
+      .dspark_model_path = dspark_requested ? opt.dspark_model_path : "",
+  };
+  if constexpr (requires { model_options.prefill_batch; })
+    model_options.prefill_batch = opt.prefill_batch;
   std::string error;
-  auto model = Ds::Model::Load(
-      opt.model_path,
-      typename Ds::ModelOptions{
-          .max_context = kDefaultContext,
-          .dspark_model_path = dspark_requested ? opt.dspark_model_path : "",
-      },
-      &error);
+  auto model = Ds::Model::Load(opt.model_path, model_options, &error);
   if (model == nullptr) {
     std::cerr << "Error creating " << Ds::kName << " model: " << error << '\n';
     PrintModelLoadTime(load_start, false);

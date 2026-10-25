@@ -170,12 +170,13 @@ struct LayerState {
   float* pool_score = nullptr;
 };
 
-/* Batch capacity: up to 2048 tokens, so the routed expert tiles average 32
- * rows per expert, fewer when the activations (about 1 MiB per token) would
- * leave less than kDeviceReserve of device memory free. On gfx1151 the
+/* Batch capacity: up to the engine's prefill batch (2048 tokens by default,
+ * where the routed expert tiles average 32 rows per expert), fewer when the
+ * activations (about 0.6 MiB per token) would leave less than kDeviceReserve
+ * of device memory free. On gfx1151 the
  * reported free memory runs about 1 GiB below MemAvailable, so this keeps
  * about 2 GiB of RAM for the MMQ scratch and the rest of the system. */
-constexpr uint32_t kMaxBatch = 2048;
+constexpr uint32_t kMaxBatch = DS41_MAX_PREFILL_BATCH;
 constexpr uint64_t kDeviceReserve = 1ull << 30;
 
 /* Indexer score rows (context + 1 floats per token) run in groups of up to
@@ -909,7 +910,7 @@ std::shared_ptr<SharedActivations> make_activations(ds41_engine* engine, uint32_
   size_t free_bytes = 0, total_bytes = 0;
   bool ok = hipMemGetInfo(&free_bytes, &total_bytes) == hipSuccess;
   const uint64_t budget = free_bytes > kDeviceReserve + fixed ? free_bytes - kDeviceReserve - fixed : 0;
-  a.capacity = (uint32_t)std::clamp<uint64_t>(budget / per_token / 16 * 16, 16, kMaxBatch);
+  a.capacity = (uint32_t)std::clamp<uint64_t>(budget / per_token / 16 * 16, 16, engine->prefill_batch / 16 * 16);
   a.score_rows = std::min(rows, a.capacity);
   const uint64_t cap = a.capacity;
   uint64_t region_floats = 0;

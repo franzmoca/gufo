@@ -1551,6 +1551,14 @@ int ds41_engine_open(ds41_engine** out, const ds41_engine_options* opt) {
     *out = nullptr;
   if (!out || !opt || !opt->model_path || !opt->model_path[0])
     return 1;
+  if (opt->prefill_batch != 0 &&
+      (opt->prefill_batch < DS41_MIN_PREFILL_BATCH ||
+       opt->prefill_batch > DS41_MAX_PREFILL_BATCH)) {
+    fprintf(stderr, "ds41: prefill batch %u is outside %u..%u\n",
+            opt->prefill_batch, DS41_MIN_PREFILL_BATCH,
+            DS41_MAX_PREFILL_BATCH);
+    return 1;
+  }
   static std::mutex load_mutex;
   const std::lock_guard lock(load_mutex);
   if (g_ds41_lock_fd >= 0) {
@@ -1564,6 +1572,8 @@ int ds41_engine_open(ds41_engine** out, const ds41_engine_options* opt) {
     e = static_cast<ds41_engine*>(ds41_xcalloc(1, sizeof(ds41_engine)));
     e->model = static_cast<ds41_model*>(ds41_xcalloc(1, sizeof(ds41_model)));
     e->model->fd = -1;
+    e->prefill_batch = opt->prefill_batch ? opt->prefill_batch
+                                          : DS41_DEFAULT_PREFILL_BATCH;
     e->weights =
         static_cast<ds41_weights*>(ds41_xcalloc(1, sizeof(ds41_weights)));
 

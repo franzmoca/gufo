@@ -615,6 +615,7 @@ void PrintServeHelp(std::string_view program_name,
     std::string draft_calibration;
     std::string draft_trace_path;
     std::string prefill_weights;
+    std::uint32_t prefill_batch = 0;
     std::string dspark_model_path;
     std::string mtp_model_path;
     std::string vision_model_path;
@@ -659,6 +660,12 @@ void PrintServeHelp(std::string_view program_name,
         "copy of the weights) or decoded (binary16 where it pays; about 2.3 "
         "copies) (default: off)",
         "Model", &prefill_weights);
+    parser.AddOption(
+        "", "--prefill-batch", "N",
+        "DeepSeek V4.1 Flash: most prompt tokens per prefill batch, 16 to "
+        "4096; 4096 prefills about 5% faster for about 1.2 GiB more memory "
+        "(default: 2048)",
+        "Model", &prefill_batch);
     parser.AddOption("", "--image-tokens", "N",
                      "Gemma 4 soft tokens per image: 70, 140, 280, 560 or "
                      "1120 (default: 280)",
@@ -1246,6 +1253,7 @@ int RunServe(std::span<const char* const> args) {
     std::string draft_calibration;
     std::string draft_trace_path;
     std::string prefill_weights;
+    std::uint32_t prefill_batch = 0;
     std::string dspark_model_path;
     std::string mtp_model_path;
     std::string vision_model_path;
@@ -1291,6 +1299,12 @@ int RunServe(std::span<const char* const> args) {
         "copy of the weights) or decoded (binary16 where it pays; about 2.3 "
         "copies) (default: off)",
         "Model", &prefill_weights);
+    llm_parser.AddOption(
+        "", "--prefill-batch", "N",
+        "DeepSeek V4.1 Flash: most prompt tokens per prefill batch, 16 to "
+        "4096; 4096 prefills about 5% faster for about 1.2 GiB more memory "
+        "(default: 2048)",
+        "Model", &prefill_batch);
     llm_parser.AddOption("", "--image-tokens", "N",
                          "Gemma 4 soft tokens per image: 70, 140, 280, 560 or "
                          "1120 (default: 280)",
@@ -1596,6 +1610,7 @@ int RunServe(std::span<const char* const> args) {
     // so supervisors see a loading server rather than a refused connection.
     server::LoadingResponder loading(host, port);
     backend->set_gemma_prefill_weights(prefill_weights);
+    backend->set_deepseek_prefill_batch(prefill_batch);
     const bool load_ok = backend->load(
         model, &err, max_context, session_count,
         server::TextPrefillPolicy{

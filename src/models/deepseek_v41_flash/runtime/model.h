@@ -25,7 +25,16 @@ struct ds41_engine_options {
   const char* engram_path;
   /* Parse, validate and bind the artifacts without uploading any weights. */
   bool validate_only;
+  /* Most prompt tokens per prefill batch, DS41_MIN_PREFILL_BATCH to
+   * DS41_MAX_PREFILL_BATCH; 0 takes DS41_DEFAULT_PREFILL_BATCH. Larger
+   * batches fill the routed expert tiles better for about 0.6 MiB of
+   * activations per token. */
+  uint32_t prefill_batch;
 };
+
+inline constexpr uint32_t DS41_MIN_PREFILL_BATCH = 16;
+inline constexpr uint32_t DS41_DEFAULT_PREFILL_BATCH = 2048;
+inline constexpr uint32_t DS41_MAX_PREFILL_BATCH = 4096;
 
 struct ds41_session_snapshot {
   uint8_t* ptr;

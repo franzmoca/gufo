@@ -92,6 +92,12 @@ void RegisterBenchOptions(ArgParser& parser, BenchOptions& opt,
       "copy of the weights) or decoded (binary16 where it pays; about 2.3 "
       "copies) (default: off)",
       "Model", &opt.prefill_weights);
+  parser.AddOption(
+      "", "--prefill-batch", "N",
+      "DeepSeek V4.1 Flash: most prompt tokens per prefill batch, 16 to "
+      "4096; 4096 prefills about 5% faster for about 1.2 GiB more memory "
+      "(default: 2048)",
+      "Model", &opt.prefill_batch);
 
   parser.AddCustomOption(
       "-p", "--n-prompt", "n,n,...",
@@ -397,6 +403,20 @@ bool IsDeepSeekV4Flash(const core::GgufReader& reader) {
   return reader.GetMetadataString("general.architecture") == "deepseek4";
 }
 
+/// Model options; the prefill batch applies to DeepSeek V4.1 Flash only.
+template<typename Ds>
+typename Ds::ModelOptions DeepSeekModelOptions(std::uint32_t max_context,
+                                               std::string dspark_model_path,
+                                               std::uint32_t prefill_batch) {
+  typename Ds::ModelOptions options{
+      .max_context = max_context,
+      .dspark_model_path = std::move(dspark_model_path),
+  };
+  if constexpr (requires { options.prefill_batch; })
+    options.prefill_batch = prefill_batch;
+  return options;
+}
+
 template<typename Ds>
 std::vector<int> MakeDeepSeekBenchmarkTokens(const typename Ds::Model& model,
                                              std::size_t count) {
@@ -479,10 +499,9 @@ int RunDeepSeekBenchmark(
   std::string error;
   auto model = Ds::Model::Load(
       options.model_path,
-      typename Ds::ModelOptions{
-          .max_context = static_cast<std::uint32_t>(required_context),
-          .dspark_model_path = dspark ? options.dspark_model_path : "",
-      },
+      DeepSeekModelOptions<Ds>(static_cast<std::uint32_t>(required_context),
+                               dspark ? options.dspark_model_path : "",
+                               options.prefill_batch),
       &error);
   if (model == nullptr) {
     std::cerr << "Error creating " << Ds::kName << " model: " << error << '\n';

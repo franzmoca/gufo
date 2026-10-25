@@ -4087,7 +4087,9 @@ bool InferenceBackend::load(
     }
     auto model = models::deepseek_v41_flash::Model::Load(
         model_path,
-        models::deepseek_v41_flash::ModelOptions{.max_context = max_context},
+        models::deepseek_v41_flash::ModelOptions{
+            .max_context = max_context,
+            .prefill_batch = deepseek_prefill_batch_},
         &load_error);
     if (model == nullptr) {
       SetError(error, "Failed to create DeepSeek V4.1 model: " + load_error);
