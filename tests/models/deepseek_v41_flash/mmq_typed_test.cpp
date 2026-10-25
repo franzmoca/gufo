@@ -583,6 +583,112 @@ bool SwigluCase(const TypeCase& t, int M, int K, std::mt19937& rng) {
   return e < 1e-6;
 }
 
+/* The FP16 matrix-core routed kernel against the FP32-activation expert
+ * GEMV: the gate/up pair with its SwiGLU store (FP16 or FP32) over
+ * per-token inputs, and the single projection over per-slot inputs. */
+bool RoutedF16Case(const TypeCase& t, int M, int K, int n_tokens, int n_experts,
+                   int used, bool pair, std::mt19937& rng) {
+  constexpr float kLimit = 7.0f;
+  const std::size_t expert_bytes =
+      static_cast<std::size_t>(M) * K / t.block_values * t.block_bytes;
+  const std::size_t blocks =
+      static_cast<std::size_t>(n_experts) * M * K / t.block_values;
+  const auto gate = RandomBlocks(t, blocks, rng);
+  const auto up = RandomBlocks(t, blocks, rng);
+  const int rows = n_tokens * used;
+  const int x_rows = pair ? n_tokens : rows;
+  std::normal_distribution<float> normal;
+  std::vector<float> x(static_cast<std::size_t>(x_rows) * K), route(rows);
+  for (auto& v : x)
+    v = normal(rng);
+  for (auto& v : route)
+    v = 1.0f + 0.1f * normal(rng);
+  /* Distinct experts per token, as top-k routing gives. */
+  std::vector<int32_t> ids(rows);
+  for (int token = 0; token < n_tokens; ++token)
+    for (int s = 0; s < used; ++s)
+      ids[token * used + s] =
+          (token % 3 + s * 7 + static_cast<int>(rng() % 2) * 31) % n_experts;
+  std::vector<int32_t> plan(rows + (n_experts + 1) + rows / 64 + n_experts);
+  int32_t* bounds = plan.data() + rows;
+  const uint32_t n_tiles = ds41_v41_routed_plan(
+      ids.data(), rows, n_experts, plan.data(), bounds, bounds + n_experts + 1);
+  /* The reference reads one FP32 input row per slot. */
+  std::vector<float> xs(static_cast<std::size_t>(rows) * K);
+  for (int slot = 0; slot < rows; ++slot)
+    std::memcpy(&xs[static_cast<std::size_t>(slot) * K],
+                &x[static_cast<std::size_t>(pair ? slot / used : slot) * K],
+                K * sizeof(float));
+  auto* dg = Device(gate);
+  auto* du = Device(up);
+  auto* dx = Device(x);
+  auto* dxs = Device(xs);
+  auto* dids = Device(ids);
+  auto* dplan = Device(plan);
+  auto* droute = Device(route);
+  const std::size_t n_out = static_cast<std::size_t>(M) * rows;
+  float *g = nullptr, *u = nullptr, *y = nullptr;
+  uint16_t *x16 = nullptr, *y16 = nullptr;
+  (void)hipMalloc(&g, sizeof(float) * n_out);
+  (void)hipMalloc(&u, sizeof(float) * n_out);
+  (void)hipMalloc(&y, sizeof(float) * n_out);
+  (void)hipMalloc(&y16, sizeof(uint16_t) * n_out);
+  (void)hipMalloc(&x16, sizeof(uint16_t) * x.size());
+  const int32_t* dbounds = dplan + rows;
+  bool ok = n_tiles > 0 &&
+            ds41_v41_gemv_experts(t.type, dg, expert_bytes, dids, rows, dxs, K,
+                                  g, M, K) == 0 &&
+            ds41_v41_gemv_experts(t.type, du, expert_bytes, dids, rows, dxs, K,
+                                  u, M, K) == 0 &&
+            ds41_v41_to_half(dx, x16, x.size()) == 0;
+  if (pair)
+    ok = ok &&
+         ds41_v41_routed_f16(t.type, dg, du, expert_bytes, x16, used, dplan,
+                             dbounds, dbounds + n_experts + 1, n_tiles, droute,
+                             kLimit, y, 0, M, K) == 0 &&
+         ds41_v41_routed_f16(t.type, dg, du, expert_bytes, x16, used, dplan,
+                             dbounds, dbounds + n_experts + 1, n_tiles, droute,
+                             kLimit, y16, 1, M, K) == 0;
+  else
+    ok = ok && ds41_v41_routed_f16(t.type, dg, nullptr, expert_bytes, x16, 1,
+                                   dplan, dbounds, dbounds + n_experts + 1,
+                                   n_tiles, nullptr, 0.0f, y, 0, M, K) == 0;
+  double e = INFINITY, e16 = 0.0;
+  if (ok) {
+    const auto hg = Host(g, n_out);
+    const auto hu = Host(u, n_out);
+    std::vector<float> want(n_out);
+    for (std::size_t i = 0; i < n_out; ++i) {
+      const float gv = std::min(hg[i], kLimit);
+      const float uv = std::min(std::max(hu[i], -kLimit), kLimit);
+      want[i] =
+          pair ? route[i / M] * (gv / (1.0f + std::exp(-gv)) * uv) : hg[i];
+    }
+    e = RelativeError(Host(y, n_out), want);
+    if (pair) {
+      std::vector<_Float16> h(n_out);
+      std::vector<float> got16(n_out);
+      (void)hipMemcpy(h.data(), y16, n_out * sizeof(uint16_t),
+                      hipMemcpyDeviceToHost);
+      for (std::size_t i = 0; i < n_out; ++i)
+        got16[i] = static_cast<float>(h[i]);
+      e16 = RelativeError(got16, want);
+    }
+  }
+  std::printf(
+      "routed f16 %-8s M=%d K=%d tokens=%d experts=%d pair=%d tiles=%u "
+      "rel_err=%.2e half_out_err=%.2e\n",
+      t.name, M, K, n_tokens, n_experts, pair, n_tiles, e, e16);
+  for (void* p :
+       {static_cast<void*>(dg), static_cast<void*>(du), static_cast<void*>(dx),
+        static_cast<void*>(dxs), static_cast<void*>(dids),
+        static_cast<void*>(dplan), static_cast<void*>(droute),
+        static_cast<void*>(g), static_cast<void*>(u), static_cast<void*>(y),
+        static_cast<void*>(y16), static_cast<void*>(x16)})
+    (void)hipFree(p);
+  return e < 2e-3 && e16 < 2e-3;
+}
+
 }  // namespace
 
 int main() {
@@ -619,6 +725,12 @@ int main() {
       ok = MoeCase(t, 256, 1024, 200, 384, 6, bounded, rng) && ok;
     }
     ok = MoeSwigluCase(t, 256, 1024, 200, 384, 6, rng) && ok;
+    if (t.type == 19) {
+      for (const int n_experts : {16, 384}) {
+        ok = RoutedF16Case(t, 256, 1024, 200, n_experts, 6, true, rng) && ok;
+        ok = RoutedF16Case(t, 512, 2304, 200, n_experts, 6, false, rng) && ok;
+      }
+    }
     ok = MoeClassCase(t, 256, 1024, 600, 384, 6, rng) && ok;
   }
   ds41_mmq_cleanup();

@@ -206,6 +206,7 @@ struct Activations {
   float *router = nullptr, *route_w = nullptr;
   int32_t* route_ids = nullptr;
   uint8_t* expert_class = nullptr;  // routed tile-width class per expert
+  int32_t* routed_plan = nullptr;   // ds41_v41_routed_plan rows, bounds and tiles
   float *g6 = nullptr, *u6 = nullptr, *mid6 = nullptr, *down6 = nullptr;
   float *sg = nullptr, *su = nullptr, *sm = nullptr, *sd = nullptr;
   float *engram_in = nullptr, *engram_kv = nullptr, *logits = nullptr;
@@ -580,6 +581,15 @@ bool attention(ds41_decoder* d, uint32_t il, uint32_t n) {
 
 /* Bytes per 256 values of the routed-expert types the FP32-activation expert
  * GEMV decodes; 0 for others. */
+/* Batched routed projections on the FP16 matrix cores (ds41_v41_routed_f16). */
+bool routed_f16_type(int type) { return type == (int)DS41_TENSOR_IQ1_S; }
+
+/* ds41_v41_routed_plan's rows, bounds and tiles for batches up to cap tokens. */
+uint64_t routed_plan_ints(uint64_t cap) {
+  const uint64_t slots = cap * DS41_N_EXPERT_USED;
+  return slots + (DS41_N_EXPERT + 1) + (slots / 64 + DS41_N_EXPERT);
+}
+
 uint64_t expert_block_bytes(int type) {
   switch ((uint32_t)type) {
   case DS41_TENSOR_IQ1_S:
@@ -631,6 +641,16 @@ bool moe(ds41_decoder* d, uint32_t il, uint32_t n) {
       ds41_mmq_set_routed_classes(nullptr, 0, nullptr, nullptr);
     }
   } routed_bounds;
+  const bool f16_gate = n > 1 && gate_type == up_type && routed_f16_type(gate_type);
+  const bool f16_down = n > 1 && routed_f16_type(down_type);
+  const int32_t* plan_rows = d->routed_plan;
+  const int32_t* plan_bounds = plan_rows + rows;
+  const int32_t* plan_tiles = plan_bounds + DS41_N_EXPERT + 1;
+  uint32_t n_tiles = 0;
+  /* FP16 copies of the input and of the SwiGLU rows, in the buffers the
+   * MMQ path would use for the gate and up rows. */
+  auto* x16 = reinterpret_cast<uint16_t*>(d->g6);
+  auto* mid16 = reinterpret_cast<uint16_t*>(d->u6);
   if (n > 1) {
     std::vector<int32_t> ids((size_t)rows);
     std::vector<unsigned int> counts(DS41_N_EXPERT, 0u);
@@ -649,6 +669,16 @@ bool moe(ds41_decoder* d, uint32_t il, uint32_t n) {
     if (n_classes > 0) {
       if (hipMemcpy(d->expert_class, classes, sizeof(classes), hipMemcpyHostToDevice) != hipSuccess) return false;
       ds41_mmq_set_routed_classes(d->expert_class, n_classes, widths, class_rows);
+    }
+    if (f16_gate || f16_down) {
+      std::vector<int32_t> plan(routed_plan_ints(n));
+      int32_t* bounds = plan.data() + rows;
+      n_tiles = ds41_v41_routed_plan(ids.data(), (uint32_t)rows, DS41_N_EXPERT, plan.data(), bounds,
+                                     bounds + DS41_N_EXPERT + 1);
+      const size_t used_ints = (size_t)rows + DS41_N_EXPERT + 1 + n_tiles;
+      if (n_tiles == 0 || hipMemcpy(d->routed_plan, plan.data(), used_ints * sizeof(int32_t),
+                                    hipMemcpyHostToDevice) != hipSuccess)
+        return false;
     }
   }
   /* Single tokens take gate, up and SwiGLU in one pass when gate and up share
@@ -672,6 +702,13 @@ bool moe(ds41_decoder* d, uint32_t il, uint32_t n) {
       status = ds41_mmq_moe_vec_typed(up_type, up, d->xn, d->route_ids, d->u6, DS41_N_FF_EXP, kDim, 1, DS41_N_EXPERT,
                                       used, 0);
     if (status) return false;
+  } else if (f16_gate) {
+    const uint64_t expert_bytes = (uint64_t)DS41_N_FF_EXP * kDim / 256 * expert_block_bytes(gate_type);
+    if (ds41_v41_to_half(d->xn, x16, (uint64_t)n * kDim) ||
+        ds41_v41_routed_f16(gate_type, gate, up, expert_bytes, x16, (uint32_t)used, plan_rows, plan_bounds,
+                            plan_tiles, n_tiles, d->route_w, kSwigluLimit, f16_down ? (void*)mid16 : (void*)d->mid6,
+                            f16_down, DS41_N_FF_EXP, kDim))
+      return false;
   } else if (gate_type == up_type) {
     /* Batches quantize the input once and store SwiGLU from the up pass. */
     if (ds41_mmq_moe_swiglu_typed(gate_type, gate, up, d->xn, d->route_ids, d->route_w, d->g6, d->mid6,
@@ -686,6 +723,8 @@ bool moe(ds41_decoder* d, uint32_t il, uint32_t n) {
   const bool mid_done = (n == 1 && fused_pair) || (n > 1 && gate_type == up_type);
   if (!mid_done && ds41_v41_swiglu(d->g6, d->u6, d->route_w, d->mid6, rows, DS41_N_FF_EXP, kSwigluLimit))
     return false;
+  /* An FP16 down pass after an MMQ gate/up pass takes its rows in FP16. */
+  if (f16_down && !f16_gate && ds41_v41_to_half(d->mid6, mid16, (uint64_t)rows * DS41_N_FF_EXP)) return false;
   /* Each (token, slot) row multiplies its own expert's down projection. */
   if (n == 1) {
     int status = 0;
@@ -693,6 +732,11 @@ bool moe(ds41_decoder* d, uint32_t il, uint32_t n) {
       status = ds41_mmq_moe_vec_typed(down_type, down, d->mid6, d->route_ids, d->down6, kDim, DS41_N_FF_EXP, rows,
                                       DS41_N_EXPERT, 1, 0);
     if (status) return false;
+  } else if (f16_down) {
+    const uint64_t expert_bytes = (uint64_t)DS41_N_FF_EXP * kDim / 256 * expert_block_bytes(down_type);
+    if (ds41_v41_routed_f16(down_type, down, nullptr, expert_bytes, mid16, 1, plan_rows, plan_bounds, plan_tiles,
+                            n_tiles, nullptr, 0.0f, d->down6, 0, kDim, DS41_N_FF_EXP))
+      return false;
   } else if (ds41_mmq_moe_typed(down_type, down, d->mid6, d->route_ids, d->down6, kDim, DS41_N_FF_EXP, rows,
                                 DS41_N_EXPERT, 1, 0)) {
     return false;
@@ -823,7 +867,7 @@ std::shared_ptr<SharedActivations> make_activations(ds41_engine* engine, uint32_
   const uint64_t per_token = (float_count(1, rows) - float_count(0, rows)) * sizeof(float) +
                              (block_stride + 31) / 32 * sizeof(uint32_t) +
                              DS41_N_INDEXER_TOP_K * sizeof(uint32_t) + DS41_N_EXPERT_USED * sizeof(int32_t) +
-                             kDim * sizeof(float);
+                             (routed_plan_ints(1) - routed_plan_ints(0)) * sizeof(int32_t) + kDim * sizeof(float);
   const uint64_t fixed = float_count(0, rows) * sizeof(float) + rows * DS41_CANDIDATE_TOPK_BLOCKS * sizeof(uint32_t);
   size_t free_bytes = 0, total_bytes = 0;
   bool ok = hipMemGetInfo(&free_bytes, &total_bytes) == hipSuccess;
@@ -852,7 +896,8 @@ std::shared_ptr<SharedActivations> make_activations(ds41_engine* engine, uint32_
     a.block_select = alloc<uint32_t>(sh->device, (uint64_t)a.score_rows * DS41_CANDIDATE_TOPK_BLOCKS);
     a.route_ids = alloc<int32_t>(sh->device, cap * DS41_N_EXPERT_USED);
     a.expert_class = alloc<uint8_t>(sh->device, DS41_N_EXPERT);
-    ok = a.candidates && a.topk && a.block_select && a.route_ids && a.expert_class;
+    a.routed_plan = alloc<int32_t>(sh->device, routed_plan_ints(cap));
+    ok = a.candidates && a.topk && a.block_select && a.route_ids && a.expert_class && a.routed_plan;
   }
   for (uint32_t slot = 0; slot < DS41_N_ENGRAM_LAYER && ok; slot++)
     ok = hipHostMalloc(&a.engram_pinned[slot], (uint64_t)kEngramPinnedTokens * kEngramIn * sizeof(float)) ==
