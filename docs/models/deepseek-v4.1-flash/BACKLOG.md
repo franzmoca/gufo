@@ -140,8 +140,10 @@ between these sizes (`tools/prof/prof.py` on the two shapes).
 A DSpark cycle at 1.9K context costs 12.5 ms of drafting plus the
 verification batch. `--spec-bench` puts 1-8 rows at 41.8 / 54.9 / 65.9 /
 76.1 / 87.1 / 96.1 / 107.7 / 109.3 ms, so each row beyond the first adds
-about 11 ms. Batches of 2-8 tokens use the decode kernels for identical
-numerics. In a 6-row pass the dense Q5_K GEMVs take 34.2 ms (22.4 ms for
+about 11 ms. Batches of 2-7 tokens use the decode kernels for identical
+numerics; from 8 tokens attention takes the batched kernel, so prompt-lookup
+copies stop at six per cycle although 99% of them are accepted on a file
+edit. In a 6-row pass the dense Q5_K GEMVs take 34.2 ms (22.4 ms for
 one row) and the routed experts 47.5 ms (10 ms for one row; reading the 21.2
 distinct experts per layer bounds them near 36 ms). The grouped IQ1_S
 kernel is limited by per-column decode and activation work rather than

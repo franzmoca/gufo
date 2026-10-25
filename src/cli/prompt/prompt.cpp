@@ -561,7 +561,13 @@ int GenerateDeepSeekResponse(const PromptOptions& opt,
               << " full_block_rate=" << full_block_rate
               << " full_blocks=" << stats.full_blocks
               << " anchors=" << stats.anchors
-              << " verifier_rows=" << stats.verifier_rows << '\n';
+              << " verifier_rows=" << stats.verifier_rows;
+    if constexpr (requires { stats.lookup_copied; }) {
+      std::cerr << " lookup_cycles=" << stats.lookup_cycles
+                << " lookup_copied=" << stats.lookup_copied
+                << " lookup_accepted=" << stats.lookup_accepted;
+    }
+    std::cerr << '\n';
   }
 
   if (opt.verbose && generated > 0) {

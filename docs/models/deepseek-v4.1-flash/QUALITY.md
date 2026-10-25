@@ -180,6 +180,17 @@ sampled cancellation cases interrupted after a fixed time: DSpark samples in
 a different order and generates more tokens before the cut, so the partial
 reply and its follow-up differ; each passes its exact-continuation check.
 
+Prompt-lookup copies are verified the same way, in batches of at most
+seven rows: from eight rows the batched attention kernel replaces the
+decode one, and `ds41_load_probe --spec-check 16 --spec-width W` keeps
+bit-identical logits against single-token decode for 6 and 7 rows but not
+for 8 (max |diff| 11.6, same argmax). Greedy generation with lookup is
+token-identical to plain decoding on the file-edit, roadmap and chat
+prompts, and the `cache` suite with the drafter passes every case with all
+30 completed replies byte-identical to the run without lookup. The lookup
+state that the tokens cannot rebuild (resume point, request start) travels
+in snapshots and in the component cache metadata.
+
 `ds41.attention` checks the drafter's block attention (ring rows with
 wrap-around plus every block row, with sinks) against an fp64 reference
 (≤ 7e-7 relative), the hc mean exactly and the Markov argmax (first index

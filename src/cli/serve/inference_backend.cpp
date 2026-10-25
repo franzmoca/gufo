@@ -329,6 +329,18 @@ struct DeepSeekV41Flash {
   }
 };
 
+// Drafts and accepted drafts, including prompt-lookup copies where the
+// engine reports them.
+template<class Stats>
+std::pair<std::uint64_t, std::uint64_t> DeepSeekDrafts(const Stats& stats) {
+  if constexpr (requires { stats.lookup_copied; }) {
+    return {stats.support_drafted + stats.lookup_copied,
+            stats.support_accepted + stats.lookup_accepted};
+  } else {
+    return {stats.support_drafted, stats.support_accepted};
+  }
+}
+
 template<class Ds>
 std::vector<std::uint8_t> DeepSeekCompatibilityIdentity(
     std::string_view artifact_fingerprint, std::string_view support_fingerprint,
@@ -2180,10 +2192,10 @@ public:
     }
     const auto stats_after = deepseek.session().DsparkStatistics();
     step.draft_rounds = stats_after.steps - stats_before.steps;
-    step.draft_tokens =
-        stats_after.support_drafted - stats_before.support_drafted;
-    step.draft_accepted_tokens =
-        stats_after.support_accepted - stats_before.support_accepted;
+    const auto [drafted, accepted] = DeepSeekDrafts(stats_after);
+    const auto [drafted_before, accepted_before] = DeepSeekDrafts(stats_before);
+    step.draft_tokens = drafted - drafted_before;
+    step.draft_accepted_tokens = accepted - accepted_before;
     return step;
   }
 
@@ -2282,10 +2294,11 @@ public:
       }
       const auto stats_after = states[index]->session().DsparkStatistics();
       step.draft_rounds = stats_after.steps - stats_before[index].steps;
-      step.draft_tokens =
-          stats_after.support_drafted - stats_before[index].support_drafted;
-      step.draft_accepted_tokens =
-          stats_after.support_accepted - stats_before[index].support_accepted;
+      const auto [drafted, accepted] = DeepSeekDrafts(stats_after);
+      const auto [drafted_before, accepted_before] =
+          DeepSeekDrafts(stats_before[index]);
+      step.draft_tokens = drafted - drafted_before;
+      step.draft_accepted_tokens = accepted - accepted_before;
     }
     return steps;
   }

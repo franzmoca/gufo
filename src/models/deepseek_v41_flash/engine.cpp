@@ -381,6 +381,8 @@ Session::DsparkStats Session::DsparkStatistics() const {
                             &stats.support_accepted, &stats.positional_accepted,
                             &stats.anchors, &stats.full_blocks, &stats.steps,
                             &stats.skipped, &stats.context_tokens);
+  ds41_session_lookup_stats(session_, &stats.lookup_cycles,
+                            &stats.lookup_copied, &stats.lookup_accepted);
   return stats;
 }
 

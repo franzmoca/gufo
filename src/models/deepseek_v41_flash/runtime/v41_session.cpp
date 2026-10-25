@@ -6,16 +6,20 @@
  * frontier logits and decoder state. With a DSpark drafter, a step drafts a
  * block after the anchor, verifies it in one speculative evaluation and keeps
  * the accepted prefix (ds41_decoder_commit); the drafter's rings follow every
- * evaluated position. */
+ * evaluated position. Where the context repeats earlier tokens, a step
+ * verifies the tokens that followed them (prompt lookup) instead of a draft. */
 #include <algorithm>
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <span>
 #include <vector>
 
+#include "ds41_v41.h"
 #include "model.h"
 #include "native_internal.h"
+#include "src/core/speculative/prompt_lookup.hpp"
 #include "v41_dspark.h"
 
 int ds41_sample_argmax(const float* logits, uint32_t vocabulary_size);
@@ -34,7 +38,12 @@ struct ds41_session {
   ds41_session_write_fn before_write = nullptr;
   void* write_data = nullptr;
   ds41_dspark_state* dspark = nullptr;
+  gufo::speculative::PromptLookup<int> lookup;
   int pending = -1;  // a sampled token a rejected row drew, emitted next
+  /* Rows of a verification: the anchor and up to six copied tokens. Below
+   * DS41_V41_ATTN_SPLIT_TOKENS rows every kernel keeps the single-token
+   * numerics, so verified output matches plain decoding. */
+  static constexpr uint32_t kVerifyRows = DS41_V41_ATTN_SPLIT_TOKENS - 1;
   static constexpr float kAcceptPrior = 0.7f;
   /* Plain steps before a one-draft cycle re-measures acceptance: from the
    * first, doubling while the policy keeps returning to plain steps. */
@@ -56,12 +65,13 @@ struct ds41_session {
   struct {
     uint64_t drafted = 0, accepted = 0, support_drafted = 0, support_accepted = 0, positional = 0;
     uint64_t anchors = 0, full_blocks = 0, steps = 0;
+    uint64_t lookup_cycles = 0, lookup_copied = 0, lookup_accepted = 0;
   } stats;
 };
 
 namespace {
 
-constexpr uint64_t kPayloadMagic = 0x3153534531345344ull;  // "DS41ESS1"
+constexpr uint64_t kPayloadMagic = 0x3253534531345344ull;  // "DS41ESS2"
 
 void set_error(char* error, size_t capacity, const char* message) {
   if (error && capacity) snprintf(error, capacity, "%s", message);
@@ -113,7 +123,7 @@ int ds41_session_create(ds41_session** out, ds41_engine* engine, int context_siz
     return 1;
   }
   s->logits.resize(vocab(s));
-  if (s->dspark) s->spec_logits.resize((uint64_t)(DS41_DSPARK_BLOCK + 1) * vocab(s));
+  if (s->dspark) s->spec_logits.resize((uint64_t)ds41_session::kVerifyRows * vocab(s));
   *out = s;
   return 0;
 }
@@ -165,6 +175,7 @@ int ds41_session_sync(ds41_session* s, const ds41_tokens* prompt, char* error, s
     s->tokens.clear();
     s->valid = false;
     s->pending = -1;
+    s->lookup.Clear();
     if (s->dspark) ds41_dspark_state_reset(s->dspark, 0);
   }
   const size_t batch = ds41_decoder_batch_capacity(s->decoder);
@@ -212,6 +223,7 @@ void ds41_session_begin_request(ds41_session* s) {
   std::fill(std::begin(s->policy.accept), std::end(s->policy.accept), ds41_session::kAcceptPrior);
   s->policy.plain = 0;
   s->policy.probe = ds41_session::kProbeFirst;
+  s->lookup.BeginRequest();
 }
 void ds41_session_prepare_batch_execution(ds41_session*) {}
 
@@ -287,22 +299,43 @@ int dspark_step(const ds41_session_dspark_batch_item& item, char* error, size_t 
   }
   const uint32_t first = (uint32_t)s->tokens.size();
   const uint32_t room = (uint32_t)(s->context - (int)first - 2);
-  const uint32_t limit =
-      std::min({(uint32_t)DS41_DSPARK_BLOCK, item.max_draft_tokens, (uint32_t)item.emitted_cap - 1, room});
-  const uint32_t tail = draft_width(s, limit);
-  int32_t drafts[DS41_DSPARK_BLOCK];
   const bool trace = getenv("GUFO_DEEPSEEK41_DSPARK_TRACE") != nullptr;
   const auto ms = [](auto a, auto b) { return (float)std::chrono::duration<double, std::milli>(b - a).count(); };
   const auto t0 = std::chrono::steady_clock::now();
-  if (tail == 0 || ds41_dspark_state_end(s->dspark) != first || !ds41_dspark_draft(s->dspark, anchor, drafts)) {
-    if (!eval(s, &anchor, 1, error, capacity)) return 1;
-    if (tail == 0) ema(s->policy.cycle_ms[0], ms(t0, std::chrono::steady_clock::now()));
-    out[(*item.n_emitted)++] = anchor;
-    return 0;
-  }
-  int block[DS41_DSPARK_BLOCK + 1];
+  int block[ds41_session::kVerifyRows];
   block[0] = anchor;
-  std::copy(drafts, drafts + tail, block + 1);
+  /* Prompt lookup first: a copy costs no drafting. Sampled requests copy
+   * only from their prompt and need the longer match (PromptLookup). */
+  uint32_t copied = 0;
+  size_t copy_start = 0;
+  if (s->lookup.Step(first)) {
+    using Lookup = gufo::speculative::PromptLookup<int>;
+    s->lookup.Extend(s->tokens, sampler != nullptr);
+    size_t agreed = 0;
+    const auto match = s->lookup.Find(s->tokens, std::span<const int>(&anchor, 1),
+                                      sampler ? Lookup::kSampledMinMatch : Lookup::kMinMatch, false, &agreed);
+    const uint32_t cap = std::min({ds41_session::kVerifyRows - 1, (uint32_t)item.emitted_cap - 1, room});
+    if (match.length != 0) {
+      copy_start = match.start;
+      while (copied < std::min<size_t>(cap, agreed)) {
+        const int token = s->tokens[match.start + copied];
+        block[1 + copied++] = token;
+        if (ds41_token_is_stop(s->engine, token)) break;
+      }
+    }
+  }
+  uint32_t tail = copied;
+  if (copied == 0) {
+    const uint32_t limit =
+        std::min({(uint32_t)DS41_DSPARK_BLOCK, item.max_draft_tokens, (uint32_t)item.emitted_cap - 1, room});
+    tail = draft_width(s, limit);
+    if (tail == 0 || ds41_dspark_state_end(s->dspark) != first || !ds41_dspark_draft(s->dspark, anchor, block + 1)) {
+      if (!eval(s, &anchor, 1, error, capacity)) return 1;
+      if (tail == 0) ema(s->policy.cycle_ms[0], ms(t0, std::chrono::steady_clock::now()));
+      out[(*item.n_emitted)++] = anchor;
+      return 0;
+    }
+  }
   const uint32_t m = tail + 1;
   if (s->before_write) s->before_write(s->write_data, first, first + m);
   const auto t1 = std::chrono::steady_clock::now();
@@ -349,12 +382,22 @@ int dspark_step(const ds41_session_dspark_batch_item& item, char* error, size_t 
   auto& st = s->stats;
   st.drafted += m;
   st.accepted += accepted;
-  st.support_drafted += tail;
-  st.support_accepted += accepted - 1;
-  st.positional += positional;
   st.anchors++;
   st.full_blocks += accepted == m;
   st.steps++;
+  if (copied != 0) {
+    s->lookup.Observe(copy_start, copied, accepted - 1);
+    st.lookup_cycles++;
+    st.lookup_copied += copied;
+    st.lookup_accepted += accepted - 1;
+    if (trace)
+      fprintf(stderr, "ds41: lookup pos=%u copied=%u accepted=%u verify=%.1fms\n", first, copied, accepted - 1,
+              ms(t1, std::chrono::steady_clock::now()));
+    return 0;
+  }
+  st.support_drafted += tail;
+  st.support_accepted += accepted - 1;
+  st.positional += positional;
   /* Drafts after the first rejection say nothing about their acceptance. */
   auto& p = s->policy;
   for (uint32_t k = 0; k < std::min(accepted, tail); k++) ema(p.accept[k], k + 1 < accepted ? 1.0f : 0.0f);
@@ -417,7 +460,9 @@ int ds41_session_save_snapshot(const ds41_session* s, ds41_session_snapshot* sna
     return 1;
   }
   std::vector<uint8_t> payload;
-  const uint64_t header[3] = {kPayloadMagic, (uint64_t)s->tokens.size(), (uint64_t)s->logits.size()};
+  const auto lookup = s->lookup.Save();
+  const uint64_t header[4] = {kPayloadMagic, (uint64_t)s->tokens.size(), (uint64_t)s->logits.size(),
+                              (uint64_t)lookup.resume << 32 | lookup.request_start};
   auto append = [&](const void* p, size_t bytes) {
     payload.insert(payload.end(), (const uint8_t*)p, (const uint8_t*)p + bytes);
   };
@@ -440,15 +485,17 @@ int ds41_session_save_snapshot(const ds41_session* s, ds41_session_snapshot* sna
 
 int ds41_session_load_snapshot(ds41_session* s, const ds41_session_snapshot* snapshot, char* error,
                                size_t capacity) {
-  uint64_t header[3];
+  uint64_t header[4];
   if (!s || !snapshot || !snapshot->ptr || snapshot->len < sizeof(header)) {
     set_error(error, capacity, "invalid snapshot");
     return 1;
   }
   memcpy(header, snapshot->ptr, sizeof(header));
   const uint64_t fixed = sizeof(header) + header[1] * sizeof(int) + header[2] * sizeof(float);
+  const gufo::speculative::PromptLookup<int>::State lookup{.resume = (uint32_t)(header[3] >> 32),
+                                                           .request_start = (uint32_t)header[3]};
   if (header[0] != kPayloadMagic || header[2] != vocab(s) || header[1] == 0 || header[1] >= (uint64_t)s->context ||
-      snapshot->len < fixed) {
+      snapshot->len < fixed || !gufo::speculative::PromptLookup<int>::Valid(lookup, header[1])) {
     set_error(error, capacity, "snapshot does not match this session");
     return 1;
   }
@@ -470,6 +517,7 @@ int ds41_session_load_snapshot(ds41_session* s, const ds41_session_snapshot* sna
   memcpy(s->logits.data(), at + header[1] * sizeof(int), header[2] * sizeof(float));
   s->valid = true;
   s->pending = -1;
+  s->lookup.Restore(lookup);
   return 0;
 }
 
@@ -490,6 +538,7 @@ void ds41_session_invalidate(ds41_session* s) {
   s->valid = false;
   s->tokens.clear();
   s->pending = -1;
+  s->lookup.Clear();
   if (s->dspark) ds41_dspark_state_reset(s->dspark, 0);
 }
 
@@ -522,9 +571,29 @@ int ds41_session_finish_restore(ds41_session* s) {
     return 1;
   /* Restored state carries no drafter rows; they refill as tokens are evaluated. */
   if (s->dspark) ds41_dspark_state_reset(s->dspark, (uint32_t)s->tokens.size());
+  s->lookup.Clear();
   s->pending = -1;
   s->valid = true;
   return 0;
+}
+
+void ds41_session_lookup_state(const ds41_session* s, uint32_t* resume, uint32_t* request_start) {
+  const auto state = s ? s->lookup.Save() : gufo::speculative::PromptLookup<int>::State{};
+  *resume = state.resume;
+  *request_start = state.request_start;
+}
+
+int ds41_session_set_lookup_state(ds41_session* s, uint32_t resume, uint32_t request_start) {
+  const gufo::speculative::PromptLookup<int>::State state{.resume = resume, .request_start = request_start};
+  if (!s || !s->valid || !gufo::speculative::PromptLookup<int>::Valid(state, s->tokens.size())) return 1;
+  s->lookup.Restore(state);
+  return 0;
+}
+
+void ds41_session_lookup_stats(const ds41_session* s, uint64_t* cycles, uint64_t* copied, uint64_t* accepted) {
+  *cycles = s ? s->stats.lookup_cycles : 0;
+  *copied = s ? s->stats.lookup_copied : 0;
+  *accepted = s ? s->stats.lookup_accepted : 0;
 }
 
 int ds41_session_pos(const ds41_session* s) { return s ? (int)s->tokens.size() : 0; }
@@ -533,6 +602,6 @@ uint32_t ds41_session_prefill_capacity(const ds41_session* s) { return s ? (uint
 
 uint64_t ds41_session_payload_bytes(const ds41_session* s) {
   if (!s || !s->valid) return 0;
-  return 3 * sizeof(uint64_t) + s->tokens.size() * sizeof(int) + s->logits.size() * sizeof(float) +
+  return 4 * sizeof(uint64_t) + s->tokens.size() * sizeof(int) + s->logits.size() * sizeof(float) +
          ds41_decoder_state_bytes(s->decoder) + (s->dspark ? ds41_dspark_state_bytes(s->dspark) : 0);
 }

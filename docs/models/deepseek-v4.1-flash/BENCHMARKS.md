@@ -50,6 +50,15 @@ token-identical to plain decoding ([QUALITY.md](QUALITY.md)).
 | Chat coding request, 45 tokens, 384 generated | Q2_K/Q4_K | 23.5 | 37.85 | 76.3% | 3.84 |
 | Chat coding request, 384 generated | Q8_0/MXFP4 | 23.5 | 39.17 | 76.3% | 4.09 |
 
+Prompt lookup in DSpark sessions: when the context repeats earlier tokens,
+a cycle verifies up to six of the tokens that followed them instead of a
+draft. On a file edit (rename a member throughout a 110-line header and
+return the file; 1,302 tokens, 512 generated, Q2_K/Q4_K) DSpark alone
+reaches 43.88 tok/s (5.17 tokens/cycle) and with lookup 56.43 tok/s (6.56
+tokens/cycle; 71 of 78 cycles copied, 414 of 420 copies accepted), against
+23.4 tok/s plain. The roadmap and chat prompts above rarely repeat
+themselves (0 and 3 lookup cycles): 28.95 and 37.81 tok/s.
+
 `gufo serve --dspark-model` (Q2_K/Q4_K, 32K context), 70-token thinking
 prompt, 400 tokens: greedy 26.4 tok/s (155 of 277 drafts accepted),
 temperature 1.0 23.6-24.6 tok/s (49-52% accepted), against tg64 23.88
