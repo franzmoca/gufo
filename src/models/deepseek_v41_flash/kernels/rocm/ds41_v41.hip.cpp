@@ -370,13 +370,67 @@ __device__ __forceinline__ void sinkhorn_token(const float* mixes, const float* 
     for (uint32_t b = 0; b < hc; b++) comb[a * hc + b] = c[a][b];
 }
 
+/* Batched form. It keeps its own copy of sinkhorn_token's arithmetic: under
+ * fast-math, calling the shared function rounds differently and moved the
+ * batched 3K scores. */
 template <uint32_t hc>
 __global__ void hc_sinkhorn_kernel(const float* all_mixes, const float* scale, const float* base, float* all_pre,
                                    float* all_post, float* all_comb, uint32_t iters, float eps, uint32_t n) {
   const uint32_t t = blockIdx.x * blockDim.x + threadIdx.x;
   if (t >= n) return;
-  sinkhorn_token<hc>(all_mixes + (uint64_t)t * (2 * hc + hc * hc), scale, base, all_pre + (uint64_t)t * hc,
-                     all_post + (uint64_t)t * hc, all_comb + (uint64_t)t * hc * hc, iters, eps);
+  const float* mixes = all_mixes + (uint64_t)t * (2 * hc + hc * hc);
+  float* pre = all_pre + (uint64_t)t * hc;
+  float* post = all_post + (uint64_t)t * hc;
+  float* comb = all_comb + (uint64_t)t * hc * hc;
+  float c[hc][hc];
+#pragma unroll
+  for (uint32_t i = 0; i < hc; i++) {
+    pre[i] = sigmoidf(mixes[i] * scale[0] + base[i]) + eps;
+    post[i] = 2.0f * sigmoidf(mixes[hc + i] * scale[1] + base[hc + i]);
+  }
+#pragma unroll
+  for (uint32_t a = 0; a < hc; a++) {
+    float m = -INFINITY;
+#pragma unroll
+    for (uint32_t b = 0; b < hc; b++) {
+      c[a][b] = mixes[2 * hc + a * hc + b] * scale[2] + base[2 * hc + a * hc + b];
+      m = fmaxf(m, c[a][b]);
+    }
+    float sum = 0.0f;
+#pragma unroll
+    for (uint32_t b = 0; b < hc; b++) {
+      c[a][b] = expf(c[a][b] - m);
+      sum += c[a][b];
+    }
+#pragma unroll
+    for (uint32_t b = 0; b < hc; b++) c[a][b] = c[a][b] / sum + eps;
+  }
+  auto normalize_columns = [&] {
+#pragma unroll
+    for (uint32_t b = 0; b < hc; b++) {
+      float sum = 0.0f;
+#pragma unroll
+      for (uint32_t a = 0; a < hc; a++) sum += c[a][b];
+#pragma unroll
+      for (uint32_t a = 0; a < hc; a++) c[a][b] /= sum + eps;
+    }
+  };
+  normalize_columns();
+  for (uint32_t it = 1; it < iters; it++) {
+#pragma unroll
+    for (uint32_t a = 0; a < hc; a++) {
+      float sum = 0.0f;
+#pragma unroll
+      for (uint32_t b = 0; b < hc; b++) sum += c[a][b];
+#pragma unroll
+      for (uint32_t b = 0; b < hc; b++) c[a][b] /= sum + eps;
+    }
+    normalize_columns();
+  }
+#pragma unroll
+  for (uint32_t a = 0; a < hc; a++)
+#pragma unroll
+    for (uint32_t b = 0; b < hc; b++) comb[a * hc + b] = c[a][b];
 }
 
 /* Small batches: each mix row of each token is split over kMixSlices blocks
