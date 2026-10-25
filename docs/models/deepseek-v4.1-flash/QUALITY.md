@@ -68,6 +68,10 @@ masked scores with a host port of the reference selection, exactly, for
 prefill batches below, at and across 16,384 rows and for decode tokens up to
 40K rows (up to 70,872 dropped rows per case).
 
+The same positions scored at the native 1M context (576-token batches,
+indexer scores in 64-token groups, per-block mask): perplexity 6.273,
+agreement 95.9%, mean |ΔNLL| 0.075; 97.2% agreement over 16,383-17,399.
+
 ## Chat template
 
 `tests/models/deepseek_v41_flash/fixtures/encoding-1017.json` holds 12

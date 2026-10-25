@@ -107,14 +107,15 @@ int ds41_v41_indexer_score(const float* q, const float* keys, const float* w, fl
                            uint64_t score_stride, uint32_t pos0, uint32_t n, uint32_t ratio, uint32_t heads,
                            uint32_t head_dim);
 /* Candidate blocks per token: max over `block`-row blocks, newest block
- * forced in, keep the top `topk_blocks`; writes mask[t, j] (1 keep / 0 drop).
- * block_scratch holds n * block_stride floats, select_scratch n * topk_blocks. */
+ * forced in, keep the top `topk_blocks`; writes mask[t, b] (1 keep / 0 drop)
+ * per block b, block_stride bytes per token. block_scratch holds
+ * n * block_stride floats, select_scratch n * topk_blocks. */
 int ds41_v41_candidate_mask(const float* score, uint64_t score_stride, uint8_t* mask, float* block_scratch,
                             uint64_t block_stride, uint32_t* select_scratch, uint32_t pos0, uint32_t n,
                             uint32_t ratio, uint32_t block, uint32_t topk_blocks);
-/* score[t, j] = -inf where mask[t, j] == 0. */
-int ds41_v41_apply_mask(float* score, uint64_t score_stride, const uint8_t* mask, uint32_t pos0, uint32_t n,
-                        uint32_t ratio);
+/* score[t, j] = -inf where the block mask[t, j / block] == 0. */
+int ds41_v41_apply_mask(float* score, uint64_t score_stride, const uint8_t* mask, uint64_t mask_stride, uint32_t pos0,
+                        uint32_t n, uint32_t ratio, uint32_t block);
 /* out[t, 0:k_t] = indices of the k_t = min(k, len_t) largest scores of token
  * t, len_t = ceil(((pos0 + t + 1) / ratio) / div); rows of out hold k. */
 int ds41_v41_topk(const float* score, uint64_t score_stride, uint32_t* out, uint32_t k, uint32_t pos0, uint32_t n,

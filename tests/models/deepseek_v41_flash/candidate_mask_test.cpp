@@ -43,19 +43,21 @@ std::size_t Case(uint32_t pos0, uint32_t n, uint32_t ratio, uint32_t block,
   uint8_t* d_mask = nullptr;
   float* d_blocks = nullptr;
   uint32_t* d_select = nullptr;
-  (void)hipMalloc(&d_mask, score.size());
+  const std::size_t mask_bytes = (std::size_t)n * block_stride;
+  (void)hipMalloc(&d_mask, mask_bytes);
   (void)hipMalloc(&d_blocks, (std::size_t)n * block_stride * sizeof(float));
   (void)hipMalloc(&d_select, (std::size_t)n * topk * sizeof(uint32_t));
-  (void)hipMemset(d_mask, 0xff, score.size());
+  (void)hipMemset(d_mask, 0xff, mask_bytes);
   if (!d_score || !d_mask || !d_blocks || !d_select ||
       ds41_v41_candidate_mask(d_score, stride, d_mask, d_blocks, block_stride,
                               d_select, pos0, n, ratio, block, topk) ||
-      ds41_v41_apply_mask(d_score, stride, d_mask, pos0, n, ratio) ||
+      ds41_v41_apply_mask(d_score, stride, d_mask, block_stride, pos0, n, ratio,
+                          block) ||
       hipDeviceSynchronize() != hipSuccess) {
     std::fprintf(stderr, "launch failed\n");
     return SIZE_MAX;
   }
-  std::vector<uint8_t> mask(score.size());
+  std::vector<uint8_t> mask(mask_bytes);
   std::vector<float> masked(score.size());
   (void)hipMemcpy(mask.data(), d_mask, mask.size(), hipMemcpyDeviceToHost);
   (void)hipMemcpy(masked.data(), d_score, masked.size() * sizeof(float),
@@ -83,13 +85,13 @@ std::size_t Case(uint32_t pos0, uint32_t n, uint32_t ratio, uint32_t block,
     std::vector<uint8_t> keep(nb, 0);
     for (uint32_t i = 0; i < std::min(topk, nb); i++)
       keep[order[i]] = 1;
+    for (uint32_t b = 0; b < nb; b++)
+      bad += mask[(std::size_t)t * block_stride + b] != keep[b];
     for (uint32_t j = 0; j < len; j++) {
       const uint8_t want = keep[j / block];
       dropped += !want;
-      const std::size_t at = (std::size_t)t * stride + j;
       const float want_score = want ? s[j] : -INFINITY;
-      bad += mask[at] != want;
-      bad += masked[at] != want_score;
+      bad += masked[(std::size_t)t * stride + j] != want_score;
     }
   }
   std::printf(
