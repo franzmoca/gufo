@@ -168,10 +168,15 @@ struct Format<22> {
 
 /* Grid (row tiles of 32, slots). The raw words of U blocks are loaded before
  * any of them is decoded. */
-template <int kType, int U>
+/* Row sums of one expert matrix; with kSwiGLU, a wave takes the same rows
+ * of the gate (w) and up (w_up) matrices and stores
+ * route_w[slot] * silu(min(gate, limit)) * clamp(up, +-limit). */
+template <int kType, int U, bool kSwiGLU>
 __global__ void __launch_bounds__(kWave* kWaves)
-    expert_gemv_kernel(const uint8_t* __restrict__ w, const float* __restrict__ x, float* __restrict__ y, uint32_t m,
-                       uint32_t k, const int32_t* __restrict__ ids, uint64_t expert_bytes, uint32_t x_slot) {
+    expert_gemv_kernel(const uint8_t* __restrict__ w, const uint8_t* __restrict__ w_up,
+                       const float* __restrict__ route_w, float limit, const float* __restrict__ x,
+                       float* __restrict__ y, uint32_t m, uint32_t k, const int32_t* __restrict__ ids,
+                       uint64_t expert_bytes, uint32_t x_slot) {
   using F = Format<kType>;
   constexpr uint32_t kRows = 4 * kWaves;
   __shared__ uint32_t grid[F::kIq1Grid ? NGRID_IQ1S : 1];
@@ -193,29 +198,62 @@ __global__ void __launch_bounds__(kWave* kWaves)
   if (row >= m) return;
   const float* xt = x + (uint64_t)blockIdx.y * x_slot + 32 * t;
   const uint32_t blocks_per_row = k / 256;
-  const uint8_t* base = w + (uint64_t)id * expert_bytes + (uint64_t)row * blocks_per_row * F::kBlockBytes;
+  const uint64_t offset = (uint64_t)id * expert_bytes + (uint64_t)row * blocks_per_row * F::kBlockBytes;
+  const uint8_t* base = w + offset;
+  const uint8_t* base_up = kSwiGLU ? w_up + offset : nullptr;
   float acc = 0.0f;
+  float acc_up = 0.0f;
   uint32_t blk = 0;
   for (; blk + U <= blocks_per_row; blk += U) {
     Raw raw[U];
+    Raw raw_up[kSwiGLU ? U : 1];
 #pragma unroll
-    for (int u = 0; u < U; ++u) raw[u] = F::Load(base + (uint64_t)(blk + u) * F::kBlockBytes, t);
+    for (int u = 0; u < U; ++u) {
+      raw[u] = F::Load(base + (uint64_t)(blk + u) * F::kBlockBytes, t);
+      if constexpr (kSwiGLU) raw_up[u] = F::Load(base_up + (uint64_t)(blk + u) * F::kBlockBytes, t);
+    }
 #pragma unroll
-    for (int u = 0; u < U; ++u) acc += F::Dot(raw[u], t, xt + (blk + u) * 256, grid);
+    for (int u = 0; u < U; ++u) {
+      acc += F::Dot(raw[u], t, xt + (blk + u) * 256, grid);
+      if constexpr (kSwiGLU) acc_up += F::Dot(raw_up[u], t, xt + (blk + u) * 256, grid);
+    }
   }
-  for (; blk < blocks_per_row; ++blk)
+  for (; blk < blocks_per_row; ++blk) {
     acc += F::Dot(F::Load(base + (uint64_t)blk * F::kBlockBytes, t), t, xt + blk * 256, grid);
+    if constexpr (kSwiGLU) acc_up += F::Dot(F::Load(base_up + (uint64_t)blk * F::kBlockBytes, t), t, xt + blk * 256, grid);
+  }
 #pragma unroll
-  for (int offset = 4; offset > 0; offset >>= 1) acc += __shfl_xor(acc, offset, kWave);
-  if (t == 0) y[row] = acc;
+  for (int offset = 4; offset > 0; offset >>= 1) {
+    acc += __shfl_xor(acc, offset, kWave);
+    if constexpr (kSwiGLU) acc_up += __shfl_xor(acc_up, offset, kWave);
+  }
+  if (t != 0) return;
+  if constexpr (kSwiGLU) {
+    float g = acc;
+    float u = acc_up;
+    if (limit > 0.0f) {
+      u = fminf(fmaxf(u, -limit), limit);
+      g = fminf(g, limit);
+    }
+    const float h = g / (1.0f + expf(-g)) * u;
+    y[row] = route_w ? route_w[blockIdx.y] * h : h;
+  } else {
+    y[row] = acc;
+  }
 }
 
 template <int kType, int U>
-int launch(const void* w, uint64_t expert_bytes, const int32_t* ids, uint32_t slots, const float* x,
-           uint32_t x_slot, float* y, uint32_t m, uint32_t k) {
+int launch(const void* w, const void* w_up, const float* route_w, float limit, uint64_t expert_bytes,
+           const int32_t* ids, uint32_t slots, const float* x, uint32_t x_slot, float* y, uint32_t m, uint32_t k) {
   constexpr uint32_t kRows = 4 * kWaves;
-  expert_gemv_kernel<kType, U><<<dim3((m + kRows - 1) / kRows, slots), kWave * kWaves>>>(
-      static_cast<const uint8_t*>(w), x, y, m, k, ids, expert_bytes, x_slot);
+  const dim3 blocks((m + kRows - 1) / kRows, slots);
+  if (w_up)
+    expert_gemv_kernel<kType, U, true><<<blocks, kWave * kWaves>>>(static_cast<const uint8_t*>(w),
+                                                                    static_cast<const uint8_t*>(w_up), route_w,
+                                                                    limit, x, y, m, k, ids, expert_bytes, x_slot);
+  else
+    expert_gemv_kernel<kType, U, false><<<blocks, kWave * kWaves>>>(
+        static_cast<const uint8_t*>(w), nullptr, nullptr, 0.0f, x, y, m, k, ids, expert_bytes, x_slot);
   const hipError_t err = hipGetLastError();
   if (err == hipSuccess) return 0;
   fprintf(stderr, "ds41: expert gemv launch failed: %s\n", hipGetErrorString(err));
@@ -224,21 +262,37 @@ int launch(const void* w, uint64_t expert_bytes, const int32_t* ids, uint32_t sl
 
 }  // namespace
 
-extern "C" int ds41_v41_gemv_experts(int type, const void* w, uint64_t expert_bytes, const int32_t* ids,
-                                     uint32_t slots, const float* x, uint32_t x_slot, float* y, uint32_t m,
-                                     uint32_t k) {
+namespace {
+
+int dispatch(int type, const void* w, const void* w_up, const float* route_w, float limit, uint64_t expert_bytes,
+             const int32_t* ids, uint32_t slots, const float* x, uint32_t x_slot, float* y, uint32_t m, uint32_t k) {
   if (!ids || slots == 0 || m == 0 || k % 256 != 0) return 1;
   /* Blocks loaded ahead: 2 measured best for IQ1_S, 1 for the others. */
   switch (type) {
   case 19:
-    return launch<19, 2>(w, expert_bytes, ids, slots, x, x_slot, y, m, k);
+    return launch<19, 2>(w, w_up, route_w, limit, expert_bytes, ids, slots, x, x_slot, y, m, k);
   case 29:
-    return launch<29, 1>(w, expert_bytes, ids, slots, x, x_slot, y, m, k);
+    return launch<29, 1>(w, w_up, route_w, limit, expert_bytes, ids, slots, x, x_slot, y, m, k);
   case 16:
-    return launch<16, 1>(w, expert_bytes, ids, slots, x, x_slot, y, m, k);
+    return launch<16, 1>(w, w_up, route_w, limit, expert_bytes, ids, slots, x, x_slot, y, m, k);
   case 22:
-    return launch<22, 1>(w, expert_bytes, ids, slots, x, x_slot, y, m, k);
+    return launch<22, 1>(w, w_up, route_w, limit, expert_bytes, ids, slots, x, x_slot, y, m, k);
   default:
     return 1;
   }
+}
+
+}  // namespace
+
+extern "C" int ds41_v41_gemv_experts(int type, const void* w, uint64_t expert_bytes, const int32_t* ids,
+                                     uint32_t slots, const float* x, uint32_t x_slot, float* y, uint32_t m,
+                                     uint32_t k) {
+  return dispatch(type, w, nullptr, nullptr, 0.0f, expert_bytes, ids, slots, x, x_slot, y, m, k);
+}
+
+extern "C" int ds41_v41_gemv_experts_swiglu(int type, const void* gate, const void* up, uint64_t expert_bytes,
+                                            const int32_t* ids, uint32_t slots, const float* x,
+                                            const float* route_w, float limit, float* y, uint32_t m, uint32_t k) {
+  if (!gate || !up) return 1;
+  return dispatch(type, gate, up, route_w, limit, expert_bytes, ids, slots, x, 0, y, m, k);
 }

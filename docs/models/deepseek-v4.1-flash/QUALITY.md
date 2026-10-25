@@ -111,7 +111,8 @@ decode 2.4e-7, matrix-core batches 3.7e-4);
 `ds41.mmq_typed` compares batched, bounded-routed and grouped matvec launches
 with the matvec path for every V4.1 weight type, and the single-token Q5_K/Q8_0
 GEMV with an fp64 dot of the dequantized rows, and the IQ routed-expert GEMV
-with the ggml matvec (shared and per-slot inputs, dropped slots write zeros).
+with the ggml matvec (shared and per-slot inputs, dropped slots write zeros);
+the fused gate/up SwiGLU passes match the unfused ones.
 With it the decode path scores perplexity 6.305 on the 3K positions,
 agreement 96.5%, mean |ΔNLL| 0.075; the smoke continuation keeps all 9 greedy
 tokens, KL ≤ 1.6e-3 per step. With the hc collapse fused into the following RMSNorm (a different

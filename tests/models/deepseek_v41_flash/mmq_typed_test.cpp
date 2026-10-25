@@ -325,6 +325,74 @@ bool ExpertGemvCase(const TypeCase& t, int M, int K, bool per_slot,
   return e < 2e-2 && dropped_zero;
 }
 
+/* Fused gate/up SwiGLU (dense GEMV for Q5_K/Q8_0, routed experts for the IQ
+ * types) against the two unfused matvecs and a host SwiGLU. */
+bool SwigluCase(const TypeCase& t, int M, int K, std::mt19937& rng) {
+  constexpr int kExperts = 8;
+  constexpr int kSlots = 6;
+  constexpr float kLimit = 7.0f;
+  const bool experts = t.type != 8 && t.type != 13;
+  const int matrices = experts ? kExperts : 1;
+  const int slots = experts ? kSlots : 1;
+  const std::size_t expert_bytes =
+      static_cast<std::size_t>(M) * K / t.block_values * t.block_bytes;
+  const std::size_t blocks =
+      static_cast<std::size_t>(matrices) * M * K / t.block_values;
+  const auto gate = RandomBlocks(t, blocks, rng);
+  const auto up = RandomBlocks(t, blocks, rng);
+  std::normal_distribution<float> normal;
+  std::vector<float> x(K), route(slots);
+  for (auto& v : x)
+    v = normal(rng);
+  for (auto& v : route)
+    v = 1.0f + 0.1f * normal(rng);
+  const std::vector<int32_t> ids = {5, 1, -1, 7, 0, 2};
+  auto* dg = Device(gate);
+  auto* du = Device(up);
+  auto* dx = Device(x);
+  auto* dids = Device(ids);
+  auto* droute = Device(route);
+  const std::size_t n_out = static_cast<std::size_t>(M) * slots;
+  float *g = nullptr, *u = nullptr, *y = nullptr;
+  (void)hipMalloc(&g, sizeof(float) * n_out);
+  (void)hipMalloc(&u, sizeof(float) * n_out);
+  (void)hipMalloc(&y, sizeof(float) * n_out);
+  bool ok;
+  if (experts) {
+    ok = ds41_v41_gemv_experts(t.type, dg, expert_bytes, dids, slots, dx, 0, g,
+                               M, K) == 0 &&
+         ds41_v41_gemv_experts(t.type, du, expert_bytes, dids, slots, dx, 0, u,
+                               M, K) == 0 &&
+         ds41_v41_gemv_experts_swiglu(t.type, dg, du, expert_bytes, dids, slots,
+                                      dx, droute, kLimit, y, M, K) == 0;
+  } else {
+    ok = ds41_v41_gemv(t.type, dg, dx, g, M, K, 0, 4) == 0 &&
+         ds41_v41_gemv(t.type, du, dx, u, M, K, 0, 4) == 0 &&
+         ds41_v41_gemv_swiglu(t.type, dg, du, dx, y, M, K, kLimit, 4) == 0;
+  }
+  double e = INFINITY;
+  if (ok) {
+    const auto hg = Host(g, n_out);
+    const auto hu = Host(u, n_out);
+    const auto got = Host(y, n_out);
+    std::vector<float> want(n_out);
+    for (std::size_t i = 0; i < n_out; ++i) {
+      const float gv = std::min(hg[i], kLimit);
+      const float uv = std::min(std::max(hu[i], -kLimit), kLimit);
+      const float h = gv / (1.0f + std::exp(-gv)) * uv;
+      want[i] = experts ? route[i / M] * h : h;
+    }
+    e = RelativeError(got, want);
+  }
+  std::printf("swiglu %-8s M=%d K=%d rel_err=%.2e\n", t.name, M, K, e);
+  for (void* p :
+       {static_cast<void*>(dg), static_cast<void*>(du), static_cast<void*>(dx),
+        static_cast<void*>(dids), static_cast<void*>(droute),
+        static_cast<void*>(g), static_cast<void*>(u), static_cast<void*>(y)})
+    (void)hipFree(p);
+  return e < 1e-6;
+}
+
 }  // namespace
 
 int main() {
@@ -343,10 +411,13 @@ int main() {
     if (t.type == 8 || t.type == 13) {
       ok = GemvCase(t, 300, 1280, 0, rng) && ok;
       ok = GemvCase(t, 256, 4096, 64, rng) && ok;
+      ok = SwigluCase(t, 2304, 5120, rng) && ok;
     }
     if (t.type != 8 && t.type != 13) {
       ok = ExpertGemvCase(t, 2304, 5120, false, rng) && ok;
       ok = ExpertGemvCase(t, 512, 2304, true, rng) && ok;
+      if (t.type == 19 || t.type == 29)
+        ok = SwigluCase(t, 2304, 5120, rng) && ok;
     }
     ok = GroupedCase(t, 128, 1, 1024, 8, rng) && ok;
     ok = GroupedCase(t, 256, 3, 512, 8, rng) && ok;
