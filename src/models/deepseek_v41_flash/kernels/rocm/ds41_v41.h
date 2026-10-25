@@ -20,33 +20,59 @@ extern "C" {
 int ds41_v41_matmul_bf16(const uint16_t* w, const float* x, float* out, uint32_t rows, uint32_t k, uint32_t n);
 int ds41_v41_matmul_f32(const float* w, const float* x, float* out, uint32_t rows, uint32_t k, uint32_t n);
 
-/* Single-token projection y[r] = W[r] . x for Q5_K (13) or Q8_0 (8) W
- * ([m][k] in GGUF blocks, k % 256 == 0) and FP32 activations; row r reads x +
- * (r / rows_per_x) * k (0: every row reads x). `slices` (1, 2, 4, 8; <= 0
- * picks the default) waves share a row group. Returns 1 for other types. */
+/* Decode projections y[c, r] = W[r] . x_c for Q5_K (13) or Q8_0 (8) W
+ * ([m][k] in GGUF blocks, k % 256 == 0) and FP32 activations, for n tokens
+ * (1 to DS41_V41_GEMV_MAX_TOKENS) read once per weight: row r of token c
+ * reads x + c * x_stride + (r / rows_per_x) * k (rows_per_x 0: every row
+ * reads x + c * x_stride) and writes y + c * y_stride + r. `slices` (1, 2, 4,
+ * 8; <= 0 picks the default) waves share a row group. Every token sees the
+ * arithmetic of a single-token launch. Returns 1 for other types. */
+#define DS41_V41_GEMV_MAX_TOKENS 8
 int ds41_v41_gemv(int type, const void* w, const float* x, float* y, uint32_t m, uint32_t k, uint32_t rows_per_x,
-                  int slices);
+                  int slices, uint32_t n, uint64_t x_stride, uint32_t y_stride);
 /* Two matrices of one type and width k over the same x in one launch:
- * y1 = W1 x (m1 rows), y2 = W2 x (m2 rows). */
+ * y1 = W1 x (m1 rows), y2 = W2 x (m2 rows), for n tokens of k floats (y1, y2
+ * rows m1, m2 floats). */
 int ds41_v41_gemv_pair(int type, const void* w1, float* y1, uint32_t m1, const void* w2, float* y2, uint32_t m2,
-                       const float* x, uint32_t k, int slices);
+                       const float* x, uint32_t k, int slices, uint32_t n);
 /* Gate and up matrices of the same type and shape over one x, fused with the
  * SwiGLU of ds41_v41_swiglu (no weight): y = silu(min(gate x, limit)) *
- * clamp(up x, +-limit). */
+ * clamp(up x, +-limit), for n tokens of k floats (y rows m floats). */
 int ds41_v41_gemv_swiglu(int type, const void* gate, const void* up, const float* x, float* y, uint32_t m, uint32_t k,
-                         float limit, int slices);
-/* Single-token routed experts in IQ1_S, IQ1_M, IQ2_XXS or IQ2_S with FP32
- * activations: y[s, 0:m] = W[ids[s]] x_s for s < slots, x_s = x + s * x_slot
- * (x_slot 0 shares one input); expert e's blocks start at w + e *
- * expert_bytes, and a negative id writes zeros. Returns 1 for other types. */
+                         float limit, int slices, uint32_t n);
+/* Decode routed experts in IQ1_S, IQ1_M, IQ2_XXS or IQ2_S with FP32
+ * activations: y[s, 0:m] = W[ids[s]] x_s for s < slots, x_s = x + (s /
+ * slots_per_x) * x_slot (x_slot 0 shares one input); expert e's blocks start
+ * at w + e * expert_bytes, and a negative id writes zeros. Every slot sees the
+ * same arithmetic. Returns 1 for other types. */
 int ds41_v41_gemv_experts(int type, const void* w, uint64_t expert_bytes, const int32_t* ids, uint32_t slots,
-                          const float* x, uint32_t x_slot, float* y, uint32_t m, uint32_t k);
-/* Gate and up of the same experts (one type, same layout) over a shared x,
- * fused with the SwiGLU of ds41_v41_swiglu: y[s, r] = route_w[s] *
- * silu(min(gate, limit)) * clamp(up, +-limit); route_w may be NULL. */
+                          const float* x, uint32_t x_slot, uint32_t slots_per_x, float* y, uint32_t m, uint32_t k);
+/* Gate and up of the same experts (one type, same layout) over the inputs of
+ * ds41_v41_gemv_experts, fused with the SwiGLU of ds41_v41_swiglu: y[s, r] =
+ * route_w[s] * silu(min(gate, limit)) * clamp(up, +-limit); route_w may be
+ * NULL. */
 int ds41_v41_gemv_experts_swiglu(int type, const void* gate, const void* up, uint64_t expert_bytes,
-                                 const int32_t* ids, uint32_t slots, const float* x, const float* route_w,
-                                 float limit, float* y, uint32_t m, uint32_t k);
+                                 const int32_t* ids, uint32_t slots, const float* x, uint32_t x_slot,
+                                 uint32_t slots_per_x, const float* route_w, float limit, float* y, uint32_t m,
+                                 uint32_t k);
+
+/* Small batches of routed experts, each expert's weights decoded once for
+ * all slots routed to it. ds41_v41_expert_plan groups the `slots` (<=
+ * DS41_V41_EXPERT_PLAN_SLOTS) ids by expert into `plan`
+ * (DS41_V41_EXPERT_PLAN_INTS(slots) device ints). The grouped GEMV then
+ * computes ds41_v41_gemv_experts (w_up NULL) or, for the IQ1 and IQ2_XXS
+ * types, ds41_v41_gemv_experts_swiglu over the planned slots; no expert may
+ * occur more than `cols` (<= DS41_V41_EXPERT_PLAN_COLS) times, which top-k
+ * routing of `cols` tokens guarantees. Each slot's result equals the
+ * ungrouped launch bit for bit. */
+#define DS41_V41_EXPERT_PLAN_SLOTS 64
+#define DS41_V41_EXPERT_PLAN_COLS 8
+#define DS41_V41_EXPERT_PLAN_INTS(slots) (1 + (slots) * (2 + DS41_V41_EXPERT_PLAN_COLS))
+int ds41_v41_expert_plan(const int32_t* ids, uint32_t slots, int32_t* plan);
+int ds41_v41_gemv_experts_grouped(int type, const void* w, const void* w_up, const float* route_w, float limit,
+                                  uint64_t expert_bytes, const int32_t* plan, uint32_t slots, uint32_t cols,
+                                  const float* x, uint32_t x_slot, uint32_t slots_per_x, float* y, uint32_t m,
+                                  uint32_t k);
 
 /* Batched dense projections (Q5_K) on the FP16 matrix cores: for each group
  * z < groups, out[t, z m + r] = W_z[r] . x[t, z k : z k + k] over n tokens,

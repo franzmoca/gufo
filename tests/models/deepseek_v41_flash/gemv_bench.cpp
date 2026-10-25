@@ -96,7 +96,8 @@ int main() {
                 s.k, bytes / 1e6, bytes / us_mmvq / 1e3);
     for (const int slices : {1, 2, 4, 8}) {
       const double us = time([&](void* p) {
-        ds41_v41_gemv(13, p, x, y1, s.m, s.k, s.rows_per_x, slices);
+        ds41_v41_gemv(13, p, x, y1, s.m, s.k, s.rows_per_x, slices, 1, s.k,
+                      s.m);
       });
       std::vector<float> r0(s.m), r1(s.m);
       (void)hipMemcpy(r0.data(), y0, s.m * 4, hipMemcpyDeviceToHost);
@@ -164,7 +165,7 @@ int main() {
     auto launch = [&](int r, bool fp32) {
       if (fp32)
         ds41_v41_gemv_experts(e.type, w, per_expert, ids + r * 6, 6, x,
-                              e.per_slot ? e.k : 0, y, e.m, e.k);
+                              e.per_slot ? e.k : 0, 1, y, e.m, e.k);
       else if (e.per_slot)
         ds41_mmq_moe_vec_typed(e.type, w, x, ids + r * 6, y, e.m, e.k, 6,
                                kExperts, 1, 0);

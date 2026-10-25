@@ -151,14 +151,21 @@ __device__ __forceinline__ int OffsetQ45K(int t) {
   return 64 * (t >> 1) + 16 * (t & 1);
 }
 
+/// acc += task t's 32 decoded Q4_K/Q5_K values w . x (x: the super-block's
+/// 256 activations).
+__device__ __forceinline__ float DotQ45K(float acc, const float (&w)[32],
+                                         int t, const float* x) {
+  const float* xv = x + OffsetQ45K(t);
+  acc = Accumulate<16>(acc, w, xv);
+  return Accumulate<16>(acc, w + 16, xv + 32);
+}
+
 template<bool kFiveBit>
 __device__ __forceinline__ float TaskQ45K(const std::uint8_t* block, int t,
                                           const float* x, float acc) {
   float w[32];
   DecodeQ45K<kFiveBit>(block, t, w);
-  const float* xv = x + OffsetQ45K(t);
-  acc = Accumulate<16>(acc, w, xv);
-  return Accumulate<16>(acc, w + 16, xv + 32);
+  return DotQ45K(acc, w, t, x);
 }
 
 // Q6_K: 4 tasks per super-block. Task t = 2 n + h covers ql bytes

@@ -27,33 +27,41 @@ template <>
 struct Format<13> {  // Q5_K
   static constexpr int kBlockBytes = 176;
   static constexpr int kTasks = 8;
-  static __device__ __forceinline__ float Task(const uint8_t* b, int t, const float* x, float acc) {
-    return TaskQ45K<true>(b, t, x, acc);
+  static __device__ __forceinline__ void Decode(const uint8_t* b, int t, float (&w)[32]) { DecodeQ45K<true>(b, t, w); }
+  static __device__ __forceinline__ float Dot(float acc, const float (&w)[32], int t, const float* x) {
+    return DotQ45K(acc, w, t, x);
   }
 };
 template <>
 struct Format<8> {  // Q8_0, eight 34-byte blocks per 256 values
   static constexpr int kBlockBytes = 272;
   static constexpr int kTasks = 8;
-  static __device__ __forceinline__ float Task(const uint8_t* b, int t, const float* x, float acc) {
-    return TaskQ80(b, t, x, acc);
+  static __device__ __forceinline__ void Decode(const uint8_t* b, int t, float (&w)[32]) {
+    DecodeQ8_0(b + 34 * t, (t & 1) != 0, w);
+  }
+  static __device__ __forceinline__ float Dot(float acc, const float (&w)[32], int t, const float* x) {
+    return Accumulate<32>(acc, w, x + 32 * t);
   }
 };
 
-/* Row r reads x + (r / rows_per_x) * k. Rows from m1 on come from w2 and go
- * to y2 (row r - m1). With kSwiGLU, w_up holds a second matrix of the same
- * shape whose rows are taken in the same pass, and row r stores
- * silu(min(gate, limit)) * clamp(up, +-limit). */
-template <int kType, int S, bool kSwiGLU>
+/* Row r of token c reads x + c * x_stride + (r / rows_per_x) * k, for the
+ * first n <= kCols tokens. Rows from m1 on come from w2 and go to y2 (row
+ * r - m1, token stride m - m1); the others to y (token stride y_stride). With
+ * kSwiGLU, w_up holds a second matrix of the same shape whose rows are taken
+ * in the same pass, and row r stores silu(min(gate, limit)) * clamp(up,
+ * +-limit). Each lane decodes its weights once for all tokens; every token
+ * sees the FMA order of a single-token pass. */
+template <int kType, int S, bool kSwiGLU, int kCols>
 __global__ void __launch_bounds__(kWave* kWaves)
     gemv_kernel(const uint8_t* __restrict__ w, const uint8_t* __restrict__ w_up, float limit,
-                const float* __restrict__ x, float* __restrict__ y, uint32_t m, uint32_t k, uint32_t rows_per_x,
-                const uint8_t* __restrict__ w2, float* __restrict__ y2, uint32_t m1) {
+                const float* __restrict__ x, uint64_t x_stride, float* __restrict__ y, uint32_t y_stride, uint32_t m,
+                uint32_t k, uint32_t rows_per_x, const uint8_t* __restrict__ w2, float* __restrict__ y2, uint32_t m1,
+                uint32_t n) {
   using F = Format<kType>;
   constexpr int kRowsPerWave = kWave / F::kTasks;
   constexpr int kGroups = kWaves / S;
-  __shared__ float partial[kWaves][kWave];
-  __shared__ float partial_up[kSwiGLU ? kWaves : 1][kWave];
+  __shared__ float partial[S > 1 ? kCols : 1][kWaves][kWave];
+  __shared__ float partial_up[S > 1 && kSwiGLU ? kCols : 1][kWaves][kWave];
   const int lane = threadIdx.x % kWave;
   const int wave = threadIdx.x / kWave;
   const int group = wave / S;
@@ -61,8 +69,8 @@ __global__ void __launch_bounds__(kWave* kWaves)
   const int t = lane % F::kTasks;
   const uint32_t row = (blockIdx.x * kGroups + group) * kRowsPerWave + lane / F::kTasks;
   const uint32_t blocks_per_row = k / 256;
-  float acc = 0.0f;
-  float acc_up = 0.0f;
+  float acc[kCols] = {};
+  float acc_up[kCols] = {};
   const bool second = row >= m1;
   if (row < m) {
     const uint64_t offset = (uint64_t)(second ? row - m1 : row) * blocks_per_row * F::kBlockBytes;
@@ -70,39 +78,61 @@ __global__ void __launch_bounds__(kWave* kWaves)
     const float* xr = x + (uint64_t)(row / rows_per_x) * k;
 #pragma unroll 2
     for (uint32_t blk = slice; blk < blocks_per_row; blk += S) {
-      acc = F::Task(base + (uint64_t)blk * F::kBlockBytes, t, xr + blk * 256, acc);
-      if constexpr (kSwiGLU) acc_up = F::Task(w_up + offset + (uint64_t)blk * F::kBlockBytes, t, xr + blk * 256, acc_up);
+      float wv[32];
+      F::Decode(base + (uint64_t)blk * F::kBlockBytes, t, wv);
+#pragma unroll
+      for (int c = 0; c < kCols; ++c)
+        if (kCols == 1 || c < (int)n) acc[c] = F::Dot(acc[c], wv, t, xr + c * x_stride + blk * 256);
+      if constexpr (kSwiGLU) {
+        F::Decode(w_up + offset + (uint64_t)blk * F::kBlockBytes, t, wv);
+#pragma unroll
+        for (int c = 0; c < kCols; ++c)
+          if (kCols == 1 || c < (int)n) acc_up[c] = F::Dot(acc_up[c], wv, t, xr + c * x_stride + blk * 256);
+      }
     }
   }
 #pragma unroll
-  for (int offset = F::kTasks / 2; offset > 0; offset >>= 1) {
-    acc += __shfl_xor(acc, offset, kWave);
-    if constexpr (kSwiGLU) acc_up += __shfl_xor(acc_up, offset, kWave);
+  for (int c = 0; c < kCols; ++c) {
+#pragma unroll
+    for (int offset = F::kTasks / 2; offset > 0; offset >>= 1) {
+      acc[c] += __shfl_xor(acc[c], offset, kWave);
+      if constexpr (kSwiGLU) acc_up[c] += __shfl_xor(acc_up[c], offset, kWave);
+    }
   }
   if constexpr (S > 1) {
-    partial[wave][lane] = acc;
-    if constexpr (kSwiGLU) partial_up[wave][lane] = acc_up;
+#pragma unroll
+    for (int c = 0; c < kCols; ++c) {
+      partial[c][wave][lane] = acc[c];
+      if constexpr (kSwiGLU) partial_up[c][wave][lane] = acc_up[c];
+    }
     __syncthreads();
     if (slice != 0) return;
 #pragma unroll
-    for (int s = 1; s < S; ++s) {
-      acc += partial[wave + s][lane];
-      if constexpr (kSwiGLU) acc_up += partial_up[wave + s][lane];
+    for (int c = 0; c < kCols; ++c) {
+#pragma unroll
+      for (int s = 1; s < S; ++s) {
+        acc[c] += partial[c][wave + s][lane];
+        if constexpr (kSwiGLU) acc_up[c] += partial_up[c][wave + s][lane];
+      }
     }
   }
   if (t != 0 || row >= m) return;
-  if constexpr (kSwiGLU) {
-    float g = acc;
-    float u = acc_up;
-    if (limit > 0.0f) {
-      u = fminf(fmaxf(u, -limit), limit);
-      g = fminf(g, limit);
+#pragma unroll
+  for (int c = 0; c < kCols; ++c) {
+    if (kCols > 1 && c >= (int)n) break;
+    if constexpr (kSwiGLU) {
+      float g = acc[c];
+      float u = acc_up[c];
+      if (limit > 0.0f) {
+        u = fminf(fmaxf(u, -limit), limit);
+        g = fminf(g, limit);
+      }
+      y[(uint64_t)c * y_stride + row] = g / (1.0f + expf(-g)) * u;
+    } else if (second) {
+      y2[(uint64_t)c * (m - m1) + row - m1] = acc[c];
+    } else {
+      y[(uint64_t)c * y_stride + row] = acc[c];
     }
-    y[row] = g / (1.0f + expf(-g)) * u;
-  } else if (second) {
-    y2[row - m1] = acc;
-  } else {
-    y[row] = acc;
   }
 }
 
@@ -113,40 +143,63 @@ struct Second {
   uint32_t m1;
 };
 
-template <int kType, int S>
+/* Tokens of one launch: x rows x_stride floats apart, y rows y_stride apart. */
+struct Tokens {
+  uint32_t n;
+  uint64_t x_stride;
+  uint32_t y_stride;
+};
+
+template <int kType, int S, int kCols>
 void launch(const void* w, const void* w_up, float limit, const float* x, float* y, uint32_t m, uint32_t k,
-            uint32_t rows_per_x, Second second) {
+            uint32_t rows_per_x, Second second, Tokens tokens) {
   constexpr uint32_t kRows = (kWave / Format<kType>::kTasks) * (kWaves / S);
   const uint32_t blocks = (m + kRows - 1) / kRows;
   const auto* w2 = static_cast<const uint8_t*>(second.w);
   if (w_up)
-    gemv_kernel<kType, S, true><<<blocks, kWave * kWaves>>>(static_cast<const uint8_t*>(w),
-                                                             static_cast<const uint8_t*>(w_up), limit, x, y, m, k,
-                                                             rows_per_x, w2, second.y, second.m1);
+    gemv_kernel<kType, S, true, kCols><<<blocks, kWave * kWaves>>>(
+        static_cast<const uint8_t*>(w), static_cast<const uint8_t*>(w_up), limit, x, tokens.x_stride, y,
+        tokens.y_stride, m, k, rows_per_x, w2, second.y, second.m1, tokens.n);
   else
-    gemv_kernel<kType, S, false><<<blocks, kWave * kWaves>>>(static_cast<const uint8_t*>(w), nullptr, 0.0f, x, y, m,
-                                                              k, rows_per_x, w2, second.y, second.m1);
+    gemv_kernel<kType, S, false, kCols><<<blocks, kWave * kWaves>>>(
+        static_cast<const uint8_t*>(w), nullptr, 0.0f, x, tokens.x_stride, y, tokens.y_stride, m, k, rows_per_x, w2,
+        second.y, second.m1, tokens.n);
+}
+
+template <int kType, int kCols>
+bool dispatch_slices(const void* w, const void* w_up, float limit, const float* x, float* y, uint32_t m, uint32_t k,
+                     uint32_t rows_per_x, int slices, Second second, Tokens tokens) {
+  switch (slices) {
+  case 1:
+    launch<kType, 1, kCols>(w, w_up, limit, x, y, m, k, rows_per_x, second, tokens);
+    return true;
+  case 2:
+    launch<kType, 2, kCols>(w, w_up, limit, x, y, m, k, rows_per_x, second, tokens);
+    return true;
+  case 4:
+    launch<kType, 4, kCols>(w, w_up, limit, x, y, m, k, rows_per_x, second, tokens);
+    return true;
+  case 8:
+    launch<kType, 8, kCols>(w, w_up, limit, x, y, m, k, rows_per_x, second, tokens);
+    return true;
+  default:
+    return false;
+  }
 }
 
 template <int kType>
 int dispatch(const void* w, const void* w_up, float limit, const float* x, float* y, uint32_t m, uint32_t k,
-             uint32_t rows_per_x, int slices, Second second) {
-  switch (slices) {
-  case 1:
-    launch<kType, 1>(w, w_up, limit, x, y, m, k, rows_per_x, second);
-    break;
-  case 2:
-    launch<kType, 2>(w, w_up, limit, x, y, m, k, rows_per_x, second);
-    break;
-  case 4:
-    launch<kType, 4>(w, w_up, limit, x, y, m, k, rows_per_x, second);
-    break;
-  case 8:
-    launch<kType, 8>(w, w_up, limit, x, y, m, k, rows_per_x, second);
-    break;
-  default:
-    return 1;
-  }
+             uint32_t rows_per_x, int slices, Second second, Tokens tokens) {
+  bool ok = false;
+  if (tokens.n == 1)
+    ok = dispatch_slices<kType, 1>(w, w_up, limit, x, y, m, k, rows_per_x, slices, second, tokens);
+  else if (tokens.n == 2)
+    ok = dispatch_slices<kType, 2>(w, w_up, limit, x, y, m, k, rows_per_x, slices, second, tokens);
+  else if (tokens.n <= 4)
+    ok = dispatch_slices<kType, 4>(w, w_up, limit, x, y, m, k, rows_per_x, slices, second, tokens);
+  else if (tokens.n <= 8)
+    ok = dispatch_slices<kType, 8>(w, w_up, limit, x, y, m, k, rows_per_x, slices, second, tokens);
+  if (!ok) return 1;
   const hipError_t err = hipGetLastError();
   if (err == hipSuccess) return 0;
   fprintf(stderr, "ds41: gemv launch failed: %s\n", hipGetErrorString(err));
@@ -158,16 +211,16 @@ int dispatch(const void* w, const void* w_up, float limit, const float* x, float
 namespace {
 
 int run(int type, const void* w, const void* w_up, float limit, const float* x, float* y, uint32_t m, uint32_t k,
-        uint32_t rows_per_x, int slices, Second second = {nullptr, nullptr, 0}) {
-  if (k % 256 != 0 || m == 0) return 1;
+        uint32_t rows_per_x, int slices, Second second, Tokens tokens) {
+  if (k % 256 != 0 || m == 0 || tokens.n == 0 || tokens.n > DS41_V41_GEMV_MAX_TOKENS) return 1;
   if (rows_per_x == 0) rows_per_x = m;
   if (slices <= 0) slices = 8;
   if (!second.w) second.m1 = m;
   switch (type) {
   case 13:
-    return dispatch<13>(w, w_up, limit, x, y, m, k, rows_per_x, slices, second);
+    return dispatch<13>(w, w_up, limit, x, y, m, k, rows_per_x, slices, second, tokens);
   case 8:
-    return dispatch<8>(w, w_up, limit, x, y, m, k, rows_per_x, slices, second);
+    return dispatch<8>(w, w_up, limit, x, y, m, k, rows_per_x, slices, second, tokens);
   default:
     return 1;
   }
@@ -176,18 +229,19 @@ int run(int type, const void* w, const void* w_up, float limit, const float* x, 
 }  // namespace
 
 extern "C" int ds41_v41_gemv(int type, const void* w, const float* x, float* y, uint32_t m, uint32_t k,
-                             uint32_t rows_per_x, int slices) {
-  return run(type, w, nullptr, 0.0f, x, y, m, k, rows_per_x, slices);
+                             uint32_t rows_per_x, int slices, uint32_t n, uint64_t x_stride, uint32_t y_stride) {
+  return run(type, w, nullptr, 0.0f, x, y, m, k, rows_per_x, slices, Second{nullptr, nullptr, 0},
+             Tokens{n, x_stride, y_stride});
 }
 
 extern "C" int ds41_v41_gemv_pair(int type, const void* w1, float* y1, uint32_t m1, const void* w2, float* y2,
-                                  uint32_t m2, const float* x, uint32_t k, int slices) {
+                                  uint32_t m2, const float* x, uint32_t k, int slices, uint32_t n) {
   if (!w2 || m2 == 0) return 1;
-  return run(type, w1, nullptr, 0.0f, x, y1, m1 + m2, k, 0, slices, Second{w2, y2, m1});
+  return run(type, w1, nullptr, 0.0f, x, y1, m1 + m2, k, 0, slices, Second{w2, y2, m1}, Tokens{n, k, m1});
 }
 
 extern "C" int ds41_v41_gemv_swiglu(int type, const void* gate, const void* up, const float* x, float* y, uint32_t m,
-                                    uint32_t k, float limit, int slices) {
+                                    uint32_t k, float limit, int slices, uint32_t n) {
   if (!up) return 1;
-  return run(type, gate, up, limit, x, y, m, k, 0, slices);
+  return run(type, gate, up, limit, x, y, m, k, 0, slices, Second{nullptr, nullptr, 0}, Tokens{n, k, m});
 }

@@ -209,6 +209,7 @@ struct Activations {
   int32_t* route_ids = nullptr;
   uint8_t* expert_class = nullptr;  // routed tile-width class per expert
   int32_t* routed_plan = nullptr;   // ds41_v41_routed_plan rows, bounds and tiles
+  int32_t* expert_plan = nullptr;   // ds41_v41_expert_plan groups of a small batch
   float *g6 = nullptr, *u6 = nullptr, *mid6 = nullptr, *down6 = nullptr;
   float *sg = nullptr, *su = nullptr, *sm = nullptr, *sd = nullptr;
   float *engram_in = nullptr, *engram_kv = nullptr, *logits = nullptr;
@@ -250,6 +251,14 @@ struct ds41_decoder : Activations {
   float* freq_compress = nullptr;
 
   int comp_layer = -1;
+  /* A speculative batch of spec_n rows from spec_pos0 holds every layer's
+   * window rows and the KV source layers' compressor inputs (kv, score)
+   * here until ds41_decoder_commit; spec_n is 0 otherwise. spec_eval marks
+   * the evaluation of that batch. */
+  uint32_t spec_pos0 = 0, spec_n = 0;
+  bool spec_eval = false;
+  float* spec_window = nullptr;  // [layer][DS41_DECODER_MAX_SPECULATIVE][head_dim]
+  float* spec_pool = nullptr;    // [layer][kv, score][DS41_DECODER_MAX_SPECULATIVE][head_dim]
   std::vector<int64_t> engram_history;
   std::vector<float> host_h;
   std::vector<int32_t> host_ids;
@@ -312,8 +321,9 @@ bool linear_raw(uint32_t type, const void* p, uint32_t rows, uint32_t k, const f
   case DS41_TENSOR_F32:
     return ds41_v41_matmul_f32((const float*)p, x, out, rows, k, n) == 0;
   default:
-    /* One token: FP32 activations, no Q8_1 pass. */
-    if (n == 1 && gemv_type(type)) return ds41_v41_gemv((int)type, p, x, out, rows, k, 0, gemv_slices(rows, k)) == 0;
+    /* Up to eight tokens: FP32 activations, no Q8_1 pass, each weight read once. */
+    if (n <= DS41_V41_GEMV_MAX_TOKENS && gemv_type(type))
+      return ds41_v41_gemv((int)type, p, x, out, rows, k, 0, gemv_slices(rows, k), n, k, rows) == 0;
     if (dense_f16(type, rows, k, n)) return ds41_v41_dense_f16((int)type, p, x, out, rows, n, k, 1) == 0;
     if (n > 8 && mmq_batched(type))
       return ds41_mmq_dense_typed((int)type, p, x, out, (int)rows, (int)n, (int)k, 0) == 0;
@@ -449,6 +459,12 @@ bool store_window(LayerState& s, const float* rows, uint32_t pos0, uint32_t n) {
   return true;
 }
 
+/* Layer il's pending rows of a speculative buffer; `part` selects kv or score of spec_pool. */
+float* spec_rows(const ds41_decoder* d, float* base, uint32_t il, uint32_t part) {
+  const uint64_t parts = base == d->spec_pool ? 2 : 1;
+  return base + ((uint64_t)il * parts + part) * DS41_DECODER_MAX_SPECULATIVE * kHeadDim;
+}
+
 bool attention(ds41_decoder* d, uint32_t il, uint32_t n) {
   const ds41_layer_weights* l = &d->engine->weights->layer[il];
   LayerState& s = d->layer[il];
@@ -460,12 +476,13 @@ bool attention(ds41_decoder* d, uint32_t il, uint32_t n) {
   /* q_a and kv share the input; one token takes both in one launch. */
   const ds41_tensor* wqa = l->attn_q_a;
   const ds41_tensor* wkv = l->attn_kv;
-  const bool pair = n == 1 && wqa->type == wkv->type && wqa->dim[0] == wkv->dim[0] && gemv_type(wqa->type);
+  const bool pair = n <= DS41_V41_GEMV_MAX_TOKENS && wqa->type == wkv->type && wqa->dim[0] == wkv->dim[0] &&
+                    gemv_type(wqa->type);
   if (pair) {
     const uint32_t k = (uint32_t)wqa->dim[0];
     const uint32_t m = (uint32_t)((wqa->elements + wkv->elements) / k);
     if (ds41_v41_gemv_pair((int)wqa->type, dev(d, wqa), d->qa, DS41_N_LORA_Q, dev(d, wkv), d->kv, kHeadDim, d->xn, k,
-                           gemv_slices(m, k)))
+                           gemv_slices(m, k), n))
       return false;
   } else if (!linear_pair(d, wqa, d->qa, wkv, d->kv, d->xn, n)) {
     return false;
@@ -486,6 +503,8 @@ bool attention(ds41_decoder* d, uint32_t il, uint32_t n) {
       if (ratio == 1) {
         if (ds41_v41_rms_norm(d->ckv, f32(d, l->attn_compressor_norm), d->latent, n, kHeadDim, eps)) return false;
       } else if (!linear(d, l->attn_compressor_gate, d->xn, d->cscore, n) ||
+                 (d->spec_eval && (!copy_dev(spec_rows(d, d->spec_pool, il, 0), d->ckv, (uint64_t)n * kHeadDim) ||
+                                !copy_dev(spec_rows(d, d->spec_pool, il, 1), d->cscore, (uint64_t)n * kHeadDim))) ||
                  ds41_v41_compress_pool(d->ckv, d->cscore, s.pool_kv, s.pool_score, pos0, n, ratio, d->craw,
                                         kHeadDim) ||
                  ds41_v41_rms_norm(d->craw, f32(d, l->attn_compressor_norm), d->latent, emitted, kHeadDim, eps)) {
@@ -543,7 +562,8 @@ bool attention(ds41_decoder* d, uint32_t il, uint32_t n) {
   if (ds41_v41_attention(d->q, s.window, d->kvn, DS41_N_SWA, comp, d->topk, DS41_N_INDEXER_TOP_K, ratio,
                          f32(d, l->attn_sinks), d->o, d->attn_partial, pos0, n, DS41_N_HEAD, kHeadDim,
                          1.0f / sqrtf((float)kHeadDim), freq, kRot, d->rope) ||
-      !store_window(s, d->kvn, pos0, n))
+      !(d->spec_eval ? copy_dev(spec_rows(d, d->spec_window, il, 0), d->kvn, (uint64_t)n * kHeadDim)
+                  : store_window(s, d->kvn, pos0, n)))
     return false;
 
   /* Grouped LoRA output: group g maps head slice g of every token. */
@@ -552,9 +572,10 @@ bool attention(ds41_decoder* d, uint32_t il, uint32_t n) {
   const uint8_t* wo_a_dev = (const uint8_t*)dev(d, wo_a);
   if (!wo_a_dev) return false;
   /* Small batches take all groups in one matvec launch. */
-  if (n == 1 && gemv_type(wo_a->type)) {
+  if (n <= DS41_V41_GEMV_MAX_TOKENS && gemv_type(wo_a->type)) {
     if (ds41_v41_gemv((int)wo_a->type, wo_a_dev, d->o, d->oa, DS41_N_OUT_GROUP * DS41_N_LORA_O, kGroupDim,
-                      DS41_N_LORA_O, gemv_slices(DS41_N_OUT_GROUP * DS41_N_LORA_O, kGroupDim)))
+                      DS41_N_LORA_O, gemv_slices(DS41_N_OUT_GROUP * DS41_N_LORA_O, kGroupDim), n, kQDim,
+                      DS41_N_OUT_GROUP * DS41_N_LORA_O))
       return false;
     return linear(d, l->attn_output_b, d->oa, d->attn_out, n);
   }
@@ -629,9 +650,15 @@ bool expert_gemv(int type, const void* w, const int32_t* ids, uint32_t slots, co
   const uint64_t block = expert_block_bytes(type);
   const bool iq1 = type == (int)DS41_TENSOR_IQ1_S || type == (int)DS41_TENSOR_IQ1_M;
   if (block == 0 || (!per_slot && !iq1)) return false;
-  *status = ds41_v41_gemv_experts(type, w, (uint64_t)m * k / 256 * block, ids, slots, x, per_slot ? k : 0, y, m, k);
+  *status = ds41_v41_gemv_experts(type, w, (uint64_t)m * k / 256 * block, ids, slots, x, per_slot ? k : 0, 1, y, m, k);
   return true;
 }
+
+/* Batches of 2 to this many tokens take the routed experts through the
+ * grouped expert GEMV: each expert's weights are read once for its tokens,
+ * with the single-token arithmetic and no host round trip for a plan. */
+constexpr uint32_t kSmallMoeTokens = DS41_V41_EXPERT_PLAN_COLS;
+static_assert(kSmallMoeTokens * DS41_N_EXPERT_USED <= DS41_V41_EXPERT_PLAN_SLOTS);
 
 bool moe(ds41_decoder* d, uint32_t il, uint32_t n) {
   const ds41_layer_weights* l = &d->engine->weights->layer[il];
@@ -657,8 +684,19 @@ bool moe(ds41_decoder* d, uint32_t il, uint32_t n) {
       ds41_mmq_set_routed_classes(nullptr, 0, nullptr, nullptr);
     }
   } routed_bounds;
-  const bool f16_gate = n > 1 && gate_type == up_type && routed_f16_type(gate_type);
-  const bool f16_down = n > 1 && routed_f16_type(down_type);
+  const bool grouped = n > 1 && n <= kSmallMoeTokens && expert_block_bytes(gate_type) &&
+                       expert_block_bytes(up_type) && expert_block_bytes(down_type);
+  const bool small = n == 1 || grouped;
+  if (grouped && ds41_v41_expert_plan(d->route_ids, (uint32_t)rows, d->expert_plan)) return false;
+  /* y = W x over the planned slots (with w_up: the routed SwiGLU into mid6). */
+  const auto grouped_gemv = [&](int type, const void* w, const void* w_up, const float* x, uint32_t x_slot,
+                                uint32_t slots_per_x, float* y, uint32_t m, uint32_t k) {
+    return ds41_v41_gemv_experts_grouped(type, w, w_up, w_up ? d->route_w : nullptr, w_up ? kSwigluLimit : 0.0f,
+                                         (uint64_t)m * k / 256 * expert_block_bytes(type), d->expert_plan,
+                                         (uint32_t)rows, n, x, x_slot, slots_per_x, y, m, k) == 0;
+  };
+  const bool f16_gate = !small && gate_type == up_type && routed_f16_type(gate_type);
+  const bool f16_down = !small && routed_f16_type(down_type);
   const int32_t* plan_rows = d->routed_plan;
   const int32_t* plan_bounds = plan_rows + rows;
   const int32_t* plan_tiles = plan_bounds + DS41_N_EXPERT + 1;
@@ -667,7 +705,7 @@ bool moe(ds41_decoder* d, uint32_t il, uint32_t n) {
    * MMQ path would use for the gate and up rows. */
   auto* x16 = reinterpret_cast<uint16_t*>(d->g6);
   auto* mid16 = reinterpret_cast<uint16_t*>(d->u6);
-  if (n > 1) {
+  if (!small) {
     std::vector<int32_t> ids((size_t)rows);
     std::vector<unsigned int> counts(DS41_N_EXPERT, 0u);
     if (hipMemcpy(ids.data(), d->route_ids, ids.size() * sizeof(int32_t), hipMemcpyDeviceToHost) != hipSuccess)
@@ -697,26 +735,32 @@ bool moe(ds41_decoder* d, uint32_t il, uint32_t n) {
         return false;
     }
   }
-  /* Single tokens take gate, up and SwiGLU in one pass when gate and up share
+  /* Small batches take gate, up and SwiGLU in one pass when gate and up share
    * a type (IQ2_XXS too: the pair runs as fast as two mmvq launches). */
   const bool fused_pair = gate_type == up_type && (gate_type == (int)DS41_TENSOR_IQ1_S ||
                                                    gate_type == (int)DS41_TENSOR_IQ1_M ||
                                                    gate_type == (int)DS41_TENSOR_IQ2_XXS);
-  if (n == 1 && fused_pair) {
+  if (grouped && gate_type == up_type) {
+    if (!grouped_gemv(gate_type, gate, up, d->xn, kDim, used, d->mid6, DS41_N_FF_EXP, kDim)) return false;
+  } else if (grouped) {
+    if (!grouped_gemv(gate_type, gate, nullptr, d->xn, kDim, used, d->g6, DS41_N_FF_EXP, kDim) ||
+        !grouped_gemv(up_type, up, nullptr, d->xn, kDim, used, d->u6, DS41_N_FF_EXP, kDim))
+      return false;
+  } else if (n == 1 && fused_pair) {
     if (ds41_v41_gemv_experts_swiglu(gate_type, gate, up,
                                      (uint64_t)DS41_N_FF_EXP * kDim / 256 * expert_block_bytes(gate_type),
-                                     d->route_ids, used, d->xn, d->route_w, kSwigluLimit, d->mid6, DS41_N_FF_EXP,
-                                     kDim))
+                                     d->route_ids, used, d->xn, 0, 1, d->route_w, kSwigluLimit, d->mid6,
+                                     DS41_N_FF_EXP, kDim))
       return false;
-  } else if (n == 1) {
+  } else if (small) {
     int status = 0;
-    if (!expert_gemv(gate_type, gate, d->route_ids, used, d->xn, false, d->g6, DS41_N_FF_EXP, kDim, &status))
-      status = ds41_mmq_moe_vec_typed(gate_type, gate, d->xn, d->route_ids, d->g6, DS41_N_FF_EXP, kDim, 1,
+    if (!expert_gemv(gate_type, gate, d->route_ids, rows, d->xn, false, d->g6, DS41_N_FF_EXP, kDim, &status))
+      status = ds41_mmq_moe_vec_typed(gate_type, gate, d->xn, d->route_ids, d->g6, DS41_N_FF_EXP, kDim, (int)n,
                                       DS41_N_EXPERT, used, 0);
     if (status) return false;
-    if (!expert_gemv(up_type, up, d->route_ids, used, d->xn, false, d->u6, DS41_N_FF_EXP, kDim, &status))
-      status = ds41_mmq_moe_vec_typed(up_type, up, d->xn, d->route_ids, d->u6, DS41_N_FF_EXP, kDim, 1, DS41_N_EXPERT,
-                                      used, 0);
+    if (!expert_gemv(up_type, up, d->route_ids, rows, d->xn, false, d->u6, DS41_N_FF_EXP, kDim, &status))
+      status = ds41_mmq_moe_vec_typed(up_type, up, d->xn, d->route_ids, d->u6, DS41_N_FF_EXP, kDim, (int)n,
+                                      DS41_N_EXPERT, used, 0);
     if (status) return false;
   } else if (f16_gate) {
     const uint64_t expert_bytes = (uint64_t)DS41_N_FF_EXP * kDim / 256 * expert_block_bytes(gate_type);
@@ -736,13 +780,17 @@ bool moe(ds41_decoder* d, uint32_t il, uint32_t n) {
                                 used, 0)) {
     return false;
   }
-  const bool mid_done = (n == 1 && fused_pair) || (n > 1 && gate_type == up_type);
+  const bool mid_done =
+      (n == 1 && fused_pair) || (grouped && gate_type == up_type) || (!small && gate_type == up_type);
   if (!mid_done && ds41_v41_swiglu(d->g6, d->u6, d->route_w, d->mid6, rows, DS41_N_FF_EXP, kSwigluLimit))
     return false;
   /* An FP16 down pass after an MMQ gate/up pass takes its rows in FP16. */
   if (f16_down && !f16_gate && ds41_v41_to_half(d->mid6, mid16, (uint64_t)rows * DS41_N_FF_EXP)) return false;
   /* Each (token, slot) row multiplies its own expert's down projection. */
-  if (n == 1) {
+  if (grouped) {
+    if (!grouped_gemv(down_type, down, nullptr, d->mid6, DS41_N_FF_EXP, 1, d->down6, kDim, DS41_N_FF_EXP))
+      return false;
+  } else if (small) {
     int status = 0;
     if (!expert_gemv(down_type, down, d->route_ids, rows, d->mid6, true, d->down6, kDim, DS41_N_FF_EXP, &status))
       status = ds41_mmq_moe_vec_typed(down_type, down, d->mid6, d->route_ids, d->down6, kDim, DS41_N_FF_EXP, rows,
@@ -759,11 +807,11 @@ bool moe(ds41_decoder* d, uint32_t il, uint32_t n) {
   }
   const ds41_tensor* sg = l->ffn_gate_shexp;
   const ds41_tensor* su = l->ffn_up_shexp;
-  if (n == 1 && sg->type == su->type && sg->elements == su->elements && gemv_type(sg->type)) {
+  if (n <= DS41_V41_GEMV_MAX_TOKENS && sg->type == su->type && sg->elements == su->elements && gemv_type(sg->type)) {
     const uint32_t k = (uint32_t)sg->dim[0];
     const uint32_t m = (uint32_t)(sg->elements / k);
     if (ds41_v41_gemv_swiglu((int)sg->type, dev(d, sg), dev(d, su), d->xn, d->sm, m, k, kSwigluLimit,
-                             gemv_slices(m, k)))
+                             gemv_slices(m, k), n))
       return false;
   } else if (!linear_pair(d, sg, d->sg, su, d->su, d->xn, n) ||
              ds41_v41_swiglu(d->sg, d->su, nullptr, d->sm, n, DS41_N_FF_EXP, kSwigluLimit)) {
@@ -935,7 +983,8 @@ std::shared_ptr<SharedActivations> make_activations(ds41_engine* engine, uint32_
     a.route_ids = alloc<int32_t>(sh->device, cap * DS41_N_EXPERT_USED);
     a.expert_class = alloc<uint8_t>(sh->device, DS41_N_EXPERT);
     a.routed_plan = alloc<int32_t>(sh->device, routed_plan_ints(cap));
-    ok = a.candidates && a.topk && a.block_select && a.route_ids && a.expert_class && a.routed_plan;
+    a.expert_plan = alloc<int32_t>(sh->device, DS41_V41_EXPERT_PLAN_INTS(DS41_V41_EXPERT_PLAN_SLOTS));
+    ok = a.candidates && a.topk && a.block_select && a.route_ids && a.expert_class && a.routed_plan && a.expert_plan;
   }
   for (uint32_t slot = 0; slot < DS41_N_ENGRAM_LAYER && ok; slot++)
     ok = hipHostMalloc(&a.engram_pinned[slot], (uint64_t)kEngramPinnedTokens * kEngramIn * sizeof(float)) ==
@@ -984,6 +1033,10 @@ ds41_decoder* ds41_decoder_create(ds41_engine* engine, uint32_t context) {
       ok = s.comp && s.comp_scale && s.index_k && s.index_scale && s.pool_kv && s.pool_score;
     }
   }
+  const uint64_t spec_floats = (uint64_t)DS41_N_LAYER * DS41_DECODER_MAX_SPECULATIVE * kHeadDim;
+  d->spec_window = ok ? alloc<float>(d->allocations, spec_floats) : nullptr;
+  d->spec_pool = ok ? alloc<float>(d->allocations, 2 * spec_floats) : nullptr;
+  ok = ok && d->spec_window && d->spec_pool;
   const std::vector<float> plain = rope_inv_freq(DS41_ROPE_FREQ_BASE, 0);
   const std::vector<float> compress = rope_inv_freq(DS41_COMPRESS_ROPE_FREQ_BASE, DS41_ROPE_ORIG_CTX);
   d->freq_plain = alloc<float>(d->allocations, plain.size());
@@ -1054,7 +1107,7 @@ uint64_t ds41_decoder_state_bytes(const ds41_decoder* d) {
 }
 
 int ds41_decoder_save(const ds41_decoder* d, std::vector<uint8_t>* out) {
-  if (!d || !out) return 1;
+  if (!d || !out || d->spec_n) return 1;
   const uint64_t header[4] = {kStateMagic, d->pos, (uint64_t)(int64_t)d->comp_layer,
                               (uint64_t)d->engram_history.size()};
   out->insert(out->end(), (const uint8_t*)header, (const uint8_t*)(header + 4));
@@ -1087,6 +1140,7 @@ int ds41_decoder_load(ds41_decoder* d, const uint8_t* data, uint64_t size, uint6
   });
   if (!ok) return 1;
   d->pos = (uint32_t)header[1];
+  d->spec_n = 0;
   d->comp_layer = (int)(int64_t)header[2];
   d->engram_history = std::move(history);
   if (consumed) *consumed = at;
@@ -1136,6 +1190,7 @@ int ds41_decoder_adopt(ds41_decoder* d, const int* tokens, uint32_t n) {
     if (tokens[i] < 0 || tokens[i] >= DS41_N_VOCAB) return 1;
     d->engram_history[i] = token_map[tokens[i]];
   }
+  d->spec_n = 0;
   /* Every evaluation leaves the last KV source layer here. */
   d->comp_layer = -1;
   for (uint32_t il = 0; n && il < DS41_N_LAYER; il++)
@@ -1155,6 +1210,7 @@ int ds41_decoder_reset(ds41_decoder* d) {
       return 1;
   }
   d->pos = 0;
+  d->spec_n = 0;
   d->comp_layer = -1;
   d->engram_history.clear();
   return 0;
@@ -1163,7 +1219,7 @@ int ds41_decoder_reset(ds41_decoder* d) {
 int ds41_decoder_eval(ds41_decoder* d, const int* tokens, uint32_t n, float* logits, uint32_t logit_rows,
                       ds41_decoder_layer_fn layer_fn, void* ctx) {
   if (!d || !tokens || n == 0 || n > d->capacity || logit_rows > n || (logit_rows && !logits) ||
-      d->pos + n > d->context)
+      d->pos + n > d->context || d->spec_n)
     return 1;
   for (uint32_t t = 0; t < n; t++)
     if (tokens[t] < 0 || tokens[t] >= (int)DS41_N_VOCAB) return 1;
@@ -1248,6 +1304,45 @@ int ds41_decoder_eval(ds41_decoder* d, const int* tokens, uint32_t n, float* log
     return 1;
   }
   d->pos += n;
+  return 0;
+}
+
+int ds41_decoder_eval_speculative(ds41_decoder* d, const int* tokens, uint32_t n, float* logits) {
+  if (!d || d->spec_n || n == 0 || n > DS41_DECODER_MAX_SPECULATIVE) return 1;
+  d->spec_pos0 = d->pos;
+  d->spec_eval = true;
+  const int rc = ds41_decoder_eval(d, tokens, n, logits, n, nullptr, nullptr);
+  d->spec_eval = false;
+  if (rc == 0) d->spec_n = n;
+  return rc;
+}
+
+int ds41_decoder_commit(ds41_decoder* d, uint32_t keep) {
+  if (!d || !d->spec_n || keep == 0 || keep > d->spec_n) return 1;
+  const uint32_t pos0 = d->spec_pos0;
+  const uint32_t end = pos0 + keep;
+  d->spec_n = 0;
+  bool ok = true;
+  for (uint32_t il = 0; il < DS41_N_LAYER && ok; il++) {
+    LayerState& s = d->layer[il];
+    ok = store_window(s, spec_rows(d, d->spec_window, il, 0), pos0, keep);
+    const uint32_t ratio = ds41_layer_compress_ratio(il);
+    if (!ok || !s.pool_kv || ratio < 2) continue;
+    /* The frontier holds the positions of the kept tokens' unfinished group,
+     * slot pos % ratio. Ratio 2 keeps at most the last kept token, which is
+     * in the batch; older pending positions would need the earlier frontier. */
+    for (uint32_t pos = end - end % ratio; pos < end && ok; pos++) {
+      if (pos < pos0) return 1;
+      const uint64_t row = (uint64_t)(pos - pos0) * kHeadDim;
+      const uint64_t slot = (uint64_t)(pos % ratio) * kHeadDim;
+      ok = copy_dev(s.pool_kv + slot, spec_rows(d, d->spec_pool, il, 0) + row, kHeadDim) &&
+           copy_dev(s.pool_score + slot, spec_rows(d, d->spec_pool, il, 1) + row, kHeadDim);
+    }
+  }
+  ok = ok && hipDeviceSynchronize() == hipSuccess;
+  if (!ok) return 1;
+  d->pos = end;
+  d->engram_history.resize(end);
   return 0;
 }
 

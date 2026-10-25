@@ -158,7 +158,8 @@ bool GemvCase(const TypeCase& t, int M, int K, int rows_per_x,
   bool ok = true;
   for (const int slices : {1, 2, 4, 8}) {
     double e = INFINITY;
-    if (ds41_v41_gemv(t.type, dw, dx, dy, M, K, rows_per_x, slices) == 0) {
+    if (ds41_v41_gemv(t.type, dw, dx, dy, M, K, rows_per_x, slices, 1, K, M) ==
+        0) {
       const auto got = Host(dy, M);
       double err = 0.0, ref = 0.0;
       for (int r = 0; r < M; ++r) {
@@ -174,6 +175,78 @@ bool GemvCase(const TypeCase& t, int M, int K, int rows_per_x,
   (void)hipFree(dw);
   (void)hipFree(dx);
   (void)hipFree(dy);
+  return ok;
+}
+
+/* Multi-token launches (plain, grouped, pair, SwiGLU) against one launch
+ * per token: every token must match bit for bit. */
+bool GemvTokensCase(const TypeCase& t, int M, int K, int rows_per_x, int n,
+                    std::mt19937& rng) {
+  const auto w =
+      RandomBlocks(t, static_cast<std::size_t>(M) * K / t.block_values, rng);
+  const auto w2 =
+      RandomBlocks(t, static_cast<std::size_t>(M) * K / t.block_values, rng);
+  const int x_groups = rows_per_x ? M / rows_per_x : 1;
+  const std::size_t x_stride = static_cast<std::size_t>(x_groups) * K + 256;
+  std::normal_distribution<float> normal;
+  std::vector<float> x(x_stride * n);
+  for (auto& v : x)
+    v = normal(rng);
+  auto* dw = Device(w);
+  auto* dw2 = Device(w2);
+  auto* dx = Device(x);
+  float *batched = nullptr, *single = nullptr, *batched2 = nullptr,
+        *single2 = nullptr;
+  const std::size_t out = static_cast<std::size_t>(M) * n;
+  (void)hipMalloc(&batched, sizeof(float) * out);
+  (void)hipMalloc(&single, sizeof(float) * out);
+  (void)hipMalloc(&batched2, sizeof(float) * out);
+  (void)hipMalloc(&single2, sizeof(float) * out);
+  bool ok = true;
+  const auto same = [&](const float* a, const float* b) {
+    const auto ha = Host(a, out);
+    const auto hb = Host(b, out);
+    return std::memcmp(ha.data(), hb.data(), out * sizeof(float)) == 0;
+  };
+  for (const int slices : {1, 4, 8}) {
+    bool launched = ds41_v41_gemv(t.type, dw, dx, batched, M, K, rows_per_x,
+                                  slices, n, x_stride, M) == 0;
+    for (int c = 0; c < n && launched; ++c)
+      launched = ds41_v41_gemv(t.type, dw, dx + c * x_stride, single + c * M, M,
+                               K, rows_per_x, slices, 1, x_stride, M) == 0;
+    const bool plain = launched && same(batched, single);
+    bool fused = true;
+    if (rows_per_x == 0) {
+      /* Pair and SwiGLU take contiguous tokens of K floats. */
+      bool pair_ok = ds41_v41_gemv_pair(t.type, dw, batched, M, dw2, batched2,
+                                        M, dx, K, slices, n) == 0;
+      for (int c = 0; c < n && pair_ok; ++c)
+        pair_ok = ds41_v41_gemv_pair(t.type, dw, single + c * M, M, dw2,
+                                     single2 + c * M, M, dx + c * K, K, slices,
+                                     1) == 0;
+      fused = pair_ok && same(batched, single) && same(batched2, single2);
+      bool swiglu_ok = ds41_v41_gemv_swiglu(t.type, dw, dw2, dx, batched, M, K,
+                                            10.0f, slices, n) == 0;
+      for (int c = 0; c < n && swiglu_ok; ++c)
+        swiglu_ok =
+            ds41_v41_gemv_swiglu(t.type, dw, dw2, dx + c * K, single + c * M, M,
+                                 K, 10.0f, slices, 1) == 0;
+      fused = fused && swiglu_ok && same(batched, single);
+    }
+    std::printf(
+        "gemv tokens %-8s M=%d K=%d rows_per_x=%d n=%d slices=%d plain=%s "
+        "pair/swiglu=%s\n",
+        t.name, M, K, rows_per_x, n, slices, plain ? "exact" : "DIFF",
+        rows_per_x ? "-" : (fused ? "exact" : "DIFF"));
+    ok = ok && plain && fused;
+  }
+  (void)hipFree(dw);
+  (void)hipFree(dw2);
+  (void)hipFree(dx);
+  (void)hipFree(batched);
+  (void)hipFree(single);
+  (void)hipFree(batched2);
+  (void)hipFree(single2);
   return ok;
 }
 
@@ -463,6 +536,118 @@ bool MoeClassCase(const TypeCase& t, int M, int K, int n_tokens, int n_experts,
          e < 1e-6;
 }
 
+/* Several tokens' slots in one expert launch (slot s reads token s / 6)
+ * against one launch per token, plain and fused SwiGLU: bit for bit. */
+bool ExpertTokensCase(const TypeCase& t, int M, int K, int n,
+                      std::mt19937& rng) {
+  constexpr int kExperts = 24;
+  constexpr int kSlots = 6;
+  const std::size_t expert_bytes =
+      static_cast<std::size_t>(M) * K / t.block_values * t.block_bytes;
+  const auto wg = RandomBlocks(
+      t, static_cast<std::size_t>(kExperts) * M * K / t.block_values, rng);
+  const auto wu = RandomBlocks(
+      t, static_cast<std::size_t>(kExperts) * M * K / t.block_values, rng);
+  std::normal_distribution<float> normal;
+  std::uniform_int_distribution<int32_t> pick(0, kExperts - 1);
+  std::vector<float> x(static_cast<std::size_t>(n) * K);
+  for (auto& v : x)
+    v = normal(rng);
+  /* Distinct experts per token, as top-k routing selects them. */
+  std::vector<int32_t> ids(static_cast<std::size_t>(n) * kSlots);
+  std::vector<float> route(ids.size());
+  std::vector<int32_t> experts(kExperts);
+  for (int c = 0; c < n; ++c) {
+    for (int e = 0; e < kExperts; ++e)
+      experts[(std::size_t)e] = e;
+    std::shuffle(experts.begin(), experts.end(), rng);
+    for (int j = 0; j < kSlots; ++j)
+      ids[(std::size_t)c * kSlots + j] = experts[(std::size_t)j];
+  }
+  for (auto& r : route)
+    r = std::fabs(normal(rng));
+  (void)pick;
+  auto* dg = Device(wg);
+  auto* du = Device(wu);
+  auto* dx = Device(x);
+  auto* dids = Device(ids);
+  auto* droute = Device(route);
+  const std::size_t n_out = static_cast<std::size_t>(M) * ids.size();
+  float *batched = nullptr, *single = nullptr;
+  (void)hipMalloc(&batched, sizeof(float) * n_out);
+  (void)hipMalloc(&single, sizeof(float) * n_out);
+  const auto same = [&] {
+    const auto a = Host(batched, n_out);
+    const auto b = Host(single, n_out);
+    return std::memcmp(a.data(), b.data(), n_out * sizeof(float)) == 0;
+  };
+  bool ok = ds41_v41_gemv_experts(t.type, dg, expert_bytes, dids,
+                                  (uint32_t)ids.size(), dx, K, kSlots, batched,
+                                  M, K) == 0;
+  for (int c = 0; ok && c < n; ++c)
+    ok = ds41_v41_gemv_experts(t.type, dg, expert_bytes, dids + c * kSlots,
+                               kSlots, dx + c * K, 0, 1,
+                               single + (std::size_t)c * kSlots * M, M, K) == 0;
+  const bool plain = ok && same();
+  bool fused = true;
+  if (t.type == 19 || t.type == 29 || t.type == 16) {
+    ok = ds41_v41_gemv_experts_swiglu(t.type, dg, du, expert_bytes, dids,
+                                      (uint32_t)ids.size(), dx, K, kSlots,
+                                      droute, 10.0f, batched, M, K) == 0;
+    for (int c = 0; ok && c < n; ++c)
+      ok = ds41_v41_gemv_experts_swiglu(
+               t.type, dg, du, expert_bytes, dids + c * kSlots, kSlots,
+               dx + c * K, 0, 1, droute + c * kSlots, 10.0f,
+               single + (std::size_t)c * kSlots * M, M, K) == 0;
+    fused = ok && same();
+  }
+  /* The grouped launch (each expert decoded once for its slots) against the
+   * per-slot launch, with duplicated experts across tokens and a dropped slot.
+   */
+  for (int c = 1; c < n; ++c) {
+    for (int j = 0; j < kSlots; ++j)
+      if (ids[(std::size_t)c * kSlots + j] == ids[0])
+        ids[(std::size_t)c * kSlots + j] = ids[(std::size_t)c * kSlots];
+    ids[(std::size_t)c * kSlots] = ids[0];
+  }
+  ids[1] = -1;
+  auto* dgids = Device(ids);
+  int32_t* dplan = nullptr;
+  (void)hipMalloc(&dplan, sizeof(int32_t) * DS41_V41_EXPERT_PLAN_INTS(
+                                                DS41_V41_EXPERT_PLAN_SLOTS));
+  const uint32_t slots = (uint32_t)ids.size();
+  ok = ds41_v41_expert_plan(dgids, slots, dplan) == 0 &&
+       ds41_v41_gemv_experts_grouped(t.type, dg, nullptr, nullptr, 0.0f,
+                                     expert_bytes, dplan, slots, n, dx, K,
+                                     kSlots, batched, M, K) == 0 &&
+       ds41_v41_gemv_experts(t.type, dg, expert_bytes, dgids, slots, dx, K,
+                             kSlots, single, M, K) == 0;
+  const bool grouped = ok && same();
+  ok = ds41_v41_gemv_experts_grouped(t.type, dg, du, droute, 10.0f,
+                                     expert_bytes, dplan, slots, n, dx, K,
+                                     kSlots, batched, M, K) == 0 &&
+       ds41_v41_gemv_experts_swiglu(t.type, dg, du, expert_bytes, dgids, slots,
+                                    dx, K, kSlots, droute, 10.0f, single, M,
+                                    K) == 0;
+  const bool grouped_swiglu = ok && same();
+  (void)hipFree(dgids);
+  (void)hipFree(dplan);
+  std::printf(
+      "experts tokens %-8s M=%d K=%d n=%d plain=%s swiglu=%s grouped=%s "
+      "grouped swiglu=%s\n",
+      t.name, M, K, n, plain ? "exact" : "DIFF", fused ? "exact" : "DIFF",
+      grouped ? "exact" : "DIFF", grouped_swiglu ? "exact" : "DIFF");
+  fused = fused && grouped && grouped_swiglu;
+  (void)hipFree(dg);
+  (void)hipFree(du);
+  (void)hipFree(dx);
+  (void)hipFree(dids);
+  (void)hipFree(droute);
+  (void)hipFree(batched);
+  (void)hipFree(single);
+  return plain && fused;
+}
+
 /* Routed-expert GEMV against the ggml matvec (Q8_1 activations, so the
  * agreement is at that rounding, ~5e-3): one shared input (gate/up) or one
  * input per slot (down), with a dropped slot (id -1) that must write 0. */
@@ -490,7 +675,7 @@ bool ExpertGemvCase(const TypeCase& t, int M, int K, bool per_slot,
   (void)hipMalloc(&got, sizeof(float) * n_out);
   (void)hipMalloc(&want, sizeof(float) * n_out);
   bool ok = ds41_v41_gemv_experts(t.type, dw, expert_bytes, dids, kSlots, dx,
-                                  per_slot ? K : 0, got, M, K) == 0;
+                                  per_slot ? K : 0, 1, got, M, K) == 0;
   ok =
       ok && (per_slot ? ds41_mmq_moe_vec_typed(t.type, dw, dx, dlive, want, M,
                                                K, kSlots, kExperts, 1, 0)
@@ -549,16 +734,16 @@ bool SwigluCase(const TypeCase& t, int M, int K, std::mt19937& rng) {
   (void)hipMalloc(&y, sizeof(float) * n_out);
   bool ok;
   if (experts) {
-    ok = ds41_v41_gemv_experts(t.type, dg, expert_bytes, dids, slots, dx, 0, g,
-                               M, K) == 0 &&
-         ds41_v41_gemv_experts(t.type, du, expert_bytes, dids, slots, dx, 0, u,
-                               M, K) == 0 &&
+    ok = ds41_v41_gemv_experts(t.type, dg, expert_bytes, dids, slots, dx, 0, 1,
+                               g, M, K) == 0 &&
+         ds41_v41_gemv_experts(t.type, du, expert_bytes, dids, slots, dx, 0, 1,
+                               u, M, K) == 0 &&
          ds41_v41_gemv_experts_swiglu(t.type, dg, du, expert_bytes, dids, slots,
-                                      dx, droute, kLimit, y, M, K) == 0;
+                                      dx, 0, 1, droute, kLimit, y, M, K) == 0;
   } else {
-    ok = ds41_v41_gemv(t.type, dg, dx, g, M, K, 0, 4) == 0 &&
-         ds41_v41_gemv(t.type, du, dx, u, M, K, 0, 4) == 0 &&
-         ds41_v41_gemv_swiglu(t.type, dg, du, dx, y, M, K, kLimit, 4) == 0;
+    ok = ds41_v41_gemv(t.type, dg, dx, g, M, K, 0, 4, 1, K, M) == 0 &&
+         ds41_v41_gemv(t.type, du, dx, u, M, K, 0, 4, 1, K, M) == 0 &&
+         ds41_v41_gemv_swiglu(t.type, dg, du, dx, y, M, K, kLimit, 4, 1) == 0;
   }
   double e = INFINITY;
   if (ok) {
@@ -610,7 +795,7 @@ bool DenseF16Case(const TypeCase& t, int M, int N, int K, int groups,
                    z * matrix_bytes,
                dx + (static_cast<std::size_t>(token) * groups + z) * K,
                want + (static_cast<std::size_t>(token) * groups + z) * M, M, K,
-               0, 4) == 0;
+               0, 4, 1, K, M) == 0;
   const double e =
       ok ? RelativeError(Host(got, n_out), Host(want, n_out)) : INFINITY;
   std::printf("dense f16 %-8s M=%d N=%d K=%d groups=%d rel_err=%.2e\n", t.name,
@@ -676,9 +861,9 @@ bool RoutedF16Case(const TypeCase& t, int M, int K, int n_tokens, int n_experts,
   const int32_t* dbounds = dplan + rows;
   bool ok = n_tiles > 0 &&
             ds41_v41_gemv_experts(t.type, dg, expert_bytes, dids, rows, dxs, K,
-                                  g, M, K) == 0 &&
+                                  1, g, M, K) == 0 &&
             ds41_v41_gemv_experts(t.type, du, expert_bytes, dids, rows, dxs, K,
-                                  u, M, K) == 0 &&
+                                  1, u, M, K) == 0 &&
             ds41_v41_to_half(dx, x16, x.size()) == 0;
   if (pair)
     ok = ok &&
@@ -751,11 +936,17 @@ int main() {
     if (t.type == 8 || t.type == 13) {
       ok = GemvCase(t, 300, 1280, 0, rng) && ok;
       ok = GemvCase(t, 256, 4096, 64, rng) && ok;
+      for (const int n : {2, 3, 5, 8}) {
+        ok = GemvTokensCase(t, 300, 1280, 0, n, rng) && ok;
+        ok = GemvTokensCase(t, 256, 4096, 64, n, rng) && ok;
+      }
       ok = SwigluCase(t, 2304, 5120, rng) && ok;
     }
     if (t.type != 8 && t.type != 13) {
       ok = ExpertGemvCase(t, 2304, 5120, false, rng) && ok;
       ok = ExpertGemvCase(t, 512, 2304, true, rng) && ok;
+      for (const int n : {2, 4, 8})
+        ok = ExpertTokensCase(t, 512, 2304, n, rng) && ok;
       if (t.type == 19 || t.type == 29 || t.type == 16)
         ok = SwigluCase(t, 2304, 5120, rng) && ok;
     }
