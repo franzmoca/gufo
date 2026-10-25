@@ -920,6 +920,8 @@ int ds41_mmq_q8_0_dense_vec(
 // allocations land on the captured stream and don't invalidate capture.
 // Pass NULL to reset to hipStreamPerThread.
 void ds41_pool_set_stream(hipStream_t stream);
+/* Frees the buffers the MMQ pool keeps for reuse. */
+void ds41_pool_release_cached(void);
 
 // V4.1 Flash matvecs over a weight type chosen at run time (ggml type codes).
 // Same contracts as ds41_mmq_q8_0_dense_vec and ds41_mmq_q8_0_moe_vec.

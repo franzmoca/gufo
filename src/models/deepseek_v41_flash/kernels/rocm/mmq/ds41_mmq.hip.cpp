@@ -187,6 +187,8 @@ extern "C" int ds41_mmq_init(int device) {
 
 extern "C" void ds41_mmq_cleanup(void) {
     (void)hipDeviceSynchronize();
+    ds41_pool_release_cached();
+    (void)hipDeviceSynchronize();
     {
         std::lock_guard<std::mutex> lock(g_hip_dense_q81_scratch.mutex);
         if (g_hip_dense_q81_scratch.ptr) {
