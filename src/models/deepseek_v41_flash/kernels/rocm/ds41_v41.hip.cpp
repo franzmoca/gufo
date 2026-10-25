@@ -2,6 +2,8 @@
 #include "ds41_v41.h"
 
 #include <hip/hip_fp16.h>
+
+#include <type_traits>
 #include <hip/hip_runtime.h>
 
 #include <rocwmma/rocwmma.hpp>
@@ -178,10 +180,10 @@ __global__ void matmul_kernel(const W* w, const float* x, float* out, uint32_t r
   float acc[kTokenTile] = {};
   for (uint32_t i = threadIdx.x % warpSize; i < k; i += warpSize) {
     float wv;
-    if constexpr (sizeof(W) == 2)
+    if constexpr (std::is_same_v<W, uint16_t>)
       wv = bf16_to_f32(r[i]);
     else
-      wv = r[i];
+      wv = (float)r[i];
 #pragma unroll
     for (uint32_t j = 0; j < kTokenTile; j++)
       if (j < tn) acc[j] += wv * x[(uint64_t)(t0 + j) * k + i];
@@ -1772,11 +1774,13 @@ __global__ void hc_mean_kernel(const float* h, float* out, uint64_t out_stride, 
 }
 
 /* out[0:rank] = table row tokens[index] (F32, or BF16 when bf16). */
-__global__ void gather_row_kernel(const void* table, int bf16, const int32_t* tokens, uint32_t index, float* out,
+__global__ void gather_row_kernel(const void* table, int format, const int32_t* tokens, uint32_t index, float* out,
                                   uint32_t rank) {
   const uint64_t row = (uint64_t)tokens[index] * rank;
   for (uint32_t d = threadIdx.x; d < rank; d += blockDim.x)
-    out[d] = bf16 ? bf16_to_f32(((const uint16_t*)table)[row + d]) : ((const float*)table)[row + d];
+    out[d] = format == DS41_V41_ROW_BF16  ? bf16_to_f32(((const uint16_t*)table)[row + d])
+             : format == DS41_V41_ROW_F16 ? (float)((const _Float16*)table)[row + d]
+                                          : ((const float*)table)[row + d];
 }
 
 /* tokens[index] = argmax over finite x[v] + bias[v], the first on ties; -1 when none. One block. */
@@ -1935,6 +1939,14 @@ extern "C" int ds41_v41_matmul_bf16(const uint16_t* w, const float* x, float* ou
   else
     matmul_kernel<uint16_t><<<grid, kThreads>>>(w, x, out, rows, k, n);
   return launch_ok("bf16 matmul");
+}
+
+extern "C" int ds41_v41_matmul_f16(const uint16_t* w, const float* x, float* out, uint32_t rows, uint32_t k,
+                                   uint32_t n) {
+  const uint32_t rows_per_block = kThreads / 32;
+  const dim3 grid((rows + rows_per_block - 1) / rows_per_block, (n + kTokenTile - 1) / kTokenTile);
+  matmul_kernel<_Float16><<<grid, kThreads>>>((const _Float16*)w, x, out, rows, k, n);
+  return launch_ok("f16 matmul");
 }
 
 extern "C" int ds41_v41_matmul_f32(const float* w, const float* x, float* out, uint32_t rows, uint32_t k,
@@ -2205,9 +2217,9 @@ extern "C" int ds41_v41_hc_mean(const float* h, float* out, uint64_t out_stride,
   return launch_ok("hc mean");
 }
 
-extern "C" int ds41_v41_gather_row(const void* table, int bf16, const int32_t* tokens, uint32_t index, float* out,
+extern "C" int ds41_v41_gather_row(const void* table, int format, const int32_t* tokens, uint32_t index, float* out,
                                    uint32_t rank) {
-  gather_row_kernel<<<1, kThreads>>>(table, bf16, tokens, index, out, rank);
+  gather_row_kernel<<<1, kThreads>>>(table, format, tokens, index, out, rank);
   return launch_ok("gather row");
 }
 

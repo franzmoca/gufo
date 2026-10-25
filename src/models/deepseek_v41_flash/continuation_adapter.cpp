@@ -33,6 +33,10 @@ struct Metadata {
   std::uint32_t position{};
 };
 static_assert(std::is_trivially_copyable_v<Metadata>);
+// Positions [start, end) held by the drafter rings.
+struct DrafterRange {
+  std::uint32_t start{}, end{};
+};
 using Coverage = std::vector<std::pair<std::size_t, std::size_t>>;
 // Loaded byte ranges cover [0, end) without a gap.
 bool Covered(Coverage ranges, std::size_t end) {
@@ -159,16 +163,19 @@ public:
   std::vector<cache::ComponentPosition> expected;
   std::vector<Coverage> coverage;
   Metadata metadata{};
+  DrafterRange drafter{};
 };
 
 ContinuationAdapter::ContinuationAdapter(std::shared_ptr<Model> model,
                                          std::uint32_t context,
-                                         cache::Identity identity)
+                                         cache::Identity identity,
+                                         bool speculative)
     : model_(std::move(model)),
       context_(context),
+      speculative_(speculative),
       identity_(std::move(identity)) {
   if (!model_ || identity_.empty() || context < 2 ||
-      context > model_->MaxContext())
+      context > model_->MaxContext() || (speculative && !model_->HasDspark()))
     throw std::invalid_argument("invalid DeepSeek V4.1 adapter configuration");
   const auto add = [&](ContinuationPart part, std::uint32_t layer,
                        cache::ComponentDescriptor d, int state = 0,
@@ -211,6 +218,10 @@ ContinuationAdapter::ContinuationAdapter(std::shared_ptr<Model> model,
   add(ContinuationPart::kMetadata, 0,
       {.kind = cache::ComponentKind::kPrivateState,
        .state_bytes = sizeof(Metadata)});
+  if (speculative_)
+    add(ContinuationPart::kDrafter, 0,
+        {.kind = cache::ComponentKind::kPrivateState,
+         .state_bytes = sizeof(DrafterRange) + ds41_dspark_ring_bytes()});
   for (const auto& component : components_)
     descriptors_.push_back(component.descriptor);
   const auto put = [&](std::uint32_t value) {
@@ -219,6 +230,8 @@ ContinuationAdapter::ContinuationAdapter(std::shared_ptr<Model> model,
   };
   put(2);  // Component layout version.
   put(context);
+  if (speculative_)
+    put(1);  // Drafter rings.
 }
 ContinuationAdapter::~ContinuationAdapter() = default;
 ContinuationAdapter::State& ContinuationAdapter::As(cache::Slot& slot) const {
@@ -281,8 +294,10 @@ cache::Identity ContinuationAdapter::CompatibilityIdentity() const {
 std::unique_ptr<cache::Slot> ContinuationAdapter::CreateSlot(
     cache::MutationGuard& guard) {
   std::string error;
-  auto session = model_->CreateSession(core::SessionMode::kAutoregressive,
-                                       context_, &error);
+  auto session =
+      model_->CreateSession(speculative_ ? core::SessionMode::kSpeculative
+                                         : core::SessionMode::kAutoregressive,
+                            context_, &error);
   if (!session)
     throw std::runtime_error(error);
   return std::make_unique<State>(*this, guard, std::move(session));
@@ -354,6 +369,15 @@ std::vector<ContinuationAdapter::Piece> ContinuationAdapter::PrivateRegion(
     case ContinuationPart::kMetadata:
       pieces.push_back({&state.metadata, 0, total, true});
       break;
+    case ContinuationPart::kDrafter: {
+      std::uint64_t bytes = 0;
+      void* ring = ds41_session_dspark_ring(state.Native(), &bytes);
+      if (!ring)
+        throw std::logic_error("DeepSeek V4.1 session lacks a drafter");
+      pieces.push_back({&state.drafter, 0, sizeof(DrafterRange), true});
+      pieces.push_back({ring, sizeof(DrafterRange), bytes});
+      break;
+    }
     default:
       throw std::invalid_argument("component is not private state");
   }
@@ -422,6 +446,7 @@ void ContinuationAdapter::BeginRestore(
   state.expected = std::move(ordered);
   state.coverage.assign(descriptors_.size(), {});
   state.metadata = {};
+  state.drafter = {};
   state.restoring = true;
 }
 cache::Completion ContinuationAdapter::CopyRowsOut(const cache::Slot& slot,
@@ -530,9 +555,16 @@ cache::Completion ContinuationAdapter::CapturePrivatePiece(
       offset > total || bytes.size() > total - offset)
     throw std::invalid_argument("invalid DeepSeek V4.1 private piece");
   Metadata metadata{.position = static_cast<std::uint32_t>(state.Tokens())};
+  DrafterRange drafter;
   auto pieces = PrivateRegion(state, c);
   if (c.part == ContinuationPart::kMetadata)
     pieces = {{&metadata, 0, total, true}};
+  if (c.part == ContinuationPart::kDrafter) {
+    if (ds41_session_dspark_range(state.Native(), &drafter.start,
+                                  &drafter.end) != 0)
+      throw std::logic_error("DeepSeek V4.1 session lacks a drafter");
+    pieces.front().pointer = &drafter;
+  }
   return Transfer(
       state, false, stream, [&](gufo::hip::TransferStream& transfer) {
         for (const auto& piece : pieces) {
@@ -628,6 +660,11 @@ bool ContinuationAdapter::Validate(
   const auto n = state.expected.front().valid_rows;
   if (state.metadata.version != 1 || state.metadata.position != n ||
       ds41_session_finish_restore(state.Native()) != 0)
+    return refuse();
+  // The restored drafter rings continue the session's position.
+  if (speculative_ &&
+      ds41_session_dspark_set_range(state.Native(), state.drafter.start,
+                                    state.drafter.end) != 0)
     return refuse();
   state.restoring = false;
   state.coverage.clear();

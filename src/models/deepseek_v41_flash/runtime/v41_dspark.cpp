@@ -197,12 +197,16 @@ bool hc_mix(const ds41_dspark_tensor& fn, const ds41_dspark_tensor& scale, const
 }  // namespace
 
 bool ds41_dspark_upload(ds41_dspark_model* m) {
+  /* F16 tensors widen to F32, except the Markov tables, which their gather and matmul read as F16. */
+  const auto widen = [m](const ds41_dspark_source& src) {
+    return src.src->type == DS41_TENSOR_F16 && src.dst != &m->markov_w1 && src.dst != &m->markov_w2;
+  };
   constexpr uint64_t kAlign = 256;
   constexpr uint64_t kChunk = 64ull << 20;
   std::vector<uint64_t> offsets;
   uint64_t total = 0;
   for (const ds41_dspark_source& src : m->sources) {
-    const uint64_t bytes = src.src->type == DS41_TENSOR_F16 ? src.src->elements * sizeof(float) : src.src->bytes;
+    const uint64_t bytes = widen(src) ? src.src->elements * sizeof(float) : src.src->bytes;
     offsets.push_back(total);
     total += (bytes + kAlign - 1) / kAlign * kAlign;
   }
@@ -222,7 +226,7 @@ bool ds41_dspark_upload(ds41_dspark_model* m) {
     ds41_dspark_tensor* dst = m->sources[i].dst;
     uint8_t* out = static_cast<uint8_t*>(m->device) + offsets[i];
     const off_t at = (off_t)(t->abs_offset - m->file.shard_offset[0]);
-    if (t->type == DS41_TENSOR_F16) {
+    if (widen(m->sources[i])) {
       half.resize(t->elements);
       full.resize(t->elements);
       ok = pread(fd, half.data(), t->bytes, at) == (ssize_t)t->bytes;
@@ -282,6 +286,25 @@ void ds41_dspark_state_reset(ds41_dspark_state* s, uint32_t pos) {
 }
 
 uint32_t ds41_dspark_state_end(const ds41_dspark_state* s) { return s->ring_end; }
+
+uint64_t ds41_dspark_ring_bytes(void) { return DS41_DSPARK_STAGES * kRingFloats * sizeof(float); }
+
+float* ds41_dspark_state_ring(ds41_dspark_state* s, uint64_t* bytes) {
+  *bytes = ds41_dspark_ring_bytes();
+  return s->ring;
+}
+
+void ds41_dspark_state_range(const ds41_dspark_state* s, uint32_t* start, uint32_t* end) {
+  *start = s->ring_start;
+  *end = s->ring_end;
+}
+
+bool ds41_dspark_state_set_range(ds41_dspark_state* s, uint32_t start, uint32_t end) {
+  if (start > end) return false;
+  s->ring_start = start;
+  s->ring_end = end;
+  return true;
+}
 
 bool ds41_dspark_inject(ds41_dspark_state* s, uint32_t pos0, uint32_t rows) {
   if (rows == 0) return true;
@@ -352,9 +375,11 @@ bool ds41_dspark_draft(ds41_dspark_state* s, int anchor, int32_t* drafts) {
   /* Target head, then the Markov path: row i adds W2 W1[token i] and takes the argmax as token i + 1. */
   ok = ok && ds41_v41_hc_collapse_norm(sc.h, sc.pre[0], f32(m->out_norm), sc.xn, kHc, kDim, DS41_RMS_EPS, n) == 0 &&
        ds41_decoder_output_head(s->decoder, sc.xn, sc.logits, n);
-  const int bf16 = m->markov_w1.type == DS41_TENSOR_BF16;
+  const int format = m->markov_w1.type == DS41_TENSOR_BF16  ? DS41_V41_ROW_BF16
+                     : m->markov_w1.type == DS41_TENSOR_F16 ? DS41_V41_ROW_F16
+                                                            : DS41_V41_ROW_F32;
   for (uint32_t i = 0; i < n && ok; i++)
-    ok = ds41_v41_gather_row(m->markov_w1.p, bf16, sc.tokens, i, sc.markov_x, DS41_DSPARK_MARKOV_RANK) == 0 &&
+    ok = ds41_v41_gather_row(m->markov_w1.p, format, sc.tokens, i, sc.markov_x, DS41_DSPARK_MARKOV_RANK) == 0 &&
          lin(m->markov_w2, sc.markov_x, sc.bias, 1) &&
          ds41_v41_argmax_bias(sc.logits + (uint64_t)i * DS41_N_VOCAB, sc.bias, DS41_N_VOCAB, sc.tokens, i + 1) == 0;
   ok = ok && hipMemcpy(drafts, sc.tokens + 1, n * sizeof(int32_t), hipMemcpyDeviceToHost) == hipSuccess;

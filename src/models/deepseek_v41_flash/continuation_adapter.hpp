@@ -22,6 +22,7 @@ enum class ContinuationPart : std::uint8_t {
   kPool,    // the compressor frontiers of all KV source layers
   kLogits,
   kMetadata,
+  kDrafter,  // the DSpark drafter's stage rings and their positions
 };
 struct ContinuationComponent {
   cache::ComponentDescriptor descriptor;
@@ -38,12 +39,13 @@ struct ContinuationBackingClass {
 // FP4 compressed-KV and index-K rows of each KV source layer are append rows,
 // counted per component (one row per compression ratio tokens); the device
 // rows can be lent. The 128-row window rings, the compressor frontiers, the
-// frontier logits and metadata are one private component each. Sessions
-// evaluate synchronously, so no device work is pending once execution returns.
+// frontier logits and metadata are one private component each, and so are
+// the DSpark drafter's rings for speculative sessions. Sessions evaluate
+// synchronously, so no device work is pending once execution returns.
 class ContinuationAdapter final : public cache::Adapter {
 public:
   ContinuationAdapter(std::shared_ptr<Model>, std::uint32_t context,
-                      cache::Identity);
+                      cache::Identity, bool speculative = false);
   ~ContinuationAdapter() override;
   [[nodiscard]] Session& GetSession(cache::Slot&);
   [[nodiscard]] std::vector<ContinuationBackingClass> BackingPlan(
@@ -118,6 +120,7 @@ private:
       const std::function<void(gufo::hip::TransferStream&)>&);
   std::shared_ptr<Model> model_;
   std::uint32_t context_;
+  bool speculative_;
   std::vector<ContinuationComponent> components_;
   std::vector<cache::ComponentDescriptor> descriptors_;
   cache::Identity identity_;

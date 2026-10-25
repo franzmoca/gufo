@@ -244,5 +244,12 @@ float* ds41_session_logits(ds41_session* session);
 int* ds41_session_begin_restore(ds41_session* session, uint32_t n);
 /* Adopts the restored tokens, logits and decoder state. */
 int ds41_session_finish_restore(ds41_session* session);
+/* The drafter's device rings and the positions [start, end) they hold
+ * (null and 0 without a drafter). Restoring a range needs end equal to the
+ * session position; finish_restore empties it first. */
+uint64_t ds41_dspark_ring_bytes(void);
+void* ds41_session_dspark_ring(ds41_session* session, uint64_t* bytes);
+int ds41_session_dspark_range(const ds41_session* session, uint32_t* start, uint32_t* end);
+int ds41_session_dspark_set_range(ds41_session* session, uint32_t start, uint32_t end);
 
 #endif  // GUFO_MODELS_DEEPSEEK_V41_FLASH_RUNTIME_MODEL_H_

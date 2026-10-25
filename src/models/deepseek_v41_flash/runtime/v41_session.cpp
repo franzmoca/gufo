@@ -127,6 +127,23 @@ void ds41_session_free(ds41_session* s) {
 
 bool ds41_session_dspark_enabled(const ds41_session* s) { return s && s->dspark; }
 
+void* ds41_session_dspark_ring(ds41_session* s, uint64_t* bytes) {
+  *bytes = 0;
+  return s && s->dspark ? ds41_dspark_state_ring(s->dspark, bytes) : nullptr;
+}
+
+int ds41_session_dspark_range(const ds41_session* s, uint32_t* start, uint32_t* end) {
+  if (!s || !s->dspark) return 1;
+  ds41_dspark_state_range(s->dspark, start, end);
+  return 0;
+}
+
+int ds41_session_dspark_set_range(ds41_session* s, uint32_t start, uint32_t end) {
+  return s && s->dspark && s->valid && end == s->tokens.size() && ds41_dspark_state_set_range(s->dspark, start, end)
+             ? 0
+             : 1;
+}
+
 int ds41_session_sync(ds41_session* s, const ds41_tokens* prompt, char* error, size_t capacity) {
   if (!s || !prompt || !prompt->v || prompt->len <= 0 || prompt->len >= s->context) {
     set_error(error, capacity, "prompt exceeds context");

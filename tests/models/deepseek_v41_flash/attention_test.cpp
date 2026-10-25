@@ -590,6 +590,53 @@ bool DsparkHelpers(std::mt19937& rng) {
   return ok && tokens[1] == 5000 && tokens[2] == -1 && tokens[0] == -2;
 }
 
+/* F16 weights (the Markov tables) give the same sums as their exact F32
+ * widening, and the F16 gather the same row. */
+bool F16Matmul(std::mt19937& rng) {
+  std::normal_distribution<float> dist(0.0f, 1.0f);
+  constexpr uint32_t kRows = 1000, kK = 256, kN = 3;
+  std::vector<_Float16> w16(kRows * kK);
+  std::vector<float> w32(w16.size()), x(kN * kK);
+  for (std::size_t i = 0; i < w16.size(); i++) {
+    w16[i] = (_Float16)(0.1f * dist(rng));
+    w32[i] = (float)w16[i];
+  }
+  for (float& v : x)
+    v = dist(rng);
+  std::vector<float> a(kN * kRows), b(a.size()), row(kK), row_ref(kK);
+  std::vector<int32_t> token = {417};
+  _Float16* dw16 = Device(w16);
+  float* dw32 = Device(w32);
+  float* dx = Device(x);
+  float* da = Device(a);
+  float* db = Device(b);
+  float* drow = Device(row);
+  float* drow_ref = Device(row_ref);
+  int32_t* dtoken = Device(token);
+  bool ok =
+      ds41_v41_matmul_f16((const uint16_t*)dw16, dx, da, kRows, kK, kN) == 0 &&
+      ds41_v41_matmul_f32(dw32, dx, db, kRows, kK, kN) == 0 &&
+      ds41_v41_gather_row(dw16, DS41_V41_ROW_F16, dtoken, 0, drow, kK) == 0 &&
+      ds41_v41_gather_row(dw32, DS41_V41_ROW_F32, dtoken, 0, drow_ref, kK) ==
+          0 &&
+      hipMemcpy(a.data(), da, a.size() * sizeof(float),
+                hipMemcpyDeviceToHost) == hipSuccess &&
+      hipMemcpy(b.data(), db, b.size() * sizeof(float),
+                hipMemcpyDeviceToHost) == hipSuccess &&
+      hipMemcpy(row.data(), drow, kK * sizeof(float), hipMemcpyDeviceToHost) ==
+          hipSuccess &&
+      hipMemcpy(row_ref.data(), drow_ref, kK * sizeof(float),
+                hipMemcpyDeviceToHost) == hipSuccess;
+  for (void* p : {(void*)dw16, (void*)dw32, (void*)dx, (void*)da, (void*)db,
+                  (void*)drow, (void*)drow_ref, (void*)dtoken})
+    (void)hipFree(p);
+  ok = ok && std::memcmp(a.data(), b.data(), a.size() * sizeof(float)) == 0 &&
+       std::memcmp(row.data(), row_ref.data(), kK * sizeof(float)) == 0;
+  std::printf("f16 matmul and gather %s\n",
+              ok ? "bit-identical to f32" : "MISMATCH");
+  return ok;
+}
+
 int main(int argc, char** argv) {
   int devices = 0;
   if (hipGetDeviceCount(&devices) != hipSuccess || devices == 0) {
@@ -667,6 +714,7 @@ int main(int argc, char** argv) {
     ok = e < 1e-5 && ok;
   }
   ok = DsparkHelpers(rng) && ok;
+  ok = F16Matmul(rng) && ok;
   std::printf("fp4 row format mismatches %d\n", g_format_errors);
   ok = g_format_errors == 0 && ok;
   std::printf("%s\n", ok ? "PASS" : "FAIL");
