@@ -22,8 +22,8 @@ same GGUF.
 | M0 Oracle and loader | done |
 | M1 Correct AR decode on IQ1_M | done |
 | M2 Resident performance | done |
-| M4 Component cache and serving | next |
-| M5 DSpark and approximations | planned |
+| M4 Component cache and serving | done |
+| M5 DSpark, prompt lookup and approximations | next |
 | M6 Vision | planned |
 | M3 SSD expert streaming (IQ2_XXS) | planned, after M6 |
 | M7 Higher-precision Engram tables | planned |
@@ -160,13 +160,13 @@ Open performance items are tracked in [BACKLOG.md](BACKLOG.md).
 
 ### M4 Component cache and serving
 
-- `src/cache/adapter.hpp` adapter: SWA rings as window rows (128); compressed
-  KV and index K of each source layer as append rows (ratio-2 layers add a
-  row every 2 tokens); compressor frontiers, logits and the Engram n-gram tail
-  as private state. State ABI `deepseek-v4.1-flash-gfx1151-state-v1`.
-- Disk cache, prefix reuse and prompt lookup as for Gemma 4.
+- `src/cache/adapter.hpp` adapter: compressed KV and index K of each source
+  layer as append rows (ratio-2 layers add a row every 2 tokens); the
+  128-row SWA rings, compressor frontiers and logits as private state; the
+  Engram n-gram history is rebuilt from the tokens on restore.
+- Disk cache and prefix reuse as for Gemma 4.
 
-### M5 DSpark and approximations
+### M5 DSpark, prompt lookup and approximations
 
 - Start with a memory budget. With one session at 1M context about 9.5 GiB
   of host memory is free; the drafter, the M4 caches and the M6 projector
@@ -184,6 +184,10 @@ Open performance items are tracked in [BACKLOG.md](BACKLOG.md).
     `dspark/dspark-xs.bin` (3.17 GiB) and `dspark-xs2.bin` (3.96 GiB), which
     are not GGUF files and need their format checked first.
   - Compare acceptance rate and decode speed against the drafter's memory.
+- Prompt lookup (`src/core/speculative/prompt_lookup.hpp`) as for Gemma 4.
+  It shares DSpark's multi-token verification and the rollback of rejected
+  tokens (SWA rings, compressor frontiers, rows), and its state joins the
+  component cache metadata.
 - Evaluate decoder SWA bounded replay (layers 20-39 over only the last 128
   prompt tokens), which roughly halves prefill; adopt only if quality holds.
 
@@ -196,6 +200,10 @@ Open performance items are tracked in [BACKLOG.md](BACKLOG.md).
   1,024 image tokens per image (`<｜deepseek_image｜>`, token 129264).
 - Interleaved image blocks in the chat template, checked against the official
   `encoding.py` image goldens; the image functional suites for this model.
+- Component cache for image prompts: the image identity in the cache
+  metadata, as for Qwen3.8-Flash-Next, so a restored prefix only serves
+  requests with the same images; the image cache suites (`image-count` RAM
+  and disk replay).
 
 ### M7 Higher-precision Engram tables
 
