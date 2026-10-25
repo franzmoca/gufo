@@ -40,15 +40,18 @@ struct Format<8> {  // Q8_0, eight 34-byte blocks per 256 values
   }
 };
 
-/* Row r reads x + (r / rows_per_x) * k. */
-template <int kType, int S>
+/* Row r reads x + (r / rows_per_x) * k. With kSwiGLU, w_up holds a second
+ * matrix of the same shape whose rows are taken in the same pass, and row r
+ * stores silu(min(gate, limit)) * clamp(up, +-limit). */
+template <int kType, int S, bool kSwiGLU>
 __global__ void __launch_bounds__(kWave* kWaves)
-    gemv_kernel(const uint8_t* __restrict__ w, const float* __restrict__ x, float* __restrict__ y, uint32_t m,
-                uint32_t k, uint32_t rows_per_x) {
+    gemv_kernel(const uint8_t* __restrict__ w, const uint8_t* __restrict__ w_up, float limit,
+                const float* __restrict__ x, float* __restrict__ y, uint32_t m, uint32_t k, uint32_t rows_per_x) {
   using F = Format<kType>;
   constexpr int kRowsPerWave = kWave / F::kTasks;
   constexpr int kGroups = kWaves / S;
   __shared__ float partial[kWaves][kWave];
+  __shared__ float partial_up[kSwiGLU ? kWaves : 1][kWave];
   const int lane = threadIdx.x % kWave;
   const int wave = threadIdx.x / kWave;
   const int group = wave / S;
@@ -57,50 +60,76 @@ __global__ void __launch_bounds__(kWave* kWaves)
   const uint32_t row = (blockIdx.x * kGroups + group) * kRowsPerWave + lane / F::kTasks;
   const uint32_t blocks_per_row = k / 256;
   float acc = 0.0f;
+  float acc_up = 0.0f;
   if (row < m) {
-    const uint8_t* base = w + (uint64_t)row * blocks_per_row * F::kBlockBytes;
+    const uint64_t offset = (uint64_t)row * blocks_per_row * F::kBlockBytes;
+    const uint8_t* base = w + offset;
     const float* xr = x + (uint64_t)(row / rows_per_x) * k;
 #pragma unroll 2
-    for (uint32_t blk = slice; blk < blocks_per_row; blk += S)
+    for (uint32_t blk = slice; blk < blocks_per_row; blk += S) {
       acc = F::Task(base + (uint64_t)blk * F::kBlockBytes, t, xr + blk * 256, acc);
+      if constexpr (kSwiGLU) acc_up = F::Task(w_up + offset + (uint64_t)blk * F::kBlockBytes, t, xr + blk * 256, acc_up);
+    }
   }
 #pragma unroll
-  for (int offset = F::kTasks / 2; offset > 0; offset >>= 1) acc += __shfl_xor(acc, offset, kWave);
-  if constexpr (S == 1) {
-    if (t == 0 && row < m) y[row] = acc;
-  } else {
+  for (int offset = F::kTasks / 2; offset > 0; offset >>= 1) {
+    acc += __shfl_xor(acc, offset, kWave);
+    if constexpr (kSwiGLU) acc_up += __shfl_xor(acc_up, offset, kWave);
+  }
+  if constexpr (S > 1) {
     partial[wave][lane] = acc;
+    if constexpr (kSwiGLU) partial_up[wave][lane] = acc_up;
     __syncthreads();
-    if (slice == 0 && t == 0 && row < m) {
-      float sum = partial[wave][lane];
+    if (slice != 0) return;
 #pragma unroll
-      for (int s = 1; s < S; ++s) sum += partial[wave + s][lane];
-      y[row] = sum;
+    for (int s = 1; s < S; ++s) {
+      acc += partial[wave + s][lane];
+      if constexpr (kSwiGLU) acc_up += partial_up[wave + s][lane];
     }
+  }
+  if (t != 0 || row >= m) return;
+  if constexpr (kSwiGLU) {
+    float g = acc;
+    float u = acc_up;
+    if (limit > 0.0f) {
+      u = fminf(fmaxf(u, -limit), limit);
+      g = fminf(g, limit);
+    }
+    y[row] = g / (1.0f + expf(-g)) * u;
+  } else {
+    y[row] = acc;
   }
 }
 
 template <int kType, int S>
-void launch(const void* w, const float* x, float* y, uint32_t m, uint32_t k, uint32_t rows_per_x) {
+void launch(const void* w, const void* w_up, float limit, const float* x, float* y, uint32_t m, uint32_t k,
+            uint32_t rows_per_x) {
   constexpr uint32_t kRows = (kWave / Format<kType>::kTasks) * (kWaves / S);
-  gemv_kernel<kType, S><<<(m + kRows - 1) / kRows, kWave * kWaves>>>(static_cast<const uint8_t*>(w), x, y, m, k,
-                                                                      rows_per_x);
+  const uint32_t blocks = (m + kRows - 1) / kRows;
+  if (w_up)
+    gemv_kernel<kType, S, true><<<blocks, kWave * kWaves>>>(static_cast<const uint8_t*>(w),
+                                                             static_cast<const uint8_t*>(w_up), limit, x, y, m, k,
+                                                             rows_per_x);
+  else
+    gemv_kernel<kType, S, false><<<blocks, kWave * kWaves>>>(static_cast<const uint8_t*>(w), nullptr, 0.0f, x, y, m,
+                                                              k, rows_per_x);
 }
 
 template <int kType>
-int dispatch(const void* w, const float* x, float* y, uint32_t m, uint32_t k, uint32_t rows_per_x, int slices) {
+int dispatch(const void* w, const void* w_up, float limit, const float* x, float* y, uint32_t m, uint32_t k,
+             uint32_t rows_per_x, int slices) {
   switch (slices) {
   case 1:
-    launch<kType, 1>(w, x, y, m, k, rows_per_x);
+    launch<kType, 1>(w, w_up, limit, x, y, m, k, rows_per_x);
     break;
   case 2:
-    launch<kType, 2>(w, x, y, m, k, rows_per_x);
+    launch<kType, 2>(w, w_up, limit, x, y, m, k, rows_per_x);
     break;
   case 4:
-    launch<kType, 4>(w, x, y, m, k, rows_per_x);
+    launch<kType, 4>(w, w_up, limit, x, y, m, k, rows_per_x);
     break;
   case 8:
-    launch<kType, 8>(w, x, y, m, k, rows_per_x);
+    launch<kType, 8>(w, w_up, limit, x, y, m, k, rows_per_x);
     break;
   default:
     return 1;
@@ -113,17 +142,32 @@ int dispatch(const void* w, const float* x, float* y, uint32_t m, uint32_t k, ui
 
 }  // namespace
 
-extern "C" int ds41_v41_gemv(int type, const void* w, const float* x, float* y, uint32_t m, uint32_t k,
-                             uint32_t rows_per_x, int slices) {
+namespace {
+
+int run(int type, const void* w, const void* w_up, float limit, const float* x, float* y, uint32_t m, uint32_t k,
+        uint32_t rows_per_x, int slices) {
   if (k % 256 != 0 || m == 0) return 1;
   if (rows_per_x == 0) rows_per_x = m;
   if (slices <= 0) slices = 8;
   switch (type) {
   case 13:
-    return dispatch<13>(w, x, y, m, k, rows_per_x, slices);
+    return dispatch<13>(w, w_up, limit, x, y, m, k, rows_per_x, slices);
   case 8:
-    return dispatch<8>(w, x, y, m, k, rows_per_x, slices);
+    return dispatch<8>(w, w_up, limit, x, y, m, k, rows_per_x, slices);
   default:
     return 1;
   }
+}
+
+}  // namespace
+
+extern "C" int ds41_v41_gemv(int type, const void* w, const float* x, float* y, uint32_t m, uint32_t k,
+                             uint32_t rows_per_x, int slices) {
+  return run(type, w, nullptr, 0.0f, x, y, m, k, rows_per_x, slices);
+}
+
+extern "C" int ds41_v41_gemv_swiglu(int type, const void* gate, const void* up, const float* x, float* y, uint32_t m,
+                                    uint32_t k, float limit, int slices) {
+  if (!up) return 1;
+  return run(type, gate, up, limit, x, y, m, k, 0, slices);
 }

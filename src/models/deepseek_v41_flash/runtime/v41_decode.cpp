@@ -566,7 +566,16 @@ bool moe(ds41_decoder* d, uint32_t il, uint32_t n) {
     ds41_mmq_set_routed_max_expert_rows((int)most);
     ds41_mmq_set_routed_tile_cols(ds41_mmq_routed_tile_cols_for_counts(counts.data(), DS41_N_EXPERT));
   }
-  if (n == 1) {
+  const bool iq1_pair = gate_type == up_type &&
+                        (gate_type == (int)DS41_TENSOR_IQ1_S || gate_type == (int)DS41_TENSOR_IQ1_M);
+  if (n == 1 && iq1_pair) {
+    /* Gate, up and SwiGLU in one pass. */
+    if (ds41_v41_gemv_experts_swiglu(gate_type, gate, up,
+                                     (uint64_t)DS41_N_FF_EXP * kDim / 256 * expert_block_bytes(gate_type),
+                                     d->route_ids, used, d->xn, d->route_w, kSwigluLimit, d->mid6, DS41_N_FF_EXP,
+                                     kDim))
+      return false;
+  } else if (n == 1) {
     int status = 0;
     if (!expert_gemv(gate_type, gate, d->route_ids, used, d->xn, false, d->g6, DS41_N_FF_EXP, kDim, &status))
       status = ds41_mmq_moe_vec_typed(gate_type, gate, d->xn, d->route_ids, d->g6, DS41_N_FF_EXP, kDim, 1,
@@ -582,7 +591,9 @@ bool moe(ds41_decoder* d, uint32_t il, uint32_t n) {
                                 used, 0)) {
     return false;
   }
-  if (ds41_v41_swiglu(d->g6, d->u6, d->route_w, d->mid6, rows, DS41_N_FF_EXP, kSwigluLimit)) return false;
+  if (!(n == 1 && iq1_pair) &&
+      ds41_v41_swiglu(d->g6, d->u6, d->route_w, d->mid6, rows, DS41_N_FF_EXP, kSwigluLimit))
+    return false;
   /* Each (token, slot) row multiplies its own expert's down projection. */
   if (n == 1) {
     int status = 0;
@@ -594,10 +605,19 @@ bool moe(ds41_decoder* d, uint32_t il, uint32_t n) {
                                 DS41_N_EXPERT, 1, 0)) {
     return false;
   }
-  if (!linear(d, l->ffn_gate_shexp, d->xn, d->sg, n) || !linear(d, l->ffn_up_shexp, d->xn, d->su, n) ||
-      ds41_v41_swiglu(d->sg, d->su, nullptr, d->sm, n, DS41_N_FF_EXP, kSwigluLimit) ||
-      !linear(d, l->ffn_down_shexp, d->sm, d->sd, n))
+  const ds41_tensor* sg = l->ffn_gate_shexp;
+  const ds41_tensor* su = l->ffn_up_shexp;
+  if (n == 1 && sg->type == su->type && sg->elements == su->elements && gemv_type(sg->type)) {
+    const uint32_t k = (uint32_t)sg->dim[0];
+    const uint32_t m = (uint32_t)(sg->elements / k);
+    if (ds41_v41_gemv_swiglu((int)sg->type, dev(d, sg), dev(d, su), d->xn, d->sm, m, k, kSwigluLimit,
+                             gemv_slices(m, k)))
+      return false;
+  } else if (!linear(d, sg, d->xn, d->sg, n) || !linear(d, su, d->xn, d->su, n) ||
+             ds41_v41_swiglu(d->sg, d->su, nullptr, d->sm, n, DS41_N_FF_EXP, kSwigluLimit)) {
     return false;
+  }
+  if (!linear(d, l->ffn_down_shexp, d->sm, d->sd, n)) return false;
   return ds41_v41_sum_rows(d->down6, d->sd, d->moe_out, used, kDim, n) == 0;
 }
 

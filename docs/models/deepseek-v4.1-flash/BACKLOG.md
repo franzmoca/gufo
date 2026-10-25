@@ -58,12 +58,14 @@ the SGPRs. Starting points for a retry:
 ~1,660 dispatches per token; ~4.6 ms per token is not covered by GPU work.
 In progress. Done: the MMQ scratch pool reuses buffers instead of
 allocating and freeing per call; Engram rows upload asynchronously from
-pinned memory; hc collapse + RMSNorm, rope + FP8 quantization and (below
-16 tokens) hc mixes + Sinkhorn run as single kernels. Remaining, from a `rocprofv3` trace of 2K decode:
+pinned memory; hc collapse + RMSNorm, rope + FP8 quantization, (below 16
+tokens) hc mixes + Sinkhorn and (single tokens) gate + up + SwiGLU run as
+single kernels; the top-k threshold and decode indexer scores have their
+own faster kernels. Remaining, from a `rocprofv3` trace of 2K decode:
 
 - ~1,550 dependent-launch gaps of ~2.5 µs per token (~4 ms). Fusion
-  candidates by count per token: rope_tail 53, hc_expand 80, swiglu 80,
-  copyBuffer 46, the q_a and KV RMSNorms 40 each.
+  candidates by count per token: rope_tail 53, hc_expand 80, copyBuffer 46,
+  the q_a and KV projections and RMSNorms 40 each, sum_rows 40.
 - hc mixes read 2 MB of F32 weights in ~14 µs (80 per token) regardless of
   how many blocks share a row.
 - ~90 µs of host work at the start of each step (embedding dequant and two
