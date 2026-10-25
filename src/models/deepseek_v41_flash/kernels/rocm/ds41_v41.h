@@ -48,6 +48,14 @@ int ds41_v41_gemv_experts_swiglu(int type, const void* gate, const void* up, uin
                                  const int32_t* ids, uint32_t slots, const float* x, const float* route_w,
                                  float limit, float* y, uint32_t m, uint32_t k);
 
+/* Batched dense projections (Q5_K) on the FP16 matrix cores: for each group
+ * z < groups, out[t, z m + r] = W_z[r] . x[t, z k : z k + k] over n tokens,
+ * W_z the z-th [m][k] matrix stored back to back; x rows hold groups * k
+ * floats, rounded to FP16 as they are staged, and out rows groups * m;
+ * non-finite outputs read as 0. Returns 1 for other types, m not a multiple
+ * of 128 or k not a multiple of 256. */
+int ds41_v41_dense_f16(int type, const void* w, const float* x, float* out, uint32_t m, uint32_t n, uint32_t k,
+                       uint32_t groups);
 /* Batched routed experts (IQ1_S, IQ1_M, IQ2_XXS) on the FP16 matrix cores, with FP16
  * activations x. rows lists the slots grouped by expert, expert e owning
  * rows[bounds[e] .. bounds[e + 1]), and tiles[0:n_tiles] names 64 of them

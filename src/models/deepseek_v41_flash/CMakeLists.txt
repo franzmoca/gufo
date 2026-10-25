@@ -66,7 +66,8 @@ add_library(gufo_deepseek_v41_flash STATIC
   ${DEEPSEEK_V41_FLASH_ROCM_DIR}/ds41_v41.hip.cpp
   ${DEEPSEEK_V41_FLASH_ROCM_DIR}/ds41_gemv.hip.cpp
   ${DEEPSEEK_V41_FLASH_ROCM_DIR}/ds41_expert_gemv.hip.cpp
-  ${DEEPSEEK_V41_FLASH_ROCM_DIR}/ds41_routed_f16.hip.cpp)
+  ${DEEPSEEK_V41_FLASH_ROCM_DIR}/ds41_routed_f16.hip.cpp
+  ${DEEPSEEK_V41_FLASH_ROCM_DIR}/ds41_dense_f16.hip.cpp)
 
 set_source_files_properties(
   ${DEEPSEEK_V41_FLASH_ROCM_DIR}/backend.hip.cpp
@@ -74,6 +75,7 @@ set_source_files_properties(
   ${DEEPSEEK_V41_FLASH_ROCM_DIR}/ds41_gemv.hip.cpp
   ${DEEPSEEK_V41_FLASH_ROCM_DIR}/ds41_expert_gemv.hip.cpp
   ${DEEPSEEK_V41_FLASH_ROCM_DIR}/ds41_routed_f16.hip.cpp
+  ${DEEPSEEK_V41_FLASH_ROCM_DIR}/ds41_dense_f16.hip.cpp
   PROPERTIES LANGUAGE HIP)
 
 target_compile_definitions(gufo_deepseek_v41_flash PRIVATE
