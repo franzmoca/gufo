@@ -48,6 +48,26 @@ int ds41_v41_gemv_experts_swiglu(int type, const void* gate, const void* up, uin
                                  const int32_t* ids, uint32_t slots, const float* x, const float* route_w,
                                  float limit, float* y, uint32_t m, uint32_t k);
 
+/* Batched routed experts (IQ1_S) on the FP16 matrix cores, with FP16
+ * activations x. rows lists the slots grouped by expert, expert e owning
+ * rows[bounds[e] .. bounds[e + 1]), and tiles[0:n_tiles] names 64 of them
+ * each as expert | index << 16 (see ds41_v41_routed_plan). A slot s reads x
+ * row s / x_div. With w_up, y[s, r] = route_w[s] * silu(min(gate, limit)) *
+ * clamp(up, +-limit), FP16 if y_half, else FP32; without it, y (FP32)
+ * [s, r] = (W x)[r]. Non-finite products read as 0. Returns 1 for other
+ * types or k not a multiple of 256. */
+int ds41_v41_routed_f16(int type, const void* w, const void* w_up, uint64_t expert_bytes, const uint16_t* x,
+                        uint32_t x_div, const int32_t* rows, const int32_t* bounds, const int32_t* tiles,
+                        uint32_t n_tiles, const float* route_w, float limit, void* y, int y_half, uint32_t m,
+                        uint32_t k);
+/* y[0:n] = x[0:n] rounded to FP16 (bits). */
+int ds41_v41_to_half(const float* x, uint16_t* y, uint64_t n);
+/* Host side: rows[slots], bounds[n_experts + 1] and tiles (at most
+ * slots / 64 + n_experts entries) from the slot experts ids[slots]; negative
+ * ids are skipped. Returns the tile count. */
+uint32_t ds41_v41_routed_plan(const int32_t* ids, uint32_t slots, uint32_t n_experts, int32_t* rows,
+                              int32_t* bounds, int32_t* tiles);
+
 /* dst[r, 0:cols] = src[r, 0:cols] for `rows` rows with the given strides (floats). */
 int ds41_v41_copy_rows(float* dst, uint64_t dst_stride, const float* src, uint64_t src_stride, uint32_t rows,
                        uint32_t cols);
