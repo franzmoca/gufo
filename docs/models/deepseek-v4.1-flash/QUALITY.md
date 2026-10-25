@@ -42,8 +42,31 @@ the indexer's top-512 selection on every compressed-attention layer.
 
 Perplexity: oracle 6.309, GPU 6.306; mean |ΔNLL| 0.078 per position.
 
-Not yet covered: candidate-block masking, which first applies beyond 16K
-compressed rows (16K tokens).
+## Teacher-forced 18.5K tokens and candidate blocks
+
+18,499 positions of repository documentation (`docs/KV-CACHE.md`,
+`docs/TESTING.md` and following), scored through 2048-token batches. Past
+16,384 tokens layer 20's candidate blocks (top 2048 of the 8-row blocks) start
+masking the rescoring layers.
+
+| Positions | Oracle NLL | GPU NLL | Oracle top-1 | GPU top-1 | Argmax agreement | Mean \|ΔNLL\| |
+|---|---:|---:|---:|---:|---:|---:|
+| 0-2047 | 1.761 | 1.762 | 0.604 | 0.601 | 0.959 | 0.077 |
+| 2048-8191 | 2.095 | 2.096 | 0.531 | 0.530 | 0.947 | 0.085 |
+| 8192-14335 | 1.681 | 1.681 | 0.627 | 0.627 | 0.964 | 0.069 |
+| 14336-16382 | 1.502 | 1.504 | 0.666 | 0.668 | 0.962 | 0.063 |
+| 16383-17399 | 1.472 | 1.469 | 0.636 | 0.640 | 0.964 | 0.075 |
+| 17400-18498 | 2.338 | 2.347 | 0.532 | 0.534 | 0.956 | 0.090 |
+| all | | | | | 0.958 | 0.076 |
+
+Perplexity: oracle 6.267, GPU 6.271. Long-context parity holds past the
+threshold. The score alone does not prove the mask: with the GPU mask
+disabled the same run also gives perplexity 6.271 and agreement 95.7%, because
+at 18.5K tokens the dropped blocks are rarely in a top-512. The mask is
+therefore checked directly: `ds41.candidate_mask` compares the GPU mask and the
+masked scores with a host port of the reference selection, exactly, for
+prefill batches below, at and across 16,384 rows and for decode tokens up to
+40K rows (up to 70,872 dropped rows per case).
 
 ## Chat template
 
@@ -82,7 +105,7 @@ GEMV): perplexity 6.303, agreement 96.1%, mean |ΔNLL| 0.077. Across the M2 chan
 of the attention output turn rounding-level differences into small logit
 changes. The smoke continuation keeps all 9 greedy tokens, KL ≤ 5.4e-3 per step.
 
-Kernel checks: `ds41.attention` compares both attention paths with an fp64
+Kernel checks: `ds41.candidate_mask` (above); `ds41.attention` compares both attention paths with an fp64
 reference (split decode 1.6e-7, batched 3e-4 relative error);
 `ds41.mmq_typed` compares batched, bounded-routed and grouped matvec launches
 with the matvec path for every V4.1 weight type, and the single-token Q5_K/Q8_0

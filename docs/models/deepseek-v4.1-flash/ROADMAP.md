@@ -119,8 +119,8 @@ speed.
 ### M2 Resident performance
 
 - Done: `deepseek41` in `gufo prompt` and `gufo bench`
-  ([BENCHMARKS.md](BENCHMARKS.md)). Open: candidate-block parity beyond 16K
-  tokens.
+  ([BENCHMARKS.md](BENCHMARKS.md)); candidate-block parity beyond 16K
+  tokens ([QUALITY.md](QUALITY.md)).
 - Batched layer-major prefill; fused gate/up + SwiGLU for IQ1/IQ2 experts;
   LDS padding and bank-conflict passes.
 - Engram v2: start row reads as soon as token ids are known (layer 1 overlaps
