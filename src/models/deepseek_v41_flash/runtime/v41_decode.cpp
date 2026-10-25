@@ -38,6 +38,8 @@ constexpr uint32_t kGroupDim = DS41_N_HEAD_DIM * (DS41_N_HEAD / DS41_N_OUT_GROUP
 constexpr uint32_t kMixes = 2 * kHc + kHc * kHc;
 constexpr uint32_t kEngramIn = DS41_ENGRAM_COLS * DS41_ENGRAM_HEAD_DIM;
 constexpr uint32_t kEngramOut = kDim * (kHc + 1);
+constexpr uint32_t kEngramPinnedTokens = 16;
+constexpr uint64_t kEngramRowsPerThread = 4;
 constexpr float kSwigluLimit = DS41_SWIGLU_CLAMP_EXP;
 
 float half_to_float(uint16_t h) {
@@ -202,6 +204,11 @@ struct ds41_decoder {
   float *g6 = nullptr, *u6 = nullptr, *mid6 = nullptr, *down6 = nullptr;
   float *sg = nullptr, *su = nullptr, *sm = nullptr, *sd = nullptr, *moe_out = nullptr;
   float *engram_in = nullptr, *engram_kv = nullptr, *logits = nullptr;
+  /* Pinned staging for the Engram rows of batches up to kEngramPinnedTokens,
+   * per Engram layer, so the upload does not wait for the queue to drain.
+   * Each evaluation ends with a device synchronize, so the next one finds
+   * the buffers idle. */
+  float* engram_pinned[DS41_N_ENGRAM_LAYER] = {};
 
   int comp_layer = -1;
   std::vector<int64_t> engram_history;
@@ -318,13 +325,12 @@ void engram_hash(ds41_decoder* d, int token, int64_t (*rows)[DS41_ENGRAM_COLS]) 
  * out. Reads run on parallel threads: each is a small random read, so
  * throughput comes from queue depth. Touches only immutable engine state, so
  * it can run while the GPU works on earlier layers. */
-bool engram_read(const ds41_decoder* d, uint32_t il, const int64_t* rows, uint32_t n, std::vector<float>* out) {
+bool engram_read(const ds41_decoder* d, uint32_t il, const int64_t* rows, uint32_t n, float* out) {
   const ds41_layer_weights* l = &d->engine->weights->layer[il];
   const ds41_engram_tables* e = d->engine->engram;
   const ds41_tensor* table = l->engram_embd;
   const uint64_t base = table->abs_offset - e->file.shard_offset[0];
   const uint64_t count = (uint64_t)n * DS41_ENGRAM_COLS;
-  out->resize(count * DS41_ENGRAM_HEAD_DIM);
   std::atomic<uint64_t> next{0};
   std::atomic<bool> ok{true};
   auto worker = [&] {
@@ -332,11 +338,11 @@ bool engram_read(const ds41_decoder* d, uint32_t il, const int64_t* rows, uint32
     for (uint64_t i = next++; i < count && ok; i = next++) {
       const off_t at = (off_t)(base + (uint64_t)rows[i] * e->row_bytes);
       if (pread(e->file.shard_fd[0], raw.data(), raw.size(), at) != (ssize_t)raw.size() ||
-          !dequant_row(table->type, raw.data(), out->data() + i * DS41_ENGRAM_HEAD_DIM, DS41_ENGRAM_HEAD_DIM))
+          !dequant_row(table->type, raw.data(), out + i * DS41_ENGRAM_HEAD_DIM, DS41_ENGRAM_HEAD_DIM))
         ok = false;
     }
   };
-  const uint32_t threads = (uint32_t)std::min<uint64_t>(32, (count + 23) / 24);
+  const uint32_t threads = (uint32_t)std::min<uint64_t>(32, (count + kEngramRowsPerThread - 1) / kEngramRowsPerThread);
   std::vector<std::thread> pool;
   for (uint32_t t = 1; t < threads; t++) pool.emplace_back(worker);
   worker();
@@ -346,10 +352,13 @@ bool engram_read(const ds41_decoder* d, uint32_t il, const int64_t* rows, uint32
 }
 
 /* Adds layer il's Engram term from rows read by engram_read. */
-bool engram(ds41_decoder* d, uint32_t il, const std::vector<float>& rows, uint32_t n) {
+bool engram(ds41_decoder* d, uint32_t il, const float* rows, uint32_t n) {
   const ds41_layer_weights* l = &d->engine->weights->layer[il];
-  if (hipMemcpy(d->engram_in, rows.data(), rows.size() * sizeof(float), hipMemcpyHostToDevice) != hipSuccess)
-    return false;
+  const uint64_t bytes = (uint64_t)n * DS41_ENGRAM_COLS * DS41_ENGRAM_HEAD_DIM * sizeof(float);
+  const hipError_t err = n <= kEngramPinnedTokens
+                             ? hipMemcpyAsync(d->engram_in, rows, bytes, hipMemcpyHostToDevice, 0)
+                             : hipMemcpy(d->engram_in, rows, bytes, hipMemcpyHostToDevice);
+  if (err != hipSuccess) return false;
   if (!linear(d, l->engram_wkv, d->engram_in, d->engram_kv, n)) return false;
   return ds41_v41_engram_gate(d->h, d->engram_kv, (const uint16_t*)dev(d, l->engram_q),
                               (const uint16_t*)dev(d, l->engram_k), kHc, kDim, DS41_RMS_EPS, n) == 0;
@@ -717,6 +726,14 @@ ds41_decoder* ds41_decoder_create(ds41_engine* engine, uint32_t context) {
     ds41_decoder_destroy(d);
     return nullptr;
   }
+  for (uint32_t slot = 0; slot < DS41_N_ENGRAM_LAYER; slot++) {
+    if (hipHostMalloc(&d->engram_pinned[slot], (uint64_t)kEngramPinnedTokens * kEngramIn * sizeof(float)) !=
+        hipSuccess) {
+      fprintf(stderr, "ds41: decoder allocation failed\n");
+      ds41_decoder_destroy(d);
+      return nullptr;
+    }
+  }
   d->host_h.resize(cap * hd);
   d->host_ids.resize(DS41_N_EXPERT_USED);
   return d;
@@ -725,6 +742,8 @@ ds41_decoder* ds41_decoder_create(ds41_engine* engine, uint32_t context) {
 void ds41_decoder_destroy(ds41_decoder* d) {
   if (!d) return;
   for (void* p : d->allocations) (void)hipFree(p);
+  for (float* p : d->engram_pinned)
+    if (p) (void)hipHostFree(p);
   delete d;
 }
 
@@ -846,12 +865,18 @@ int ds41_decoder_eval(ds41_decoder* d, const int* tokens, uint32_t n, float* log
 
   /* Every Engram layer's rows are read while the GPU runs the layers before it. */
   std::vector<float> engram_host[DS41_N_ENGRAM_LAYER];
+  float* engram_out[DS41_N_ENGRAM_LAYER];
   std::future<bool> engram_reads[DS41_N_ENGRAM_LAYER];
   for (uint32_t il = 0; il < DS41_N_LAYER; il++) {
     const int slot = ds41_layer_engram_slot(il);
-    if (slot >= 0)
-      engram_reads[slot] = std::async(std::launch::async, engram_read, d, il,
-                                      &engram_rows[(uint64_t)slot * n * DS41_ENGRAM_COLS], n, &engram_host[slot]);
+    if (slot < 0) continue;
+    engram_out[slot] = d->engram_pinned[slot];
+    if (n > kEngramPinnedTokens) {
+      engram_host[slot].resize((uint64_t)n * DS41_ENGRAM_COLS * DS41_ENGRAM_HEAD_DIM);
+      engram_out[slot] = engram_host[slot].data();
+    }
+    engram_reads[slot] = std::async(std::launch::async, engram_read, d, il,
+                                    &engram_rows[(uint64_t)slot * n * DS41_ENGRAM_COLS], n, engram_out[slot]);
   }
 
   /* Embedding, replicated over the hc residual streams; layer 0 pre-mix is one-hot. */
@@ -871,7 +896,7 @@ int ds41_decoder_eval(ds41_decoder* d, const int* tokens, uint32_t n, float* log
   const int prev = 0;
   for (uint32_t il = 0; il < DS41_N_LAYER && ok; il++) {
     const int slot = ds41_layer_engram_slot(il);
-    if (slot >= 0) ok = engram_reads[slot].get() && engram(d, il, engram_host[slot], n);
+    if (slot >= 0) ok = engram_reads[slot].get() && engram(d, il, engram_out[slot], n);
     /* block() leaves this layer's FFN pre-mix in pre[prev]. */
     ok = ok && block(d, il, prev, prev ^ 1, n);
     if (ok && layer_fn) {
