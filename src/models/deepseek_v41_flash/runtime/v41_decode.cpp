@@ -158,8 +158,8 @@ std::vector<float> rope_inv_freq(float base, uint64_t original_ctx) {
 
 struct LayerState {
   float* window = nullptr;    // [DS41_N_SWA, head_dim] ring, slot pos % DS41_N_SWA
-  float* comp = nullptr;      // [context / ratio, head_dim] (KV sources)
-  float* index_k = nullptr;   // [context / ratio, indexer head_dim] (KV sources)
+  uint16_t* comp = nullptr;     // [context / ratio, head_dim] bfloat16 (KV sources)
+  uint16_t* index_k = nullptr;  // [context / ratio, indexer head_dim] bfloat16 (KV sources)
   float* pool_kv = nullptr;   // [ratio, head_dim] compressor frontier
   float* pool_score = nullptr;
 };
@@ -423,7 +423,7 @@ bool attention(ds41_decoder* d, uint32_t il, uint32_t n) {
       ds41_v41_rope_tail(d->q, n * DS41_N_HEAD, kHeadDim, kRot, freq, pos0, DS41_N_HEAD, 1, 0))
     return false;
 
-  const float* comp = nullptr;
+  const uint16_t* comp = nullptr;
   if (ratio) {
     /* Compressed rows R0 .. R0 + emitted - 1 complete inside this batch. */
     const uint32_t r0 = pos0 / ratio;
@@ -447,9 +447,8 @@ bool attention(ds41_decoder* d, uint32_t il, uint32_t n) {
           (!linear(d, l->indexer_attn_k, d->latent, d->ik, emitted) ||
            ds41_v41_rms_norm(d->ik, f32(d, l->indexer_k_norm), d->ikn, emitted, DS41_N_INDEXER_HEAD_DIM, eps) ||
            ds41_v41_rope_tail(d->ikn, emitted, DS41_N_INDEXER_HEAD_DIM, kRot, freq, r0 * ratio, 1, ratio, 0) ||
-           ds41_v41_fp4_fake_quant(d->ikn, emitted * DS41_N_INDEXER_HEAD_DIM, 32, 0) ||
-           !copy_dev(s.index_k + (uint64_t)r0 * DS41_N_INDEXER_HEAD_DIM, d->ikn,
-                     (uint64_t)emitted * DS41_N_INDEXER_HEAD_DIM)))
+           ds41_v41_fp4_store_bf16(d->ikn, s.index_k + (uint64_t)r0 * DS41_N_INDEXER_HEAD_DIM,
+                                   emitted * DS41_N_INDEXER_HEAD_DIM, 32, 0)))
         return false;
       const float w_scale = 1.0f / sqrtf((float)DS41_N_INDEXER_HEAD_DIM) / sqrtf((float)DS41_N_INDEXER_HEAD);
       if (!linear(d, l->indexer_attn_q_b, d->qr, d->iq, n) ||
@@ -482,8 +481,7 @@ bool attention(ds41_decoder* d, uint32_t il, uint32_t n) {
     }
     if (source_layer && emitted &&
         (ds41_v41_rope_tail(d->latent, emitted, kHeadDim, kRot, freq, r0 * ratio, 1, ratio, 0) ||
-         ds41_v41_fp4_fake_quant(d->latent, emitted * kHeadDim, 16, 1) ||
-         !copy_dev(s.comp + (uint64_t)r0 * kHeadDim, d->latent, (uint64_t)emitted * kHeadDim)))
+         ds41_v41_fp4_store_bf16(d->latent, s.comp + (uint64_t)r0 * kHeadDim, emitted * kHeadDim, 16, 1)))
       return false;
     comp = source.comp;
   }
@@ -690,8 +688,8 @@ ds41_decoder* ds41_decoder_create(ds41_engine* engine, uint32_t context) {
     const uint32_t ratio = ds41_layer_compress_ratio(il);
     if (ok && ds41_layer_is_kv_source(il)) {
       const uint64_t rows = context / ratio + 1;
-      s.comp = alloc<float>(d, rows * kHeadDim);
-      s.index_k = alloc<float>(d, rows * DS41_N_INDEXER_HEAD_DIM);
+      s.comp = alloc<uint16_t>(d, rows * kHeadDim);
+      s.index_k = alloc<uint16_t>(d, rows * DS41_N_INDEXER_HEAD_DIM);
       s.pool_kv = alloc<float>(d, (uint64_t)ratio * kHeadDim);
       s.pool_score = alloc<float>(d, (uint64_t)ratio * kHeadDim);
       ok = s.comp && s.index_k && s.pool_kv && s.pool_score;
@@ -832,8 +830,8 @@ bool for_each_state(const ds41_decoder* d, uint32_t pos, Fn&& fn) {
     if (!fn(s.window, (uint64_t)DS41_N_SWA * kHeadDim * sizeof(float))) return false;
     if (!s.comp) continue;
     const uint64_t rows = pos / ratio;
-    if (!fn(s.comp, rows * kHeadDim * sizeof(float)) ||
-        !fn(s.index_k, rows * DS41_N_INDEXER_HEAD_DIM * sizeof(float)) ||
+    if (!fn(s.comp, rows * kHeadDim * sizeof(uint16_t)) ||
+        !fn(s.index_k, rows * DS41_N_INDEXER_HEAD_DIM * sizeof(uint16_t)) ||
         !fn(s.pool_kv, (uint64_t)ratio * kHeadDim * sizeof(float)) ||
         !fn(s.pool_score, (uint64_t)ratio * kHeadDim * sizeof(float)))
       return false;
@@ -841,7 +839,7 @@ bool for_each_state(const ds41_decoder* d, uint32_t pos, Fn&& fn) {
   return true;
 }
 
-constexpr uint64_t kStateMagic = 0x3176615453313453ull;  // "S4STav1"
+constexpr uint64_t kStateMagic = 0x3276615453313453ull;  // "S4STav2": bfloat16 compressed rows
 
 }  // namespace
 

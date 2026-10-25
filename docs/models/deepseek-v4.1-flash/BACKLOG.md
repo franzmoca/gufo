@@ -30,7 +30,7 @@ WMMA), attention 8.8%, Q8_1 activation quantization 5.0%, BF16 matmuls
 | 2 | Launch gaps between decode kernels | Decode | Medium | Up to ~2.7 ms/token | Medium |
 | 3 | Routed-expert MMQ tiles | Prefill | Hard | Up to ~1.4 s per 2K prefill (~20%) at the dense rate | Low |
 | 4 | Prefill glue passes | Prefill | Medium | ~0.1 s per 2K prefill (~2%) | Medium |
-| 5 | Compact KV state at long context | Memory / prefill | Medium | 1M-context batch 576 → 2048 tokens | Medium |
+| 5 | FP4-packed KV state | Memory | Medium | ~2.2 GiB more free at 1M context | Medium |
 
 ### 1. Routed-expert GEMV with wide-load weight tiles
 
@@ -109,9 +109,10 @@ projections that share an input (q_a/KV, shared gate/up, the compressor and
 indexer projections) still quantize it once each; the shared-expert SwiGLU
 still runs as its own pass.
 
-### 5. Compact KV state at long context
+### 5. FP4-packed KV state
 
-The compressed KV and index-K rows are stored as FP32 although they hold
-FP8- and FP4-quantized values; at the native 1M context they take ~6 GiB,
-which leaves room for 576-token prefill batches only. Storing them packed
-would restore 2048-token batches at 1M and shrink the cache snapshots.
+Done: compressed KV and index-K rows are stored as bfloat16 (exact), halving
+the state to ~3.1 GiB at 1M and restoring 2048-token prefill batches there.
+Packing them as FP4 codes plus block scales would shrink them ~3.5x further
+(the attention and indexer kernels would decode on load); not needed for the
+batch size now.

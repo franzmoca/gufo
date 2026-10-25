@@ -99,6 +99,16 @@ __device__ __forceinline__ float round_e2m1(float x) {
 /* Compressed rows visible at position p of a ratio-r layer. */
 __device__ __forceinline__ uint32_t comp_len(uint32_t p, uint32_t ratio) { return ratio ? (p + 1) / ratio : 0u; }
 
+/* Compressed KV and index-K rows are stored as bfloat16 bits: they hold FP4
+ * values times an E4M3 or power-of-two scale (at most 6 significant bits),
+ * so the conversion is exact. */
+__device__ __forceinline__ float bf16_value(uint16_t v) { return __uint_as_float((uint32_t)v << 16); }
+__device__ __forceinline__ float4 load_bf16x4(const uint16_t* p) {
+  const uint2 u = *reinterpret_cast<const uint2*>(p);
+  return make_float4(__uint_as_float(u.x << 16), __uint_as_float(u.x & 0xffff0000u), __uint_as_float(u.y << 16),
+                     __uint_as_float(u.y & 0xffff0000u));
+}
+
 constexpr uint32_t kTokenTile = 8;
 
 /* Warp per weight row, kTokenTile tokens per block column. */
@@ -278,7 +288,9 @@ __global__ void __launch_bounds__(kQkvThreads)
   rope_fp8_block(b, kvn + (uint64_t)token * n + col, col, n, rope_dim, inv_freq, pos0 + token, 0);
 }
 
-__global__ void fp4_fake_quant_kernel(float* x, uint32_t blocks, uint32_t block, int e4m3_scale) {
+/* With out set, the quantized values go to out as bfloat16 bits (exact, see
+ * bf16_value) and x is left unchanged. */
+__global__ void fp4_fake_quant_kernel(float* x, uint16_t* out, uint32_t blocks, uint32_t block, int e4m3_scale) {
   const uint32_t b = blockIdx.x * blockDim.x + threadIdx.x;
   if (b >= blocks) return;
   float* v = x + (uint64_t)b * block;
@@ -286,7 +298,13 @@ __global__ void fp4_fake_quant_kernel(float* x, uint32_t blocks, uint32_t block,
   for (uint32_t i = 0; i < block; i++) amax = fmaxf(amax, fabsf(v[i]));
   const float scale = e4m3_scale ? round_e4m3(fmaxf(amax, 6.0f * 0.001953125f) / 6.0f)
                                  : pow2_ceil(fmaxf(amax, 6.0f * 1.1754943508e-38f) / 6.0f);
-  for (uint32_t i = 0; i < block; i++) v[i] = round_e2m1(fminf(fmaxf(v[i] / scale, -6.0f), 6.0f)) * scale;
+  for (uint32_t i = 0; i < block; i++) {
+    const float q = round_e2m1(fminf(fmaxf(v[i] / scale, -6.0f), 6.0f)) * scale;
+    if (out)
+      out[(uint64_t)b * block + i] = (uint16_t)(__float_as_uint(q) >> 16);
+    else
+      v[i] = q;
+  }
 }
 
 /* Block (mix, token). */
@@ -636,7 +654,7 @@ __global__ void compress_pool_kernel(const float* kv, const float* score, float*
 }
 
 /* Block (key tile, token); one thread per key; the query heads live in shared memory. */
-__global__ void indexer_score_kernel(const float* q, const float* keys, const float* w, float w_scale, float* score,
+__global__ void indexer_score_kernel(const float* q, const uint16_t* keys, const float* w, float w_scale, float* score,
                                      uint64_t score_stride, uint32_t pos0, uint32_t ratio, uint32_t heads,
                                      uint32_t head_dim) {
   const uint32_t token = blockIdx.y;
@@ -650,11 +668,11 @@ __global__ void indexer_score_kernel(const float* q, const float* keys, const fl
   __syncthreads();
   const uint32_t j = blockIdx.x * blockDim.x + threadIdx.x;
   if (j >= len) return;
-  const float* k = keys + (uint64_t)j * head_dim;
+  const uint16_t* k = keys + (uint64_t)j * head_dim;
   float acc = 0.0f;
   for (uint32_t h = 0; h < heads; h++) {
     float dot = 0.0f;
-    for (uint32_t d = 0; d < head_dim; d++) dot += sq[h * head_dim + d] * k[d];
+    for (uint32_t d = 0; d < head_dim; d++) dot += sq[h * head_dim + d] * bf16_value(k[d]);
     acc += fmaxf(dot, 0.0f) * sw[h];
   }
   score[token * score_stride + j] = acc;
@@ -668,7 +686,7 @@ __global__ void indexer_score_kernel(const float* q, const float* keys, const fl
 constexpr uint32_t kScoreHeads = 32;
 constexpr uint32_t kScoreSmallTokens = 4;
 constexpr uint32_t kScoreKeys = 64;
-__global__ __launch_bounds__(256) void indexer_score_small_kernel(const float* q, const float* keys, const float* w,
+__global__ __launch_bounds__(256) void indexer_score_small_kernel(const float* q, const uint16_t* keys, const float* w,
                                                                   float w_scale, float* score, uint64_t score_stride,
                                                                   uint32_t pos0, uint32_t ratio) {
   constexpr uint32_t DIM = 128, D4 = DIM / 4, PITCH4 = D4 + 1, GROUPS = 256 / kScoreKeys,
@@ -683,11 +701,11 @@ __global__ __launch_bounds__(256) void indexer_score_small_kernel(const float* q
   __shared__ float part[GROUPS][kScoreKeys];
   const float4* qt = reinterpret_cast<const float4*>(q + (uint64_t)token * kScoreHeads * DIM);
   for (uint32_t i = threadIdx.x; i < kScoreHeads * D4; i += 256) sq[i] = qt[i];
-  const float4* kt = reinterpret_cast<const float4*>(keys + (uint64_t)key0 * DIM);
+  const uint16_t* kt = keys + (uint64_t)key0 * DIM;
   const uint32_t rows = min(kScoreKeys, len - key0);
   for (uint32_t i = threadIdx.x; i < kScoreKeys * D4; i += 256) {
     const uint32_t r = i / D4;
-    sk[r * PITCH4 + i % D4] = r < rows ? kt[i] : make_float4(0.0f, 0.0f, 0.0f, 0.0f);
+    sk[r * PITCH4 + i % D4] = r < rows ? load_bf16x4(kt + (uint64_t)i * 4) : make_float4(0.0f, 0.0f, 0.0f, 0.0f);
   }
   if (threadIdx.x < kScoreHeads) sw[threadIdx.x] = w[(uint64_t)token * kScoreHeads + threadIdx.x] * w_scale;
   __syncthreads();
@@ -719,7 +737,7 @@ __global__ __launch_bounds__(256) void indexer_score_small_kernel(const float* q
  * rows, stages the rows once as half and each head's queries (double
  * buffered), and keeps the relu-weighted head sum in fp32. head_dim 128,
  * 256 threads; grid (ceil(len / 128), ceil(n / 16)). */
-__global__ __launch_bounds__(256) void indexer_score_wmma_kernel(const float* q, const float* keys, const float* w,
+__global__ __launch_bounds__(256) void indexer_score_wmma_kernel(const float* q, const uint16_t* keys, const float* w,
                                                                  float w_scale, float* score, uint64_t score_stride,
                                                                  uint32_t pos0, uint32_t n, uint32_t ratio,
                                                                  uint32_t heads) {
@@ -740,7 +758,7 @@ __global__ __launch_bounds__(256) void indexer_score_wmma_kernel(const float* q,
     const uint32_t d = (i4 % (DIM / 4)) * 4;
     uint2 packed = make_uint2(0u, 0u);
     if (tile_c + c < visible_max) {
-      const float4 v4 = *reinterpret_cast<const float4*>(keys + (uint64_t)(tile_c + c) * DIM + d);
+      const float4 v4 = load_bf16x4(keys + (uint64_t)(tile_c + c) * DIM + d);
       const __half2 h_lo = __floats2half2_rn(v4.x, v4.y);
       const __half2 h_hi = __floats2half2_rn(v4.z, v4.w);
       packed.x = *reinterpret_cast<const uint32_t*>(&h_lo);
@@ -929,7 +947,7 @@ __global__ void apply_mask_kernel(float* score, uint64_t stride, const uint8_t* 
 
 /* Block (head, token). Scores for every key are kept in shared memory. */
 __global__ void attention_kernel(const float* q, const float* ring, const float* chunk, uint32_t window,
-                                 const float* comp, const uint32_t* all_idx, uint32_t k, uint32_t ratio,
+                                 const uint16_t* comp, const uint32_t* all_idx, uint32_t k, uint32_t ratio,
                                  const float* sinks, float* out, uint32_t pos0, uint32_t heads, uint32_t head_dim,
                                  float scale) {
   extern __shared__ float scores[];
@@ -941,19 +959,18 @@ __global__ void attention_kernel(const float* q, const float* ring, const float*
   const uint32_t n_comp = min(k, comp_len(p, ratio));
   const uint32_t* idx = all_idx + (uint64_t)token * k;
   const float* qh = q + ((uint64_t)token * heads + head) * head_dim;
-  auto key_row = [&](uint32_t j) -> const float* {
-    if (j >= n_window) return comp + (uint64_t)idx[j - n_window] * head_dim;
+  auto key_at = [&](uint32_t j, uint32_t d) -> float {
+    if (j >= n_window) return bf16_value(comp[(uint64_t)idx[j - n_window] * head_dim + d]);
     const uint32_t pos = lo + j;
-    return pos < pos0 ? ring + (uint64_t)(pos % window) * head_dim : chunk + (uint64_t)(pos - pos0) * head_dim;
+    return pos < pos0 ? ring[(uint64_t)(pos % window) * head_dim + d] : chunk[(uint64_t)(pos - pos0) * head_dim + d];
   };
   const uint32_t n = n_window + n_comp;
   const uint32_t warps = blockDim.x / warpSize;
   const uint32_t warp = threadIdx.x / warpSize;
   const uint32_t lane = threadIdx.x % warpSize;
   for (uint32_t j = warp; j < n; j += warps) {
-    const float* key = key_row(j);
     float dot = 0.0f;
-    for (uint32_t d = lane; d < head_dim; d += warpSize) dot += qh[d] * key[d];
+    for (uint32_t d = lane; d < head_dim; d += warpSize) dot += qh[d] * key_at(j, d);
     for (int o = warpSize / 2; o > 0; o >>= 1) dot += __shfl_xor(dot, o);
     if (lane == 0) scores[j] = dot * scale;
   }
@@ -970,7 +987,7 @@ __global__ void attention_kernel(const float* q, const float* ring, const float*
   __syncthreads();
   for (uint32_t d = threadIdx.x; d < head_dim; d += blockDim.x) {
     float acc = 0.0f;
-    for (uint32_t j = 0; j < n; j++) acc += scores[j] * key_row(j)[d];
+    for (uint32_t j = 0; j < n; j++) acc += scores[j] * key_at(j, d);
     out[((uint64_t)token * heads + head) * head_dim + d] = acc / sum;
   }
 }
@@ -981,7 +998,7 @@ __global__ void attention_kernel(const float* q, const float* ring, const float*
  * accumulates in fp32 across one pass over the rows. Grid (n, heads / 32),
  * 1024 threads; head_dim 512, window <= 256, k <= 512. */
 __global__ __launch_bounds__(1024, 1) void attention_heads32_wmma_kernel(
-    const float* q, const float* ring, const float* chunk, uint32_t window, const float* comp,
+    const float* q, const float* ring, const float* chunk, uint32_t window, const uint16_t* comp,
     const uint32_t* all_idx, uint32_t k, uint32_t ratio, const float* sinks, float* out, uint32_t pos0,
     uint32_t heads, float scale) {
   constexpr uint32_t BM = 16, BN = 16, BK = 16;
@@ -1048,10 +1065,11 @@ __global__ __launch_bounds__(1024, 1) void attention_heads32_wmma_kernel(
       if (rr < nr) {
         const uint32_t sr = row0 + rr;
         const uint32_t row = rows[sr];
-        const float* src = sr >= n_window          ? comp + (uint64_t)row * DIM
-                           : (row & 0x80000000u) ? ring + (uint64_t)(row & 0x7fffffffu) * DIM
-                                                 : chunk + (uint64_t)row * DIM;
-        const float4 v4 = *reinterpret_cast<const float4*>(src + d);
+        const float4 v4 = sr >= n_window ? load_bf16x4(comp + (uint64_t)row * DIM + d)
+                          : *reinterpret_cast<const float4*>(((row & 0x80000000u)
+                                                                  ? ring + (uint64_t)(row & 0x7fffffffu) * DIM
+                                                                  : chunk + (uint64_t)row * DIM) +
+                                                             d);
         const __half2 h_lo = __floats2half2_rn(v4.x, v4.y);
         const __half2 h_hi = __floats2half2_rn(v4.z, v4.w);
         packed.x = *reinterpret_cast<const uint32_t*>(&h_lo);
@@ -1148,7 +1166,7 @@ constexpr uint32_t kAttnSplitHeads = 16;
 constexpr uint32_t kAttnPartial = 512 + 4;
 
 __global__ __launch_bounds__(512) void attention_split_kernel(const float* q, const float* ring, const float* chunk,
-                                                              uint32_t window, const float* comp,
+                                                              uint32_t window, const uint16_t* comp,
                                                               const uint32_t* all_idx, uint32_t k, uint32_t ratio,
                                                               float* partial, uint32_t pos0, uint32_t heads,
                                                               float scale) {
@@ -1183,14 +1201,13 @@ __global__ __launch_bounds__(512) void attention_split_kernel(const float* q, co
     const uint32_t nr = min(STAGE, r1 - row0);
     for (uint32_t i = threadIdx.x; i < nr * (DIM / 4); i += blockDim.x) {
       const uint32_t j = row0 + i / (DIM / 4);
-      const float* src;
       if (j >= n_window) {
-        src = comp + (uint64_t)idx[j - n_window] * DIM;
+        kv_sh[i] = load_bf16x4(comp + (uint64_t)idx[j - n_window] * DIM + (i % (DIM / 4)) * 4);
       } else {
         const uint32_t pos = lo + j;
-        src = pos < pos0 ? ring + (uint64_t)(pos % window) * DIM : chunk + (uint64_t)(pos - pos0) * DIM;
+        const float* src = pos < pos0 ? ring + (uint64_t)(pos % window) * DIM : chunk + (uint64_t)(pos - pos0) * DIM;
+        kv_sh[i] = reinterpret_cast<const float4*>(src)[i % (DIM / 4)];
       }
-      kv_sh[i] = reinterpret_cast<const float4*>(src)[i % (DIM / 4)];
     }
     __syncthreads();
     for (uint32_t r = 0; r < nr; r++) {
@@ -1420,8 +1437,15 @@ extern "C" int ds41_v41_q_kv_norm(const float* qa, const float* q_weight, float*
 
 extern "C" int ds41_v41_fp4_fake_quant(float* x, uint32_t n, uint32_t block, int e4m3_scale) {
   if (n == 0) return 0;
-  fp4_fake_quant_kernel<<<blocks_for(n / block), kThreads>>>(x, n / block, block, e4m3_scale);
+  fp4_fake_quant_kernel<<<blocks_for(n / block), kThreads>>>(x, nullptr, n / block, block, e4m3_scale);
   return launch_ok("fp4 quant");
+}
+
+extern "C" int ds41_v41_fp4_store_bf16(const float* x, uint16_t* out, uint32_t n, uint32_t block, int e4m3_scale) {
+  if (block == 0 || n % block != 0) return 1;
+  fp4_fake_quant_kernel<<<blocks_for(n / block), kThreads>>>(const_cast<float*>(x), out, n / block, block,
+                                                              e4m3_scale);
+  return launch_ok("fp4 store");
 }
 
 extern "C" int ds41_v41_hc_mixes(const float* fn, const float* h, float* mixes, uint32_t hc, uint32_t dim,
@@ -1481,7 +1505,7 @@ extern "C" int ds41_v41_compress_pool(const float* kv, const float* score, float
   return launch_ok("compressor pool");
 }
 
-extern "C" int ds41_v41_indexer_score(const float* q, const float* keys, const float* w, float w_scale,
+extern "C" int ds41_v41_indexer_score(const float* q, const uint16_t* keys, const float* w, float w_scale,
                                       float* score, uint64_t score_stride, uint32_t pos0, uint32_t n,
                                       uint32_t ratio, uint32_t heads, uint32_t head_dim) {
   if (heads > 64) return 1;
@@ -1537,7 +1561,7 @@ extern "C" int ds41_v41_apply_mask(float* score, uint64_t score_stride, const ui
 }
 
 extern "C" int ds41_v41_attention(const float* q, const float* ring, const float* chunk, uint32_t window,
-                                  const float* comp, const uint32_t* idx, uint32_t k, uint32_t ratio,
+                                  const uint16_t* comp, const uint32_t* idx, uint32_t k, uint32_t ratio,
                                   const float* sinks, float* out, float* partial, uint32_t pos0, uint32_t n,
                                   uint32_t heads, uint32_t head_dim, float scale) {
   static_assert(DS41_V41_ATTN_PARTIAL_PER_HEAD == kAttnSplits * kAttnPartial, "partial layout");

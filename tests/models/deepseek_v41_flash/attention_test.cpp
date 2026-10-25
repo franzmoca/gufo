@@ -7,6 +7,7 @@
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
+#include <cstring>
 #include <random>
 #include <vector>
 
@@ -30,6 +31,20 @@ T* Device(const std::vector<T>& host) {
   return static_cast<T*>(p);
 }
 
+/* Rounds v to bfloat16 in place (the stored compressed-row format) and
+ * returns the bits. */
+std::vector<uint16_t> Bf16(std::vector<float>& v) {
+  std::vector<uint16_t> bits(v.size());
+  for (std::size_t i = 0; i < v.size(); i++) {
+    uint32_t u = 0;
+    std::memcpy(&u, &v[i], sizeof(u));
+    u &= 0xffff0000u;
+    std::memcpy(&v[i], &u, sizeof(u));
+    bits[i] = static_cast<uint16_t>(u >> 16);
+  }
+  return bits;
+}
+
 /* n tokens at pos0 with `comp_rows` compressed rows at the given ratio;
  * returns the worst relative RMS error over tokens. */
 double Case(uint32_t pos0, uint32_t n, uint32_t ratio, uint32_t comp_rows,
@@ -44,7 +59,8 @@ double Case(uint32_t pos0, uint32_t n, uint32_t ratio, uint32_t comp_rows,
   const auto q = fill((std::size_t)n * kHeads * kDim, 0.08f);
   const auto ring = fill((std::size_t)kWindow * kDim, 1.0f);
   const auto chunk = fill((std::size_t)n * kDim, 1.0f);
-  const auto comp = fill((std::size_t)std::max(comp_rows, 1u) * kDim, 1.0f);
+  auto comp = fill((std::size_t)std::max(comp_rows, 1u) * kDim, 1.0f);
+  const auto comp_bits = Bf16(comp);
   const auto sinks = fill(kHeads, 1.0f);
   std::vector<uint32_t> idx((std::size_t)n * kTopK, 0);
   for (uint32_t t = 0; t < n; t++) {
@@ -60,7 +76,7 @@ double Case(uint32_t pos0, uint32_t n, uint32_t ratio, uint32_t comp_rows,
   auto* dq = Device(q);
   auto* dring = Device(ring);
   auto* dchunk = Device(chunk);
-  auto* dcomp = Device(comp);
+  auto* dcomp = Device(comp_bits);
   auto* dsinks = Device(sinks);
   auto* didx = Device(idx);
   std::vector<float> partial_host((std::size_t)n * kHeads *
@@ -142,7 +158,7 @@ double IndexerCase(uint32_t pos0, uint32_t n, uint32_t ratio,
       x = normal(rng);
   const float scale = 0.0625f;
   float* d_q = Device(q);
-  float* d_keys = Device(keys);
+  uint16_t* d_keys = Device(Bf16(keys));
   float* d_w = Device(w);
   float* d_score = nullptr;
   (void)hipMalloc(&d_score, (std::size_t)n * stride * sizeof(float));
@@ -156,7 +172,8 @@ double IndexerCase(uint32_t pos0, uint32_t n, uint32_t ratio,
   std::vector<float> score((std::size_t)n * stride);
   (void)hipMemcpy(score.data(), d_score, score.size() * sizeof(float),
                   hipMemcpyDeviceToHost);
-  for (float* p : {d_q, d_keys, d_w, d_score})
+  (void)hipFree(d_keys);
+  for (float* p : {d_q, d_w, d_score})
     (void)hipFree(p);
   double worst = 0.0;
   for (uint32_t t = 0; t < n; t++) {

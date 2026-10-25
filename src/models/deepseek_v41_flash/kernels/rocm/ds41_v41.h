@@ -69,6 +69,9 @@ int ds41_v41_rope_tail(float* x, uint32_t rows, uint32_t row_dim, uint32_t rope_
 int ds41_v41_rope_fp8(float* x, uint32_t rows, uint32_t row_dim, uint32_t rope_dim, const float* inv_freq,
                       uint32_t pos0, uint32_t rows_per_pos, uint32_t pos_step, int inverse);
 int ds41_v41_fp4_fake_quant(float* x, uint32_t n, uint32_t block, int e4m3_scale);
+/* The same quantization of x written to out as bfloat16 bits (exact: FP4
+ * values times the block scale have at most 6 significant bits); x is kept. */
+int ds41_v41_fp4_store_bf16(const float* x, uint16_t* out, uint32_t n, uint32_t block, int e4m3_scale);
 /* qr = RMSNorm(qa) * q_weight, and kvn = RMSNorm(kv) * kv_weight followed by
  * ds41_v41_rope_fp8 (token t at pos0 + t), for n tokens in one launch. */
 int ds41_v41_q_kv_norm(const float* qa, const float* q_weight, float* qr, uint32_t q_dim, const float* kv,
@@ -102,8 +105,9 @@ int ds41_v41_compress_pool(const float* kv, const float* score, float* state_kv,
                            uint32_t n, uint32_t ratio, float* out, uint32_t dim);
 
 /* score[t, j] = sum_h relu(q[t, h] . k_j) * w[t, h] * w_scale for the
- * j < (pos0 + t + 1) / ratio compressed rows; rows have score_stride floats. */
-int ds41_v41_indexer_score(const float* q, const float* keys, const float* w, float w_scale, float* score,
+ * j < (pos0 + t + 1) / ratio compressed rows (keys in bfloat16 bits); rows have
+ * score_stride floats. */
+int ds41_v41_indexer_score(const float* q, const uint16_t* keys, const float* w, float w_scale, float* score,
                            uint64_t score_stride, uint32_t pos0, uint32_t n, uint32_t ratio, uint32_t heads,
                            uint32_t head_dim);
 /* Candidate blocks per token: max over `block`-row blocks, newest block
@@ -124,14 +128,14 @@ int ds41_v41_topk(const float* score, uint64_t score_stride, uint32_t* out, uint
 /* Sparse attention for n queries. Token t at p = pos0 + t attends the window
  * positions max(0, p - window + 1) .. p, read from `ring` (slot pos % window,
  * positions before pos0) and from `chunk` (row pos - pos0), plus
- * min(k, (p + 1) / ratio) compressed rows comp[idx[t, j]] (none when ratio
+ * min(k, (p + 1) / ratio) compressed rows comp[idx[t, j]] (bfloat16 bits; none when ratio
  * is 0). Keys equal values; sinks join the softmax denominator. q/out are
  * [n, heads, head_dim]. Batches below DS41_V41_ATTN_SPLIT_TOKENS split the
  * rows across blocks and need `partial` with n * heads *
  * DS41_V41_ATTN_PARTIAL_PER_HEAD floats. */
 #define DS41_V41_ATTN_SPLIT_TOKENS 8u
 #define DS41_V41_ATTN_PARTIAL_PER_HEAD (20u * 516u)
-int ds41_v41_attention(const float* q, const float* ring, const float* chunk, uint32_t window, const float* comp,
+int ds41_v41_attention(const float* q, const float* ring, const float* chunk, uint32_t window, const uint16_t* comp,
                        const uint32_t* idx, uint32_t k, uint32_t ratio, const float* sinks, float* out,
                        float* partial, uint32_t pos0, uint32_t n, uint32_t heads, uint32_t head_dim, float scale);
 
