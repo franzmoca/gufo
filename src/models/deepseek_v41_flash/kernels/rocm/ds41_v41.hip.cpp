@@ -518,6 +518,126 @@ __global__ __launch_bounds__(256) void hc_mixes_rows_kernel(const float* fn, con
   }
 }
 
+/* Batched pass over the mHC state (hc = 4) of kMixTokens tokens per block,
+ * each thread taking two 4-channel groups of every copy: with kExpand the
+ * state is first expanded, s = post y + comb^T h, and stored to h_out;
+ * then the mixes of s (as hc_mixes_rows_kernel) and the collapse
+ * weight * RMSNorm(sum_c pre_c s_c) come from the same registers, so the
+ * state is read once. */
+template <bool kExpand>
+__global__ __launch_bounds__(1024) void hc_state_pass_kernel(const float* y, const float* post, const float* comb,
+                                                             const float* h, float* h_out, const float* pre,
+                                                             const float* norm_w, float* xn, const float* fn,
+                                                             float* mixes, uint32_t dim, uint32_t tokens, float eps) {
+  constexpr uint32_t T = kMixTokens, HC = 4, MIX = 24, G = 2;
+  constexpr uint32_t V = T * (MIX + 2);  // per token: the mix dots, the state and the collapse sums of squares
+  const uint32_t t0 = blockIdx.x * T, groups = dim / 4, n = HC * dim;
+  float4 st[T][G][HC], col[T][G];
+  float acc[2 * T] = {};  // the state and the collapse sums of squares
+#pragma unroll
+  for (uint32_t t = 0; t < T; t++) {
+    const bool live = t0 + t < tokens;
+    const uint64_t tok = live ? t0 + t : 0;
+    const float4* ht = reinterpret_cast<const float4*>(h + tok * n);
+#pragma unroll
+    for (uint32_t g = 0; g < G; g++) {
+      const uint32_t q = threadIdx.x + g * blockDim.x;
+      if constexpr (kExpand) {
+        const float4 yv = reinterpret_cast<const float4*>(y + tok * dim)[q];
+        float4 hv[HC];
+#pragma unroll
+        for (uint32_t a = 0; a < HC; a++) hv[a] = ht[a * groups + q];
+#pragma unroll
+        for (uint32_t c = 0; c < HC; c++) {
+          const float pc = post[tok * HC + c];
+          float4 v = make_float4(pc * yv.x, pc * yv.y, pc * yv.z, pc * yv.w);
+#pragma unroll
+          for (uint32_t a = 0; a < HC; a++) {
+            const float w = comb[tok * HC * HC + a * HC + c];
+            v.x += w * hv[a].x, v.y += w * hv[a].y, v.z += w * hv[a].z, v.w += w * hv[a].w;
+          }
+          st[t][g][c] = v;
+          if (live) reinterpret_cast<float4*>(h_out + tok * n)[c * groups + q] = v;
+        }
+      } else {
+#pragma unroll
+        for (uint32_t c = 0; c < HC; c++) st[t][g][c] = ht[c * groups + q];
+      }
+      if (!live) {
+#pragma unroll
+        for (uint32_t c = 0; c < HC; c++) st[t][g][c] = make_float4(0.0f, 0.0f, 0.0f, 0.0f);
+      }
+      float4 v = make_float4(0.0f, 0.0f, 0.0f, 0.0f);
+#pragma unroll
+      for (uint32_t c = 0; c < HC; c++) {
+        const float pc = live ? pre[tok * HC + c] : 0.0f;
+        const float4 x = st[t][g][c];
+        v.x += pc * x.x, v.y += pc * x.y, v.z += pc * x.z, v.w += pc * x.w;
+        acc[t] += x.x * x.x + x.y * x.y + x.z * x.z + x.w * x.w;
+      }
+      col[t][g] = v;
+      acc[T + t] += v.x * v.x + v.y * v.y + v.z * v.z + v.w * v.w;
+    }
+  }
+  __shared__ float partial[V][32];
+  __shared__ float total[V];
+  const uint32_t lane = threadIdx.x % 32, warp = threadIdx.x / 32, warps = blockDim.x / 32;
+  /* One copy of the mix body (the kernel's code stays within the
+   * instruction cache), each mix reduced across the wave in turn. */
+#pragma unroll 1
+  for (uint32_t j = 0; j < MIX; j++) {
+    float dot[T] = {};
+#pragma unroll
+    for (uint32_t g = 0; g < G; g++)
+#pragma unroll
+      for (uint32_t c = 0; c < HC; c++) {
+        const float4 w =
+            reinterpret_cast<const float4*>(fn + (uint64_t)j * n)[c * groups + threadIdx.x + g * blockDim.x];
+#pragma unroll
+        for (uint32_t t = 0; t < T; t++) {
+          const float4 x = st[t][g][c];
+          dot[t] += w.x * x.x + w.y * x.y + w.z * x.z + w.w * x.w;
+        }
+      }
+#pragma unroll
+    for (uint32_t t = 0; t < T; t++) {
+      float a = dot[t];
+      for (int o = 16; o > 0; o >>= 1) a += __shfl_xor(a, o, 32);
+      if (lane == 0) partial[j * T + t][warp] = a;
+    }
+  }
+#pragma unroll
+  for (uint32_t v = MIX * T; v < V; v++) {
+    float a = acc[v - MIX * T];
+    for (int o = 16; o > 0; o >>= 1) a += __shfl_xor(a, o, 32);
+    if (lane == 0) partial[v][warp] = a;
+  }
+  __syncthreads();
+  for (uint32_t v = threadIdx.x; v < V; v += blockDim.x) {
+    float sum = 0.0f;
+    for (uint32_t w = 0; w < warps; w++) sum += partial[v][w];
+    total[v] = sum;
+  }
+  __syncthreads();
+  for (uint32_t v = threadIdx.x; v < MIX * T; v += blockDim.x) {
+    const uint32_t t = v % T;
+    if (t0 + t < tokens)
+      mixes[(uint64_t)(t0 + t) * MIX + v / T] = total[v] * rsqrtf(total[MIX * T + t] / (float)n + eps);
+  }
+#pragma unroll
+  for (uint32_t t = 0; t < T; t++) {
+    if (t0 + t >= tokens) continue;
+    const float scale = rsqrtf(total[MIX * T + T + t] / (float)dim + eps);
+#pragma unroll
+    for (uint32_t g = 0; g < G; g++) {
+      const uint32_t q = threadIdx.x + g * blockDim.x;
+      const float4 w = reinterpret_cast<const float4*>(norm_w)[q], v = col[t][g];
+      reinterpret_cast<float4*>(xn + (uint64_t)(t0 + t) * dim)[q] =
+          make_float4(w.x * (v.x * scale), w.y * (v.y * scale), w.z * (v.z * scale), w.w * (v.w * scale));
+    }
+  }
+}
+
 __device__ __forceinline__ float sigmoidf(float x) { return 1.0f / (1.0f + expf(-x)); }
 
 /* Thread per token. */
@@ -1819,6 +1939,19 @@ extern "C" int ds41_v41_hc_sinkhorn(const float* mixes, const float* scale, cons
   if (hc != 4) return 1;
   hc_sinkhorn_kernel<4><<<blocks_for(n, 64), 64>>>(mixes, scale, base, pre, post, comb, iters, eps, n);
   return launch_ok("hc sinkhorn");
+}
+
+extern "C" int ds41_v41_hc_state_pass(const float* y, const float* post, const float* comb, const float* h,
+                                     float* h_out, const float* pre, const float* norm_w, float* xn, const float* fn,
+                                     float* mixes, uint32_t hc, uint32_t dim, float eps, uint32_t n) {
+  if (hc != 4 || dim % 256 != 0 || dim / 8 > 1024) return 1;
+  if (n == 0) return 0;
+  const dim3 grid((n + kMixTokens - 1) / kMixTokens);
+  if (y)
+    hc_state_pass_kernel<true><<<grid, dim / 8>>>(y, post, comb, h, h_out, pre, norm_w, xn, fn, mixes, dim, n, eps);
+  else
+    hc_state_pass_kernel<false><<<grid, dim / 8>>>(y, post, comb, h, h_out, pre, norm_w, xn, fn, mixes, dim, n, eps);
+  return launch_ok("hc state pass");
 }
 
 extern "C" int ds41_v41_hc_collapse_norm(const float* h, const float* pre, const float* weight, float* out,

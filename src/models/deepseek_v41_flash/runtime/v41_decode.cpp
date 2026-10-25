@@ -772,9 +772,30 @@ bool moe(ds41_decoder* d, uint32_t il, uint32_t n) {
   return linear(d, l->ffn_down_shexp, d->sm, d->sd, n);
 }
 
+/* Tokens from which block() fuses the batched state passes. */
+constexpr uint32_t kStatePassTokens = 16;
+
 bool block(ds41_decoder* d, uint32_t il, int prev, int next, uint32_t n) {
   const ds41_layer_weights* l = &d->engine->weights->layer[il];
   const float eps = DS41_RMS_EPS;
+  /* Batches read each state once for its mixes and collapse (the FFN's
+   * after the attention expand); the collapse uses the pre-mix that was
+   * known before the mix. */
+  if (n >= kStatePassTokens) {
+    const auto sinkhorn = [&](const ds41_tensor* scale, const ds41_tensor* base, float* pre, float* post,
+                              float* comb) {
+      return ds41_v41_hc_sinkhorn(d->mixes, f32(d, scale), f32(d, base), pre, post, comb, kHc,
+                                  DS41_N_HC_SINKHORN_ITER, DS41_HC_EPS, n) == 0;
+    };
+    return ds41_v41_hc_state_pass(nullptr, nullptr, nullptr, d->h, nullptr, d->pre[prev], f32(d, l->attn_norm),
+                                  d->xn, f32(d, l->hc_attn_fn), d->mixes, kHc, kDim, eps, n) == 0 &&
+           sinkhorn(l->hc_attn_scale, l->hc_attn_base, d->pre[next], d->post, d->comb) && attention(d, il, n) &&
+           ds41_v41_hc_state_pass(d->attn_out, d->post, d->comb, d->h, d->h2, d->pre[next], f32(d, l->ffn_norm),
+                                  d->xn, f32(d, l->hc_ffn_fn), d->mixes, kHc, kDim, eps, n) == 0 &&
+           sinkhorn(l->hc_ffn_scale, l->hc_ffn_base, d->pre[prev], d->ffn_post, d->ffn_comb) && moe(d, il, n) &&
+           ds41_v41_hc_expand_sum(d->down6, d->sd, DS41_N_EXPERT_USED, d->h2, d->ffn_post, d->ffn_comb, d->h, kHc,
+                                  kDim, n) == 0;
+  }
   /* Attention uses the pre-mix of the previous FFN (shifted mHC). */
   if (!hc_mix(d, l->hc_attn_fn, l->hc_attn_scale, l->hc_attn_base, d->h, d->pre[next], d->post, d->comb, n) ||
       ds41_v41_hc_collapse_norm(d->h, d->pre[prev], f32(d, l->attn_norm), d->xn, kHc, kDim, eps, n) ||
