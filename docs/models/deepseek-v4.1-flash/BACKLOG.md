@@ -29,7 +29,7 @@ WMMA), attention 8.8%, Q8_1 activation quantization 5.0%, BF16 matmuls
 | 1 | Routed-expert GEMV with wide-load weight tiles | Decode | Hard | Up to ~3 ms/token (~6%) if the experts reach ~210 GB/s | Low |
 | 2 | Launch gaps between decode kernels | Decode | Medium | Up to ~2.7 ms/token | Medium |
 | 3 | Routed-expert MMQ tiles | Prefill | Hard | Up to ~1.4 s per 2K prefill (~20%) at the dense rate | Low |
-| 4 | Prefill glue passes | Prefill | Medium | ~0.1 s per 2K prefill (~2%) | Medium |
+| 4 | Q8_1 quantization in the producing kernels | Prefill | Medium | ~0.2 s per 2K prefill (~3%) | Low |
 | 5 | FP4-packed KV state | Memory | Medium | ~2.2 GiB more free at 1M context | Medium |
 
 ### 1. Routed-expert GEMV with wide-load weight tiles
@@ -101,13 +101,12 @@ reaching 22-32 TFLOPS on this GPU.
 
 ### 4. Prefill glue passes
 
-Per 2K prefill: Q8_1 activation quantization 302 ms over 722 launches and
-routed row gathers 128 ms. Done: non-finite guard at the MMQ store (was a
-150 ms pass), routed gate/up as one pair with the SwiGLU store (one input
-quantization and gather instead of two, no SwiGLU pass). Remaining: dense
-projections that share an input (q_a/KV, shared gate/up, the compressor and
-indexer projections) still quantize it once each; the shared-expert SwiGLU
-still runs as its own pass.
+Done: non-finite guard at the MMQ store, routed gate/up as one pair with the
+SwiGLU store, the output LoRA groups as MMQ channels (no row copies), and
+q_a/KV and shared gate/up quantizing their input once. Left per 2K prefill:
+one Q8_1 quantization per remaining projection input (~0.4 ms each); folding
+it into the producing norm kernels would remove those passes, and the
+shared-expert SwiGLU (9 ms) could use the dense up pass's store.
 
 ### 5. FP4-packed KV state
 
