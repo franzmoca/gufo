@@ -25,6 +25,7 @@ struct ModelOptions {
   std::string dspark_model_path;
 };
 
+class ContinuationAdapter;
 class Session;
 class SessionSnapshot;
 
@@ -176,6 +177,7 @@ private:
   CancellationCheck is_cancelled_;
 
   friend class Model;
+  friend class ContinuationAdapter;
 };
 
 class SessionSnapshot final {

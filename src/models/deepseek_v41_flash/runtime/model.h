@@ -195,4 +195,43 @@ int ds41_decoder_save(const ds41_decoder* decoder, std::vector<uint8_t>* out);
 int ds41_decoder_load(ds41_decoder* decoder, const uint8_t* data, uint64_t size,
                       uint64_t* consumed);
 
+/* Decoder state arrays, for the component cache. Row parts hold one row per
+ * compression ratio tokens of a KV source layer; the others are whole. */
+enum ds41_state_part {
+  DS41_STATE_WINDOW,      /* sliding-window ring, every layer */
+  DS41_STATE_COMP,        /* compressed KV, FP4 codes */
+  DS41_STATE_COMP_SCALE,  /* compressed KV, FP4 scales */
+  DS41_STATE_INDEX_K,     /* index K, FP4 codes */
+  DS41_STATE_INDEX_SCALE, /* index K, FP4 scales */
+  DS41_STATE_POOL_KV,     /* compressor frontier */
+  DS41_STATE_POOL_SCORE,
+};
+/* Device memory of a layer's part, with the bytes of one row (row parts) or
+ * of the whole part in *bytes; NULL when the layer has no such part. */
+void* ds41_decoder_state_part(ds41_decoder* decoder, uint32_t layer, int part,
+                              uint64_t* bytes);
+/* Tokens per row of a KV source layer's row parts; 0 for other layers. */
+uint32_t ds41_layer_state_ratio(uint32_t layer);
+/* Adopts state restored into the decoder's arrays at `n` tokens, rebuilding
+ * the Engram n-gram history from the tokens. */
+int ds41_decoder_adopt(ds41_decoder* decoder, const int* tokens, uint32_t n);
+
+/* Positions [first, end) are about to be evaluated (rows written). */
+typedef void (*ds41_session_write_fn)(void* user_data, uint32_t first,
+                                      uint32_t end);
+void ds41_session_set_write_hook(ds41_session* session,
+                                 ds41_session_write_fn callback,
+                                 void* user_data);
+ds41_decoder* ds41_session_decoder(ds41_session* session);
+/* Whether the session holds evaluated state (false after a failed step). */
+bool ds41_session_valid(const ds41_session* session);
+/* The evaluated tokens and the frontier logits (vocabulary floats). */
+const int* ds41_session_tokens(const ds41_session* session);
+float* ds41_session_logits(ds41_session* session);
+/* Starts a restore of `n` tokens: invalidates the session and returns its
+ * token buffer, resized to n, for the caller to fill with the logits. */
+int* ds41_session_begin_restore(ds41_session* session, uint32_t n);
+/* Adopts the restored tokens, logits and decoder state. */
+int ds41_session_finish_restore(ds41_session* session);
+
 #endif  // GUFO_MODELS_DEEPSEEK_V41_FLASH_RUNTIME_MODEL_H_

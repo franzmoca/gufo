@@ -31,6 +31,7 @@ attention 0.36 s, mHC state passes and the routed sum 0.26 s, BF16 matmuls
 | 3 | Routed-expert FP16 kernel: weight decode per slot | Prefill | Hard | ~5-20% of the routed time | Low |
 | 4 | Dense FP16 kernel barriers | Prefill | Hard | Up to ~0.15 s per 2K batch | Low |
 | 5 | Remaining prefill glue | Prefill | Medium | ~30-60 ms per 2K batch | Medium |
+| 7 | Small-batch evaluation cost | Prefill | Medium | ~15 ms per short follow-up turn | Low |
 
 ### 1. Routed-expert GEMV with wide-load weight tiles
 
@@ -125,6 +126,14 @@ Measured with `gufo bench -p 2048 -n 64`:
 Sorted, deduplicated reads, `O_DIRECT` and a pinned row cache stay unbuilt
 until a measurement shows reads stalling the GPU, for example under SSD
 contention once M3 streams experts.
+
+### 7. Small-batch evaluation cost
+
+Short follow-up turns evaluate 3-20 tokens per batch, and the cost is not
+monotonic in the batch size: 7 tokens from position 8,469 take 136 ms and
+9 tokens from 8,467 take 120 ms (both on a live slot); at position 0,
+10 tokens take 160 ms and 12 take 143. Find which kernels switch paths
+between these sizes (`tools/prof/prof.py` on the two shapes).
 
 ## Memory
 

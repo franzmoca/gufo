@@ -27,6 +27,8 @@ struct ds41_session {
   bool valid = false;
   ds41_session_cancel_fn cancel = nullptr;
   void* cancel_data = nullptr;
+  ds41_session_write_fn before_write = nullptr;
+  void* write_data = nullptr;
 };
 
 namespace {
@@ -47,6 +49,8 @@ bool eval(ds41_session* s, const int* tokens, uint32_t n, char* error, size_t ca
     set_error(error, capacity, "context is full");
     return false;
   }
+  const uint32_t first = (uint32_t)s->tokens.size();
+  if (s->before_write) s->before_write(s->write_data, first, first + n);
   if (ds41_decoder_eval(s->decoder, tokens, n, s->logits.data(), 1, nullptr, nullptr) != 0) {
     set_error(error, capacity, "ROCm evaluation failed");
     s->valid = false;
@@ -244,6 +248,37 @@ void ds41_session_invalidate(ds41_session* s) {
   if (!s) return;
   s->valid = false;
   s->tokens.clear();
+}
+
+void ds41_session_set_write_hook(ds41_session* s, ds41_session_write_fn callback, void* user_data) {
+  if (!s) return;
+  s->before_write = callback;
+  s->write_data = user_data;
+}
+
+ds41_decoder* ds41_session_decoder(ds41_session* s) { return s ? s->decoder : nullptr; }
+
+bool ds41_session_valid(const ds41_session* s) { return s && s->valid; }
+
+const int* ds41_session_tokens(const ds41_session* s) { return s ? s->tokens.data() : nullptr; }
+
+float* ds41_session_logits(ds41_session* s) { return s ? s->logits.data() : nullptr; }
+
+int* ds41_session_begin_restore(ds41_session* s, uint32_t n) {
+  if (!s || n == 0 || n >= (uint32_t)s->context) return nullptr;
+  s->valid = false;
+  s->tokens.resize(n);
+  return s->tokens.data();
+}
+
+int ds41_session_finish_restore(ds41_session* s) {
+  if (!s || s->tokens.empty()) return 1;
+  const int n_vocab = (int)vocab(s);
+  if (std::any_of(s->tokens.begin(), s->tokens.end(), [n_vocab](int t) { return t < 0 || t >= n_vocab; }) ||
+      ds41_decoder_adopt(s->decoder, s->tokens.data(), (uint32_t)s->tokens.size()) != 0)
+    return 1;
+  s->valid = true;
+  return 0;
 }
 
 int ds41_session_pos(const ds41_session* s) { return s ? (int)s->tokens.size() : 0; }

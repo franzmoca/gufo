@@ -123,6 +123,40 @@ model generates that newline inside the string parameter. The official
 `encoding.py` and `deepseek-recipe` both keep string parameter values
 verbatim, as Gufo does.
 
+### Component cache (M4)
+
+Sessions serve the component cache: compressed-KV and index-K rows of the
+four KV source layers are lent rows, the window rings, compressor frontiers
+and frontier logits private state, and the Engram history is rebuilt from
+the tokens. Capture cost on a 55K-token conversation (65K context):
+
+| Capture | Whole-state snapshot | Component cache |
+|---|---:|---:|
+| 55,014-token prompt | 284 MB, 274 ms | 119 MB, 9.1 ms |
+| 10-token follow-up turn | 182 MB, 140 ms | 25 MB, 1.5 ms |
+
+Functional suites (32K context, 2 sessions) against the whole-state
+snapshot build: `cache` (RAM and disk, restart, disk checkpoint spacing)
+passes qualification. cache-edits, cache-rotation, cache-shared-prefix and
+cache-concurrency pass on both builds with the same outputs. Per request,
+captures take a median 0.066 of the old time and restores 0.44; prefill
+and decode medians are unchanged (0.998). cache-growth and cache-depth fail
+on both builds with the same replies: V4.1 answers a trivial turn without
+thinking, and the depth fixture is 16,210 tokens with this tokenizer, below
+its 16,384 floor.
+
+Flags that remain, from alternating runs:
+
+- One rotation return reuses 2 more tokens (8,470 instead of 8,468) and
+  prefills 216 ms instead of 202: its 7-token batch takes 136 ms where the
+  old 9-token batch took 120, also without a restore (BACKLOG item 7).
+- Restores queue 5-6 ms longer in cache-shared-prefix (`long_tasks_1-3`),
+  outside the restore itself; a fresh server with few checkpoints shows no
+  difference. Time to first token is still lower than before.
+- The first token now comes before the capture completes, so single-token
+  and concurrent decodes count up to one step more while the requests end
+  sooner (cache-concurrency `identical`: 8,107 against 8,124-8,140 ms).
+
 ## Batched prefill and M2 kernels
 
 The same 3K positions scored through 2048-token batches (matrix-core
