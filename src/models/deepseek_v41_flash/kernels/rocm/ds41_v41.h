@@ -53,7 +53,7 @@ int ds41_v41_gemv_experts_swiglu(int type, const void* gate, const void* up, uin
  * W_z the z-th [m][k] matrix stored back to back; x rows hold groups * k
  * floats, rounded to FP16 as they are staged, and out rows groups * m;
  * non-finite outputs read as 0. Returns 1 for other types, m not a multiple
- * of 128 or k not a multiple of 256. */
+ * of 256 or k not a multiple of 256. */
 int ds41_v41_dense_f16(int type, const void* w, const float* x, float* out, uint32_t m, uint32_t n, uint32_t k,
                        uint32_t groups);
 /* Batched routed experts (IQ1_S, IQ1_M, IQ2_XXS) on the FP16 matrix cores, with FP16

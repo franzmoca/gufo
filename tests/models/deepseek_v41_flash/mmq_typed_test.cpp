@@ -745,8 +745,8 @@ int main() {
     ok = DenseCase(t, 384, 130, 2304, rng) && ok;
     if (t.type == 13) {
       ok = DenseF16Case(t, 256, 37, 1280, 1, rng) && ok;
-      ok = DenseF16Case(t, 384, 300, 2304, 1, rng) && ok;
-      ok = DenseF16Case(t, 128, 130, 512, 4, rng) && ok;
+      ok = DenseF16Case(t, 512, 300, 2304, 1, rng) && ok;
+      ok = DenseF16Case(t, 256, 130, 512, 4, rng) && ok;
     }
     if (t.type == 8 || t.type == 13) {
       ok = GemvCase(t, 300, 1280, 0, rng) && ok;
