@@ -725,7 +725,7 @@ int main() {
       ok = MoeCase(t, 256, 1024, 200, 384, 6, bounded, rng) && ok;
     }
     ok = MoeSwigluCase(t, 256, 1024, 200, 384, 6, rng) && ok;
-    if (t.type == 19) {
+    if (t.type == 19 || t.type == 29 || t.type == 16) {
       for (const int n_experts : {16, 384}) {
         ok = RoutedF16Case(t, 256, 1024, 200, n_experts, 6, true, rng) && ok;
         ok = RoutedF16Case(t, 512, 2304, 200, n_experts, 6, false, rng) && ok;

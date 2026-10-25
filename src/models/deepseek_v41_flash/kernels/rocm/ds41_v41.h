@@ -48,7 +48,7 @@ int ds41_v41_gemv_experts_swiglu(int type, const void* gate, const void* up, uin
                                  const int32_t* ids, uint32_t slots, const float* x, const float* route_w,
                                  float limit, float* y, uint32_t m, uint32_t k);
 
-/* Batched routed experts (IQ1_S) on the FP16 matrix cores, with FP16
+/* Batched routed experts (IQ1_S, IQ1_M, IQ2_XXS) on the FP16 matrix cores, with FP16
  * activations x. rows lists the slots grouped by expert, expert e owning
  * rows[bounds[e] .. bounds[e + 1]), and tiles[0:n_tiles] names 64 of them
  * each as expert | index << 16 (see ds41_v41_routed_plan). A slot s reads x
