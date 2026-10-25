@@ -57,16 +57,16 @@ the SGPRs. Starting points for a retry:
 
 ~1,660 dispatches per token; ~4.6 ms per token is not covered by GPU work.
 In progress. Done: the MMQ scratch pool reuses buffers instead of
-allocating and freeing per call. Remaining, from a `rocprofv3` trace of 2K
-decode:
+allocating and freeing per call; Engram rows upload asynchronously from
+pinned memory. Remaining, from a `rocprofv3` trace of 2K decode:
 
 - ~1,550 dependent-launch gaps of ~2.5 µs per token (~4 ms). Fusion
   candidates by count per token: rms_norm 166, rope_tail 133,
   hc_collapse/hc_mixes/hc_sinkhorn/hc_expand 80 each, fp8_fake_quant 80,
   swiglu 80, copyBuffer 46.
-- ~0.5 ms before layer 1's Engram upload: the 24 rows of one token are read
-  by a single worker thread.
-- ~0.5 ms at the start of each step before the first kernel.
+- ~90 µs of host work at the start of each step (embedding dequant and two
+  synchronous uploads take ~70 µs); a device-side embedding lookup would
+  remove most of it.
 
 ### 3. IQ1_S routed-expert MMQ
 
