@@ -150,6 +150,10 @@ public:
     std::uint64_t steps{0};
     std::uint64_t skipped{0};
     std::uint32_t context_tokens{0};
+    /// Prompt-lookup cycles, the tokens they copied and the copies accepted.
+    std::uint64_t lookup_cycles{0};
+    std::uint64_t lookup_copied{0};
+    std::uint64_t lookup_accepted{0};
     bool operator==(const DsparkStats&) const = default;
   };
   [[nodiscard]] DsparkStats DsparkStatistics() const;

@@ -23,7 +23,7 @@ same GGUF.
 | M1 Correct AR decode on IQ1_M | done |
 | M2 Resident performance | done |
 | M4 Component cache and serving | done |
-| M5 DSpark, prompt lookup and approximations | in progress: DSpark done |
+| M5 DSpark, prompt lookup and approximations | in progress: DSpark and prompt lookup done |
 | M6 Vision | planned |
 | M3 SSD expert streaming (IQ2_XXS) | planned, after M6 |
 | M7 Higher-precision Engram tables | planned |
@@ -190,10 +190,11 @@ Open performance items are tracked in [BACKLOG.md](BACKLOG.md).
   the 4 GiB host reserve that explicit limits keep (as whole-state
   snapshots already did), and cache backing may pin down to 1 GiB of free
   device heap instead of the 4 GiB dispatch reserve.
-- Prompt lookup (`src/core/speculative/prompt_lookup.hpp`) as for Gemma 4.
-  It shares DSpark's multi-token verification and the rollback of rejected
-  tokens (SWA rings, compressor frontiers, rows), and its state joins the
-  component cache metadata.
+- Prompt lookup (done in DSpark sessions): `src/core/speculative/prompt_lookup.hpp`
+  copies up to six tokens that followed an earlier occurrence of the
+  context; they replace that cycle's draft and share DSpark's verification
+  and rollback. Its state joins snapshots and the component cache
+  metadata. File edit 43.9 → 56.4 tok/s with identical output.
 - Evaluate decoder SWA bounded replay (layers 20-39 over only the last 128
   prompt tokens), which roughly halves prefill; adopt only if quality holds.
 

@@ -113,13 +113,14 @@ ds41_decoder* Prefill(ds41_engine* engine, const std::vector<int>& prompt,
   return d;
 }
 
-/* --spec-check: speculative batches of four rows keeping 1, 2, 3, 4 rows in
- * turn. Pass A drafts the greedy continuation, pass B replaces the rows past
- * the kept prefix with other tokens. Exact rollback leaves both passes with
- * bit-identical logits for every kept row.
+/* --spec-check: speculative batches of --spec-width rows (default 4, at
+ * most 8) keeping 1, 2, ..., width rows in turn. Pass A drafts the greedy
+ * continuation, pass B replaces the rows past the kept prefix with other
+ * tokens. Exact rollback leaves both passes with bit-identical logits for every
+ * kept row.
  * --spec-bench N: times speculative batches of N rows (0: 1 to 8), commit 1. */
 int SpeculativeProbe(ds41_engine* engine, const std::vector<int>& prompt,
-                     uint32_t context, int cycles, int bench) {
+                     uint32_t context, int cycles, int bench, int width) {
   const std::size_t vocab = (std::size_t)ds41_engine_vocab_size(engine);
   context = std::max<uint32_t>(context, (uint32_t)prompt.size() + 4096);
   std::vector<float> last(vocab);
@@ -166,7 +167,7 @@ int SpeculativeProbe(ds41_engine* engine, const std::vector<int>& prompt,
     if (!d)
       return 1;
     greedy.push_back(Argmax(last.data(), vocab));
-    for (int i = 0; i < cycles * 4 + 4; ++i) {
+    for (int i = 0; i < cycles * width + width; ++i) {
       if (ds41_decoder_step(d, greedy.back(), last.data(), nullptr, nullptr))
         return 1;
       greedy_logits.push_back(last);
@@ -180,15 +181,15 @@ int SpeculativeProbe(ds41_engine* engine, const std::vector<int>& prompt,
     ds41_decoder* d = Prefill(engine, prompt, context, &last);
     if (!d)
       return 1;
-    std::vector<float> rows(vocab * 4);
+    std::vector<float> rows(vocab * width);
     std::size_t at = 0;  // greedy index of the next row's token
     for (int c = 0; c < cycles; ++c) {
-      const uint32_t keep = 1 + (uint32_t)c % 4;
-      int batch[4];
-      for (uint32_t r = 0; r < 4; ++r)
+      const uint32_t keep = 1 + (uint32_t)c % width;
+      int batch[DS41_DECODER_MAX_SPECULATIVE];
+      for (uint32_t r = 0; r < (uint32_t)width; ++r)
         batch[r] =
             pass == 1 && r >= keep ? (int)(1000 + 37 * r + c) : greedy[at + r];
-      if (ds41_decoder_eval_speculative(d, batch, 4, rows.data()) ||
+      if (ds41_decoder_eval_speculative(d, batch, width, rows.data()) ||
           ds41_decoder_commit(d, keep))
         return 1;
       for (uint32_t r = 0; r < keep; ++r) {
@@ -322,6 +323,13 @@ int DsparkProbe(ds41_engine* engine, const std::vector<int>& prompt,
         (unsigned long long)accepted,
         drafted ? 100.0 * accepted / drafted : 0.0,
         steps ? (double)spec.size() / steps : 0.0, (unsigned long long)full);
+    uint64_t lookup_cycles = 0, lookup_copied = 0, lookup_accepted = 0;
+    ds41_session_lookup_stats(session, &lookup_cycles, &lookup_copied,
+                              &lookup_accepted);
+    std::printf("lookup: %llu cycles, copied %llu accepted %llu\n",
+                (unsigned long long)lookup_cycles,
+                (unsigned long long)lookup_copied,
+                (unsigned long long)lookup_accepted);
     std::printf("greedy match: %d of %d tokens%s\n", same, n_tokens,
                 same == n_tokens ? " (identical)" : "");
     if (same < n_tokens) {
@@ -412,6 +420,7 @@ int main(int argc, char** argv) {
   bool upload = false;
   bool rendered = false;
   int spec_check = 0;
+  int spec_width = 4;
   int spec_bench = -1;
   const char* dspark = nullptr;
   int dspark_generate = 0;
@@ -440,6 +449,8 @@ int main(int argc, char** argv) {
     } else if (std::strcmp(argv[i], "--spec-check") == 0 && i + 1 < argc) {
       spec_check = std::atoi(argv[++i]);
       upload = true;
+    } else if (std::strcmp(argv[i], "--spec-width") == 0 && i + 1 < argc) {
+      spec_width = std::clamp(std::atoi(argv[++i]), 1, 8);
     } else if (std::strcmp(argv[i], "--spec-bench") == 0 && i + 1 < argc) {
       spec_bench = std::atoi(argv[++i]);
       upload = true;
@@ -470,7 +481,8 @@ int main(int argc, char** argv) {
         "usage: %s MODEL-00001-of-N.gguf [--engram FILE] [--upload] "
         "[--tokenize TEXTS [--rendered]] [--decode IDS [--generate N] "
         "[--score] [--batch] [--context N] [--prefill-batch N] "
-        "[--out DIR]] [--spec-check CYCLES | --spec-bench N | --dspark FILE "
+        "[--out DIR]] [--spec-check CYCLES [--spec-width W] | --spec-bench N | "
+        "--dspark FILE "
         "--dspark-generate N [--dspark-sweep] | --dspark FILE --dspark-dump "
         "DIR]\n",
         argv[0]);
@@ -536,7 +548,8 @@ int main(int argc, char** argv) {
     if (dspark_generate > 0)
       return DsparkProbe(engine, prompt, context, dspark_generate,
                          dspark_sweep);
-    return SpeculativeProbe(engine, prompt, context, spec_check, spec_bench);
+    return SpeculativeProbe(engine, prompt, context, spec_check, spec_bench,
+                            spec_width);
   }
   if (decode) {
     /* Feed comma-separated ids one at a time (--batch: in decoder batches),

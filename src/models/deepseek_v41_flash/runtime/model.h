@@ -93,7 +93,7 @@ struct ds41_session_dspark_batch_item {
 };
 
 inline constexpr int DS41_SESSION_SYNC_INTERRUPTED = 2;
-inline constexpr std::uint32_t DS41_SESSION_PAYLOAD_VERSION = 4;
+inline constexpr std::uint32_t DS41_SESSION_PAYLOAD_VERSION = 5;
 
 int ds41_engine_open(ds41_engine** out, const ds41_engine_options* options);
 void ds41_engine_close(ds41_engine* engine);
@@ -147,6 +147,16 @@ void ds41_session_dspark_stats(const ds41_session* session, uint64_t* drafted,
                                uint64_t* positional_accepted, uint64_t* anchors,
                                uint64_t* full_blocks, uint64_t* steps,
                                uint64_t* skipped, uint32_t* context_tokens);
+/* Prompt-lookup copies verified by DSpark steps. */
+void ds41_session_lookup_stats(const ds41_session* session, uint64_t* cycles,
+                               uint64_t* copied, uint64_t* accepted);
+/* The prompt-lookup state the token history cannot rebuild
+ * (PromptLookup::State); setting it fails unless it fits the session's
+ * tokens. */
+void ds41_session_lookup_state(const ds41_session* session, uint32_t* resume,
+                               uint32_t* request_start);
+int ds41_session_set_lookup_state(ds41_session* session, uint32_t resume,
+                                  uint32_t request_start);
 int ds41_session_copy_logits(const ds41_session* session, float* out,
                              int capacity);
 int ds41_session_save_snapshot(const ds41_session* session,

@@ -29,8 +29,10 @@ constexpr std::array<int, 4> kRowParts = {
     DS41_STATE_COMP, DS41_STATE_COMP_SCALE, DS41_STATE_INDEX_K,
     DS41_STATE_INDEX_SCALE};
 struct Metadata {
-  std::uint32_t version{1};
+  std::uint32_t version{2};
   std::uint32_t position{};
+  // PromptLookup::State, which the tokens cannot rebuild.
+  std::uint32_t lookup_resume{}, lookup_request_start{};
 };
 static_assert(std::is_trivially_copyable_v<Metadata>);
 // Positions [start, end) held by the drafter rings.
@@ -228,7 +230,7 @@ ContinuationAdapter::ContinuationAdapter(std::shared_ptr<Model> model,
     for (unsigned i = 0; i < 4; ++i)
       identity_.push_back(static_cast<std::uint8_t>(value >> (8 * i)));
   };
-  put(2);  // Component layout version.
+  put(3);  // Component layout version.
   put(context);
   if (speculative_)
     put(1);  // Drafter rings.
@@ -555,6 +557,8 @@ cache::Completion ContinuationAdapter::CapturePrivatePiece(
       offset > total || bytes.size() > total - offset)
     throw std::invalid_argument("invalid DeepSeek V4.1 private piece");
   Metadata metadata{.position = static_cast<std::uint32_t>(state.Tokens())};
+  ds41_session_lookup_state(state.Native(), &metadata.lookup_resume,
+                            &metadata.lookup_request_start);
   DrafterRange drafter;
   auto pieces = PrivateRegion(state, c);
   if (c.part == ContinuationPart::kMetadata)
@@ -658,8 +662,12 @@ bool ContinuationAdapter::Validate(
       return refuse();
   }
   const auto n = state.expected.front().valid_rows;
-  if (state.metadata.version != 1 || state.metadata.position != n ||
-      ds41_session_finish_restore(state.Native()) != 0)
+  if (state.metadata.version != Metadata{}.version ||
+      state.metadata.position != n ||
+      ds41_session_finish_restore(state.Native()) != 0 ||
+      ds41_session_set_lookup_state(state.Native(),
+                                    state.metadata.lookup_resume,
+                                    state.metadata.lookup_request_start) != 0)
     return refuse();
   // The restored drafter rings continue the session's position.
   if (speculative_ &&
