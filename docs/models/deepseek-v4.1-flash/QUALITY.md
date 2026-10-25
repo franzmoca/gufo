@@ -98,6 +98,31 @@ Measured at M1, before the M2 performance work: decode 12-14 tok/s with
 short prompts, prefill one token at a time. Current speeds are in
 [BENCHMARKS.md](BENCHMARKS.md).
 
+### Functional suites after M2
+
+`tests/functional/run.py` with the `deepseek4` sampling preset (V4.1 is
+served with the V4 defaults), 32K context, 2 sessions, against the M2 build:
+
+| Suites | Result |
+|---|---|
+| discovery, responses, stops, conversation, tools, tool-edges, tool-streaming, structured, sampling-defaults, long-context | passed |
+| cache (RAM and disk, restart, disk checkpoint spacing) | passed |
+| tool-reasoning | 8 of 9 cases pass; the first case fails |
+
+The failing case asks the model to quote a corrupted docstring containing a
+literal `<tool_call>` opener and then call `edit`, with 1,024 output tokens at
+low effort. V4.1 IQ1_M is still reasoning when it reaches the limit. With 4,096
+tokens it calls `edit` with the exact arguments after 2,529 tokens at low
+effort and 1,953 at high. The fixture budget is unchanged.
+
+`tests/functional/pi_agent.py` (Pi 0.87.0, server sampling defaults): 13 of
+15 tasks pass, covering simple, tools, edit, creation, bugfix,
+literal-protocol and wide-tool. Two of three `tools` runs wrote `hello.txt`
+as `bonjour` plus a newline where the task asks for exactly `bonjour`. The
+model generates that newline inside the string parameter. The official
+`encoding.py` and `deepseek-recipe` both keep string parameter values
+verbatim, as Gufo does.
+
 ## Batched prefill and M2 kernels
 
 The same 3K positions scored through 2048-token batches (matrix-core
