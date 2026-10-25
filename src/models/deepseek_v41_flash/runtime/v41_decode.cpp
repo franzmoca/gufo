@@ -366,9 +366,8 @@ bool engram(ds41_decoder* d, uint32_t il, const float* rows, uint32_t n) {
 
 bool hc_mix(ds41_decoder* d, const ds41_tensor* fn, const ds41_tensor* scale, const ds41_tensor* base,
             const float* h, float* pre, float* post, float* comb, uint32_t n) {
-  return ds41_v41_hc_mixes(f32(d, fn), h, d->mixes, kHc, kDim, DS41_RMS_EPS, n) == 0 &&
-         ds41_v41_hc_sinkhorn(d->mixes, f32(d, scale), f32(d, base), pre, post, comb, kHc,
-                              DS41_N_HC_SINKHORN_ITER, DS41_HC_EPS, n) == 0;
+  return ds41_v41_hc_mix(f32(d, fn), h, f32(d, scale), f32(d, base), d->mixes, pre, post, comb, kHc, kDim,
+                         DS41_RMS_EPS, DS41_N_HC_SINKHORN_ITER, DS41_HC_EPS, n) == 0;
 }
 
 bool copy_dev(float* dst, const float* src, uint64_t count) {

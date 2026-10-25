@@ -317,14 +317,8 @@ __device__ __forceinline__ float sigmoidf(float x) { return 1.0f / (1.0f + expf(
 /* hc is a template constant so the matrix stays in registers; a runtime
  * bound puts it in scratch memory (90 us per call at hc = 4). */
 template <uint32_t hc>
-__global__ void hc_sinkhorn_kernel(const float* all_mixes, const float* scale, const float* base, float* all_pre,
-                                   float* all_post, float* all_comb, uint32_t iters, float eps, uint32_t n) {
-  const uint32_t t = blockIdx.x * blockDim.x + threadIdx.x;
-  if (t >= n) return;
-  const float* mixes = all_mixes + (uint64_t)t * (2 * hc + hc * hc);
-  float* pre = all_pre + (uint64_t)t * hc;
-  float* post = all_post + (uint64_t)t * hc;
-  float* comb = all_comb + (uint64_t)t * hc * hc;
+__device__ __forceinline__ void sinkhorn_token(const float* mixes, const float* scale, const float* base, float* pre,
+                                               float* post, float* comb, uint32_t iters, float eps) {
   float c[hc][hc];
 #pragma unroll
   for (uint32_t i = 0; i < hc; i++) {
@@ -374,6 +368,82 @@ __global__ void hc_sinkhorn_kernel(const float* all_mixes, const float* scale, c
   for (uint32_t a = 0; a < hc; a++)
 #pragma unroll
     for (uint32_t b = 0; b < hc; b++) comb[a * hc + b] = c[a][b];
+}
+
+template <uint32_t hc>
+__global__ void hc_sinkhorn_kernel(const float* all_mixes, const float* scale, const float* base, float* all_pre,
+                                   float* all_post, float* all_comb, uint32_t iters, float eps, uint32_t n) {
+  const uint32_t t = blockIdx.x * blockDim.x + threadIdx.x;
+  if (t >= n) return;
+  sinkhorn_token<hc>(all_mixes + (uint64_t)t * (2 * hc + hc * hc), scale, base, all_pre + (uint64_t)t * hc,
+                     all_post + (uint64_t)t * hc, all_comb + (uint64_t)t * hc * hc, iters, eps);
+}
+
+/* Small batches: each mix row of each token is split over kMixSlices blocks
+ * with 16-byte loads, unrolled so a thread's loads are in flight together.
+ * Blocks leave partial sums in g_mix_dot and g_mix_ss; the last block to finish a
+ * token (counted in g_mix_done, which it resets) reduces them and runs that
+ * token's Sinkhorn. */
+constexpr uint32_t kMixSmallTokens = 16;
+constexpr uint32_t kMixSmallThreads = 256;
+constexpr uint32_t kMixSlices = 8;
+constexpr uint32_t kMixMax = 24;
+__device__ uint32_t g_mix_done[kMixSmallTokens];
+__device__ float g_mix_dot[kMixSmallTokens][kMixMax * kMixSlices];
+__device__ float g_mix_ss[kMixSmallTokens][kMixMax * kMixSlices];
+
+template <uint32_t hc>
+__global__ void __launch_bounds__(kMixSmallThreads)
+    hc_mix_small_kernel(const float* fn, const float* h, const float* scale, const float* base, float* all_mixes,
+                        float* all_pre, float* all_post, float* all_comb, uint32_t n, float eps, uint32_t iters,
+                        float hc_eps) {
+  constexpr uint32_t kMix = 2 * hc + hc * hc;
+  static_assert(kMix <= kMixMax, "mix rows");
+  const uint32_t t = blockIdx.y;
+  const uint32_t row = blockIdx.x / kMixSlices;
+  const uint32_t slice = blockIdx.x % kMixSlices;
+  const uint32_t n4 = n / 4;
+  const uint32_t per = (n4 + kMixSlices - 1) / kMixSlices;
+  const uint32_t end = min(n4, (slice + 1) * per);
+  const float4* r = reinterpret_cast<const float4*>(fn + (uint64_t)row * n);
+  const float4* x = reinterpret_cast<const float4*>(h + (uint64_t)t * n);
+  float dot = 0.0f;
+  float ss = 0.0f;
+#pragma unroll 4
+  for (uint32_t i = slice * per + threadIdx.x; i < end; i += kMixSmallThreads) {
+    const float4 w = r[i];
+    const float4 v = x[i];
+    dot += w.x * v.x + w.y * v.y + w.z * v.z + w.w * v.w;
+    ss += v.x * v.x + v.y * v.y + v.z * v.z + v.w * v.w;
+  }
+  dot = block_sum(dot);
+  ss = block_sum(ss);
+  __shared__ bool last;
+  if (threadIdx.x == 0) {
+    g_mix_dot[t][blockIdx.x] = dot;
+    g_mix_ss[t][blockIdx.x] = ss;
+    __threadfence();
+    last = atomicAdd(&g_mix_done[t], 1u) == kMix * kMixSlices - 1;
+  }
+  __syncthreads();
+  if (!last) return;
+  __threadfence();
+  __shared__ float mixes[kMix];
+  if (threadIdx.x < kMix) {
+    float d = 0.0f, q = 0.0f;
+#pragma unroll
+    for (uint32_t k = 0; k < kMixSlices; k++) {
+      d += __hip_atomic_load(&g_mix_dot[t][threadIdx.x * kMixSlices + k], __ATOMIC_RELAXED, __HIP_MEMORY_SCOPE_AGENT);
+      q += __hip_atomic_load(&g_mix_ss[t][k], __ATOMIC_RELAXED, __HIP_MEMORY_SCOPE_AGENT);
+    }
+    mixes[threadIdx.x] = d * rsqrtf(q / (float)n + eps);
+    all_mixes[(uint64_t)t * kMix + threadIdx.x] = mixes[threadIdx.x];
+  }
+  __syncthreads();
+  if (threadIdx.x != 0) return;
+  g_mix_done[t] = 0;
+  sinkhorn_token<hc>(mixes, scale, base, all_pre + (uint64_t)t * hc, all_post + (uint64_t)t * hc,
+                     all_comb + (uint64_t)t * hc * hc, iters, hc_eps);
 }
 
 /* Block per token; each thread keeps its kPer collapsed values in registers
@@ -1162,6 +1232,18 @@ extern "C" int ds41_v41_hc_mixes(const float* fn, const float* h, float* mixes, 
   }
   hc_mixes_kernel<<<dim3(mixes_n, n), 1024>>>(fn, h, mixes, hc * dim, mixes_n, eps);
   return launch_ok("hc mixes");
+}
+
+extern "C" int ds41_v41_hc_mix(const float* fn, const float* h, const float* scale, const float* base, float* mixes,
+                               float* pre, float* post, float* comb, uint32_t hc, uint32_t dim, float eps,
+                               uint32_t iters, float hc_eps, uint32_t n) {
+  if (n < kMixSmallTokens && hc == 4 && (hc * dim) % 4 == 0) {
+    hc_mix_small_kernel<4><<<dim3((2 * hc + hc * hc) * kMixSlices, n), kMixSmallThreads>>>(fn, h, scale, base, mixes, pre, post,
+                                                                           comb, hc * dim, eps, iters, hc_eps);
+    return launch_ok("hc mix");
+  }
+  return ds41_v41_hc_mixes(fn, h, mixes, hc, dim, eps, n) ||
+         ds41_v41_hc_sinkhorn(mixes, scale, base, pre, post, comb, hc, iters, hc_eps, n);
 }
 
 extern "C" int ds41_v41_hc_sinkhorn(const float* mixes, const float* scale, const float* base, float* pre,
