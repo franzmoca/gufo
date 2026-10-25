@@ -1093,6 +1093,57 @@ int ds41_decoder_load(ds41_decoder* d, const uint8_t* data, uint64_t size, uint6
   return 0;
 }
 
+uint32_t ds41_layer_state_ratio(uint32_t layer) {
+  return layer < DS41_N_LAYER && ds41_layer_is_kv_source(layer) ? ds41_layer_compress_ratio(layer) : 0;
+}
+
+void* ds41_decoder_state_part(ds41_decoder* d, uint32_t layer, int part, uint64_t* bytes) {
+  if (!d || layer >= DS41_N_LAYER || !bytes) return nullptr;
+  LayerState& s = d->layer[layer];
+  const uint64_t frontier = (uint64_t)ds41_layer_state_ratio(layer) * kHeadDim * sizeof(float);
+  switch (part) {
+  case DS41_STATE_WINDOW:
+    *bytes = (uint64_t)DS41_N_SWA * kHeadDim * sizeof(float);
+    return s.window;
+  case DS41_STATE_COMP:
+    *bytes = kCompCodeBytes;
+    return s.comp;
+  case DS41_STATE_COMP_SCALE:
+    *bytes = kCompScaleBytes;
+    return s.comp_scale;
+  case DS41_STATE_INDEX_K:
+    *bytes = kIndexCodeBytes;
+    return s.index_k;
+  case DS41_STATE_INDEX_SCALE:
+    *bytes = kIndexScaleBytes;
+    return s.index_scale;
+  case DS41_STATE_POOL_KV:
+    *bytes = frontier;
+    return s.pool_kv;
+  case DS41_STATE_POOL_SCORE:
+    *bytes = frontier;
+    return s.pool_score;
+  default:
+    return nullptr;
+  }
+}
+
+int ds41_decoder_adopt(ds41_decoder* d, const int* tokens, uint32_t n) {
+  if (!d || n > d->context || (n && !tokens)) return 1;
+  const int32_t* token_map = (const int32_t*)host(d, d->engine->weights->engram_token_map);
+  d->engram_history.resize(n);
+  for (uint32_t i = 0; i < n; i++) {
+    if (tokens[i] < 0 || tokens[i] >= DS41_N_VOCAB) return 1;
+    d->engram_history[i] = token_map[tokens[i]];
+  }
+  /* Every evaluation leaves the last KV source layer here. */
+  d->comp_layer = -1;
+  for (uint32_t il = 0; n && il < DS41_N_LAYER; il++)
+    if (ds41_layer_is_kv_source(il)) d->comp_layer = (int)il;
+  d->pos = n;
+  return 0;
+}
+
 int ds41_decoder_reset(ds41_decoder* d) {
   if (!d) return 1;
   for (uint32_t il = 0; il < DS41_N_LAYER; il++) {

@@ -56,6 +56,7 @@ target_link_libraries(gufo_deepseek_v41_flash_mmq PUBLIC
 
 add_library(gufo_deepseek_v41_flash STATIC
   chat_template.cpp
+  continuation_adapter.cpp
   engine.cpp
   ${DEEPSEEK_V41_FLASH_RUNTIME_DIR}/model_data.cpp
   ${DEEPSEEK_V41_FLASH_RUNTIME_DIR}/sampling.cpp
@@ -97,6 +98,7 @@ target_include_directories(gufo_deepseek_v41_flash SYSTEM PUBLIC
 
 target_link_libraries(gufo_deepseek_v41_flash PUBLIC
   gufo_deepseek_v41_flash_mmq
+  gufo_cache_hip
   hip::host
   roc::hipblas
   roc::hipblaslt

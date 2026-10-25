@@ -43,6 +43,7 @@
 #include "src/core/hip/host_allocations.hpp"
 #include "src/core/speculative/speculative_verifier.hpp"
 #include "src/models/deepseek_v41_flash/chat_template.hpp"
+#include "src/models/deepseek_v41_flash/continuation_adapter.hpp"
 #include "src/models/deepseek_v41_flash/dspark_sampler.hpp"
 #include "src/models/deepseek_v41_flash/engine.hpp"
 #include "src/models/deepseek_v4_flash/dspark_sampler.hpp"
@@ -272,6 +273,7 @@ struct DeepSeekV4Flash {
       sampling::JsonConstraint::ToolFormat::kDeepSeek;
   static constexpr auto kSamplingPreset =
       sampling::TextModelPreset::kDeepSeekV4Flash;
+  static constexpr bool kComponentCache = false;
 
   static std::string_view ChatTemplateId() noexcept {
     return models::deepseek_v4_flash::ChatTemplateId();
@@ -295,6 +297,7 @@ struct DeepSeekV41Flash {
   using ChatMessage = models::deepseek_v41_flash::ChatMessage;
   using ChatTool = models::deepseek_v41_flash::ChatTool;
   using DsparkSamplerBridge = models::deepseek_v41_flash::DsparkSamplerBridge;
+  using ContinuationAdapter = models::deepseek_v41_flash::ContinuationAdapter;
 
   static constexpr std::string_view kStateAbi =
       "deepseek-v4.1-flash-gfx1151-state-v1";
@@ -311,6 +314,8 @@ struct DeepSeekV41Flash {
   // top_p 0.95.
   static constexpr auto kSamplingPreset =
       sampling::TextModelPreset::kDeepSeekV4Flash;
+  // Sessions serve the component cache (ContinuationAdapter).
+  static constexpr bool kComponentCache = true;
 
   static std::string_view ChatTemplateId() noexcept {
     return models::deepseek_v41_flash::ChatTemplateId();
@@ -1667,21 +1672,30 @@ public:
     if (session_ == nullptr) {
       throw std::runtime_error("Failed to create DeepSeek session: " + error);
     }
+    active_ = session_.get();
   }
+  // Borrows the session of a component-cache slot.
+  DeepSeekTextRunnerState(typename Ds::Session& session,
+                          cache::Adapter& adapter, cache::Slot& slot)
+      : active_(&session), adapter_(&adapter), slot_(&slot) {}
 
   void SetCancellationCheck(const CancellationCheck& is_cancelled) override {
-    session_->SetCancellationCheck(is_cancelled);
+    active_->SetCancellationCheck(is_cancelled);
   }
 
   void Invalidate() noexcept override {
-    session_->SetCancellationCheck({});
-    session_->Invalidate();
+    active_->SetCancellationCheck({});
+    if (adapter_ != nullptr) {
+      (void)adapter_->Invalidate(*slot_);
+    } else {
+      active_->Invalidate();
+    }
     position_ = 0;
   }
 
   [[nodiscard]] TextRunnerMeasuredResources MeasuredResources()
       const noexcept override {
-    const std::uint64_t bytes = session_->PayloadBytes();
+    const std::uint64_t bytes = active_->PayloadBytes();
     if (bytes == 0 || bytes > static_cast<std::uint64_t>(
                                   std::numeric_limits<std::size_t>::max())) {
       return {};
@@ -1692,12 +1706,15 @@ public:
     };
   }
 
-  [[nodiscard]] typename Ds::Session& session() const { return *session_; }
+  [[nodiscard]] typename Ds::Session& session() const { return *active_; }
   [[nodiscard]] std::size_t position() const noexcept { return position_; }
   void set_position(std::size_t position) noexcept { position_ = position; }
 
 private:
   std::unique_ptr<typename Ds::Session> session_;
+  typename Ds::Session* active_{};
+  cache::Adapter* adapter_{};
+  cache::Slot* slot_{};
   std::size_t position_{0};
 };
 
@@ -1773,7 +1790,51 @@ public:
               max_draft_tokens_),
           .payload_version = Ds::kPayloadVersion,
       };
+      component_identity_ = persistence_->compatibility_identity;
+    } else {
+      // Without artifact fingerprints checkpoints stay in this process.
+      std::ostringstream identity;
+      identity << "schema=gufo-process-text-continuation-v1\n"
+               << "model_instance=" << model_.get() << '\n'
+               << "context_tokens=" << max_context_ << '\n';
+      const auto canonical = identity.str();
+      component_identity_.assign(canonical.begin(), canonical.end());
     }
+  }
+
+  [[nodiscard]] bool UsesComponentCache() const override {
+    return Ds::kComponentCache && !use_dspark_;
+  }
+  [[nodiscard]] std::unique_ptr<ComponentCacheResources>
+  CreateComponentCacheResources(cache::ResourceLedger& ledger,
+                                std::size_t ram) const override {
+    if constexpr (Ds::kComponentCache) {
+      (void)ram;
+      return CreateHipComponentCacheResources(
+          std::make_unique<typename Ds::ContinuationAdapter>(
+              model_, max_context_, component_identity_),
+          ledger);
+    } else {
+      return TextModelRunner::CreateComponentCacheResources(ledger, ram);
+    }
+  }
+  [[nodiscard]] std::unique_ptr<TextRunnerState> BindComponentState(
+      cache::Adapter& adapter, cache::Slot& slot) const override {
+    if constexpr (Ds::kComponentCache) {
+      auto& deepseek = dynamic_cast<typename Ds::ContinuationAdapter&>(adapter);
+      return std::make_unique<DeepSeekTextRunnerState<Ds>>(
+          deepseek.GetSession(slot), adapter, slot);
+    } else {
+      return TextModelRunner::BindComponentState(adapter, slot);
+    }
+  }
+  void ReconcileComponentState(TextRunnerState& state,
+                               std::size_t position) const override {
+    auto& deepseek = RequireDeepSeekState<Ds>(state);
+    if (deepseek.session().Position() != position) {
+      throw std::logic_error("DeepSeek component state position differs");
+    }
+    deepseek.set_position(position);
   }
 
   [[nodiscard]] TextRunnerDescriptor Descriptor() const override {
@@ -2369,6 +2430,7 @@ private:
   bool use_dspark_;
   std::uint32_t max_draft_tokens_;
   std::optional<TextRunnerPersistenceDescriptor> persistence_;
+  std::vector<std::uint8_t> component_identity_;
 };
 
 /// Derives the content identity that keys persistent continuations for one
