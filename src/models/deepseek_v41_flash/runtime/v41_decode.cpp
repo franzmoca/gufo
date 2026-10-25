@@ -497,6 +497,35 @@ bool attention(ds41_decoder* d, uint32_t il, uint32_t n) {
   return linear(d, l->attn_output_b, d->oa, d->attn_out, n);
 }
 
+/* Bytes per 256 values of the routed-expert types the FP32-activation expert
+ * GEMV decodes; 0 for others. */
+uint64_t expert_block_bytes(int type) {
+  switch ((uint32_t)type) {
+  case DS41_TENSOR_IQ1_S:
+    return 50;
+  case DS41_TENSOR_IQ1_M:
+    return 56;
+  case DS41_TENSOR_IQ2_XXS:
+    return 66;
+  case DS41_TENSOR_IQ2_S:
+    return 82;
+  default:
+    return 0;
+  }
+}
+
+/* Single-token expert projection through the FP32-activation expert GEMV
+ * where it measured faster than mmvq: IQ1 always, IQ2 with one input per slot
+ * (down). Returns false to fall back to mmvq. */
+bool expert_gemv(int type, const void* w, const int32_t* ids, uint32_t slots, const float* x, bool per_slot, float* y,
+                 uint32_t m, uint32_t k, int* status) {
+  const uint64_t block = expert_block_bytes(type);
+  const bool iq1 = type == (int)DS41_TENSOR_IQ1_S || type == (int)DS41_TENSOR_IQ1_M;
+  if (block == 0 || (!per_slot && !iq1)) return false;
+  *status = ds41_v41_gemv_experts(type, w, (uint64_t)m * k / 256 * block, ids, slots, x, per_slot ? k : 0, y, m, k);
+  return true;
+}
+
 bool moe(ds41_decoder* d, uint32_t il, uint32_t n) {
   const ds41_layer_weights* l = &d->engine->weights->layer[il];
   const int used = (int)DS41_N_EXPERT_USED;
@@ -532,11 +561,15 @@ bool moe(ds41_decoder* d, uint32_t il, uint32_t n) {
     ds41_mmq_set_routed_tile_cols(ds41_mmq_routed_tile_cols_for_counts(counts.data(), DS41_N_EXPERT));
   }
   if (n == 1) {
-    if (ds41_mmq_moe_vec_typed(gate_type, gate, d->xn, d->route_ids, d->g6, DS41_N_FF_EXP, kDim, 1, DS41_N_EXPERT,
-                               used, 0) ||
-        ds41_mmq_moe_vec_typed(up_type, up, d->xn, d->route_ids, d->u6, DS41_N_FF_EXP, kDim, 1, DS41_N_EXPERT, used,
-                               0))
-      return false;
+    int status = 0;
+    if (!expert_gemv(gate_type, gate, d->route_ids, used, d->xn, false, d->g6, DS41_N_FF_EXP, kDim, &status))
+      status = ds41_mmq_moe_vec_typed(gate_type, gate, d->xn, d->route_ids, d->g6, DS41_N_FF_EXP, kDim, 1,
+                                      DS41_N_EXPERT, used, 0);
+    if (status) return false;
+    if (!expert_gemv(up_type, up, d->route_ids, used, d->xn, false, d->u6, DS41_N_FF_EXP, kDim, &status))
+      status = ds41_mmq_moe_vec_typed(up_type, up, d->xn, d->route_ids, d->u6, DS41_N_FF_EXP, kDim, 1, DS41_N_EXPERT,
+                                      used, 0);
+    if (status) return false;
   } else if (ds41_mmq_moe_typed(gate_type, gate, d->xn, d->route_ids, d->g6, DS41_N_FF_EXP, kDim, (int)n,
                                 DS41_N_EXPERT, used, 0) ||
              ds41_mmq_moe_typed(up_type, up, d->xn, d->route_ids, d->u6, DS41_N_FF_EXP, kDim, (int)n, DS41_N_EXPERT,
@@ -545,11 +578,16 @@ bool moe(ds41_decoder* d, uint32_t il, uint32_t n) {
   }
   if (ds41_v41_swiglu(d->g6, d->u6, d->route_w, d->mid6, rows, DS41_N_FF_EXP, kSwigluLimit)) return false;
   /* Each (token, slot) row multiplies its own expert's down projection. */
-  if (n == 1 ? ds41_mmq_moe_vec_typed(down_type, down, d->mid6, d->route_ids, d->down6, kDim, DS41_N_FF_EXP, rows,
-                                      DS41_N_EXPERT, 1, 0)
-             : ds41_mmq_moe_typed(down_type, down, d->mid6, d->route_ids, d->down6, kDim, DS41_N_FF_EXP, rows,
-                                  DS41_N_EXPERT, 1, 0))
+  if (n == 1) {
+    int status = 0;
+    if (!expert_gemv(down_type, down, d->route_ids, rows, d->mid6, true, d->down6, kDim, DS41_N_FF_EXP, &status))
+      status = ds41_mmq_moe_vec_typed(down_type, down, d->mid6, d->route_ids, d->down6, kDim, DS41_N_FF_EXP, rows,
+                                      DS41_N_EXPERT, 1, 0);
+    if (status) return false;
+  } else if (ds41_mmq_moe_typed(down_type, down, d->mid6, d->route_ids, d->down6, kDim, DS41_N_FF_EXP, rows,
+                                DS41_N_EXPERT, 1, 0)) {
     return false;
+  }
   if (!linear(d, l->ffn_gate_shexp, d->xn, d->sg, n) || !linear(d, l->ffn_up_shexp, d->xn, d->su, n) ||
       ds41_v41_swiglu(d->sg, d->su, nullptr, d->sm, n, DS41_N_FF_EXP, kSwigluLimit) ||
       !linear(d, l->ffn_down_shexp, d->sm, d->sd, n))

@@ -26,6 +26,12 @@ int ds41_v41_matmul_f32(const float* w, const float* x, float* out, uint32_t row
  * picks the default) waves share a row group. Returns 1 for other types. */
 int ds41_v41_gemv(int type, const void* w, const float* x, float* y, uint32_t m, uint32_t k, uint32_t rows_per_x,
                   int slices);
+/* Single-token routed experts in IQ1_S, IQ1_M, IQ2_XXS or IQ2_S with FP32
+ * activations: y[s, 0:m] = W[ids[s]] x_s for s < slots, x_s = x + s * x_slot
+ * (x_slot 0 shares one input); expert e's blocks start at w + e *
+ * expert_bytes, and a negative id writes zeros. Returns 1 for other types. */
+int ds41_v41_gemv_experts(int type, const void* w, uint64_t expert_bytes, const int32_t* ids, uint32_t slots,
+                          const float* x, uint32_t x_slot, float* y, uint32_t m, uint32_t k);
 
 /* dst[r, 0:cols] = src[r, 0:cols] for `rows` rows with the given strides (floats). */
 int ds41_v41_copy_rows(float* dst, uint64_t dst_stride, const float* src, uint64_t src_stride, uint32_t rows,

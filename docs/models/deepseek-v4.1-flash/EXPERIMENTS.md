@@ -22,11 +22,17 @@ teacher-forced score against the oracle's perplexity 6.309
 | Prefill batches of 1024 / 2048 tokens (from 512) | 2048 retained: 233 → 261 → 292 tok/s; experts average 32 rows per batch instead of 8. Activations take ~1 MiB per token; 6.8 GiB stay free after the decoder allocates. The context budget still lowers the cap at long contexts. |
 | Batched hc mixes: two tokens and all 24 rows per block (state read once) | Retained for batches of 16+ tokens. Prefill 292 → 313 tok/s; perplexity 6.310. Decode keeps the per-row kernel (one block per token would idle the GPU). |
 | Single-token Q5_K/Q8_0 projections through an FP32-activation GEMV forked from the Gemma 4 K-quant GEMV (no Q8_1 activation pass), eight waves split into 8 / S row groups of S slices | Retained. DRAM-cold bandwidth, mmvq → GEMV: q_b 190 → 221, wo_b 191 → 219, grouped wo_a 200 → 219, shared gate 179 → 210, shared down 172 → 207, wq_a 154 → 198, wkv 102 → 166 GB/s (measured DRAM read peak 235 GB/s). S = 2 for K ≤ 2304, 4 for K ≤ 5120 with M ≤ 4096, else 8. Matches an fp64 dot to 2e-7 (mmvq: ~5e-3 from Q8_1 activations). Decode 50.5 → 47.2 ms/token; decode-path 3K perplexity 6.303, agreement 96.1%, mean |ΔNLL| 0.077. |
+| Single-token routed experts through an FP32-activation expert GEMV (IQ1_S, IQ1_M, IQ2_XXS, IQ2_S): IQ1 groups as d s (sum n x + (delta - 1) sum x), IQ1 codebook in LDS, IQ1_S loads two blocks ahead | Retained for IQ1 projections and IQ2 down projections; IQ2_XXS gate/up stay on mmvq (141 → 154 µs). DRAM-cold six-expert launches, mmvq → GEMV: IQ1_S gate/up 87.5 → 79.3 µs, down 94.1 → 85.2; IQ1_M 91.3 → 89.9, 106.1 → 95.9; IQ2_XXS down 208.5 → 147.2; IQ2_S down 224.5 → 158.7. Matches mmvq to its Q8_1 rounding (5e-3 to 9e-3, `ds41.mmq_typed`). Decode at 2K 47.1 / 47.8 → 46.5 / 46.8 ms/token (alternating runs); decode-path 3K perplexity 6.305, agreement 96.5%, mean \|ΔNLL\| 0.075. |
+| Expert GEMV variants (same DRAM-cold launches) | Rejected, each slower than the retained kernel: mmvq with 2, 4 or 8 waves per row (IQ1_S gate/up 91-118 µs); activations held in registers across 2-8 rows per lane (110-150 µs); activations staged in LDS, with or without bank padding (100-300 µs); non-temporal weight loads (102 µs); 32-row tiles staged into LDS with dword loads and one row per lane (126-245 µs, register spills); per-weight decode to floats before the FMA (95-100 µs). |
 
 ## Measured limits
 
 - Measured DRAM read peak (`tools/bench/gfx1151_peak.hip`): 235 GB/s. The
   dense decode projections run at 207-221 GB/s on the large shapes; decode
-  spends 42.6 ms of GPU time per token at 2K (47.2 ms wall). The routed
-  expert matvecs (IQ1_S/IQ1_M/IQ2_XXS, Q8_1 activations) total ~11 ms at
-  140-183 GB/s.
+  spends 42.6 ms of GPU time per token at 2K (47.2 ms wall).
+- Routed expert matvecs: a plain read of the same six DRAM-cold 2.3 MB
+  experts streams at 230-238 GB/s (58 µs); the expert GEMV reaches 160-175
+  GB/s on IQ1 (79-96 µs) and mmvq 145-170 GB/s. Both are bound by the
+  texture addresser (`TA_BUSY` ~92% of active cycles): every 32-value
+  sub-block costs four 2-byte weight loads and eight activation loads per
+  lane.
