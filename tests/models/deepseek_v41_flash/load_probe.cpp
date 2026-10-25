@@ -2,6 +2,7 @@
  * --upload the resident weights are copied to the GPU and the memory peak is
  * reported; otherwise the artifacts are only parsed, validated and bound. */
 #include <glob.h>
+#include <hip/hip_runtime_api.h>
 
 #include <algorithm>
 #include <chrono>
@@ -16,6 +17,7 @@
 #include <vector>
 
 #include "src/models/deepseek_v41_flash/runtime/model.h"
+#include "src/models/deepseek_v41_flash/runtime/v41_dspark.h"
 
 namespace {
 std::uint64_t MeminfoKiB(const char* key) {
@@ -225,6 +227,177 @@ int SpeculativeProbe(ds41_engine* engine, const std::vector<int>& prompt,
 }
 }  // namespace
 
+/* --dspark-generate N: greedy decode of N tokens after the prompt, first
+ * token by token, then in DSpark cycles; the outputs must match.
+ * --dspark-sweep repeats the DSpark run with at most 1 to 5 drafts. */
+int DsparkProbe(ds41_engine* engine, const std::vector<int>& prompt,
+                uint32_t context, int n_tokens, bool sweep) {
+  const int ctx =
+      (int)std::max<std::size_t>(context, prompt.size() + n_tokens + 16);
+  ds41_session* session = nullptr;
+  if (ds41_session_create(&session, engine, ctx, true) != 0) {
+    std::fprintf(stderr, "DSpark session creation failed\n");
+    return 1;
+  }
+  char error[256] = {};
+  ds41_tokens tokens{const_cast<int*>(prompt.data()), (int)prompt.size(),
+                     (int)prompt.size()};
+  const auto now = [] { return std::chrono::steady_clock::now(); };
+  const auto ms = [](auto a, auto b) {
+    return std::chrono::duration<double, std::milli>(b - a).count();
+  };
+  if (ds41_session_sync(session, &tokens, error, sizeof(error)) != 0) {
+    std::fprintf(stderr, "sync failed: %s\n", error);
+    return 1;
+  }
+  std::vector<int> plain;
+  auto t0 = now();
+  while ((int)plain.size() < n_tokens) {
+    const int token = ds41_session_argmax(session);
+    plain.push_back(token);
+    if (ds41_session_eval(session, token, error, sizeof(error)) != 0) {
+      std::fprintf(stderr, "eval failed: %s\n", error);
+      return 1;
+    }
+  }
+  const double plain_ms = ms(t0, now());
+  ds41_session_invalidate(session);
+  if (ds41_session_sync(session, &tokens, error, sizeof(error)) != 0) {
+    std::fprintf(stderr, "sync failed: %s\n", error);
+    return 1;
+  }
+  const int widths = sweep ? 5 : 1;
+  for (int width = 1; width <= widths; width++) {
+    if (width > 1) {
+      ds41_session_invalidate(session);
+      if (ds41_session_sync(session, &tokens, error, sizeof(error)) != 0)
+        return 1;
+    }
+    std::vector<int> spec;
+    int block[32];
+    int produced = 0;
+    uint64_t base_drafted = 0, base_accepted = 0, base_steps = 0, base_full = 0;
+    ds41_session_dspark_stats(session, nullptr, nullptr, &base_drafted,
+                              &base_accepted, nullptr, nullptr, &base_full,
+                              &base_steps, nullptr, nullptr);
+    t0 = now();
+    while ((int)spec.size() < n_tokens) {
+      ds41_session_dspark_batch_item item{
+          session,
+          block,
+          std::min(32, n_tokens - (int)spec.size()),
+          widths > 1 ? (uint32_t)width : 5u,
+          &produced,
+          nullptr,
+          false};
+      if (ds41_sessions_dspark_step_batch(&item, 1, error, sizeof(error)) !=
+          0) {
+        std::fprintf(stderr, "DSpark step failed: %s\n", error);
+        return 1;
+      }
+      spec.insert(spec.end(), block, block + produced);
+    }
+    const double spec_ms = ms(t0, now());
+    uint64_t drafted = 0, accepted = 0, steps = 0, full = 0;
+    ds41_session_dspark_stats(session, nullptr, nullptr, &drafted, &accepted,
+                              nullptr, nullptr, &full, &steps, nullptr,
+                              nullptr);
+    drafted -= base_drafted;
+    accepted -= base_accepted;
+    steps -= base_steps;
+    full -= base_full;
+    if (widths > 1)
+      std::printf("width %d: ", width);
+    int same = 0;
+    while (same < n_tokens && plain[same] == spec[same])
+      same++;
+    std::printf("plain %d tokens %.1f ms (%.2f tok/s)\n", n_tokens, plain_ms,
+                n_tokens * 1000.0 / plain_ms);
+    std::printf(
+        "dspark %zu tokens %.1f ms (%.2f tok/s), %llu cycles, drafted %llu "
+        "accepted %llu (%.1f%%), %.2f "
+        "tokens/cycle, %llu full blocks\n",
+        spec.size(), spec_ms, spec.size() * 1000.0 / spec_ms,
+        (unsigned long long)steps, (unsigned long long)drafted,
+        (unsigned long long)accepted,
+        drafted ? 100.0 * accepted / drafted : 0.0,
+        steps ? (double)spec.size() / steps : 0.0, (unsigned long long)full);
+    std::printf("greedy match: %d of %d tokens%s\n", same, n_tokens,
+                same == n_tokens ? " (identical)" : "");
+    if (same < n_tokens) {
+      std::printf("plain:");
+      for (int i = same; i < std::min(n_tokens, same + 8); i++)
+        std::printf(" %d", plain[i]);
+      std::printf("\ndspark:");
+      for (int i = same; i < std::min(n_tokens, same + 8); i++)
+        std::printf(" %d", spec[i]);
+      std::printf("\n");
+    }
+    if (same < n_tokens)
+      return 1;
+  }
+  ds41_session_free(session);
+  return 0;
+}
+
+/* --dspark-dump DIR: prefills the prompt, drafts after its argmax and writes
+ * the drafter inputs and outputs for tools/ds41/dspark_reference.py:
+ * features.f32 ([rows][3 * dim] target features of the last rows),
+ * logits.f32 ([block][vocab] head logits before the Markov bias) and
+ * draft.txt (first feature position, rows, anchor, drafts). */
+int DsparkDump(ds41_engine* engine, const std::vector<int>& prompt,
+               const char* dir) {
+  ds41_decoder* d = ds41_decoder_create(engine, (uint32_t)prompt.size() + 16);
+  ds41_dspark_state* s = d ? ds41_dspark_state_create(engine, d) : nullptr;
+  std::vector<float> logits((std::size_t)ds41_engine_vocab_size(engine));
+  if (!s)
+    return 1;
+  const uint32_t cap = ds41_decoder_batch_capacity(d);
+  uint32_t pos0 = 0, rows = 0;
+  const float* features = nullptr;
+  for (uint32_t at = 0; at < prompt.size();) {
+    const uint32_t n = std::min<uint32_t>(cap, (uint32_t)prompt.size() - at);
+    if (ds41_decoder_eval(d, prompt.data() + at, n, logits.data(), 1, nullptr,
+                          nullptr) != 0)
+      return 1;
+    features = ds41_decoder_features(d, &pos0, &rows);
+    /* The ring holds only the dumped rows, so the oracle sees the same keys. */
+    ds41_dspark_state_reset(s, pos0);
+    if (!ds41_dspark_inject(s, pos0, rows))
+      return 1;
+    at += n;
+  }
+  const int anchor = Argmax(logits.data(), logits.size());
+  int32_t drafts[DS41_DSPARK_BLOCK];
+  if (!ds41_dspark_draft(s, anchor, drafts))
+    return 1;
+  std::vector<float> host((std::size_t)rows * DS41_DSPARK_TARGET_LAYERS * 5120);
+  std::vector<float> draft_logits((std::size_t)DS41_DSPARK_BLOCK *
+                                  logits.size());
+  if (hipMemcpy(host.data(), features, host.size() * sizeof(float),
+                hipMemcpyDeviceToHost) != hipSuccess ||
+      !ds41_dspark_copy_logits(engine, draft_logits.data()))
+    return 1;
+  const std::string base(dir);
+  std::ofstream(base + "/features.f32", std::ios::binary)
+      .write((const char*)host.data(), host.size() * 4);
+  std::ofstream(base + "/logits.f32", std::ios::binary)
+      .write((const char*)draft_logits.data(), draft_logits.size() * 4);
+  std::ofstream meta(base + "/draft.txt");
+  meta << pos0 << " " << rows << " " << anchor;
+  for (int32_t t : drafts)
+    meta << " " << t;
+  meta << "\n";
+  std::printf("dumped %u feature rows from %u, anchor %d, drafts", rows, pos0,
+              anchor);
+  for (int32_t t : drafts)
+    std::printf(" %d", t);
+  std::printf("\n");
+  ds41_dspark_state_destroy(s);
+  ds41_decoder_destroy(d);
+  return 0;
+}
+
 int main(int argc, char** argv) {
   const char* model = nullptr;
   const char* engram = nullptr;
@@ -240,6 +413,10 @@ int main(int argc, char** argv) {
   bool rendered = false;
   int spec_check = 0;
   int spec_bench = -1;
+  const char* dspark = nullptr;
+  int dspark_generate = 0;
+  const char* dspark_dump = nullptr;
+  bool dspark_sweep = false;
   for (int i = 1; i < argc; ++i) {
     if (std::strcmp(argv[i], "--engram") == 0 && i + 1 < argc) {
       engram = argv[++i];
@@ -266,6 +443,16 @@ int main(int argc, char** argv) {
     } else if (std::strcmp(argv[i], "--spec-bench") == 0 && i + 1 < argc) {
       spec_bench = std::atoi(argv[++i]);
       upload = true;
+    } else if (std::strcmp(argv[i], "--dspark") == 0 && i + 1 < argc) {
+      dspark = argv[++i];
+    } else if (std::strcmp(argv[i], "--dspark-generate") == 0 && i + 1 < argc) {
+      dspark_generate = std::atoi(argv[++i]);
+      upload = true;
+    } else if (std::strcmp(argv[i], "--dspark-sweep") == 0) {
+      dspark_sweep = true;
+    } else if (std::strcmp(argv[i], "--dspark-dump") == 0 && i + 1 < argc) {
+      dspark_dump = argv[++i];
+      upload = true;
     } else if (std::strcmp(argv[i], "--rendered") == 0) {
       rendered = true;
     } else if (std::strcmp(argv[i], "--upload") == 0) {
@@ -278,12 +465,15 @@ int main(int argc, char** argv) {
     }
   }
   if (!model) {
-    std::fprintf(stderr,
-                 "usage: %s MODEL-00001-of-N.gguf [--engram FILE] [--upload] "
-                 "[--tokenize TEXTS [--rendered]] [--decode IDS [--generate N] "
-                 "[--score] [--batch] [--context N] [--prefill-batch N] "
-                 "[--out DIR]] [--spec-check CYCLES | --spec-bench N]\n",
-                 argv[0]);
+    std::fprintf(
+        stderr,
+        "usage: %s MODEL-00001-of-N.gguf [--engram FILE] [--upload] "
+        "[--tokenize TEXTS [--rendered]] [--decode IDS [--generate N] "
+        "[--score] [--batch] [--context N] [--prefill-batch N] "
+        "[--out DIR]] [--spec-check CYCLES | --spec-bench N | --dspark FILE "
+        "--dspark-generate N [--dspark-sweep] | --dspark FILE --dspark-dump "
+        "DIR]\n",
+        argv[0]);
     return 2;
   }
   Report("start");
@@ -294,6 +484,7 @@ int main(int argc, char** argv) {
   options.engram_path = engram;
   options.validate_only = !upload;
   options.prefill_batch = prefill_batch;
+  options.dspark_model_path = dspark;
   if (ds41_engine_open(&engine, &options) != 0)
     return 1;
   const double seconds =
@@ -330,7 +521,8 @@ int main(int argc, char** argv) {
       ds41_tokens_free(&tokens);
     }
   }
-  if (decode && (spec_check || spec_bench >= 0)) {
+  if (decode &&
+      (spec_check || spec_bench >= 0 || dspark_generate > 0 || dspark_dump)) {
     std::vector<int> prompt;
     for (const char* p = decode; *p;) {
       prompt.push_back(std::atoi(p));
@@ -339,6 +531,11 @@ int main(int argc, char** argv) {
       if (*p == ',')
         ++p;
     }
+    if (dspark_dump)
+      return DsparkDump(engine, prompt, dspark_dump);
+    if (dspark_generate > 0)
+      return DsparkProbe(engine, prompt, context, dspark_generate,
+                         dspark_sweep);
     return SpeculativeProbe(engine, prompt, context, spec_check, spec_bench);
   }
   if (decode) {

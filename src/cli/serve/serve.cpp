@@ -691,9 +691,10 @@ void PrintServeHelp(std::string_view program_name,
         "", "--draft-policy", "POLICY",
         "DFlash2 block length: fixed or adaptive (default: adaptive)",
         "Speculative", &draft_policy);
-    parser.AddOption("", "--dspark-model", "PATH",
-                     "Path to DeepSeek V4 Flash DSpark support GGUF file",
-                     "Speculative", &dspark_model_path);
+    parser.AddOption(
+        "", "--dspark-model", "PATH",
+        "Path to the DeepSeek V4 or V4.1 Flash DSpark support GGUF file",
+        "Speculative", &dspark_model_path);
     parser.AddOption("", "--mtp-model", "PATH",
                      "Path to the Qwen MTP draft GGUF (Qwen3.8-Flash-Next: the "
                      "mtp-...-shared-*.gguf sidecar)",
@@ -1314,9 +1315,10 @@ int RunServe(std::span<const char* const> args) {
         "", "--draft-policy", "POLICY",
         "DFlash2 block length: fixed or adaptive (default: adaptive)",
         "Speculative", &draft_policy);
-    llm_parser.AddOption("", "--dspark-model", "PATH",
-                         "Path to DeepSeek V4 Flash DSpark support GGUF file",
-                         "Speculative", &dspark_model_path);
+    llm_parser.AddOption(
+        "", "--dspark-model", "PATH",
+        "Path to the DeepSeek V4 or V4.1 Flash DSpark support GGUF file",
+        "Speculative", &dspark_model_path);
     llm_parser.AddOption(
         "", "--mtp-model", "PATH",
         "Path to the Qwen MTP draft GGUF (Qwen3.8-Flash-Next: the "

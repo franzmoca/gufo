@@ -1718,6 +1718,99 @@ __global__ void attention_combine_kernel(const float* partial, const float* sink
   }
 }
 
+/* Block (head, token): the DSpark block attention. Keys are the ring rows of
+ * positions first .. first + n_ring - 1 (slot pos % window) and every block row. */
+__global__ void dspark_attention_kernel(const float* q, const float* ring, uint32_t first, uint32_t n_ring,
+                                        uint32_t window, const float* block_kv, uint32_t n_block,
+                                        const float* sinks, float* out, uint32_t heads, uint32_t head_dim,
+                                        float scale) {
+  extern __shared__ float scores[];
+  const uint32_t head = blockIdx.x;
+  const uint32_t token = blockIdx.y;
+  const float* qh = q + ((uint64_t)token * heads + head) * head_dim;
+  auto key = [&](uint32_t j) {
+    return j < n_ring ? ring + (uint64_t)((first + j) % window) * head_dim
+                      : block_kv + (uint64_t)(j - n_ring) * head_dim;
+  };
+  const uint32_t n = n_ring + n_block;
+  const uint32_t warps = blockDim.x / warpSize;
+  const uint32_t warp = threadIdx.x / warpSize;
+  const uint32_t lane = threadIdx.x % warpSize;
+  for (uint32_t j = warp; j < n; j += warps) {
+    const float* k = key(j);
+    float dot = 0.0f;
+    for (uint32_t d = lane; d < head_dim; d += warpSize) dot += qh[d] * k[d];
+    for (int o = warpSize / 2; o > 0; o >>= 1) dot += __shfl_xor(dot, o);
+    if (lane == 0) scores[j] = dot * scale;
+  }
+  __syncthreads();
+  float m = -INFINITY;
+  for (uint32_t j = threadIdx.x; j < n; j += blockDim.x) m = fmaxf(m, scores[j]);
+  m = fmaxf(block_max(m), sinks[head]);
+  float sum = 0.0f;
+  for (uint32_t j = threadIdx.x; j < n; j += blockDim.x) {
+    scores[j] = expf(scores[j] - m);
+    sum += scores[j];
+  }
+  sum = block_sum(sum) + expf(sinks[head] - m);
+  __syncthreads();
+  for (uint32_t d = threadIdx.x; d < head_dim; d += blockDim.x) {
+    float acc = 0.0f;
+    for (uint32_t j = 0; j < n; j++) acc += scores[j] * key(j)[d];
+    out[((uint64_t)token * heads + head) * head_dim + d] = acc / sum;
+  }
+}
+
+__global__ void hc_mean_kernel(const float* h, float* out, uint64_t out_stride, uint32_t hc, uint32_t dim) {
+  const uint32_t i = blockIdx.x * blockDim.x + threadIdx.x;
+  const uint32_t t = blockIdx.y;
+  if (i >= dim) return;
+  const float* row = h + (uint64_t)t * hc * dim + i;
+  float sum = 0.0f;
+  for (uint32_t c = 0; c < hc; c++) sum += row[(uint64_t)c * dim];
+  out[t * out_stride + i] = sum / (float)hc;
+}
+
+/* out[0:rank] = table row tokens[index] (F32, or BF16 when bf16). */
+__global__ void gather_row_kernel(const void* table, int bf16, const int32_t* tokens, uint32_t index, float* out,
+                                  uint32_t rank) {
+  const uint64_t row = (uint64_t)tokens[index] * rank;
+  for (uint32_t d = threadIdx.x; d < rank; d += blockDim.x)
+    out[d] = bf16 ? bf16_to_f32(((const uint16_t*)table)[row + d]) : ((const float*)table)[row + d];
+}
+
+/* tokens[index] = argmax over finite x[v] + bias[v], the first on ties; -1 when none. One block. */
+__global__ void __launch_bounds__(1024) argmax_bias_kernel(const float* x, const float* bias, uint32_t n,
+                                                           int32_t* tokens, uint32_t index) {
+  __shared__ float best_v[1024];
+  __shared__ int32_t best_i[1024];
+  float v = -INFINITY;
+  int32_t at = -1;
+  for (uint32_t i = threadIdx.x; i < n; i += blockDim.x) {
+    const float s = x[i] + (bias ? bias[i] : 0.0f);
+    if (isfinite(s) && (at < 0 || s > v)) {
+      v = s;
+      at = (int32_t)i;
+    }
+  }
+  best_v[threadIdx.x] = v;
+  best_i[threadIdx.x] = at;
+  __syncthreads();
+  for (uint32_t step = blockDim.x / 2; step > 0; step >>= 1) {
+    if (threadIdx.x < step) {
+      const float ov = best_v[threadIdx.x + step];
+      const int32_t oi = best_i[threadIdx.x + step];
+      if (oi >= 0 && (best_i[threadIdx.x] < 0 || ov > best_v[threadIdx.x] ||
+                      (ov == best_v[threadIdx.x] && oi < best_i[threadIdx.x]))) {
+        best_v[threadIdx.x] = ov;
+        best_i[threadIdx.x] = oi;
+      }
+    }
+    __syncthreads();
+  }
+  if (threadIdx.x == 0) tokens[index] = best_i[0];
+}
+
 /* Block per token. */
 __global__ void route_kernel(const float* all_logits, const float* bias, int32_t* all_ids, float* all_weights,
                              uint32_t n_experts, uint32_t k, float route_scale) {
@@ -2092,4 +2185,33 @@ extern "C" int ds41_v41_engram_gate(float* h, const float* kv, const uint16_t* q
                                     uint32_t dim, float eps, uint32_t n) {
   engram_gate_kernel<<<dim3(hc, n), 1024>>>(h, kv, q, k, dim, hc, eps);
   return launch_ok("engram gate");
+}
+
+extern "C" int ds41_v41_dspark_attention(const float* q, const float* ring, uint32_t first, uint32_t n_ring,
+                                         uint32_t window, const float* block_kv, uint32_t n_block,
+                                         const float* sinks, float* out, uint32_t heads, uint32_t head_dim,
+                                         float scale) {
+  const size_t shared = (size_t)(n_ring + n_block) * sizeof(float);
+  if (n_ring > window || shared > 60 * 1024) return 1;
+  dspark_attention_kernel<<<dim3(heads, n_block), kThreads, shared>>>(q, ring, first, n_ring, window, block_kv,
+                                                                      n_block, sinks, out, heads, head_dim, scale);
+  return launch_ok("dspark attention");
+}
+
+extern "C" int ds41_v41_hc_mean(const float* h, float* out, uint64_t out_stride, uint32_t hc, uint32_t dim,
+                                uint32_t n) {
+  if (n == 0) return 0;
+  hc_mean_kernel<<<dim3(blocks_for(dim), n), kThreads>>>(h, out, out_stride, hc, dim);
+  return launch_ok("hc mean");
+}
+
+extern "C" int ds41_v41_gather_row(const void* table, int bf16, const int32_t* tokens, uint32_t index, float* out,
+                                   uint32_t rank) {
+  gather_row_kernel<<<1, kThreads>>>(table, bf16, tokens, index, out, rank);
+  return launch_ok("gather row");
+}
+
+extern "C" int ds41_v41_argmax_bias(const float* x, const float* bias, uint32_t n, int32_t* tokens, uint32_t index) {
+  argmax_bias_kernel<<<1, 1024>>>(x, bias, n, tokens, index);
+  return launch_ok("argmax");
 }

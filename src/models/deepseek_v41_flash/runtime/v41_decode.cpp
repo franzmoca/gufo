@@ -27,6 +27,7 @@
 #include "model_data_internal.h"
 #include "native_internal.h"
 #include "tensor_types.h"
+#include "v41_dspark.h"
 
 namespace {
 
@@ -259,6 +260,10 @@ struct ds41_decoder : Activations {
   bool spec_eval = false;
   float* spec_window = nullptr;  // [layer][DS41_DECODER_MAX_SPECULATIVE][head_dim]
   float* spec_pool = nullptr;    // [layer][kv, score][DS41_DECODER_MAX_SPECULATIVE][head_dim]
+  /* DSpark target features: [DS41_DSPARK_FEATURE_ROWS][3 * dim] hc-means of
+   * the target layers' inputs for positions feature_pos0 .. + feature_rows. */
+  float* features = nullptr;
+  uint32_t feature_pos0 = 0, feature_rows = 0;
   std::vector<int64_t> engram_history;
   std::vector<float> host_h;
   std::vector<int32_t> host_ids;
@@ -1141,6 +1146,7 @@ int ds41_decoder_load(ds41_decoder* d, const uint8_t* data, uint64_t size, uint6
   if (!ok) return 1;
   d->pos = (uint32_t)header[1];
   d->spec_n = 0;
+  d->feature_rows = 0;
   d->comp_layer = (int)(int64_t)header[2];
   d->engram_history = std::move(history);
   if (consumed) *consumed = at;
@@ -1196,6 +1202,7 @@ int ds41_decoder_adopt(ds41_decoder* d, const int* tokens, uint32_t n) {
   for (uint32_t il = 0; n && il < DS41_N_LAYER; il++)
     if (ds41_layer_is_kv_source(il)) d->comp_layer = (int)il;
   d->pos = n;
+  d->feature_rows = 0;
   return 0;
 }
 
@@ -1211,6 +1218,7 @@ int ds41_decoder_reset(ds41_decoder* d) {
   }
   d->pos = 0;
   d->spec_n = 0;
+  d->feature_rows = 0;
   d->comp_layer = -1;
   d->engram_history.clear();
   return 0;
@@ -1271,9 +1279,17 @@ int ds41_decoder_eval(ds41_decoder* d, const int* tokens, uint32_t n, float* log
        hipMemcpy(d->pre[0], one_hot.data(), one_hot.size() * sizeof(float), hipMemcpyHostToDevice) == hipSuccess;
 
   const int prev = 0;
+  const uint32_t feature_rows = std::min(n, DS41_DSPARK_FEATURE_ROWS);
+  d->feature_rows = 0;
   for (uint32_t il = 0; il < DS41_N_LAYER && ok; il++) {
     const int slot = ds41_layer_engram_slot(il);
     if (slot >= 0) ok = engram_reads[slot].get() && engram(d, il, engram_out[slot], n);
+    if (d->features) {
+      for (uint32_t f = 0; f < DS41_DSPARK_TARGET_LAYERS && ok; f++)
+        if (il == DS41_DSPARK_TARGET_LAYER[f])
+          ok = ds41_v41_hc_mean(d->h + (uint64_t)(n - feature_rows) * hd, d->features + (uint64_t)f * kDim,
+                                (uint64_t)DS41_DSPARK_TARGET_LAYERS * kDim, kHc, kDim, feature_rows) == 0;
+    }
     /* block() leaves this layer's FFN pre-mix in pre[prev]. */
     ok = ok && block(d, il, prev, prev ^ 1, n);
     if (ok && layer_fn) {
@@ -1302,6 +1318,10 @@ int ds41_decoder_eval(ds41_decoder* d, const int* tokens, uint32_t n, float* log
     /* The device state is partial; callers reset or reload before reuse. */
     d->engram_history.resize(history);
     return 1;
+  }
+  if (d->features) {
+    d->feature_pos0 = d->pos + n - feature_rows;
+    d->feature_rows = feature_rows;
   }
   d->pos += n;
   return 0;
@@ -1349,3 +1369,39 @@ int ds41_decoder_commit(ds41_decoder* d, uint32_t keep) {
 int ds41_decoder_step(ds41_decoder* d, int token, float* logits, ds41_decoder_layer_fn layer_fn, void* ctx) {
   return ds41_decoder_eval(d, &token, 1, logits, logits ? 1 : 0, layer_fn, ctx);
 }
+
+bool ds41_decoder_enable_features(ds41_decoder* d) {
+  if (!d) return false;
+  if (!d->features)
+    d->features =
+        alloc<float>(d->allocations, (uint64_t)DS41_DSPARK_FEATURE_ROWS * DS41_DSPARK_TARGET_LAYERS * kDim);
+  d->feature_rows = 0;
+  return d->features != nullptr;
+}
+
+const float* ds41_decoder_features(const ds41_decoder* d, uint32_t* pos0, uint32_t* rows) {
+  *pos0 = d->feature_pos0;
+  *rows = d->feature_rows;
+  return d->features;
+}
+
+bool ds41_v41_linear(uint32_t type, const void* w, uint32_t rows, uint32_t k, const float* x, float* out, uint32_t n) {
+  return linear_raw(type, w, rows, k, x, out, n);
+}
+
+bool ds41_decoder_output_head(const ds41_decoder* d, const float* x, float* logits, uint32_t n) {
+  return linear(d, d->engine->weights->output, x, logits, n);
+}
+
+bool ds41_decoder_embed(const ds41_decoder* d, const int* tokens, uint32_t n, float* host_rows) {
+  const ds41_tensor* embd = d->engine->weights->token_embd;
+  const uint64_t row_bytes = embd->bytes / DS41_N_VOCAB;
+  for (uint32_t t = 0; t < n; t++)
+    if (tokens[t] < 0 || tokens[t] >= (int)DS41_N_VOCAB ||
+        !dequant_row(embd->type, host(d, embd) + (uint64_t)tokens[t] * row_bytes, host_rows + (uint64_t)t * kDim,
+                     kDim))
+      return false;
+  return true;
+}
+
+const float* ds41_decoder_freq_plain(const ds41_decoder* d) { return d->freq_plain; }
