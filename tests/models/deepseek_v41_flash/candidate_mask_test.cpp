@@ -40,26 +40,28 @@ std::size_t Case(uint32_t pos0, uint32_t n, uint32_t ratio, uint32_t block,
     v = normal(rng);
 
   float* d_score = Device(score);
-  uint8_t* d_mask = nullptr;
+  uint32_t* d_mask = nullptr;
   float* d_blocks = nullptr;
   uint32_t* d_select = nullptr;
-  const std::size_t mask_bytes = (std::size_t)n * block_stride;
+  const uint64_t mask_words = (block_stride + 31) / 32;
+  const std::size_t mask_bytes = (std::size_t)n * mask_words * sizeof(uint32_t);
   (void)hipMalloc(&d_mask, mask_bytes);
   (void)hipMalloc(&d_blocks, (std::size_t)n * block_stride * sizeof(float));
   (void)hipMalloc(&d_select, (std::size_t)n * topk * sizeof(uint32_t));
   (void)hipMemset(d_mask, 0xff, mask_bytes);
   if (!d_score || !d_mask || !d_blocks || !d_select ||
-      ds41_v41_candidate_mask(d_score, stride, d_mask, d_blocks, block_stride,
-                              d_select, pos0, n, ratio, block, topk) ||
-      ds41_v41_apply_mask(d_score, stride, d_mask, block_stride, pos0, n, ratio,
+      ds41_v41_candidate_mask(d_score, stride, d_mask, mask_words, d_blocks,
+                              block_stride, d_select, pos0, n, ratio, block,
+                              topk) ||
+      ds41_v41_apply_mask(d_score, stride, d_mask, mask_words, pos0, n, ratio,
                           block) ||
       hipDeviceSynchronize() != hipSuccess) {
     std::fprintf(stderr, "launch failed\n");
     return SIZE_MAX;
   }
-  std::vector<uint8_t> mask(mask_bytes);
+  std::vector<uint32_t> mask((std::size_t)n * mask_words);
   std::vector<float> masked(score.size());
-  (void)hipMemcpy(mask.data(), d_mask, mask.size(), hipMemcpyDeviceToHost);
+  (void)hipMemcpy(mask.data(), d_mask, mask_bytes, hipMemcpyDeviceToHost);
   (void)hipMemcpy(masked.data(), d_score, masked.size() * sizeof(float),
                   hipMemcpyDeviceToHost);
   (void)hipFree(d_score);
@@ -86,7 +88,8 @@ std::size_t Case(uint32_t pos0, uint32_t n, uint32_t ratio, uint32_t block,
     for (uint32_t i = 0; i < std::min(topk, nb); i++)
       keep[order[i]] = 1;
     for (uint32_t b = 0; b < nb; b++)
-      bad += mask[(std::size_t)t * block_stride + b] != keep[b];
+      bad += ((mask[(std::size_t)t * mask_words + b / 32] >> (b % 32)) & 1u) !=
+             keep[b];
     for (uint32_t j = 0; j < len; j++) {
       const uint8_t want = keep[j / block];
       dropped += !want;

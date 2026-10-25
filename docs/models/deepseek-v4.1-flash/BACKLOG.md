@@ -31,7 +31,6 @@ WMMA), attention 8.8%, Q8_1 activation quantization 5.0%, BF16 matmuls
 | 2 | Launch gaps between decode kernels | Decode | Medium | Up to ~2.7 ms/token | Medium |
 | 3 | Routed-expert MMQ unpack and rate | Prefill | Hard | Up to ~1 s per 2K prefill at the dense rate | Low |
 | 4 | Q8_1 quantization in the producing kernels | Prefill | Medium | ~0.2 s per 2K prefill (~3%) | Low |
-| 5 | FP4-packed KV state | Memory | Medium | ~2.2 GiB more free at 1M context | Medium |
 
 ### 1. Routed-expert GEMV with wide-load weight tiles
 
@@ -106,10 +105,10 @@ one Q8_1 quantization per remaining projection input (~0.4 ms each); folding
 it into the producing norm kernels would remove those passes, and the
 shared-expert SwiGLU (9 ms) could use the dense up pass's store.
 
-### 5. FP4-packed KV state
+## Memory
 
-Done: compressed KV and index-K rows are stored as bfloat16 (exact), halving
-the state to ~3.1 GiB at 1M and restoring 2048-token prefill batches there.
-Packing them as FP4 codes plus block scales would shrink them ~3.5x further
-(the attention and indexer kernels would decode on load); not needed for the
-batch size now.
+Resident weights take 112.27 GiB GTT. A session at the native 1M context
+adds 0.9 GiB of FP4 state; the batch scratch (1.4 GiB at 1M, of it 256 MiB
+of indexer scores) is shared by all sessions, and a 2048-token prefill peaks
+0.3 GiB higher. Further reductions would need smaller prefill batches, which
+cost speed (see EXPERIMENTS.md).
