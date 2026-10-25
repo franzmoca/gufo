@@ -203,6 +203,7 @@ struct Activations {
   uint32_t *topk = nullptr, *block_select = nullptr;
   float *attn_partial = nullptr;
   float *o = nullptr, *o_group = nullptr, *oa_group = nullptr, *oa = nullptr, *attn_out = nullptr;
+  float* rope = nullptr;  // [cap, kRot / 2] (cos, sin) for the batched attention
   float *router = nullptr, *route_w = nullptr;
   int32_t* route_ids = nullptr;
   uint8_t* expert_class = nullptr;  // routed tile-width class per expert
@@ -470,8 +471,7 @@ bool attention(ds41_decoder* d, uint32_t il, uint32_t n) {
   }
   if (ds41_v41_q_kv_norm(d->qa, f32(d, l->attn_q_a_norm), d->qr, DS41_N_LORA_Q, d->kv, f32(d, l->attn_kv_a_norm),
                          d->kvn, kHeadDim, kRot, freq, pos0, n, eps) ||
-      !linear(d, l->attn_q_b, d->qr, d->q, n) ||
-      ds41_v41_rope_tail(d->q, n * DS41_N_HEAD, kHeadDim, kRot, freq, pos0, DS41_N_HEAD, 1, 0))
+      !linear(d, l->attn_q_b, d->qr, d->q, n))
     return false;
 
   ds41_fp4_rows comp{};
@@ -541,9 +541,8 @@ bool attention(ds41_decoder* d, uint32_t il, uint32_t n) {
 
   if (ds41_v41_attention(d->q, s.window, d->kvn, DS41_N_SWA, comp, d->topk, DS41_N_INDEXER_TOP_K, ratio,
                          f32(d, l->attn_sinks), d->o, d->attn_partial, pos0, n, DS41_N_HEAD, kHeadDim,
-                         1.0f / sqrtf((float)kHeadDim)) ||
-      !store_window(s, d->kvn, pos0, n) ||
-      ds41_v41_rope_fp8(d->o, n * DS41_N_HEAD, kHeadDim, kRot, freq, pos0, DS41_N_HEAD, 1, 1))
+                         1.0f / sqrtf((float)kHeadDim), freq, kRot, d->rope) ||
+      !store_window(s, d->kvn, pos0, n))
     return false;
 
   /* Grouped LoRA output: group g maps head slice g of every token. */
@@ -843,6 +842,7 @@ std::shared_ptr<SharedActivations> make_activations(ds41_engine* engine, uint32_
         {&a.oa_group, cap * DS41_N_LORA_O, kAttention},
         {&a.oa, cap * DS41_N_OUT_GROUP * DS41_N_LORA_O, kAttention},
         {&a.attn_out, cap * kDim, kAttention},
+        {&a.rope, cap * kRot, kAttention},
         {&a.router, cap * DS41_N_EXPERT, kFfn},
         {&a.route_w, cap * DS41_N_EXPERT_USED, kFfn},
         {&a.g6, cap * routed, kFfn},
