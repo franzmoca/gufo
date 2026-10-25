@@ -70,8 +70,9 @@ def llm_command(model_id, binary, assets, *, mode=None, context=32768, sessions=
     root = Path(assets[model['asset']])
     command = [str(binary), 'serve', 'llm', '--model', str(root / model['target']),
                '--speculative', mode or model['mode'], '--context', str(context),
-               '--sessions', str(sessions), model['draft_option'],
-               str(Path(assets[model['draft_asset']]) / model['draft'])]
+               '--sessions', str(sessions)]
+    if 'draft_asset' in model:
+        command += [model['draft_option'], str(Path(assets[model['draft_asset']]) / model['draft'])]
     if model.get('projector'):
         command += ['--mmproj', str(root / model['projector'])]
     return command

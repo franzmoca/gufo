@@ -39,6 +39,7 @@ class PlanTest(unittest.TestCase):
     def test_private_model_and_mixed_paths_preserve_both(self):
         private = 'src/models/deepseek_v4_flash/model.cpp'
         self.assertEqual(self.models(private), {'deepseek4'})
+        self.assertEqual(self.models('src/models/deepseek_v41_flash/engine.cpp'), {'deepseek41'})
         self.assertEqual(self.models(private, 'src/core/sampling.cpp'), {'deepseek4', 'flash-next-q4'})
         self.assertEqual(self.models('src/models/qwen/hip/attention.hip'), {'qwen27-q4'})
         self.assertEqual(self.models('src/models/qwen38_flash_next/engine.cpp'), {'flash-next-q4'})
@@ -64,6 +65,8 @@ class PlanTest(unittest.TestCase):
                          {'qwen3-tts-base', 'qwen3-tts-custom', 'qwen3-tts-design'})
         plan = self.plan('src/models/deepseek_v4_flash/model.cpp', ar=True)
         self.assertEqual({g['profile'] for g in plan['groups']}, {'deepseek4/off', 'deepseek4/dspark'})
+        plan = self.plan('src/models/deepseek_v41_flash/engine.cpp', ar=True)
+        self.assertEqual({g['profile'] for g in plan['groups']}, {'deepseek41/off'})
         self.assertEqual(self.models('docs/README.md', benchmark=True), {'flash-next-q4'})
 
     def test_timing_gates_follow_production_changes(self):
@@ -78,6 +81,8 @@ class PlanTest(unittest.TestCase):
                          ['asr', 'tts-base'])
         self.assertEqual(devlab_models.asset_keys(self.plan('src/models/deepseek_v4_flash/model.cpp'), self.data),
                          ['deepseek4', 'dspark'])
+        self.assertEqual(devlab_models.asset_keys(self.plan('src/models/deepseek_v41_flash/engine.cpp'), self.data),
+                         ['deepseek41'])
         self.assertEqual(devlab_models.asset_keys(self.plan('docs/SERVER.md'), self.data), [])
         for asset in self.data['assets'].values():
             self.assertRegex(asset['revision'], r'^[0-9a-f]{40}$')
@@ -93,6 +98,11 @@ class PlanTest(unittest.TestCase):
             self.assertEqual(args[args.index('--sampling-preset')+1], preset)
             self.assertEqual('--mmproj' in args, key.startswith('qwen'))
             self.assertIn('--record-baseline', args)
+        plan = self.plan('src/models/deepseek_v41_flash/engine.cpp')
+        args = cluster.command(plan['groups'][0], Path('/gufo'), None, Path('/out'), 'pr', assets)
+        self.assertEqual(args[args.index('--speculative')+1], 'off')
+        self.assertFalse({'--dspark-model', '--mtp-model', '--dflash-model'} & set(args), args)
+        self.assertEqual(args[args.index('--sampling-preset')+1], 'deepseek4')
 
     def test_tts_evaluator_is_merge_base_and_fixture_is_packaged(self):
         assets = {key: '/weights/' + key for key in self.data['assets']}

@@ -66,6 +66,21 @@
         "DeepSeek-V4-Flash-DSpark-support-0731.gguf"
       ]
     },
+    "deepseek41": {
+      "repo": "ISTA-DASLab/DeepSeek-V4.1-Flash-1017-GSQ-RCO-GGUF",
+      "revision": "cb02422c900df489cea5833e8a92171224059b3c",
+      "patterns": [
+        "DeepSeek-V4.1-Flash-1017-GSQ-RCO-IQ1_M-*.gguf",
+        "DeepSeek-V4.1-Flash-Engram-IQ4_NL.gguf"
+      ],
+      "required": [
+        "DeepSeek-V4.1-Flash-1017-GSQ-RCO-IQ1_M-00001-of-00004.gguf",
+        "DeepSeek-V4.1-Flash-1017-GSQ-RCO-IQ1_M-00002-of-00004.gguf",
+        "DeepSeek-V4.1-Flash-1017-GSQ-RCO-IQ1_M-00003-of-00004.gguf",
+        "DeepSeek-V4.1-Flash-1017-GSQ-RCO-IQ1_M-00004-of-00004.gguf",
+        "DeepSeek-V4.1-Flash-Engram-IQ4_NL.gguf"
+      ]
+    },
     "embedding": {
       "repo": "google/embeddinggemma-2",
       "revision": "914f7f89142e33e77833254d9c9b90c3cef7303b",
@@ -191,6 +206,14 @@
       "mode": "dspark",
       "sampling": "deepseek4"
     },
+    "deepseek41": {
+      "title": "DeepSeek V4.1 Flash",
+      "category": "llm",
+      "asset": "deepseek41",
+      "target": "DeepSeek-V4.1-Flash-1017-GSQ-RCO-IQ1_M-00001-of-00004.gguf",
+      "mode": "off",
+      "sampling": "deepseek4"
+    },
     "embedding-gemma2": {
       "title": "EmbeddingGemma 2",
       "category": "embedding",
@@ -287,6 +310,18 @@
       ],
       "owners": [
         "deepseek4"
+      ]
+    },
+    {
+      "id": "private-deepseek41",
+      "priority": 20,
+      "paths": [
+        "src/models/deepseek_v41_flash/**",
+        "tests/models/deepseek_v41_flash/**",
+        "tools/ds41/**"
+      ],
+      "owners": [
+        "deepseek41"
       ]
     },
     {

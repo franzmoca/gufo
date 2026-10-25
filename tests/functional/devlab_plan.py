@@ -66,7 +66,7 @@ def select(paths, data, tier='pr', ar=False, benchmark=False):
         result['models'].append({'id': key, 'category': model['category'], 'reasons': reasons,
                                  'timing_checks': timing_checks(model, reasons)})
         if model['category'] == 'llm':
-            modes = [model['mode']] + (['off'] if ar else [])
+            modes = [model['mode']] + (['off'] if ar and model['mode'] != 'off' else [])
             profiles = [key + '/' + mode for mode in modes]
             affected = [reason['path'] for reason in reasons if reason['path']]
             # Benchmark-only dispatches still receive a bounded correctness plan.
