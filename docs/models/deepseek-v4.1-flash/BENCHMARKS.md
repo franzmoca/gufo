@@ -27,6 +27,19 @@ prefills at 384 tok/s with a prompt-sized context, 386 tok/s in a
 131K-token context (was 245 with 409-token batches) and 381 tok/s in the
 native 1M context (was ~120 with 51-token batches).
 
+## Memory
+
+GTT in use (`ds41_load_probe --upload` and `gufo serve`, native 1M context):
+
+| State | Before | Now |
+|---|---:|---:|
+| Weights loaded | 112.69 GiB | 112.27 GiB |
+| One session | 118.32 GiB | 114.55 GiB |
+| Two sessions (`-j 2`) | does not fit | 115.45 GiB |
+
+With two sessions, 6.3 GiB of host memory stays available. A 2,048-token
+prefill peaks 0.3 GiB above the idle session.
+
 `gufo serve` (16K context, before the FP32-activation GEMV): a 9,160-token
 chat prompt prefilled at 307 tok/s in six chunks of up to 2,048 tokens, then
 decoded at 19.8 tok/s; repeating it reused all 9,160 prompt tokens from the

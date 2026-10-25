@@ -1,6 +1,8 @@
 // Batched (matrix-core) and split decode attention against a double
 // precision reference of the plain softmax-with-sink over window and
 // compressed rows; the indexer scores against the same kind of reference.
+// The compressed rows are packed FP4, checked bit for bit against the
+// fake-quantized floats through a host decoding of the documented format.
 #include <hip/hip_runtime.h>
 
 #include <algorithm>
@@ -31,18 +33,55 @@ T* Device(const std::vector<T>& host) {
   return static_cast<T*>(p);
 }
 
-/* Rounds v to bfloat16 in place (the stored compressed-row format) and
- * returns the bits. */
-std::vector<uint16_t> Bf16(std::vector<float>& v) {
-  std::vector<uint16_t> bits(v.size());
-  for (std::size_t i = 0; i < v.size(); i++) {
-    uint32_t u = 0;
-    std::memcpy(&u, &v[i], sizeof(u));
-    u &= 0xffff0000u;
-    std::memcpy(&v[i], &u, sizeof(u));
-    bits[i] = static_cast<uint16_t>(u >> 16);
+int g_format_errors = 0;
+
+/* The stored FP4 row format decoded on the host, as documented with
+ * ds41_fp4_rows. */
+float HostFp4(const std::vector<uint8_t>& codes,
+              const std::vector<uint8_t>& scales, std::size_t i, uint32_t block,
+              bool e4m3) {
+  static const float kE2m1[8] = {0.0f, 0.5f, 1.0f, 1.5f,
+                                 2.0f, 3.0f, 4.0f, 6.0f};
+  const uint32_t c = (codes[i / 2] >> (4 * (i & 1))) & 15u;
+  const uint32_t b = scales[i / block];
+  float scale;
+  if (e4m3) {
+    const uint32_t e = b >> 3, m = b & 7u;
+    scale =
+        e ? std::ldexp(1.0f + m / 8.0f, (int)e - 7) : std::ldexp((float)m, -9);
+  } else {
+    scale = std::ldexp(1.0f, (int)b - 127);
   }
-  return bits;
+  return (c & 8u ? -kE2m1[c & 7u] : kE2m1[c & 7u]) * scale;
+}
+
+/* Packs v as FP4 rows with ds41_v41_fp4_store, replaces v by the values of
+ * ds41_v41_fp4_fake_quant (the reference), and counts in g_format_errors
+ * the values whose host decoding of the packed bytes differs from them. */
+ds41_fp4_rows Fp4(std::vector<float>& v, uint32_t block, bool e4m3,
+                  uint8_t** codes_out, uint8_t** scales_out) {
+  std::vector<uint8_t> codes(v.size() / 2), scales(v.size() / block);
+  float* x = Device(v);
+  uint8_t* dcodes = Device(codes);
+  uint8_t* dscales = Device(scales);
+  if (!x || !dcodes || !dscales ||
+      ds41_v41_fp4_store(x, dcodes, dscales, (uint32_t)v.size(), block, e4m3) ||
+      ds41_v41_fp4_fake_quant(x, (uint32_t)v.size(), block, e4m3) ||
+      hipDeviceSynchronize() != hipSuccess) {
+    g_format_errors++;
+  }
+  (void)hipMemcpy(v.data(), x, v.size() * sizeof(float), hipMemcpyDeviceToHost);
+  (void)hipMemcpy(codes.data(), dcodes, codes.size(), hipMemcpyDeviceToHost);
+  (void)hipMemcpy(scales.data(), dscales, scales.size(), hipMemcpyDeviceToHost);
+  (void)hipFree(x);
+  for (std::size_t i = 0; i < v.size(); i++) {
+    const float got = HostFp4(codes, scales, i, block, e4m3);
+    if (std::memcmp(&got, &v[i], sizeof(float)) != 0)
+      g_format_errors++;
+  }
+  *codes_out = dcodes;
+  *scales_out = dscales;
+  return {dcodes, dscales};
 }
 
 /* n tokens at pos0 with `comp_rows` compressed rows at the given ratio;
@@ -60,7 +99,12 @@ double Case(uint32_t pos0, uint32_t n, uint32_t ratio, uint32_t comp_rows,
   const auto ring = fill((std::size_t)kWindow * kDim, 1.0f);
   const auto chunk = fill((std::size_t)n * kDim, 1.0f);
   auto comp = fill((std::size_t)std::max(comp_rows, 1u) * kDim, 1.0f);
-  const auto comp_bits = Bf16(comp);
+  /* Rows of several magnitudes, down to subnormal E4M3 block scales. */
+  for (std::size_t i = 0; i < comp.size(); i++)
+    comp[i] *=
+        (i / kDim) % 3 == 0 ? 1.0f : ((i / kDim) % 3 == 1 ? 1e-3f : 30.0f);
+  uint8_t *dcodes = nullptr, *dscales = nullptr;
+  const ds41_fp4_rows dcomp = Fp4(comp, 16, true, &dcodes, &dscales);
   const auto sinks = fill(kHeads, 1.0f);
   std::vector<uint32_t> idx((std::size_t)n * kTopK, 0);
   for (uint32_t t = 0; t < n; t++) {
@@ -76,7 +120,6 @@ double Case(uint32_t pos0, uint32_t n, uint32_t ratio, uint32_t comp_rows,
   auto* dq = Device(q);
   auto* dring = Device(ring);
   auto* dchunk = Device(chunk);
-  auto* dcomp = Device(comp_bits);
   auto* dsinks = Device(sinks);
   auto* didx = Device(idx);
   std::vector<float> partial_host((std::size_t)n * kHeads *
@@ -92,8 +135,9 @@ double Case(uint32_t pos0, uint32_t n, uint32_t ratio, uint32_t comp_rows,
   (void)hipDeviceSynchronize();
   (void)hipMemcpy(out.data(), dout, out.size() * sizeof(float),
                   hipMemcpyDeviceToHost);
-  for (void* p : {(void*)dq, (void*)dring, (void*)dchunk, (void*)dcomp,
-                  (void*)dsinks, (void*)didx, (void*)dpartial, (void*)dout})
+  for (void* p :
+       {(void*)dq, (void*)dring, (void*)dchunk, (void*)dcodes, (void*)dscales,
+        (void*)dsinks, (void*)didx, (void*)dpartial, (void*)dout})
     (void)hipFree(p);
   if (rc != 0)
     return INFINITY;
@@ -158,11 +202,12 @@ double IndexerCase(uint32_t pos0, uint32_t n, uint32_t ratio,
       x = normal(rng);
   const float scale = 0.0625f;
   float* d_q = Device(q);
-  uint16_t* d_keys = Device(Bf16(keys));
+  uint8_t *d_codes = nullptr, *d_scales = nullptr;
+  const ds41_fp4_rows d_keys = Fp4(keys, 32, false, &d_codes, &d_scales);
   float* d_w = Device(w);
   float* d_score = nullptr;
   (void)hipMalloc(&d_score, (std::size_t)n * stride * sizeof(float));
-  if (!d_q || !d_keys || !d_w || !d_score ||
+  if (!d_q || !d_codes || !d_w || !d_score ||
       ds41_v41_indexer_score(d_q, d_keys, d_w, scale, d_score, stride, pos0, n,
                              ratio, heads, dim) ||
       hipDeviceSynchronize() != hipSuccess) {
@@ -172,7 +217,8 @@ double IndexerCase(uint32_t pos0, uint32_t n, uint32_t ratio,
   std::vector<float> score((std::size_t)n * stride);
   (void)hipMemcpy(score.data(), d_score, score.size() * sizeof(float),
                   hipMemcpyDeviceToHost);
-  (void)hipFree(d_keys);
+  (void)hipFree(d_codes);
+  (void)hipFree(d_scales);
   for (float* p : {d_q, d_w, d_score})
     (void)hipFree(p);
   double worst = 0.0;
@@ -291,6 +337,8 @@ int main() {
     std::printf("q kv norm n=%u max_abs_diff=%.2e\n", n, e);
     ok = e < 1e-5 && ok;
   }
+  std::printf("fp4 row format mismatches %d\n", g_format_errors);
+  ok = g_format_errors == 0 && ok;
   std::printf("%s\n", ok ? "PASS" : "FAIL");
   return ok ? 0 : 1;
 }

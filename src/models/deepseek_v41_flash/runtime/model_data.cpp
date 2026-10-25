@@ -760,13 +760,21 @@ static uint64_t accelerator_rocm_preload_span_bytes(const ds41_model* m) {
   return m->max_tensor_bytes > floor ? m->max_tensor_bytes : floor;
 }
 
+/* The token embedding is dequantized on the host one row per token, so it
+ * stays in the mapped file instead of taking device memory. */
+static bool tensor_device_resident(const ds41_tensor* t) {
+  static const char kHostOnly[] = "token_embd.weight";
+  return !(t->name.len == sizeof(kHostOnly) - 1 &&
+           memcmp(t->name.ptr, kHostOnly, sizeof(kHostOnly) - 1) == 0);
+}
+
 static bool accelerator_cache_model_tensor_spans(const ds41_model* m,
                                                  uint64_t* cached_out) {
   std::vector<accelerator_tensor_span> spans;
   spans.reserve(static_cast<size_t>(m->n_tensors));
   for (uint64_t i = 0; i < m->n_tensors; i++) {
     const ds41_tensor* t = &m->tensors[i];
-    if (t->bytes == 0)
+    if (t->bytes == 0 || !tensor_device_resident(t))
       continue;
     if (t->abs_offset > m->size || t->bytes > m->size - t->abs_offset) {
       return false;
@@ -1468,11 +1476,13 @@ static void engram_close(ds41_engram_tables* e) {
   free(e);
 }
 
-/* Upload every backbone tensor; nothing in the Engram file is resident. */
+/* Bytes of the tensors uploaded to the device; nothing in the Engram file is
+ * resident. */
 static uint64_t model_resident_bytes(const ds41_model* m) {
   uint64_t bytes = 0;
   for (uint64_t i = 0; i < m->n_tensors; i++)
-    bytes += m->tensors[i].bytes;
+    if (tensor_device_resident(&m->tensors[i]))
+      bytes += m->tensors[i].bytes;
   return bytes;
 }
 

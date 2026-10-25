@@ -33,9 +33,11 @@ MemTotal is 124.4 GiB: 128 GiB minus the 1 GiB UMA carve-out and about
 (124.0 GiB) already covers it, so a larger GTT gains nothing; shrinking the
 carve-out to 512 MB is the only remaining knob (+0.5 GiB).
 
-Measured IQ1_M load with `ds41_load_probe --upload`: 21 s, 112.69 GiB GTT,
-8.57 GiB `MemAvailable` afterwards. KV (about 0.5 GiB at 128K) and scratch
-(2-4 GiB) fit in what remains. The upload streams from the file descriptors
+Measured IQ1_M load with `ds41_load_probe --upload`: 18 s, 112.27 GiB GTT
+(the token embedding stays in the mapped file), 9.3 GiB `MemAvailable`
+afterwards. A session at the native 1M context adds 2.3 GiB: 0.9 GiB of FP4
+compressed state and 1.4 GiB of batch scratch shared by all sessions; a
+2048-token prefill peaks 0.3 GiB higher for the MMQ pool. The upload streams from the file descriptors
 and never doubles the weights in page cache; the Engram file must not be
 resident in page cache at the same time.
 
@@ -53,8 +55,9 @@ resident in page cache at the same time.
 | Engram | none | layers 1 and 14, before the block: 24 rows per token (2- to 4-grams x 8 heads over 99,092 compressed ids), `wkv` 6144 -> 5 x 5120, per-copy sigmoid gate, `h_c += gate_c * v` |
 | Template | `<｜DSML｜tool_calls>` | DSML tags with a leading space, `Reasoning Effort: N` (1-100; high = 75 default), mid-conversation `<｜System｜>` turns |
 
-State is small: about 890 B/token of compressed KV plus a fixed 128-row SWA
-ring per layer, so a 1M-token context costs about 4 GiB.
+State is small: about 890 B/token of compressed KV and index K plus a fixed
+128-row SWA ring per layer at the reference precision; stored as FP4 codes
+and scales it is about 0.9 GiB at 1M tokens.
 
 GGUF types: experts are IQ1_S/IQ1_M/IQ2_XXS/IQ2_S per layer (gate and up
 share a type; down may differ); dense projections Q8_0/Q5_K; router,

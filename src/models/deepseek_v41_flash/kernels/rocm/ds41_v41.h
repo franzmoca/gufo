@@ -69,9 +69,18 @@ int ds41_v41_rope_tail(float* x, uint32_t rows, uint32_t row_dim, uint32_t rope_
 int ds41_v41_rope_fp8(float* x, uint32_t rows, uint32_t row_dim, uint32_t rope_dim, const float* inv_freq,
                       uint32_t pos0, uint32_t rows_per_pos, uint32_t pos_step, int inverse);
 int ds41_v41_fp4_fake_quant(float* x, uint32_t n, uint32_t block, int e4m3_scale);
-/* The same quantization of x written to out as bfloat16 bits (exact: FP4
- * values times the block scale have at most 6 significant bits); x is kept. */
-int ds41_v41_fp4_store_bf16(const float* x, uint16_t* out, uint32_t n, uint32_t block, int e4m3_scale);
+/* FP4 rows: E2M1 codes two per byte (even value in the low nibble), dim / 2
+ * bytes per row, and one scale byte per `block` values: the E4M3FN encoding
+ * (e4m3_scale) or the float exponent field of a power-of-two scale. The
+ * compressed KV rows use block 16 with E4M3 scales, the index-K rows block 32
+ * with power-of-two scales. */
+typedef struct ds41_fp4_rows {
+  const uint8_t* codes;
+  const uint8_t* scales;
+} ds41_fp4_rows;
+/* The same quantization of x packed into codes/scales (exact: decoding
+ * returns the quantized floats); x is kept. */
+int ds41_v41_fp4_store(const float* x, uint8_t* codes, uint8_t* scales, uint32_t n, uint32_t block, int e4m3_scale);
 /* qr = RMSNorm(qa) * q_weight, and kvn = RMSNorm(kv) * kv_weight followed by
  * ds41_v41_rope_fp8 (token t at pos0 + t), for n tokens in one launch. */
 int ds41_v41_q_kv_norm(const float* qa, const float* q_weight, float* qr, uint32_t q_dim, const float* kv,
@@ -105,20 +114,21 @@ int ds41_v41_compress_pool(const float* kv, const float* score, float* state_kv,
                            uint32_t n, uint32_t ratio, float* out, uint32_t dim);
 
 /* score[t, j] = sum_h relu(q[t, h] . k_j) * w[t, h] * w_scale for the
- * j < (pos0 + t + 1) / ratio compressed rows (keys in bfloat16 bits); rows have
+ * j < (pos0 + t + 1) / ratio compressed rows (FP4 index-K rows); rows have
  * score_stride floats. */
-int ds41_v41_indexer_score(const float* q, const uint16_t* keys, const float* w, float w_scale, float* score,
+int ds41_v41_indexer_score(const float* q, ds41_fp4_rows keys, const float* w, float w_scale, float* score,
                            uint64_t score_stride, uint32_t pos0, uint32_t n, uint32_t ratio, uint32_t heads,
                            uint32_t head_dim);
 /* Candidate blocks per token: max over `block`-row blocks, newest block
- * forced in, keep the top `topk_blocks`; writes mask[t, b] (1 keep / 0 drop)
- * per block b, block_stride bytes per token. block_scratch holds
- * n * block_stride floats, select_scratch n * topk_blocks. */
-int ds41_v41_candidate_mask(const float* score, uint64_t score_stride, uint8_t* mask, float* block_scratch,
-                            uint64_t block_stride, uint32_t* select_scratch, uint32_t pos0, uint32_t n,
+ * forced in, keep the top `topk_blocks`; writes the keep bit of block b as
+ * bit b % 32 of mask[t, b / 32], mask_stride words per token. block_scratch
+ * holds n * block_stride floats (at least one per block), select_scratch
+ * n * topk_blocks. */
+int ds41_v41_candidate_mask(const float* score, uint64_t score_stride, uint32_t* mask, uint64_t mask_stride,
+                            float* block_scratch, uint64_t block_stride, uint32_t* select_scratch, uint32_t pos0, uint32_t n,
                             uint32_t ratio, uint32_t block, uint32_t topk_blocks);
-/* score[t, j] = -inf where the block mask[t, j / block] == 0. */
-int ds41_v41_apply_mask(float* score, uint64_t score_stride, const uint8_t* mask, uint64_t mask_stride, uint32_t pos0,
+/* score[t, j] = -inf where the keep bit of block j / block is clear. */
+int ds41_v41_apply_mask(float* score, uint64_t score_stride, const uint32_t* mask, uint64_t mask_stride, uint32_t pos0,
                         uint32_t n, uint32_t ratio, uint32_t block);
 /* out[t, 0:k_t] = indices of the k_t = min(k, len_t) largest scores of token
  * t, len_t = ceil(((pos0 + t + 1) / ratio) / div); rows of out hold k. */
@@ -128,14 +138,14 @@ int ds41_v41_topk(const float* score, uint64_t score_stride, uint32_t* out, uint
 /* Sparse attention for n queries. Token t at p = pos0 + t attends the window
  * positions max(0, p - window + 1) .. p, read from `ring` (slot pos % window,
  * positions before pos0) and from `chunk` (row pos - pos0), plus
- * min(k, (p + 1) / ratio) compressed rows comp[idx[t, j]] (bfloat16 bits; none when ratio
+ * min(k, (p + 1) / ratio) compressed rows comp[idx[t, j]] (FP4 KV rows; none when ratio
  * is 0). Keys equal values; sinks join the softmax denominator. q/out are
  * [n, heads, head_dim]. Batches below DS41_V41_ATTN_SPLIT_TOKENS split the
  * rows across blocks and need `partial` with n * heads *
  * DS41_V41_ATTN_PARTIAL_PER_HEAD floats. */
 #define DS41_V41_ATTN_SPLIT_TOKENS 8u
 #define DS41_V41_ATTN_PARTIAL_PER_HEAD (20u * 516u)
-int ds41_v41_attention(const float* q, const float* ring, const float* chunk, uint32_t window, const uint16_t* comp,
+int ds41_v41_attention(const float* q, const float* ring, const float* chunk, uint32_t window, ds41_fp4_rows comp,
                        const uint32_t* idx, uint32_t k, uint32_t ratio, const float* sinks, float* out,
                        float* partial, uint32_t pos0, uint32_t n, uint32_t heads, uint32_t head_dim, float scale);
 
