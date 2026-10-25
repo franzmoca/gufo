@@ -22,9 +22,15 @@ same GGUF.
 | M0 Oracle and loader | done |
 | M1 Correct AR decode on IQ1_M | done |
 | M2 Resident performance | done |
-| M3 SSD expert streaming (IQ2_XXS) | planned |
-| M4 Component cache and serving | planned |
+| M4 Component cache and serving | next |
 | M5 DSpark and approximations | planned |
+| M6 Vision | planned |
+| M7 Higher-precision Engram tables | planned |
+| M3 SSD expert streaming (IQ2_XXS) | deferred until after M7 |
+
+Order: M4, M5, M6, M7, then M3. Everything through M7 builds on the resident
+IQ1_M model; streaming experts would compete with the Engram reads for the SSD
+and with DSpark's multi-token verification for expert reuse.
 
 ## Memory budget
 
@@ -160,10 +166,47 @@ Open performance items are tracked in [BACKLOG.md](BACKLOG.md).
 
 ### M5 DSpark and approximations
 
-- A drafter GGUF from the official `mtp.*` blocks (3 SWA blocks, 128-expert
-  MoE, Markov head, confidence head) with block-of-5 non-causal drafts.
+- Start with a memory budget. With one session at 1M context about 9.5 GiB
+  of host memory is free; the drafter, the M4 caches and the M6 projector
+  come out of it.
+- Drafter GGUFs (3 SWA blocks, 128-expert MoE, Markov head, confidence head;
+  block-of-5 non-causal drafts), largest first:
+  - [unsloth](https://huggingface.co/unsloth/DeepSeek-V4.1-Flash-1017-GGUF):
+    `dspark/dspark-DeepSeek-V4.1-Flash-1017-BF16.gguf` (7.92 GiB),
+    `dspark-DeepSeek-V4.1-Flash-1017-Q8_0.gguf` (7.43 GiB).
+  - If those do not fit:
+    [Lucebox](https://huggingface.co/Lucebox/DeepSeek-V4.1-Flash-1017-ROCMFP-GGUF)
+    `DeepSeek-V4.1-Flash-1017-DSpark-draft-Q2K-Q4K.gguf` (4.58 GiB) or
+    `-MXFP4-Q8.gguf` (7.42 GiB);
+    [peasantsmith](https://huggingface.co/peasantsmith/DeepSeek-V4.1-Flash-1017-Maya-GGUF)
+    `dspark/dspark-xs.bin` (3.17 GiB) and `dspark-xs2.bin` (3.96 GiB), which
+    are not GGUF files and need their format checked first.
+  - Compare acceptance rate and decode speed against the drafter's memory.
 - Evaluate decoder SWA bounded replay (layers 20-39 over only the last 128
   prompt tokens), which roughly halves prefill; adopt only if quality holds.
+
+### M6 Vision
+
+- Vision tower from
+  [unsloth](https://huggingface.co/unsloth/DeepSeek-V4.1-Flash-1017-GGUF)
+  `mmproj-BF16.gguf` (0.91 GiB; `mmproj-F16.gguf` 0.90 GiB). The official
+  config has 32 layers, width 1024, patch 14, a 3x downsample and at most
+  1,024 image tokens per image (`<｜deepseek_image｜>`, token 129264).
+- Interleaved image blocks in the chat template, checked against the official
+  `encoding.py` image goldens; the image functional suites for this model.
+
+### M7 Higher-precision Engram tables
+
+- Measure the speed and quality of Engram tables above IQ4_NL (144 B rows).
+  [unsloth](https://huggingface.co/unsloth/DeepSeek-V4.1-Flash-1017-GGUF)
+  `engram/` offers Q5_K (125.89 GiB), Q6_K (150.21 GiB) and MXFP8
+  (188.83 GiB), in its own split-file format (`*.gguf_file`, `set_split.py`).
+  Full BF16 tables (512 B rows, about 366 GiB) would come from the official
+  checkpoint.
+- Quality: teacher-forced perplexity and agreement against the oracle at 3K and
+  18.5K tokens, per table format. Speed: prefill and decode at the card
+  depths, and the Engram read and wait times (BACKLOG item 6), because rows
+  grow up to 3.6 times.
 
 ## Verification
 
