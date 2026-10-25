@@ -11,15 +11,16 @@ gufo bench -m DeepSeek-V4.1-Flash-1017-GSQ-RCO-IQ1_M-00001-of-00004.gguf \
 
 | Test | t/s |
 |---|---:|
-| pp2048 | 421.80 ± 9.85 |
-| tg64 | 23.96 ± 0.02 |
-| pp2048 @ d8192 | 414.37 ± 0.84 |
-| tg64 @ d8192 | 23.44 ± 0.03 |
-| pp2048 @ d32768 | 378.66 ± 0.88 |
-| tg64 @ d32768 | 22.96 ± 0.00 |
+| pp2048 | 703.07 ± 10.04 |
+| tg64 | 23.88 ± 0.13 |
+| pp2048 @ d8192 | 677.76 ± 1.79 |
+| tg64 @ d8192 | 23.44 ± 0.02 |
+| pp2048 @ d32768 | 585.30 ± 1.84 |
+| tg64 @ d32768 | 22.92 ± 0.01 |
 
-The depth-8K rows come from a repeated run: the sweep's tg64 @ d8192
-(21.79 ± 2.36) had one slow repetition.
+Prefill runs the routed experts, the dense Q5_K projections and attention on
+the FP16 matrix cores (previous card: pp2048 421.80, @ d8192 414.37,
+@ d32768 378.66; decode unchanged).
 
 Prefill batches no longer shrink with the session context: the same
 2,048-token prompt (`ds41_load_probe --batch`, first pass over the weights)

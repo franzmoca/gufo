@@ -15,13 +15,12 @@ measured 235 GB/s DRAM read peak; the routed expert matvecs take ~10 ms at
 160-175 GB/s (IQ1) and 125-145 GB/s (IQ2), against 230-238 GB/s for a plain
 read of the same six DRAM-cold experts.
 
-Prefill, 2048-token batches: ~420 tok/s at depth 0, 379 tok/s at 32K. A
-`rocprofv3` trace of a 2K prefill before the prefill changes of 2026-10-25
-(6.0 s GPU time, 94% busy): MMQ 64%
-(routed experts 2.72 s at 10-15 TOPS: IQ1_S 1.73 s, IQ2_XXS 0.48 s, IQ1_M
-0.45 s; dense Q5_K/Q8_0 1.10 s near 27 TOPS, against 57 TOPS measured int8
-WMMA), attention 8.8%, Q8_1 activation quantization 5.0%, BF16 matmuls
-4.7%, the MMQ non-finite sanitize pass 2.5%, row gathers 2.1%.
+Prefill, 2048-token batches: 703 tok/s at depth 0, 585 tok/s at 32K. A
+`rocprofv3` trace of a 2K batch (3.30 s): routed experts on the FP16 matrix
+cores 1.38 s (22-26 TOPS on issued slots; IQ2_S stays on MMQ, 57 ms), dense
+Q5_K projections 0.88 s (~33 TOPS against 55 measured FP16 WMMA),
+attention 0.36 s, mHC state passes and the routed sum 0.26 s, BF16 matmuls
+95 ms, Q8_0 MMQ 59 ms.
 
 ## Open items
 
@@ -29,8 +28,9 @@ WMMA), attention 8.8%, Q8_1 activation quantization 5.0%, BF16 matmuls
 | ---: | --- | --- | --- | --- | --- |
 | 1 | Routed-expert GEMV with wide-load weight tiles | Decode | Hard | Up to ~3 ms/token (~6%) if the experts reach ~210 GB/s | Low |
 | 2 | Launch gaps between decode kernels | Decode | Medium | Up to ~2.7 ms/token | Medium |
-| 3 | Routed-expert MMQ unpack and rate | Prefill | Hard | Up to ~1 s per 2K prefill at the dense rate | Low |
-| 4 | Q8_1 quantization in the producing kernels | Prefill | Medium | ~0.2 s per 2K prefill (~3%) | Low |
+| 3 | Routed-expert FP16 kernel: weight decode per slot | Prefill | Hard | ~5-20% of the routed time | Low |
+| 4 | Dense FP16 kernel barriers | Prefill | Hard | Up to ~0.15 s per 2K batch | Low |
+| 5 | Remaining prefill glue | Prefill | Medium | ~30-60 ms per 2K batch | Medium |
 
 ### 1. Routed-expert GEMV with wide-load weight tiles
 
@@ -83,27 +83,32 @@ of 2K decode:
   synchronous uploads take ~70 µs); a device-side embedding lookup would
   remove most of it.
 
-### 3. Routed-expert MMQ tiles
+### 3. Routed-expert FP16 kernel: weight decode per slot
 
-The vendored MMQ (int8 WMMA) with routed launch bounds and, since the last
-change, a tile width per expert (16, 32 or 64 columns by bucket size, one
-launch per width). Before it, a 32-column tile was 67% full at 2048 tokens
-and its weight-panel unpack cost about 40% of the tile; wider batches and
-fixed widths did not help (see EXPERIMENTS.md). Left: the unpack itself (a
-cheaper IQ1 path, e.g. int8 codebook rows in LDS) and the kernel rate,
-~21 TOPS on issued columns against ~27 for the dense tiles and 57 measured
-int8 WMMA; see the Qwen 3.8 Flash Next routed GEMM rows in
-`docs/models/qwen3.8-flash-next/EXPERIMENTS.md` for a routed WMMA kernel
-reaching 22-32 TFLOPS on this GPU.
+`kernels/rocm/ds41_routed_f16.hip.cpp`. Without the weight decode (timing
+only) IQ1_S gate/up drops 22.6 → 17.0 ms per layer and IQ2_XXS 26.0 →
+17.5 ms; the activation and weight loads cost ~2 ms each, the codebook
+lookup ~1 ms. A decoded fragment feeds at most four 16-slot tiles, and on
+average 2.3 since most experts get under 64 slots. 128-slot tiles for the
+large experts would cut the decode work by 13-24% (recorded counts) but
+need 128 accumulator VGPRs and twice the activation LDS; 4096-token
+batches measured +21% routed throughput for ~1.2 GiB more activations
+(not adopted, memory).
 
-### 4. Prefill glue passes
+### 4. Dense FP16 kernel barriers
 
-Done: non-finite guard at the MMQ store, routed gate/up as one pair with the
-SwiGLU store, the output LoRA groups as MMQ channels (no row copies), and
-q_a/KV and shared gate/up quantizing their input once. Left per 2K prefill:
-one Q8_1 quantization per remaining projection input (~0.4 ms each); folding
-it into the producing norm kernels would remove those passes, and the
-shared-expert SwiGLU (9 ms) could use the dense up pass's store.
+`kernels/rocm/ds41_dense_f16.hip.cpp`. Without its two barriers per stage
+(timing only) the output LoRA runs 5.55 → 4.20 ms and o_b 5.14 → 4.83 ms;
+double-buffered stages with one barrier were slower (EXPERIMENTS.md), so
+the cost is not understood yet.
+
+### 5. Remaining prefill glue
+
+The FFN-end routed sum and expand (`hc_expand_sum`, 115 ms per 2K batch)
+could feed the next layer's state pass directly except before the Engram
+layers (~30 ms); Q8_0 projections still go through MMQ and its Q8_1 pass
+(77 ms); the shared-expert SwiGLU (9 ms) could use the dense up pass's
+store.
 
 ## Memory
 
