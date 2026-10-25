@@ -587,7 +587,9 @@ static __global__ void mul_mat_vec_q(
                     }
                 }
             }
-            dst[j*stride_col_dst + threadIdx.x] = result;
+            /* ds41: non-finite results store as zero, the contract the
+             * callers' separate sanitize pass used to apply. */
+            dst[j*stride_col_dst + threadIdx.x] = isfinite(result) ? result : 0.0f;
         }
     }
 
@@ -663,7 +665,8 @@ static __global__ void mul_mat_vec_q_moe(
 
     // Write results
     if (threadIdx.x < c_rows_per_block && (c_rows_per_block == 1 || uint32_t(row0 + threadIdx.x) < nrows_x)) {
-        dst[channel_dst*stride_channel_dst + token_idx*stride_col_dst + row0 + threadIdx.x] = tmp[threadIdx.x];
+        const float value = tmp[threadIdx.x];
+        dst[channel_dst*stride_channel_dst + token_idx*stride_col_dst + row0 + threadIdx.x] = isfinite(value) ? value : 0.0f;
     }
 }
 

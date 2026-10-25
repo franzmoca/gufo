@@ -74,6 +74,16 @@ int ds41_mmq_routed_tile_cols_for_counts(const unsigned int *counts,
 //   n_experts: 0 for dense matmul, >0 for MoE (e.g. 256 for V4 Flash).
 int ds41_mmq_should_use(int type_x, int64_t ne11, int64_t n_experts);
 
+// V4.1 Flash: ds41_mmq_<type>_dense / _moe for a run-time weight type
+// (Q8_0, Q5_K, IQ1_S, IQ1_M, IQ2_XXS or IQ2_S). Same layouts as below.
+int ds41_mmq_dense_typed(int type, const void * W, const float * X_f32,
+                         float * out_f32, int M, int N, int K,
+                         hipStream_t stream);
+int ds41_mmq_moe_typed(int type, const void * W, const float * X_f32,
+                       const int32_t * ids, float * out_f32, int M, int K,
+                       int n_tokens, int n_experts, int n_expert_used,
+                       hipStream_t stream);
+
 // Dense matmul entry points. Per-type wrappers that all share the same
 // underlying mul_mat_q template, parameterised by the weight quant type.
 //
@@ -916,6 +926,11 @@ void ds41_pool_set_stream(hipStream_t stream);
 int ds41_mmq_dense_vec_typed(int type, const void* W, const float* X_f32,
                              float* out_f32, int M, int N, int K,
                              hipStream_t stream);
+// `groups` matvecs in one launch: X [N, groups, K], W the groups' [M, K]
+// blocks back to back, out [N, groups, M]. N <= 8.
+int ds41_mmq_grouped_vec_typed(int type, const void* W, const float* X_f32,
+                               float* out_f32, int M, int N, int K, int groups,
+                               hipStream_t stream);
 int ds41_mmq_moe_vec_typed(int type, const void* W, const float* X_f32,
                            const int32_t* ids, float* out_f32, int M, int K,
                            int n_tokens, int n_experts, int n_expert_used,

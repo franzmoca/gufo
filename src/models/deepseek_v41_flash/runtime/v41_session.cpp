@@ -1,9 +1,10 @@
-/* DeepSeek V4.1 Flash request sessions over the single-token decoder.
+/* DeepSeek V4.1 Flash request sessions over the decoder.
  *
  * A session owns one decoder and the tokens it has evaluated. Sync reuses
- * the evaluated prefix when the prompt extends it and otherwise starts over;
- * snapshots carry the tokens, frontier logits and decoder state. Speculative
- * decoding is not available for this model yet. */
+ * the evaluated prefix when the prompt extends it and otherwise starts over,
+ * evaluating the rest in decoder-sized batches; snapshots carry the tokens,
+ * frontier logits and decoder state. Speculative decoding is not available
+ * for this model yet. */
 #include <algorithm>
 #include <cstdio>
 #include <cstdlib>
@@ -40,17 +41,18 @@ uint32_t vocab(const ds41_session* s) { return (uint32_t)ds41_engine_vocab_size(
 
 bool cancelled(const ds41_session* s) { return s->cancel && s->cancel(s->cancel_data); }
 
-bool step(ds41_session* s, int token, char* error, size_t capacity) {
-  if ((int)s->tokens.size() + 1 >= s->context) {
+/* Evaluates n tokens; the frontier logits are those of the last one. */
+bool eval(ds41_session* s, const int* tokens, uint32_t n, char* error, size_t capacity) {
+  if ((int)(s->tokens.size() + n) >= s->context) {
     set_error(error, capacity, "context is full");
     return false;
   }
-  if (ds41_decoder_step(s->decoder, token, s->logits.data(), nullptr, nullptr) != 0) {
-    set_error(error, capacity, "ROCm decode step failed");
+  if (ds41_decoder_eval(s->decoder, tokens, n, s->logits.data(), 1, nullptr, nullptr) != 0) {
+    set_error(error, capacity, "ROCm evaluation failed");
     s->valid = false;
     return false;
   }
-  s->tokens.push_back(token);
+  s->tokens.insert(s->tokens.end(), tokens, tokens + n);
   s->valid = true;
   return true;
 }
@@ -103,12 +105,15 @@ int ds41_session_sync(ds41_session* s, const ds41_tokens* prompt, char* error, s
     s->tokens.clear();
     s->valid = false;
   }
-  for (size_t i = s->tokens.size(); i < n; i++) {
+  const size_t batch = ds41_decoder_batch_capacity(s->decoder);
+  for (size_t i = s->tokens.size(); i < n;) {
     if (cancelled(s)) {
       set_error(error, capacity, "prefill cancelled");
       return DS41_SESSION_SYNC_INTERRUPTED;
     }
-    if (!step(s, prompt->v[i], error, capacity)) return 1;
+    const uint32_t count = (uint32_t)std::min(batch, n - i);
+    if (!eval(s, prompt->v + i, count, error, capacity)) return 1;
+    i += count;
   }
   return 0;
 }
@@ -129,7 +134,7 @@ int ds41_session_eval(ds41_session* s, int token, char* error, size_t capacity) 
     set_error(error, capacity, "invalid token");
     return 1;
   }
-  return step(s, token, error, capacity) ? 0 : 1;
+  return eval(s, &token, 1, error, capacity) ? 0 : 1;
 }
 
 int ds41_sessions_eval_batch(const ds41_session_batch_item* items, size_t count, char* error, size_t capacity) {

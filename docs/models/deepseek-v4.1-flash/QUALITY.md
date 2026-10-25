@@ -67,5 +67,22 @@ all 12 byte-for-byte.
 | Tool call: Rome weather for 3 days | `get_weather {"city":"Rome","days":3}`, `finish_reason=tool_calls` |
 | Tool result returned | summarizes the three forecast days; 390 of 466 prompt tokens reused |
 
-Decode runs at 12-14 tok/s with short prompts. Prefill evaluates one token at
-a time (about 13 tok/s) until batched prefill lands.
+Measured at M1, before the M2 performance work: decode 12-14 tok/s with
+short prompts, prefill one token at a time. Current speeds are in
+[BENCHMARKS.md](BENCHMARKS.md).
+
+## Batched prefill and M2 kernels
+
+The same 3K positions scored through 2048-token batches (matrix-core
+attention and indexer, bounded routed MoE tiles): perplexity 6.310 against
+the oracle's 6.309, argmax agreement 95.8%, mean |ΔNLL| 0.080. Scored token by
+token through the decode path (split-row attention): perplexity 6.307,
+agreement 96.0%. Across the M2 changes the batched perplexity moved within
+6.296-6.319: half-precision attention operands and the FP8 fake quantization
+of the attention output turn rounding-level differences into small logit
+changes. The smoke continuation keeps all 9 greedy tokens, KL ≤ 1e-3 per step.
+
+Kernel checks: `ds41.attention` compares both attention paths with an fp64
+reference (split decode 1.6e-7, batched 3e-4 relative error);
+`ds41.mmq_typed` compares batched, bounded-routed and grouped matvec launches
+with the matvec path for every V4.1 weight type.

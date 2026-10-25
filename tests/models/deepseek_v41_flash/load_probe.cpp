@@ -91,6 +91,7 @@ int main(int argc, char** argv) {
   const char* out_dir = nullptr;
   int generate = 0;
   bool score = false;
+  bool batch = false;
   bool upload = false;
   bool rendered = false;
   for (int i = 1; i < argc; ++i) {
@@ -105,6 +106,8 @@ int main(int argc, char** argv) {
       generate = std::atoi(argv[++i]);
     } else if (std::strcmp(argv[i], "--score") == 0) {
       score = true;
+    } else if (std::strcmp(argv[i], "--batch") == 0) {
+      batch = true;
     } else if (std::strcmp(argv[i], "--out") == 0 && i + 1 < argc) {
       out_dir = argv[++i];
     } else if (std::strcmp(argv[i], "--rendered") == 0) {
@@ -122,7 +125,7 @@ int main(int argc, char** argv) {
     std::fprintf(stderr,
                  "usage: %s MODEL-00001-of-N.gguf [--engram FILE] [--upload] "
                  "[--tokenize TEXTS [--rendered]] [--decode IDS [--generate N] "
-                 "[--score] [--out DIR]]\n",
+                 "[--score] [--batch] [--out DIR]]\n",
                  argv[0]);
     return 2;
   }
@@ -170,7 +173,8 @@ int main(int argc, char** argv) {
     }
   }
   if (decode) {
-    /* Feed comma-separated ids one at a time, then decode greedily. */
+    /* Feed comma-separated ids one at a time (--batch: in decoder batches),
+     * then decode greedily. */
     std::vector<int> tokens;
     for (const char* p = decode; *p;) {
       tokens.push_back(std::atoi(p));
@@ -197,9 +201,61 @@ int main(int argc, char** argv) {
     FILE* score_file = out_dir && score
                            ? std::fopen((dump.dir + "/score.txt").c_str(), "w")
                            : nullptr;
-    std::vector<float> logits((size_t)ds41_engine_vocab_size(engine));
+    const size_t vocab = (size_t)ds41_engine_vocab_size(engine);
+    std::vector<float> logits(vocab);
     std::vector<int> generated;
-    for (uint32_t step = 0; step < total; ++step) {
+    /* Records the logits of position `step` (input `token`). */
+    auto consume = [&](uint32_t step, int token, const float* row, double ms) {
+      if (logits_file)
+        std::fwrite(row, sizeof(float), vocab, logits_file);
+      int best = 0;
+      for (size_t i = 1; i < vocab; ++i)
+        if (row[i] > row[(size_t)best])
+          best = (int)i;
+      if (step + 1 >= tokens.size())
+        generated.push_back(best);
+      if (score_file && step + 1 < tokens.size()) {
+        double sum = 0.0;
+        for (size_t i = 0; i < vocab; ++i)
+          sum += std::exp((double)row[i] - (double)row[(size_t)best]);
+        const double nll =
+            std::log(sum) -
+            ((double)row[(size_t)tokens[step + 1]] - (double)row[(size_t)best]);
+        std::fprintf(score_file, "%u %d %d %.6f %.2f\n", step, best,
+                     tokens[step + 1], nll, ms);
+      } else if (!score_file) {
+        std::printf("step %u token %d -> %d (%.1f ms)\n", step, token, best,
+                    ms);
+      }
+    };
+    uint32_t step = 0;
+    if (batch) {
+      /* The prompt in decoder-sized batches with logits for every position. */
+      const uint32_t cap = ds41_decoder_batch_capacity(decoder);
+      std::vector<float> rows((size_t)cap * vocab);
+      while (step < tokens.size()) {
+        const uint32_t n =
+            std::min<uint32_t>(cap, (uint32_t)tokens.size() - step);
+        const auto t0 = std::chrono::steady_clock::now();
+        /* Every row's logits only when they are recorded. */
+        const uint32_t logit_rows = logits_file || score_file ? n : 1;
+        if (ds41_decoder_eval(decoder, tokens.data() + step, n, rows.data(),
+                              logit_rows, nullptr, nullptr) != 0) {
+          std::fprintf(stderr, "batch failed at step %u\n", step);
+          return 1;
+        }
+        const double ms = std::chrono::duration<double, std::milli>(
+                              std::chrono::steady_clock::now() - t0)
+                              .count();
+        std::fprintf(stderr, "batch %u tokens at %u: %.1f ms (%.1f tok/s)\n", n,
+                     step, ms, n * 1000.0 / ms);
+        for (uint32_t i = n - logit_rows; i < n; ++i)
+          consume(step + i, tokens[step + i],
+                  rows.data() + (size_t)(i - (n - logit_rows)) * vocab, ms / n);
+        step += n;
+      }
+    }
+    for (; step < total; ++step) {
       const int token = step < tokens.size() ? tokens[step] : generated.back();
       dump.pos = step;
       const auto t0 = std::chrono::steady_clock::now();
@@ -212,27 +268,7 @@ int main(int argc, char** argv) {
       const double ms = std::chrono::duration<double, std::milli>(
                             std::chrono::steady_clock::now() - t0)
                             .count();
-      if (logits_file)
-        std::fwrite(logits.data(), sizeof(float), logits.size(), logits_file);
-      int best = 0;
-      for (size_t i = 1; i < logits.size(); ++i)
-        if (logits[i] > logits[(size_t)best])
-          best = (int)i;
-      if (step + 1 >= tokens.size())
-        generated.push_back(best);
-      if (score_file && step + 1 < tokens.size()) {
-        double sum = 0.0;
-        for (float v : logits)
-          sum += std::exp((double)v - (double)logits[(size_t)best]);
-        const double nll =
-            std::log(sum) - ((double)logits[(size_t)tokens[step + 1]] -
-                             (double)logits[(size_t)best]);
-        std::fprintf(score_file, "%u %d %d %.6f %.2f\n", step, best,
-                     tokens[step + 1], nll, ms);
-      } else if (!score_file) {
-        std::printf("step %u token %d -> %d (%.1f ms)\n", step, token, best,
-                    ms);
-      }
+      consume(step, token, logits.data(), ms);
     }
     std::printf("generated");
     for (size_t i = 0;

@@ -155,16 +155,25 @@ int ds41_session_ctx(const ds41_session* session);
 uint32_t ds41_session_prefill_capacity(const ds41_session* session);
 uint64_t ds41_session_payload_bytes(const ds41_session* session);
 
-/* Single-sequence V4.1 decoder: one token per step from position 0. */
+/* Single-sequence V4.1 decoder from position 0. Prompts run layer-major in
+ * batches of up to ds41_decoder_batch_capacity tokens; decode is a batch of
+ * one. */
 struct ds41_decoder;
 /* Called after each block with the [hc, dim] residual streams and the routed
- * expert ids of that layer, both in host memory. */
+ * expert ids of that layer for the batch's last token, in host memory. */
 typedef void (*ds41_decoder_layer_fn)(void* ctx, uint32_t layer,
                                       const float* hidden,
                                       const int32_t* experts);
 ds41_decoder* ds41_decoder_create(ds41_engine* engine, uint32_t context);
 void ds41_decoder_destroy(ds41_decoder* decoder);
-/* Evaluates `token` at the next position and writes vocabulary logits. */
+uint32_t ds41_decoder_batch_capacity(const ds41_decoder* decoder);
+/* Evaluates `n` tokens (n <= batch capacity) at the next positions. Writes
+ * vocabulary logits for the last `logit_rows` tokens (0 to n) to `logits`,
+ * row-major; logits may be NULL when logit_rows is 0. */
+int ds41_decoder_eval(ds41_decoder* decoder, const int* tokens, uint32_t n,
+                      float* logits, uint32_t logit_rows,
+                      ds41_decoder_layer_fn layer_fn, void* ctx);
+/* ds41_decoder_eval of one token. */
 int ds41_decoder_step(ds41_decoder* decoder, int token, float* logits,
                       ds41_decoder_layer_fn layer_fn, void* ctx);
 uint32_t ds41_decoder_pos(const ds41_decoder* decoder);

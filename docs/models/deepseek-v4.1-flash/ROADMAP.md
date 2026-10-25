@@ -21,7 +21,7 @@ same GGUF.
 |---|---|
 | M0 Oracle and loader | done |
 | M1 Correct AR decode on IQ1_M | done |
-| M2 Resident performance | next |
+| M2 Resident performance | in progress |
 | M3 SSD expert streaming (IQ2_XXS) | planned |
 | M4 Component cache and serving | planned |
 | M5 DSpark and approximations | planned |
