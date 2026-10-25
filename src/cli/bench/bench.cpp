@@ -485,7 +485,13 @@ int RunDeepSeekBenchmark(
   const auto sample_next = [&](typename Ds::Session& session,
                                sampling::SamplerState& sampler,
                                std::string* error_msg) -> int {
-    int token = session.TakePendingDsparkToken();
+    int token = -1;
+    if constexpr (requires { session.EvaluatePending(error_msg); }) {
+      if (!session.EvaluatePending(error_msg))
+        return -1;
+    } else {
+      token = session.TakePendingDsparkToken();
+    }
     if (token < 0) {
       const auto logits = session.CopyLogits(error_msg);
       if (logits.empty())

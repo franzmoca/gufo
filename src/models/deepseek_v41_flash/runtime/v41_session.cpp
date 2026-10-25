@@ -39,7 +39,9 @@ struct ds41_session {
   void* write_data = nullptr;
   ds41_dspark_state* dspark = nullptr;
   gufo::speculative::PromptLookup<int> lookup;
-  int pending = -1;  // a sampled token a rejected row drew, emitted next
+  /* The last token a speculative step emitted, not evaluated yet: the next
+   * step's anchor, or evaluated by ds41_session_flush before a plain step. */
+  int next = -1;
   /* Rows of a verification: the anchor and up to six copied tokens. Below
    * DS41_V41_ATTN_SPLIT_TOKENS rows every kernel keeps the single-token
    * numerics, so verified output matches plain decoding. */
@@ -123,7 +125,7 @@ int ds41_session_create(ds41_session** out, ds41_engine* engine, int context_siz
     return 1;
   }
   s->logits.resize(vocab(s));
-  if (s->dspark) s->spec_logits.resize((uint64_t)ds41_session::kVerifyRows * vocab(s));
+  s->spec_logits.resize((uint64_t)ds41_session::kVerifyRows * vocab(s));
   *out = s;
   return 0;
 }
@@ -164,6 +166,8 @@ int ds41_session_sync(ds41_session* s, const ds41_tokens* prompt, char* error, s
     set_error(error, capacity, "prompt contains an invalid token ID");
     return 1;
   }
+  /* The prompt carries any token a speculative step left unevaluated. */
+  s->next = -1;
   const size_t n = (size_t)prompt->len;
   const bool extends = s->valid && s->tokens.size() <= n && std::equal(s->tokens.begin(), s->tokens.end(), prompt->v);
   if (!extends || s->tokens.size() == n) {
@@ -174,7 +178,7 @@ int ds41_session_sync(ds41_session* s, const ds41_tokens* prompt, char* error, s
     }
     s->tokens.clear();
     s->valid = false;
-    s->pending = -1;
+    s->next = -1;
     s->lookup.Clear();
     if (s->dspark) ds41_dspark_state_reset(s->dspark, 0);
   }
@@ -207,6 +211,10 @@ int ds41_session_eval(ds41_session* s, int token, char* error, size_t capacity) 
     set_error(error, capacity, "invalid token");
     return 1;
   }
+  if (s->next >= 0) {
+    set_error(error, capacity, "a speculative step's last token is not evaluated yet");
+    return 1;
+  }
   return eval(s, &token, 1, error, capacity) ? 0 : 1;
 }
 
@@ -224,6 +232,7 @@ void ds41_session_begin_request(ds41_session* s) {
   s->policy.plain = 0;
   s->policy.probe = ds41_session::kProbeFirst;
   s->lookup.BeginRequest();
+  s->next = -1;
 }
 void ds41_session_prepare_batch_execution(ds41_session*) {}
 
@@ -255,27 +264,29 @@ uint32_t draft_width(ds41_session* s, uint32_t limit) {
 
 void ema(float& v, float x, float rate = kPolicyRate) { v += rate * (x - v); }
 
-/* The token that starts the next block: the frontier argmax (greedy), the
- * token a rejected row already drew, or a draw from the frontier logits. */
-int dspark_anchor(ds41_session* s, const ds41_dspark_sampler* sampler) {
-  if (!sampler) return ds41_sample_argmax(s->logits.data(), vocab(s));
-  const int pending = s->pending;
-  s->pending = -1;
-  if (pending >= 0) {
-    if (sampler->accept) sampler->accept(sampler->ctx, pending);
-    return pending;
-  }
-  return sampler->sample(sampler->ctx, s->logits.data(), vocab(s));
+/* The request's next token from target logits: the argmax (greedy) or a
+ * draw by the request's sampler. */
+int draw(const ds41_session* s, const ds41_dspark_sampler* sampler, const float* row) {
+  const int top = ds41_sample_argmax(row, vocab(s));
+  if (!sampler || (sampler->try_accept_argmax && top >= 0 && sampler->try_accept_argmax(sampler->ctx, top)))
+    return top;
+  return sampler->sample(sampler->ctx, row, vocab(s));
 }
 
-/* One cycle: emits the anchor and the accepted drafts. Drafts are the
- * drafter's greedy path; a sampled request draws every verified row with its
- * own sampler (point-mass proposals), so the output distribution is exactly
- * the target's. */
+/* One cycle. The anchor is the emitted token the session has not evaluated
+ * yet (s->next), drawn here on a request's first cycle. The cycle verifies
+ * the anchor with up to kVerifyRows - 1 proposals (prompt-lookup copies or
+ * the drafter's block), keeps the accepted prefix and draws the token after
+ * it from the last kept row: a rejected proposal's own draw, or the bonus
+ * after a fully accepted block. It emits the accepted proposals and that
+ * token, which stays unevaluated, so a step emits each token after one
+ * evaluation as a plain decode does. Proposals depend only on the prefix and
+ * every row is drawn by the request's sampler (point mass), so the output
+ * distribution is exactly the target's. */
 int dspark_step(const ds41_session_dspark_batch_item& item, char* error, size_t capacity) {
   ds41_session* s = item.session;
   const ds41_dspark_sampler* sampler = item.sampler;
-  if (!s || !s->dspark || !s->valid || !item.emitted || item.emitted_cap < 1 || !item.n_emitted ||
+  if (!s || !s->valid || !item.emitted || item.emitted_cap < 1 || !item.n_emitted ||
       (sampler && !sampler->sample)) {
     set_error(error, capacity, "invalid DSpark step request");
     return 1;
@@ -286,19 +297,26 @@ int dspark_step(const ds41_session_dspark_batch_item& item, char* error, size_t 
     return 1;
   }
   const uint32_t n_vocab = vocab(s);
-  const int anchor = dspark_anchor(s, sampler);
-  if (anchor < 0 || anchor >= (int)n_vocab) {
-    set_error(error, capacity, "DSpark target logits contain no finite values");
-    s->valid = false;
-    return 1;
-  }
   int* out = item.emitted;
-  if (item.stop_at_eos && ds41_token_is_stop(s->engine, anchor)) {
-    out[(*item.n_emitted)++] = anchor;
-    return 0;
+  const auto emit = [&](int token) { out[(*item.n_emitted)++] = token; };
+  const auto ends = [&](int token) { return item.stop_at_eos && ds41_token_is_stop(s->engine, token); };
+  if (s->next < 0) {
+    const int anchor = draw(s, sampler, s->logits.data());
+    if (anchor < 0 || anchor >= (int)n_vocab) {
+      set_error(error, capacity, "DSpark target logits contain no finite values");
+      s->valid = false;
+      return 1;
+    }
+    emit(anchor);
+    if (ends(anchor)) return 0;
+    s->next = anchor;
   }
+  const int anchor = s->next;
+  /* Room for the proposals and the token after them. */
+  const uint32_t budget = (uint32_t)(item.emitted_cap - *item.n_emitted);
+  if (budget == 0) return 0;
   const uint32_t first = (uint32_t)s->tokens.size();
-  const uint32_t room = (uint32_t)(s->context - (int)first - 2);
+  const uint32_t room = std::min((uint32_t)(s->context - (int)first - 2), budget - 1);
   const bool trace = getenv("GUFO_DEEPSEEK41_DSPARK_TRACE") != nullptr;
   const auto ms = [](auto a, auto b) { return (float)std::chrono::duration<double, std::milli>(b - a).count(); };
   const auto t0 = std::chrono::steady_clock::now();
@@ -314,7 +332,7 @@ int dspark_step(const ds41_session_dspark_batch_item& item, char* error, size_t 
     size_t agreed = 0;
     const auto match = s->lookup.Find(s->tokens, std::span<const int>(&anchor, 1),
                                       sampler ? Lookup::kSampledMinMatch : Lookup::kMinMatch, false, &agreed);
-    const uint32_t cap = std::min({ds41_session::kVerifyRows - 1, (uint32_t)item.emitted_cap - 1, room});
+    const uint32_t cap = std::min(ds41_session::kVerifyRows - 1, room);
     if (match.length != 0) {
       copy_start = match.start;
       while (copied < std::min<size_t>(cap, agreed)) {
@@ -324,61 +342,75 @@ int dspark_step(const ds41_session_dspark_batch_item& item, char* error, size_t 
       }
     }
   }
+  /* Without a copy, the drafter (if any) proposes the block. */
   uint32_t tail = copied;
-  if (copied == 0) {
-    const uint32_t limit =
-        std::min({(uint32_t)DS41_DSPARK_BLOCK, item.max_draft_tokens, (uint32_t)item.emitted_cap - 1, room});
+  bool plain = false;  // the drafter's policy chose a plain step
+  if (copied == 0 && s->dspark) {
+    const uint32_t limit = std::min({(uint32_t)DS41_DSPARK_BLOCK, item.max_draft_tokens, room});
     tail = draft_width(s, limit);
-    if (tail == 0 || ds41_dspark_state_end(s->dspark) != first || !ds41_dspark_draft(s->dspark, anchor, block + 1)) {
-      if (!eval(s, &anchor, 1, error, capacity)) return 1;
-      if (tail == 0) ema(s->policy.cycle_ms[0], ms(t0, std::chrono::steady_clock::now()));
-      out[(*item.n_emitted)++] = anchor;
-      return 0;
-    }
+    plain = tail == 0;
+    if (tail != 0 && (ds41_dspark_state_end(s->dspark) != first || !ds41_dspark_draft(s->dspark, anchor, block + 1)))
+      tail = 0;
   }
   const uint32_t m = tail + 1;
-  if (s->before_write) s->before_write(s->write_data, first, first + m);
+  float* rows = s->logits.data();
   const auto t1 = std::chrono::steady_clock::now();
-  float* rows = s->spec_logits.data();
-  if (ds41_decoder_eval_speculative(s->decoder, block, m, rows) != 0) {
-    set_error(error, capacity, "DSpark verification failed");
-    s->valid = false;
-    return 1;
+  if (m == 1) {
+    if (!eval(s, &anchor, 1, error, capacity)) return 1;
+  } else {
+    if (s->before_write) s->before_write(s->write_data, first, first + m);
+    rows = s->spec_logits.data();
+    if (ds41_decoder_eval_speculative(s->decoder, block, m, rows) != 0) {
+      set_error(error, capacity, "DSpark verification failed");
+      s->valid = false;
+      return 1;
+    }
   }
-  /* Row i - 1 verifies block[i]; the first mismatch ends the accepted prefix. */
+  /* Row i - 1 verifies block[i]; the first mismatch ends the accepted prefix
+   * and its draw is the next token. */
   const int stop = item.stop_at_eos ? ds41_token_eos(s->engine) : -1;
   uint32_t accepted = 1;
   uint32_t positional = 0;
-  bool mismatch = false;
+  int next = -1;
   for (uint32_t i = 1; i < m; i++) {
     const float* row = rows + (uint64_t)(i - 1) * n_vocab;
-    const int top = ds41_sample_argmax(row, n_vocab);
-    positional += top == block[i];
-    if (mismatch) continue;
-    int drawn = top;
-    if (sampler && !(sampler->try_accept_argmax && top >= 0 && sampler->try_accept_argmax(sampler->ctx, top)))
-      drawn = sampler->sample(sampler->ctx, row, n_vocab);
-    if (drawn != block[i] || (item.stop_at_eos && ds41_token_is_stop(s->engine, drawn)) || block[i] == stop) {
-      /* A sampled draw is the request's next token; greedy re-takes the frontier argmax. */
-      if (sampler) s->pending = drawn;
-      mismatch = true;
-      continue;
+    positional += ds41_sample_argmax(row, n_vocab) == block[i];
+    if (next >= 0) continue;
+    const int drawn = draw(s, sampler, row);
+    if (drawn != block[i] || ends(drawn) || block[i] == stop)
+      next = drawn;
+    else
+      accepted++;
+  }
+  if (m > 1) {
+    if (ds41_decoder_commit(s->decoder, accepted) != 0) {
+      set_error(error, capacity, "DSpark commit failed");
+      s->valid = false;
+      return 1;
     }
-    accepted++;
+    s->tokens.insert(s->tokens.end(), block, block + accepted);
+    memcpy(s->logits.data(), rows + (uint64_t)(accepted - 1) * n_vocab, n_vocab * sizeof(float));
+    if (s->dspark && !ds41_dspark_inject(s->dspark, first, accepted)) {
+      set_error(error, capacity, "DSpark feature injection failed");
+      s->valid = false;
+      return 1;
+    }
   }
-  if (ds41_decoder_commit(s->decoder, accepted) != 0) {
-    set_error(error, capacity, "DSpark commit failed");
+  if (next < 0) next = draw(s, sampler, s->logits.data());
+  if (next < 0 || next >= (int)n_vocab) {
+    set_error(error, capacity, "DSpark target logits contain no finite values");
     s->valid = false;
     return 1;
   }
-  s->tokens.insert(s->tokens.end(), block, block + accepted);
-  memcpy(s->logits.data(), rows + (uint64_t)(accepted - 1) * n_vocab, n_vocab * sizeof(float));
-  if (!ds41_dspark_inject(s->dspark, first, accepted)) {
-    set_error(error, capacity, "DSpark feature injection failed");
-    s->valid = false;
-    return 1;
+  for (uint32_t i = 1; i < accepted; i++) emit(block[i]);
+  emit(next);
+  s->next = ends(next) ? -1 : next;
+  const auto t2 = std::chrono::steady_clock::now();
+  auto& p = s->policy;
+  if (m == 1) {
+    if (plain) ema(p.cycle_ms[0], ms(t0, t2));
+    return 0;
   }
-  for (uint32_t i = 0; i < accepted; i++) out[(*item.n_emitted)++] = block[i];
   auto& st = s->stats;
   st.drafted += m;
   st.accepted += accepted;
@@ -392,17 +424,15 @@ int dspark_step(const ds41_session_dspark_batch_item& item, char* error, size_t 
     st.lookup_accepted += accepted - 1;
     if (trace)
       fprintf(stderr, "ds41: lookup pos=%u copied=%u accepted=%u verify=%.1fms\n", first, copied, accepted - 1,
-              ms(t1, std::chrono::steady_clock::now()));
+              ms(t1, t2));
     return 0;
   }
   st.support_drafted += tail;
   st.support_accepted += accepted - 1;
   st.positional += positional;
   /* Drafts after the first rejection say nothing about their acceptance. */
-  auto& p = s->policy;
   for (uint32_t k = 0; k < std::min(accepted, tail); k++) ema(p.accept[k], k + 1 < accepted ? 1.0f : 0.0f);
   for (uint32_t k = tail; k < DS41_DSPARK_BLOCK; k++) ema(p.accept[k], ds41_session::kAcceptPrior, kPolicyRelax);
-  const auto t2 = std::chrono::steady_clock::now();
   ema(p.cycle_ms[tail], ms(t0, t2));
   if (trace)
     fprintf(stderr, "ds41: DSpark pos=%u drafted=%u accepted=%u draft=%.1fms verify=%.1fms\n", first, tail,
@@ -419,11 +449,15 @@ int ds41_sessions_dspark_step_batch(const ds41_session_dspark_batch_item* items,
   return 0;
 }
 
-int ds41_session_dspark_take_pending_anchor(ds41_session* s) {
-  if (!s) return -1;
-  const int pending = s->pending;
-  s->pending = -1;
-  return pending;
+int ds41_session_flush(ds41_session* s, char* error, size_t capacity) {
+  if (!s || !s->valid) {
+    set_error(error, capacity, "no evaluated state to continue");
+    return 1;
+  }
+  if (s->next < 0) return 0;
+  const int token = s->next;
+  s->next = -1;
+  return eval(s, &token, 1, error, capacity) ? 0 : 1;
 }
 
 void ds41_session_dspark_stats(const ds41_session* s, uint64_t* drafted, uint64_t* accepted,
@@ -433,18 +467,17 @@ void ds41_session_dspark_stats(const ds41_session* s, uint64_t* drafted, uint64_
   const auto set = [](uint64_t* v, uint64_t x) {
     if (v) *v = x;
   };
-  const bool on = s && s->dspark;
-  set(drafted, on ? s->stats.drafted : 0);
-  set(accepted, on ? s->stats.accepted : 0);
-  set(support_drafted, on ? s->stats.support_drafted : 0);
-  set(support_accepted, on ? s->stats.support_accepted : 0);
-  set(positional_accepted, on ? s->stats.positional : 0);
-  set(anchors, on ? s->stats.anchors : 0);
-  set(full_blocks, on ? s->stats.full_blocks : 0);
-  set(steps, on ? s->stats.steps : 0);
+  set(drafted, s ? s->stats.drafted : 0);
+  set(accepted, s ? s->stats.accepted : 0);
+  set(support_drafted, s ? s->stats.support_drafted : 0);
+  set(support_accepted, s ? s->stats.support_accepted : 0);
+  set(positional_accepted, s ? s->stats.positional : 0);
+  set(anchors, s ? s->stats.anchors : 0);
+  set(full_blocks, s ? s->stats.full_blocks : 0);
+  set(steps, s ? s->stats.steps : 0);
   set(skipped, 0);
   if (context_tokens)
-    *context_tokens = !s ? 0 : on ? ds41_dspark_state_end(s->dspark) : (uint32_t)s->tokens.size();
+    *context_tokens = !s ? 0 : s->dspark ? ds41_dspark_state_end(s->dspark) : (uint32_t)s->tokens.size();
 }
 
 int ds41_session_copy_logits(const ds41_session* s, float* out, int capacity) {
@@ -516,7 +549,7 @@ int ds41_session_load_snapshot(ds41_session* s, const ds41_session_snapshot* sna
   s->tokens.assign((const int*)at, (const int*)at + header[1]);
   memcpy(s->logits.data(), at + header[1] * sizeof(int), header[2] * sizeof(float));
   s->valid = true;
-  s->pending = -1;
+  s->next = -1;
   s->lookup.Restore(lookup);
   return 0;
 }
@@ -537,7 +570,7 @@ void ds41_session_invalidate(ds41_session* s) {
   if (!s) return;
   s->valid = false;
   s->tokens.clear();
-  s->pending = -1;
+  s->next = -1;
   s->lookup.Clear();
   if (s->dspark) ds41_dspark_state_reset(s->dspark, 0);
 }
@@ -572,7 +605,7 @@ int ds41_session_finish_restore(ds41_session* s) {
   /* Restored state carries no drafter rows; they refill as tokens are evaluated. */
   if (s->dspark) ds41_dspark_state_reset(s->dspark, (uint32_t)s->tokens.size());
   s->lookup.Clear();
-  s->pending = -1;
+  s->next = -1;
   s->valid = true;
   return 0;
 }

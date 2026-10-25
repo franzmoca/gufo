@@ -370,8 +370,14 @@ bool Session::DsparkStep(std::size_t max_tokens, std::uint32_t max_draft_tokens,
       std::span<const SessionDsparkBatchItem>(&item, 1), error_msg);
 }
 
-int Session::TakePendingDsparkToken() {
-  return ds41_session_dspark_take_pending_anchor(session_);
+bool Session::EvaluatePending(std::string* error_msg) {
+  std::array<char, kErrorCapacity> error{};
+  if (ds41_session_flush(session_, error.data(), error.size()) == 0)
+    return true;
+  AssignError(error_msg, error[0] != '\0'
+                             ? error.data()
+                             : "DeepSeek V4.1 Flash evaluation failed");
+  return false;
 }
 
 Session::DsparkStats Session::DsparkStatistics() const {

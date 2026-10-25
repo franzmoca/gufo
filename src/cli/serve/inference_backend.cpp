@@ -274,6 +274,7 @@ struct DeepSeekV4Flash {
   static constexpr auto kSamplingPreset =
       sampling::TextModelPreset::kDeepSeekV4Flash;
   static constexpr bool kComponentCache = false;
+  static constexpr bool kPromptLookup = false;
 
   static std::string_view ChatTemplateId() noexcept {
     return models::deepseek_v4_flash::ChatTemplateId();
@@ -316,6 +317,8 @@ struct DeepSeekV41Flash {
       sampling::TextModelPreset::kDeepSeekV4Flash;
   // Sessions serve the component cache (ContinuationAdapter).
   static constexpr bool kComponentCache = true;
+  // Speculative steps verify prompt-lookup copies, also without a drafter.
+  static constexpr bool kPromptLookup = true;
 
   static std::string_view ChatTemplateId() noexcept {
     return models::deepseek_v41_flash::ChatTemplateId();
@@ -1861,7 +1864,7 @@ public:
   }
 
   [[nodiscard]] TextRunnerDescriptor Descriptor() const override {
-    const bool dspark = use_dspark_;
+    const bool dspark = use_dspark_ || Ds::kPromptLookup;
     return {
         .model_id = model_->ModelName(),
         .state_abi = std::string(Ds::kStateAbi),
@@ -2089,8 +2092,17 @@ public:
     auto& deepseek = RequireDeepSeekState<Ds>(state);
     if (deepseek.position() >= max_context_)
       return {.stop = true, .piece = {}};
-    // A sampled DSpark cycle may have drawn the next token already.
-    int token = deepseek.session().TakePendingDsparkToken();
+    // A speculative step's last token may be unevaluated (DeepSeek V4.1), or
+    // a sampled DSpark cycle may have drawn the next token already (V4).
+    int token = -1;
+    if constexpr (requires { deepseek.session().EvaluatePending(); }) {
+      std::string error;
+      if (!deepseek.session().EvaluatePending(&error))
+        throw std::runtime_error("DeepSeek decode failed: " + error);
+      deepseek.set_position(deepseek.session().Position());
+    } else {
+      token = deepseek.session().TakePendingDsparkToken();
+    }
     if (token < 0) {
       std::string error;
       const auto logits = deepseek.session().CopyLogits(&error);
@@ -2146,7 +2158,7 @@ public:
   [[nodiscard]] TextDecodeStep DecodeStep(
       TextRunnerState& state, std::size_t max_tokens,
       sampling::SamplerState& sampler) const override {
-    if (!use_dspark_) {
+    if (!use_dspark_ && !Ds::kPromptLookup) {
       return TextModelRunner::DecodeStep(state, max_tokens, sampler);
     }
     if (max_tokens == 0) {
@@ -2201,7 +2213,8 @@ public:
 
   [[nodiscard]] std::vector<TextDecodeStep> DecodeBatch(
       std::span<const TextRunnerDecode> decodes) const override {
-    if (!use_dspark_ || decodes.size() < 2 || decodes.size() > 8) {
+    if ((!use_dspark_ && !Ds::kPromptLookup) || decodes.size() < 2 ||
+        decodes.size() > 8) {
       return TextModelRunner::DecodeBatch(decodes);
     }
     if (std::any_of(decodes.begin(), decodes.end(), [&](const auto& item) {

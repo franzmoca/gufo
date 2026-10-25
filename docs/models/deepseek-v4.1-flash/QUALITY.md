@@ -191,6 +191,18 @@ prompts, and the `cache` suite with the drafter passes every case with all
 state that the tokens cannot rebuild (resume point, request start) travels
 in snapshots and in the component cache metadata.
 
+Each step now emits the token after its accepted proposals before
+evaluating it; the next step verifies it as its first row. Greedy output
+stays token-identical to plain decoding with and without the drafter (file
+edit, 512 tokens), and seeded sampled `gufo prompt` output (temperature 1.0,
+160 tokens) is byte-identical to the previous build with DSpark and without
+a drafter. A reply's last token is then evaluated by the next turn's
+prefill, as in plain decoding, so DSpark follow-ups prefill one token more
+than before (cached 187 → 186 tokens) and three cancellation follow-ups in
+the `cache` suite changed their sampled text; every case passes. Without a
+drafter all 30 completed `cache` replies are byte-identical to the previous
+build.
+
 `ds41.attention` checks the drafter's block attention (ring rows with
 wrap-around plus every block row, with sinks) against an fp64 reference
 (≤ 7e-7 relative), the hc mean exactly and the Markov argmax (first index

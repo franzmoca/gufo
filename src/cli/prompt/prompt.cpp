@@ -342,6 +342,7 @@ struct DeepSeekV4FlashPrompt {
   using ChatMessage = models::deepseek_v4_flash::ChatMessage;
   using DsparkSamplerBridge = models::deepseek_v4_flash::DsparkSamplerBridge;
   static constexpr std::string_view kName = "DeepSeek V4 Flash";
+  static constexpr bool kPromptLookup = false;
   static bool ValidateGgufTemplate(const core::GgufReader& reader,
                                    std::string* error) {
     return models::deepseek_v4_flash::ValidateGgufTemplate(reader, error);
@@ -358,6 +359,8 @@ struct DeepSeekV41FlashPrompt {
   using ChatMessage = models::deepseek_v41_flash::ChatMessage;
   using DsparkSamplerBridge = models::deepseek_v41_flash::DsparkSamplerBridge;
   static constexpr std::string_view kName = "DeepSeek V4.1 Flash";
+  // Speculative steps verify prompt-lookup copies, also without a drafter.
+  static constexpr bool kPromptLookup = true;
   static bool ValidateGgufTemplate(const core::GgufReader& reader,
                                    std::string* error) {
     return models::deepseek_v41_flash::ValidateGgufTemplate(reader, error);
@@ -471,7 +474,7 @@ int GenerateDeepSeekResponse(const PromptOptions& opt,
   }
   sampling::SamplerState sampler(opt.sampling, sampling_history);
 
-  const bool use_dspark = session.DsparkEnabled();
+  const bool use_dspark = session.DsparkEnabled() || Ds::kPromptLookup;
 
   const auto generation_start = std::chrono::steady_clock::now();
   std::size_t generated = 0;
@@ -505,6 +508,13 @@ int GenerateDeepSeekResponse(const PromptOptions& opt,
         if (opt.verbose)
           generated_ids.push_back(token);
         ++generated;
+      }
+    }
+    // The last emitted token is unevaluated; a reused chat session owns it.
+    if constexpr (requires { session.EvaluatePending(&error); }) {
+      if (reply != nullptr && !session.EvaluatePending(&error)) {
+        std::cerr << "\n" << Ds::kName << " decode failed: " << error << '\n';
+        return 1;
       }
     }
   } else {

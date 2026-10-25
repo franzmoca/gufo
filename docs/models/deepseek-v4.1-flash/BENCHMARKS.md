@@ -59,6 +59,13 @@ tokens/cycle; 71 of 78 cycles copied, 414 of 420 copies accepted), against
 23.4 tok/s plain. The roadmap and chat prompts above rarely repeat
 themselves (0 and 3 lookup cycles): 28.95 and 37.81 tok/s.
 
+Without a drafter, decoding verifies prompt-lookup copies the same way: the
+file edit runs at 54.61 tok/s against 23.59 plain (71 lookup cycles, 418 of
+424 copies accepted, 7.21 tokens per cycle), and the chat prompt at 24.30
+against 23.81 tok/s. A step emits the token after its accepted copies
+without evaluating it (the next step's first row), so tokens without a copy
+cost one evaluation each, as in plain decoding.
+
 `gufo serve --dspark-model` (Q2_K/Q4_K, 32K context), 70-token thinking
 prompt, 400 tokens: greedy 26.4 tok/s (155 of 277 drafts accepted),
 temperature 1.0 23.6-24.6 tok/s (49-52% accepted), against tg64 23.88
