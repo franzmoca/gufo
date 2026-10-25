@@ -291,6 +291,61 @@ double QkvNormCase(uint32_t pos0, uint32_t n, std::mt19937& rng) {
   return worst;
 }
 
+/* ds41_v41_matmul_bf16 (rows x k BF16 weights, n FP32 tokens) against
+ * double precision; returns the worst error relative to the largest output
+ * magnitude of a token. The batched form splits the activations into three
+ * exact bfloat16 terms, so it stays at FP32 accumulation error. */
+double Bf16MatmulCase(uint32_t rows, uint32_t k, uint32_t n,
+                      std::mt19937& rng) {
+  std::normal_distribution<float> normal;
+  std::vector<uint16_t> w((std::size_t)rows * k);
+  std::vector<float> wf(w.size()), x((std::size_t)n * k);
+  for (std::size_t i = 0; i < w.size(); i++) {
+    const float v = normal(rng) * 0.05f;
+    uint32_t u = 0;
+    std::memcpy(&u, &v, sizeof(u));
+    w[i] = (uint16_t)(u >> 16);
+    u &= 0xffff0000u;
+    std::memcpy(&wf[i], &u, sizeof(u));
+  }
+  for (std::size_t i = 0; i < x.size(); i++)
+    x[i] = normal(rng) * (i % 7 == 0 ? 30.0f : 1.0f);
+  uint16_t* dw = Device(w);
+  float* dx = Device(x);
+  float* dout = nullptr;
+  (void)hipMalloc(&dout, (std::size_t)n * rows * sizeof(float));
+  if (!dw || !dx || !dout || ds41_v41_matmul_bf16(dw, dx, dout, rows, k, n) ||
+      hipDeviceSynchronize() != hipSuccess) {
+    std::fprintf(stderr, "bf16 matmul launch failed\n");
+    return INFINITY;
+  }
+  std::vector<float> out((std::size_t)n * rows);
+  (void)hipMemcpy(out.data(), dout, out.size() * sizeof(float),
+                  hipMemcpyDeviceToHost);
+  (void)hipFree(dw);
+  (void)hipFree(dx);
+  (void)hipFree(dout);
+  double worst = 0.0;
+  for (uint32_t t = 0; t < n; t++) {
+    std::vector<double> want(rows);
+    double scale = 1e-30;
+    for (uint32_t r = 0; r < rows; r++) {
+      double acc = 0.0;
+      for (uint32_t i = 0; i < k; i++)
+        acc += (double)wf[(std::size_t)r * k + i] * x[(std::size_t)t * k + i];
+      want[r] = acc;
+      scale = std::max(scale, std::fabs(acc));
+    }
+    for (uint32_t r = 0; r < rows; r++) {
+      const double got = out[(std::size_t)t * rows + r];
+      if (!std::isfinite(got))
+        return INFINITY;
+      worst = std::max(worst, std::fabs(got - want[r]) / scale);
+    }
+  }
+  return worst;
+}
+
 }  // namespace
 
 int main() {
@@ -336,6 +391,16 @@ int main() {
     const double e = QkvNormCase(5000, n, rng);
     std::printf("q kv norm n=%u max_abs_diff=%.2e\n", n, e);
     ok = e < 1e-5 && ok;
+  }
+  /* Router, compressor and indexer shapes: FP32 kernel below 16 tokens, the
+   * matrix cores above (tile edges at 37 and 200 tokens). */
+  const uint32_t matmuls[][3] = {
+      {384, 5120, 1}, {384, 5120, 37}, {512, 5120, 200}, {4096, 1280, 64}};
+  for (const auto& m : matmuls) {
+    const double e = Bf16MatmulCase(m[0], m[1], m[2], rng);
+    std::printf("bf16 matmul rows=%u k=%u n=%u rel_err=%.2e\n", m[0], m[1],
+                m[2], e);
+    ok = e < 2e-6 && ok;
   }
   std::printf("fp4 row format mismatches %d\n", g_format_errors);
   ok = g_format_errors == 0 && ok;
