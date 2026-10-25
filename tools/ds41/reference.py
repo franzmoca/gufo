@@ -37,6 +37,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from gguf_model import Model  # noqa: E402
+from quants import TORCH_DEQUANT  # noqa: E402
 
 DEAD = -1
 
@@ -284,6 +285,15 @@ class Weights:
         names = [f"blk.{layer}.ffn_{p}_exps.weight" for p in ("gate", "up", "down")]
         tensors = [self.model[n] for n in names]
 
+        if self.device.type != "cpu" and all(t.type in TORCH_DEQUANT for t in tensors):
+            # Decode on the device: the numpy decode dominated long prompts.
+            for expert in ids:
+                yield expert, [
+                    TORCH_DEQUANT[t.type](torch.frombuffer(bytearray(t.raw(expert, 1)), dtype=torch.uint8).to(
+                        self.device)).reshape(t.shape[1:]) for t in tensors
+                ]
+            return
+
         def load(expert):
             return expert, [t.array(expert, 1)[0] for t in tensors]
 
@@ -424,8 +434,11 @@ class Layer:
         q = fp4_fake_quant(q, 32, False)
         index_k = shared.index_k[:end_pos // ratio]
         weights = linear(x, self.t("indexer.proj")) * (cfg.index_head_dim**-0.5 * cfg.index_heads**-0.5)
-        score = torch.einsum("shd,td->sht", q, index_k)
-        score = (score.relu_() * weights.unsqueeze(-1)).sum(dim=1)
+        # Query chunks bound the [s, heads, rows] product (41 GiB at 18.5K tokens);
+        # prompts that fit in 4 GiB keep a single chunk.
+        chunk = max(1, (4 << 30) // (4 * cfg.index_heads * max(1, index_k.size(0))))
+        score = torch.cat([(torch.einsum("shd,td->sht", q[i:i + chunk], index_k).relu_() *
+                            weights[i:i + chunk].unsqueeze(-1)).sum(dim=1) for i in range(0, seqlen, chunk)])
         if start_pos == 0:
             compress_lens = (torch.arange(1, seqlen + 1, device=x.device) // ratio).unsqueeze(-1)
             score.masked_fill_(torch.arange(seqlen // ratio, device=x.device) >= compress_lens, -torch.inf)
@@ -590,12 +603,15 @@ class Transformer:
         pre_mix = torch.zeros(len(tokens), cfg.hc_mult, device=h.device)
         pre_mix[:, 0] = 1.0
         routes: list = []
+        t_start = time.time()
         for i, layer in enumerate(self.layers):
             if layer.has_engram:
                 h = layer.engram(h, hashes[:, cfg.engram_layers.index(i)].to(h.device))
             h, pre_mix = layer.forward(h, start_pos, pre_mix, self.shared, routes)
             if dump is not None:
                 dump(i, h)
+            if len(tokens) > 1:
+                print(f"layer {i} done at {time.time() - t_start:.0f} s", file=sys.stderr, flush=True)
         x = (pre_mix.unsqueeze(-1) * h).sum(1)
         scored = None
         if score:

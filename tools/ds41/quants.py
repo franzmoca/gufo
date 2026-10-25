@@ -144,6 +144,104 @@ def dequant_iq4_nl(data: np.ndarray) -> np.ndarray:
     return (values * d[:, None]).reshape(-1).astype(np.float32)
 
 
+# Torch ports of the expert formats: the same integer decode and the same float64
+# scale product rounded once to float32, so they match the numpy versions bit for
+# bit while running on the oracle's device.
+def _t(table: np.ndarray, device) -> "torch.Tensor":
+    import torch
+
+    return torch.from_numpy(np.ascontiguousarray(table)).to(device)
+
+
+def _t_f16(raw):
+    import torch
+
+    return raw.contiguous().view(torch.float16).double().reshape(raw.shape[:-1])
+
+
+def _t_u16(raw):
+    import torch
+
+    return raw.contiguous().view(torch.int16).long() & 0xFFFF
+
+
+def _t_u32(raw):
+    import torch
+
+    return raw.contiguous().view(torch.int32).long() & 0xFFFFFFFF
+
+
+def torch_dequant_iq1_s(b):
+    import torch
+
+    b = b.reshape(-1, 50)
+    d = _t_f16(b[:, 0:2])
+    qs = b[:, 2:34].reshape(-1, 8, 4).long()
+    qh = _t_u16(b[:, 34:50])
+    shift = 3 * torch.arange(4, device=b.device)
+    index = qs | (((qh[:, :, None] >> shift) & 7) << 8)
+    scale = d[:, None] * (2 * ((qh >> 12) & 7) + 1)
+    delta = torch.where((qh & 0x8000) != 0, -IQ1_DELTA, IQ1_DELTA).float()
+    values = _t(_iq1s_grid(), b.device)[index] + delta[:, :, None, None]
+    return (values.double() * scale[:, :, None, None]).reshape(-1).float()
+
+
+def torch_dequant_iq1_m(b):
+    import torch
+
+    b = b.reshape(-1, 56)
+    qs = b[:, 0:32].reshape(-1, 8, 4).long()
+    qh = b[:, 32:48].reshape(-1, 8, 2).long()
+    sc = _t_u16(b[:, 48:56])
+    packed = (sc[:, 0] >> 12) | ((sc[:, 1] >> 8) & 0x00F0) | ((sc[:, 2] >> 4) & 0x0F00) | (sc[:, 3] & 0xF000)
+    d = packed.to(torch.int16).view(torch.float16).double()
+    ib = torch.arange(8, device=b.device)
+    word = sc[:, ib // 2] >> (6 * (ib % 2))
+    scale1 = d[:, None] * (2 * (word & 7) + 1)
+    scale2 = d[:, None] * (2 * ((word >> 3) & 7) + 1)
+    high = torch.stack([(qh[..., 0] << 8), (qh[..., 0] << 4), (qh[..., 1] << 8), (qh[..., 1] << 4)], -1) & 0x700
+    index = qs | high
+    flag = torch.stack([qh[..., 0] & 0x08, qh[..., 0] & 0x80, qh[..., 1] & 0x08, qh[..., 1] & 0x80], -1)
+    delta = torch.where(flag != 0, -IQ1_DELTA, IQ1_DELTA).float()
+    values = _t(_iq1s_grid(), b.device)[index] + delta[..., None]
+    scale = torch.stack([scale1, scale1, scale2, scale2], -1)
+    return (values.double() * scale[..., None]).reshape(-1).float()
+
+
+def torch_dequant_iq2_xxs(b):
+    import torch
+
+    b = b.reshape(-1, 66)
+    d = _t_f16(b[:, 0:2])
+    groups = b[:, 2:66].reshape(-1, 8, 8)
+    index = groups[:, :, 0:4].long()
+    aux = _t_u32(groups[:, :, 4:8]).reshape(-1, 8)
+    scale = d[:, None] * (0.5 + (aux >> 28)) * 0.25
+    sign_index = (aux[:, :, None] >> (7 * torch.arange(4, device=b.device))) & 127
+    values = _t(_byte_grid("iq2xxs_grid"), b.device)[index] * _t(_sign_table(), b.device)[sign_index]
+    return (values.double() * scale[:, :, None, None]).reshape(-1).float()
+
+
+def torch_dequant_iq2_s(b):
+    import torch
+
+    b = b.reshape(-1, 82)
+    d = _t_f16(b[:, 0:2])
+    qs = b[:, 2:34].reshape(-1, 8, 4).long()
+    signs = b[:, 34:66].reshape(-1, 8, 4)
+    qh = b[:, 66:74].long()
+    scales = b[:, 74:82].long()
+    index = qs | ((qh[:, :, None] << (8 - 2 * torch.arange(4, device=b.device))) & 0x300)
+    low = d[:, None] * (0.5 + (scales & 0xF)) * 0.25
+    high = d[:, None] * (0.5 + (scales >> 4)) * 0.25
+    scale = torch.stack([low, low, high, high], -1)
+    bits = (signs[..., None] >> torch.arange(8, dtype=torch.uint8, device=b.device)) & 1
+    values = _t(_byte_grid("iq2s_grid"), b.device)[index] * (1.0 - 2.0 * bits.float())
+    return (values.double() * scale[..., None]).reshape(-1).float()
+
+
+TORCH_DEQUANT = {19: torch_dequant_iq1_s, 29: torch_dequant_iq1_m, 16: torch_dequant_iq2_xxs, 22: torch_dequant_iq2_s}
+
 DEQUANT = dict(BASE_DEQUANT)
 DEQUANT.update({19: dequant_iq1_s, 29: dequant_iq1_m, 16: dequant_iq2_xxs, 22: dequant_iq2_s, 20: dequant_iq4_nl})
 
