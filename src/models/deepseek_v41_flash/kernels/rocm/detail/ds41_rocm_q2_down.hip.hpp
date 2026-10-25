@@ -9,11 +9,10 @@
 // small tails at 64 rows avoids wasting matrix work on padding. The return
 // value separates the two launch spans; each expert output belongs to one tile.
 static uint32_t ds41_rocm_q2_down_tile_map(std::vector<uint32_t>& map,
-                                           const uint32_t* counts,
-                                           const uint32_t* hot_experts,
-                                           uint32_t hot_count,
-                                           uint32_t row_tiles,
-                                           bool pair_tiles) {
+                                          const uint32_t* counts,
+                                          const uint32_t* hot_experts,
+                                          uint32_t hot_count,
+                                          uint32_t row_tiles, bool pair_tiles) {
   map.clear();
   const uint32_t rows = row_tiles * 16u;
   for (uint32_t h = 0; h < hot_count; ++h) {
@@ -40,8 +39,8 @@ static uint32_t ds41_rocm_q2_down_tile_map(std::vector<uint32_t>& map,
  * only the larger of those two counts, but the raw window has to sit beyond
  * both because the K loop still needs it. */
 static size_t ds41_rocm_q2_down_wide_shmem(uint32_t mtiles, uint32_t bm,
-                                           uint32_t bn, uint32_t bk,
-                                           uint32_t nfrag) {
+                                          uint32_t bn, uint32_t bk,
+                                          uint32_t nfrag) {
   /* Two mid-tile buffers: the kernel prefetches the next K step's tile while
    * the current one still feeds the matrix ops. */
   const size_t ab = (2u * (size_t)mtiles * bm * bk + (size_t)nfrag * bk * bn) *

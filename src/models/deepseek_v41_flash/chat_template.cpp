@@ -23,59 +23,31 @@ constexpr std::string_view kAssistant = "<｜Assistant｜>";
 constexpr std::string_view kThinkStart = "<think>";
 constexpr std::string_view kThinkEnd = "</think>";
 
-constexpr std::string_view kHighReasoningPrompt =
-    "Reasoning Effort: Absolute maximum with no shortcuts permitted.\n"
-    "You MUST be very thorough in your thinking and comprehensively "
-    "decompose the problem to resolve the root cause, rigorously "
-    "stress-testing your logic against all potential paths, edge cases, and "
-    "adversarial scenarios.\n"
-    "Explicitly write out your entire deliberation process, documenting "
-    "every intermediate step, considered alternative, and rejected "
-    "hypothesis to ensure absolutely no assumption is left unchecked.\n\n";
+constexpr std::string_view kSystem = "<｜System｜>";
 
-constexpr std::string_view kMaxReasoningPrompt =
-    "Reasoning Effort: Beyond maximum — exhaustive, relentless, and "
-    "uncompromising.\n"
-    "You MUST reason with the utmost depth and rigor, leaving absolutely "
-    "nothing to chance: exhaustively decompose the problem into its most "
-    "fundamental components, trace every causal chain to its root, and "
-    "resolve the underlying cause rather than any surface symptom.\n"
-    "Do not stop reasoning until you have independently verified the "
-    "solution from multiple angles and are certain that no assumption "
-    "remains unchecked and no error remains undiscovered.\n\n";
-
-enum class NativeEffort : std::uint8_t {
-  kLow,
-  kHigh,
-  kMax,
-};
-
-NativeEffort MapEffort(ReasoningEffort effort) noexcept {
+/// V4.1 reasoning effort is a 1-100 budget; deepseek-recipe maps the API
+/// levels to 50 (low), 75 (default, high, xhigh) and 100 (max).
+int EffortBudget(ReasoningEffort effort) noexcept {
   switch (effort) {
     case ReasoningEffort::kMinimal:
     case ReasoningEffort::kLow:
-      return NativeEffort::kLow;
+      return 50;
     case ReasoningEffort::kMedium:
     case ReasoningEffort::kHigh:
     case ReasoningEffort::kXHigh:
-      return NativeEffort::kHigh;
+      return 75;
     case ReasoningEffort::kMax:
-      return NativeEffort::kMax;
+      return 100;
   }
-  return NativeEffort::kLow;
+  return 75;
 }
 
 void AppendEffortPrompt(std::string& output, ReasoningEffort effort) {
-  switch (MapEffort(effort)) {
-    case NativeEffort::kLow:
-      return;
-    case NativeEffort::kHigh:
-      output.append(kHighReasoningPrompt);
-      return;
-    case NativeEffort::kMax:
-      output.append(kMaxReasoningPrompt);
-      return;
-  }
+  output.append("Reasoning Effort: ");
+  output.append(std::to_string(EffortBudget(effort)));
+  output.append(
+      " (range 1-100, the higher the value, the more thorough the "
+      "reasoning)\n\n");
 }
 
 std::string Sha256(std::string_view value) {
@@ -272,15 +244,14 @@ ChatTemplateOptions ResolveDeepSeekChatOptions(
 }
 
 std::string_view DeepSeekReasoningEffortName(ReasoningEffort effort) noexcept {
-  switch (MapEffort(effort)) {
-    case NativeEffort::kLow:
+  switch (EffortBudget(effort)) {
+    case 50:
       return "low";
-    case NativeEffort::kHigh:
-      return "high";
-    case NativeEffort::kMax:
+    case 100:
       return "max";
+    default:
+      return "high";
   }
-  return "low";
 }
 
 std::string RenderChat(std::span<const ChatMessage> messages,
@@ -288,81 +259,63 @@ std::string RenderChat(std::span<const ChatMessage> messages,
   return RenderChat(messages, {}, options);
 }
 
+/// Renders the official V4.1 encoding with deepseek-recipe serving rules:
+/// request tools join a leading system message (inserted empty when the
+/// conversation has none), `developer` is a system message, and earlier
+/// reasoning is rendered only with tools or when explicitly preserved.
 std::string RenderChat(std::span<const ChatMessage> messages,
                        std::span<const ChatTool> tools,
                        const ChatTemplateOptions& options) {
+  const auto is_system = [](std::string_view role) {
+    return role == "system" || role == "developer";
+  };
+  const auto is_user_turn = [](std::string_view role) {
+    return role == "user" || role == "tool" || role == "function";
+  };
+  const bool thinking = options.enable_thinking;
+  const bool drop_thinking =
+      !options.preserve_thinking && !options.tools_present && tools.empty();
+  const bool insert_system =
+      !tools.empty() && (messages.empty() || !is_system(messages[0].role));
+
   std::string output(kBos);
-  if (options.enable_thinking) {
+  if (thinking || insert_system ||
+      (!messages.empty() && is_system(messages[0].role)))
+    output.append(kSystem);
+  if (thinking)
     AppendEffortPrompt(output, options.reasoning_effort);
-  }
-
-  std::size_t last_user_index = messages.size();
-  for (std::size_t index = messages.size(); index > 0; --index) {
-    const std::string_view role = messages[index - 1].role;
-    if (role == "user" || role == "developer") {
-      last_user_index = index - 1;
-      break;
-    }
-  }
-  const bool preserve_thinking =
-      options.preserve_thinking || options.tools_present || !tools.empty();
-
-  std::size_t tool_host_index = messages.size();
-  if (!tools.empty()) {
-    for (std::size_t index = 0; index < messages.size(); ++index) {
-      if (messages[index].role == "system" ||
-          messages[index].role == "developer") {
-        tool_host_index = index;
-        break;
-      }
-    }
-    if (tool_host_index == messages.size()) {
-      AppendToolsPrompt(output, tools);
-    }
+  if (insert_system) {
+    output.append("\n\n");
+    AppendToolsPrompt(output, tools);
   }
 
   std::unordered_map<std::string_view, std::size_t> tool_call_order;
   for (std::size_t index = 0; index < messages.size(); ++index) {
     const auto& message = messages[index];
     const std::string_view role = message.role;
-    if (role == "system") {
+    const bool first = index == 0 && !insert_system;
+    if (is_system(role)) {
+      if (!first)
+        output.append(kSystem);
       output.append(message.content);
-      if (index == tool_host_index) {
-        if (!message.content.empty()) {
-          output.append("\n\n");
-        }
+      if (first && !tools.empty()) {
+        output.append("\n\n");
         AppendToolsPrompt(output, tools);
       }
       continue;
     }
-    if (role == "developer") {
-      if (options.enable_thinking && !preserve_thinking &&
-          index < last_user_index) {
-        continue;
-      }
-      output.append(kUser);
-      output.append(message.content);
-      if (index == tool_host_index) {
-        if (!message.content.empty()) {
-          output.append("\n\n");
-        }
-        AppendToolsPrompt(output, tools);
-      }
-      continue;
-    }
-    if (role == "user" || role == "tool" || role == "function") {
+    if (is_user_turn(role)) {
+      // One user turn: consecutive user text and tool results joined by blank
+      // lines, with results sorted by the preceding call order as in
+      // sort_tool_results_by_call_order. Unknown IDs rank first; ties keep
+      // their arrival order.
+      std::size_t end = index;
       std::vector<const ChatMessage*> tool_results;
-      for (std::size_t end = index; end < messages.size(); ++end) {
-        const auto& next = messages[end];
-        if (next.role != "user" && next.role != "tool" &&
-            next.role != "function")
-          break;
-        if (next.role != "user")
-          tool_results.push_back(&next);
+      while (end < messages.size() && is_user_turn(messages[end].role)) {
+        if (messages[end].role != "user")
+          tool_results.push_back(&messages[end]);
+        ++end;
       }
-      // Match sort_tool_results_by_call_order in the official encoder.
-      // Reorder only tool slots, retaining interleaved user text. Unknown
-      // IDs have rank zero and ties preserve their arrival order.
       const auto rank = [&](const ChatMessage* result) {
         const auto found = tool_call_order.find(result->tool_call_id);
         return found == tool_call_order.end() ? std::size_t{0} : found->second;
@@ -373,24 +326,18 @@ std::string RenderChat(std::span<const ChatMessage> messages,
                        });
       std::size_t result_index = 0;
       output.append(kUser);
-      bool first_block = true;
-      while (index < messages.size() && (messages[index].role == "user" ||
-                                         messages[index].role == "tool" ||
-                                         messages[index].role == "function")) {
-        if (!first_block) {
+      for (std::size_t part = index; part < end; ++part) {
+        if (part != index)
           output.append("\n\n");
-        }
-        if (messages[index].role == "user") {
-          output.append(messages[index].content);
+        if (messages[part].role == "user") {
+          output.append(messages[part].content);
         } else {
           output.append("<tool_result>");
           output.append(tool_results[result_index++]->content);
           output.append("</tool_result>");
         }
-        first_block = false;
-        ++index;
       }
-      --index;
+      index = end - 1;
       continue;
     }
     if (role == "assistant") {
@@ -402,28 +349,19 @@ std::string RenderChat(std::span<const ChatMessage> messages,
         }
       }
       output.append(kAssistant);
-      if (options.enable_thinking &&
-          (preserve_thinking || index > last_user_index)) {
+      if (thinking && index > 0 && !drop_thinking) {
         output.append(kThinkStart);
         output.append(message.reasoning_content);
-        output.append(kThinkEnd);
-      } else {
-        output.append(kThinkEnd);
       }
+      output.append(kThinkEnd);
       output.append(message.content);
       AppendToolCalls(output, message.tool_calls);
       output.append(kEos);
-      continue;
     }
   }
 
-  if (!messages.empty()) {
-    const std::string_view last_role = messages.back().role;
-    if (last_role == "user" || last_role == "developer" ||
-        last_role == "tool" || last_role == "function") {
-      output.append(GenerationPrompt(options.enable_thinking));
-    }
-  }
+  if (!messages.empty() && messages.back().role != "assistant")
+    output.append(GenerationPrompt(thinking));
   return output;
 }
 
@@ -433,16 +371,9 @@ std::string_view GenerationPrompt(bool enable_thinking) {
 
 bool ValidateGgufTemplate(const core::GgufReader& reader,
                           std::string* error_msg) {
-  if (reader.GetMetadataString("general.architecture") != "deepseek4") {
+  if (reader.GetMetadataString("general.architecture") != "deepseek41") {
     AssignError(error_msg,
-                "DeepSeek V4 Flash artifact has unexpected architecture");
-    return false;
-  }
-  const auto name = reader.GetMetadataString("general.name");
-  if (!name.has_value() ||
-      name->find("DeepSeek V4 Flash") == std::string_view::npos) {
-    AssignError(error_msg,
-                "DeepSeek artifact is not the supported V4 Flash revision");
+                "DeepSeek V4.1 Flash artifact has unexpected architecture");
     return false;
   }
   const auto raw_template = reader.GetMetadataString("tokenizer.chat_template");
@@ -454,7 +385,7 @@ bool ValidateGgufTemplate(const core::GgufReader& reader,
   const std::string actual_hash = Sha256(*raw_template);
   if (actual_hash != ArtifactTemplateSha256()) {
     AssignError(error_msg,
-                "DeepSeek GGUF chat template SHA-256 is not the pinned 0731 "
+                "DeepSeek GGUF chat template SHA-256 is not the pinned 1017 "
                 "artifact version: " +
                     actual_hash);
     return false;

@@ -13,9 +13,29 @@
 #include <stdexcept>
 #include <string_view>
 #include <tuple>
+#include <utility>
 
 namespace gufo::sampling {
 namespace {
+
+/// Native DSML tag text for `format`, written in V4 form. V4.1 writes each
+/// tag name after a space and names the call block `calls`.
+std::string Dsml(JsonConstraint::ToolFormat format, std::string_view v4_text) {
+  std::string text(v4_text);
+  if (format != JsonConstraint::ToolFormat::kDeepSeek41)
+    return text;
+  static constexpr std::pair<std::string_view, std::string_view> kTags[] = {
+      {"｜DSML｜tool_calls", "｜DSML｜ calls"},
+      {"｜DSML｜invoke", "｜DSML｜ invoke"},
+      {"｜DSML｜parameter", "｜DSML｜ parameter"},
+  };
+  for (const auto& [from, to] : kTags) {
+    for (std::size_t at = text.find(from); at != std::string::npos;
+         at = text.find(from, at + to.size()))
+      text.replace(at, from.size(), to);
+  }
+  return text;
+}
 constexpr std::uint32_t kTerminal = 1U << 31;
 constexpr std::uint32_t kLexeme = 1U << 30;
 constexpr std::uint32_t kArguments = 1U << 29;
@@ -338,8 +358,9 @@ public:
            std::string_view(" \t\f\v").find(name.back()) !=
                std::string_view::npos))
         return {};
-      const std::string close =
-          format == Format::kQwen ? "\n</parameter>\n" : "</｜DSML｜parameter>";
+      const std::string close = format == Format::kQwen
+                                    ? "\n</parameter>\n"
+                                    : Dsml(format, "</｜DSML｜parameter>");
       const auto* schema = NativeSchema(original);
       const auto* type = schema ? schema->find("type") : nullptr;
       if (!type || !type->is_string() || schema->contains("anyOf")) {
@@ -375,8 +396,8 @@ public:
           value =
               Seq({Literal("<parameter=" + name + ">\n"), text ? raw : typed});
         } else {
-          const auto open =
-              "<｜DSML｜parameter name=\"" + name + "\" string=\"";
+          const auto open = Dsml(format, "<｜DSML｜parameter name=\"") + name +
+                            "\" string=\"";
           Sequence choices;
           if (text)
             choices.push_back(Seq({Literal(open + "true\">"), raw}));
@@ -438,9 +459,9 @@ public:
       }
       const auto open = format == Format::kQwen
                             ? "<parameter=" + name + ">\n"
-                            : "<｜DSML｜parameter name=\"" + name +
-                                  "\" string=\"" + (string ? "true" : "false") +
-                                  "\">";
+                            : Dsml(format, "<｜DSML｜parameter name=\"") +
+                                  name + "\" string=\"" +
+                                  (string ? "true" : "false") + "\">";
       members.emplace_back(
           name, Seq({Literal(open), value,
                      Literal(format == Format::kQwen ? close : close + "\n")}));
@@ -464,7 +485,7 @@ public:
     ignore_unknown_keys_ = true;
     const bool qwen = format == Format::kQwen;
     const std::string close =
-        qwen ? "\n</parameter>\n" : "</｜DSML｜parameter>";
+        qwen ? "\n</parameter>\n" : Dsml(format, "</｜DSML｜parameter>");
     // A root reference is followed as ToolParameters does; other roots that
     // are not objects declare no parameters, as in llama.cpp.
     const auto* root = &schema_;
@@ -561,7 +582,8 @@ public:
         value =
             Seq({Literal("<parameter=" + name + ">\n"), text ? raw : typed});
       } else {
-        const auto open = "<｜DSML｜parameter name=\"" + name + "\" string=\"";
+        const auto open =
+            Dsml(format, "<｜DSML｜parameter name=\"") + name + "\" string=\"";
         Sequence choices;
         if (text)
           choices.push_back(Seq({Literal(open + "true\">"), raw}));
@@ -647,14 +669,15 @@ private:
     const auto name =
         Lexeme(JsonSchemaLexeme::RawString(name_schema, qwen ? ">" : "\""));
     const std::string close =
-        qwen ? "\n</parameter>\n" : "</｜DSML｜parameter>";
+        qwen ? "\n</parameter>\n" : Dsml(format, "</｜DSML｜parameter>");
     const auto raw = Optional(
         Lexeme(JsonSchemaLexeme::RawString(json::Value::object(), close)));
     const auto value = qwen ? Seq({Literal(">\n"), raw})
                             : Alt({Seq({Literal("\" string=\"true\">"), raw}),
                                    Seq({Literal("\" string=\"false\">"),
                                         GenericValue(kMaxDepth)})});
-    return Seq({Literal(qwen ? "<parameter=" : "<｜DSML｜parameter name=\""),
+    return Seq({Literal(qwen ? std::string("<parameter=")
+                             : Dsml(format, "<｜DSML｜parameter name=\"")),
                 name, value, Literal(qwen ? close : close + "\n")});
   }
 
@@ -1880,7 +1903,14 @@ std::shared_ptr<const JsonConstraint> JsonConstraint::OpenToolParameters(
     return JsonConstraintCompiler(schema, false)
         .OpenToolParameters(ToolFormat::kDeepSeek);
   }();
-  return format == ToolFormat::kQwen ? qwen : deepseek;
+  static const auto deepseek41 = [] {
+    const auto schema = json::Value::object();
+    return JsonConstraintCompiler(schema, false)
+        .OpenToolParameters(ToolFormat::kDeepSeek41);
+  }();
+  return format == ToolFormat::kQwen         ? qwen
+         : format == ToolFormat::kDeepSeek41 ? deepseek41
+                                             : deepseek;
 }
 
 std::shared_ptr<const JsonConstraint> JsonConstraint::WithReasoning(
@@ -2001,11 +2031,12 @@ std::shared_ptr<const JsonConstraint> JsonConstraint::WithTools(
     grammar->rules_.push_back({std::move(bytes)});
     return id;
   };
-  const bool deepseek = format == ToolFormat::kDeepSeek;
-  const std::string_view marker =
-      deepseek ? "<｜DSML｜tool_calls>" : "<tool_call>";
+  const bool deepseek =
+      format == ToolFormat::kDeepSeek || format == ToolFormat::kDeepSeek41;
+  const std::string marker =
+      deepseek ? Dsml(format, "<｜DSML｜tool_calls>") : "<tool_call>";
   const auto end = literal(format == ToolFormat::kJson ? "}</tool_call>"
-                           : deepseek                  ? "</｜DSML｜invoke>"
+                           : deepseek ? Dsml(format, "</｜DSML｜invoke>")
                                       : "</function>\n</tool_call>");
   const auto calls = static_cast<std::uint32_t>(grammar->rules_.size());
   grammar->rules_.push_back({});
@@ -2087,7 +2118,7 @@ std::shared_ptr<const JsonConstraint> JsonConstraint::WithTools(
     }
   }
   if (deepseek) {
-    const auto finish = literal("\n</｜DSML｜tool_calls>");
+    const auto finish = literal(Dsml(format, "\n</｜DSML｜tool_calls>"));
     const auto tail = static_cast<std::uint32_t>(grammar->rules_.size());
     grammar->rules_.push_back({{finish, after}});
     if (parallel)
@@ -2099,7 +2130,7 @@ std::shared_ptr<const JsonConstraint> JsonConstraint::WithTools(
     imported.emplace(answer.get(), answer->root_);
   if (format != ToolFormat::kJson) {
     grammar->reasoning_tool_prefix_ =
-        deepseek ? "<｜DSML｜tool_calls>\n<｜DSML｜invoke name=\""
+        deepseek ? Dsml(format, "<｜DSML｜tool_calls>\n<｜DSML｜invoke name=\"")
                  : "<tool_call>\n<function=";
     grammar->reasoning_tool_root_ = grammar->rules_.size();
     grammar->rules_.push_back({});
@@ -2108,7 +2139,7 @@ std::shared_ptr<const JsonConstraint> JsonConstraint::WithTools(
     const auto begin = literal(
         format == ToolFormat::kJson
             ? "{\"name\":" + json::Value(name).dump() + ",\"arguments\":"
-        : deepseek ? "\n<｜DSML｜invoke name=\"" + name + "\">\n"
+        : deepseek ? Dsml(format, "\n<｜DSML｜invoke name=\"") + name + "\">\n"
                    : "\n<function=" + name + ">\n");
     if (const auto found = imported.find(arguments.get());
         found != imported.end()) {

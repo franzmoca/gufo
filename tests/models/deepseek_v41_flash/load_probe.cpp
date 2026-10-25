@@ -4,11 +4,14 @@
 #include <glob.h>
 
 #include <chrono>
+#include <cmath>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <fstream>
 #include <string>
+#include <vector>
 
 #include "src/models/deepseek_v41_flash/runtime/model.h"
 
@@ -50,6 +53,26 @@ std::uint64_t GttUsedBytes() {
   return bytes;
 }
 
+struct Dump {
+  std::string dir;
+  uint32_t pos = 0;
+  FILE* routes = nullptr;
+};
+
+void DumpLayer(void* ctx, uint32_t layer, const float* hidden,
+               const int32_t* experts) {
+  auto* dump = static_cast<Dump*>(ctx);
+  const std::string path = dump->dir + "/pos" + std::to_string(dump->pos) +
+                           "_layer" + std::to_string(layer) + ".f32";
+  if (FILE* f = std::fopen(path.c_str(), "wb")) {
+    std::fwrite(hidden, sizeof(float), 4u * 5120u, f);
+    std::fclose(f);
+  }
+  std::fprintf(dump->routes, "%u %u %d %d %d %d %d %d\n", dump->pos, layer,
+               experts[0], experts[1], experts[2], experts[3], experts[4],
+               experts[5]);
+}
+
 void Report(const char* stage) {
   constexpr double kGiB = 1024.0 * 1024.0 * 1024.0;
   std::printf(
@@ -64,6 +87,10 @@ int main(int argc, char** argv) {
   const char* model = nullptr;
   const char* engram = nullptr;
   const char* tokenize = nullptr;
+  const char* decode = nullptr;
+  const char* out_dir = nullptr;
+  int generate = 0;
+  bool score = false;
   bool upload = false;
   bool rendered = false;
   for (int i = 1; i < argc; ++i) {
@@ -71,6 +98,15 @@ int main(int argc, char** argv) {
       engram = argv[++i];
     } else if (std::strcmp(argv[i], "--tokenize") == 0 && i + 1 < argc) {
       tokenize = argv[++i];
+    } else if (std::strcmp(argv[i], "--decode") == 0 && i + 1 < argc) {
+      decode = argv[++i];
+      upload = true;
+    } else if (std::strcmp(argv[i], "--generate") == 0 && i + 1 < argc) {
+      generate = std::atoi(argv[++i]);
+    } else if (std::strcmp(argv[i], "--score") == 0) {
+      score = true;
+    } else if (std::strcmp(argv[i], "--out") == 0 && i + 1 < argc) {
+      out_dir = argv[++i];
     } else if (std::strcmp(argv[i], "--rendered") == 0) {
       rendered = true;
     } else if (std::strcmp(argv[i], "--upload") == 0) {
@@ -85,7 +121,8 @@ int main(int argc, char** argv) {
   if (!model) {
     std::fprintf(stderr,
                  "usage: %s MODEL-00001-of-N.gguf [--engram FILE] [--upload] "
-                 "[--tokenize TEXTS [--rendered]]\n",
+                 "[--tokenize TEXTS [--rendered]] [--decode IDS [--generate N] "
+                 "[--score] [--out DIR]]\n",
                  argv[0]);
     return 2;
   }
@@ -131,6 +168,85 @@ int main(int argc, char** argv) {
       std::printf("\n");
       ds41_tokens_free(&tokens);
     }
+  }
+  if (decode) {
+    /* Feed comma-separated ids one at a time, then decode greedily. */
+    std::vector<int> tokens;
+    for (const char* p = decode; *p;) {
+      tokens.push_back(std::atoi(p));
+      while (*p && *p != ',')
+        ++p;
+      if (*p == ',')
+        ++p;
+    }
+    const uint32_t total = (uint32_t)tokens.size() + (uint32_t)generate;
+    ds41_decoder* decoder = ds41_decoder_create(engine, total + 1);
+    if (!decoder)
+      return 1;
+    Report("decoder");
+    Dump dump;
+    if (out_dir) {
+      dump.dir = out_dir;
+      dump.routes = std::fopen((dump.dir + "/routes.txt").c_str(), "w");
+    }
+    /* --score writes the argmax and next-token NLL per prompt position instead
+     * of logits. */
+    FILE* logits_file =
+        out_dir && !score ? std::fopen((dump.dir + "/logits.f32").c_str(), "wb")
+                          : nullptr;
+    FILE* score_file = out_dir && score
+                           ? std::fopen((dump.dir + "/score.txt").c_str(), "w")
+                           : nullptr;
+    std::vector<float> logits((size_t)ds41_engine_vocab_size(engine));
+    std::vector<int> generated;
+    for (uint32_t step = 0; step < total; ++step) {
+      const int token = step < tokens.size() ? tokens[step] : generated.back();
+      dump.pos = step;
+      const auto t0 = std::chrono::steady_clock::now();
+      if (ds41_decoder_step(decoder, token, logits.data(),
+                            out_dir && !score ? DumpLayer : nullptr,
+                            &dump) != 0) {
+        std::fprintf(stderr, "decode failed at step %u\n", step);
+        return 1;
+      }
+      const double ms = std::chrono::duration<double, std::milli>(
+                            std::chrono::steady_clock::now() - t0)
+                            .count();
+      if (logits_file)
+        std::fwrite(logits.data(), sizeof(float), logits.size(), logits_file);
+      int best = 0;
+      for (size_t i = 1; i < logits.size(); ++i)
+        if (logits[i] > logits[(size_t)best])
+          best = (int)i;
+      if (step + 1 >= tokens.size())
+        generated.push_back(best);
+      if (score_file && step + 1 < tokens.size()) {
+        double sum = 0.0;
+        for (float v : logits)
+          sum += std::exp((double)v - (double)logits[(size_t)best]);
+        const double nll =
+            std::log(sum) - ((double)logits[(size_t)tokens[step + 1]] -
+                             (double)logits[(size_t)best]);
+        std::fprintf(score_file, "%u %d %d %.6f %.2f\n", step, best,
+                     tokens[step + 1], nll, ms);
+      } else if (!score_file) {
+        std::printf("step %u token %d -> %d (%.1f ms)\n", step, token, best,
+                    ms);
+      }
+    }
+    std::printf("generated");
+    for (size_t i = 0;
+         i + 1 < generated.size() || (i < generated.size() && generate > 0);
+         ++i)
+      std::printf(" %d", generated[i]);
+    std::printf("\n");
+    if (logits_file)
+      std::fclose(logits_file);
+    if (score_file)
+      std::fclose(score_file);
+    if (dump.routes)
+      std::fclose(dump.routes);
+    ds41_decoder_destroy(decoder);
   }
   ds41_engine_close(engine);
   Report("closed");

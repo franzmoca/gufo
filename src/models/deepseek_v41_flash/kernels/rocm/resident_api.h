@@ -407,6 +407,9 @@ int ds41_gpu_swiglu_tensor(ds41_gpu_tensor* out, const ds41_gpu_tensor* gate,
                            const ds41_gpu_tensor* up, uint32_t n, float clamp,
                            float weight);
 int ds41_gpu_synchronize(void);
+/* Device address of an uploaded model range, or NULL if it is not resident. */
+const void* ds41_gpu_model_ptr(const void* model_map, uint64_t offset, uint64_t bytes);
+void* ds41_gpu_tensor_ptr(ds41_gpu_tensor* tensor);
 ds41_gpu_tensor* ds41_gpu_tensor_alloc(uint64_t bytes);
 ds41_gpu_tensor* ds41_gpu_tensor_alloc_managed(uint64_t bytes);
 uint64_t ds41_gpu_tensor_bytes(const ds41_gpu_tensor* tensor);

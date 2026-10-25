@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-// Thin redirect so the vendored common.hip.hpp / vecdotq.hip.hpp / mmid.hip.cpp
-// / etc. can write #include "ggml.h" unchanged.
+// Thin redirect so the vendored common.hip.hpp / vecdotq.hip.hpp / mmid.hip.cpp / etc.
+// can write #include "ggml.h" unchanged.
 #pragma once
 #include "ds41_ggml_stubs.h"

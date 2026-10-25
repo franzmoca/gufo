@@ -20,7 +20,7 @@ extern "C" {
 // Returns 0 on success.
 int ds41_mmq_init(int device);
 void ds41_mmq_cleanup(void);
-void ds41_mmq_set_aligned_q81_scratch(void* ptr, size_t bytes);
+void ds41_mmq_set_aligned_q81_scratch(void *ptr, size_t bytes);
 
 // ds4: routed MoE column-tile bound.
 //
@@ -46,9 +46,9 @@ void ds41_mmq_set_routed_max_expert_rows(int rows);
 // chunk width, which is the right answer for a dense column range and the wrong
 // one for a routed one. A tile executes all its columns whether or not the
 // bucket fills them, so the cost is `sum_e ceil(c_e / w) * w` column-slots plus
-// one weight-panel reload per tile: at a 4,096-token chunk the mean bucket is
-// 96 rows and the 80-column tile is nearly full, while at 512 tokens it is
-// twelve rows and about 85% of the matrix-core issue is padding.
+// one weight-panel reload per tile: at a 4,096-token chunk the mean bucket is 96
+// rows and the 80-column tile is nearly full, while at 512 tokens it is twelve
+// rows and about 85% of the matrix-core issue is padding.
 //
 // cols <= 0, or a width the device cannot host, restores the default rule.
 // Purely a tiling choice: each output element still walks K once in the same
@@ -57,8 +57,8 @@ void ds41_mmq_set_routed_tile_cols(int cols);
 
 // The width the model above picks for one per-expert assignment-count array.
 // Returns 0 when the counts are unusable, which the setter treats as "default".
-int ds41_mmq_routed_tile_cols_for_counts(const unsigned int* counts,
-                                         int n_experts);
+int ds41_mmq_routed_tile_cols_for_counts(const unsigned int *counts,
+                                        int n_experts);
 
 // Query whether ds41_mmq is willing to handle a given matmul. Returns
 //   1 if mmq is faster than dequant+cublas for this shape on this device,
@@ -92,8 +92,14 @@ int ds41_mmq_should_use(int type_x, int64_t ne11, int64_t n_experts);
 //
 // Returns 0 on success, non-zero on validation or launch failure.
 
-int ds41_mmq_q8_0_dense(const void* W_q8_0, const float* X_f32, float* out_f32,
-                        int M, int N, int K, hipStream_t stream);
+int ds41_mmq_q8_0_dense(
+    const void  * W_q8_0,
+    const float * X_f32,
+    float       * out_f32,
+    int           M,
+    int           N,
+    int           K,
+    hipStream_t  stream);
 
 // v0.5 flat-pool p5a: same contract as ds41_mmq_q8_0_dense but the
 // activation arrives PRE-QUANTIZED in the block_q8_1_mmq D4 layout
@@ -103,41 +109,80 @@ int ds41_mmq_q8_0_dense(const void* W_q8_0, const float* X_f32, float* out_f32,
 // this entry zeroes.  Requires K such that GGML_PAD(K, MATRIX_ROW_PADDING)
 // == K.  Returns 0 on success; callers fall back to the quantizing entry
 // on any non-zero.
-int ds41_mmq_q8_0_dense_preq(const void* W_q8_0, const void* Y_q8_mmq,
-                             size_t y_bytes, float* out_f32, int M, int N,
-                             int K, hipStream_t stream);
+int ds41_mmq_q8_0_dense_preq(
+    const void  * W_q8_0,
+    const void  * Y_q8_mmq,
+    size_t        y_bytes,
+    float       * out_f32,
+    int           M,
+    int           N,
+    int           K,
+    hipStream_t  stream);
 
 // Dense Q8_0 D2R on the kind-5 aligned artifact (weight server
 // --repack-q8-aligned).  Same in/out contract as ds41_mmq_q8_0_dense but W is
 // the ALIGNED artifact base ([half dq[nblk]][pad64][int8 qs]), and the shape
 // must satisfy M % 128 == 0 && K % 1024 == 0.  Callers gate on n_tok scale
 // and K <= 4096 (o_proj's K=8192 measured faster on mmq).
-int ds41_mmq_q8_0_dense_d2r(const void* W_aligned, const float* X_f32,
-                            float* out_f32, int M, int N, int K,
-                            hipStream_t stream);
+int ds41_mmq_q8_0_dense_d2r(
+    const void  * W_aligned,
+    const float * X_f32,
+    float       * out_f32,
+    int           M,
+    int           N,
+    int           K,
+    hipStream_t  stream);
 
 // flat-pool p5c: D2R dense over a producer-quantized token-major Y
 // (block_q8_1_mmq D4, ib = kseg*N + row, requires GGML_PAD(K) == K).
 // y_bytes must cover the payload plus max(mmq_x_max, 128) slack blocks;
 // the slack is zeroed here each call (S1.1a).  Returns 0 on success;
 // callers fall back to the quantizing entry on any non-zero.
-int ds41_mmq_q8_0_dense_d2r_preq(const void* W_aligned, const void* Y_q8_mmq,
-                                 size_t y_bytes, float* out_f32, int M, int N,
-                                 int K, hipStream_t stream);
+int ds41_mmq_q8_0_dense_d2r_preq(
+    const void  * W_aligned,
+    const void  * Y_q8_mmq,
+    size_t        y_bytes,
+    float       * out_f32,
+    int           M,
+    int           N,
+    int           K,
+    hipStream_t  stream);
 
-int ds41_mmq_q2_K_dense(const void* W_q2_K, const float* X_f32, float* out_f32,
-                        int M, int N, int K, hipStream_t stream);
+int ds41_mmq_q2_K_dense(
+    const void  * W_q2_K,
+    const float * X_f32,
+    float       * out_f32,
+    int           M,
+    int           N,
+    int           K,
+    hipStream_t  stream);
 
-int ds41_mmq_iq2_xxs_dense(const void* W_iq2_xxs, const float* X_f32,
-                           float* out_f32, int M, int N, int K,
-                           hipStream_t stream);
+int ds41_mmq_iq2_xxs_dense(
+    const void  * W_iq2_xxs,
+    const float * X_f32,
+    float       * out_f32,
+    int           M,
+    int           N,
+    int           K,
+    hipStream_t  stream);
 
-int ds41_mmq_q4_K_dense(const void* W_q4_K, const float* X_f32, float* out_f32,
-                        int M, int N, int K, hipStream_t stream);
+int ds41_mmq_q4_K_dense(
+    const void  * W_q4_K,
+    const float * X_f32,
+    float       * out_f32,
+    int           M,
+    int           N,
+    int           K,
+    hipStream_t  stream);
 
-int ds41_mmq_mxfp4_dense(const void* W_mxfp4, const float* X_f32,
-                         float* out_f32, int M, int N, int K,
-                         hipStream_t stream);
+int ds41_mmq_mxfp4_dense(
+    const void  * W_mxfp4,
+    const float * X_f32,
+    float       * out_f32,
+    int           M,
+    int           N,
+    int           K,
+    hipStream_t  stream);
 
 // MoE matmul entry points. For each (token, slot-within-token's-top-k) pair
 // the kernel computes:
@@ -167,17 +212,41 @@ int ds41_mmq_mxfp4_dense(const void* W_mxfp4, const float* X_f32,
 //
 // Returns 0 on success, non-zero on validation or launch failure.
 
-int ds41_mmq_q8_0_moe(const void* W, const float* X_f32, const int32_t* ids,
-                      float* out_f32, int M, int K, int n_tokens, int n_experts,
-                      int n_expert_used, hipStream_t stream);
+int ds41_mmq_q8_0_moe(
+    const void    * W,
+    const float   * X_f32,
+    const int32_t * ids,
+    float         * out_f32,
+    int             M,
+    int             K,
+    int             n_tokens,
+    int             n_experts,
+    int             n_expert_used,
+    hipStream_t    stream);
 
-int ds41_mmq_q2_K_moe(const void* W, const float* X_f32, const int32_t* ids,
-                      float* out_f32, int M, int K, int n_tokens, int n_experts,
-                      int n_expert_used, hipStream_t stream);
+int ds41_mmq_q2_K_moe(
+    const void    * W,
+    const float   * X_f32,
+    const int32_t * ids,
+    float         * out_f32,
+    int             M,
+    int             K,
+    int             n_tokens,
+    int             n_experts,
+    int             n_expert_used,
+    hipStream_t    stream);
 
-int ds41_mmq_iq2_xxs_moe(const void* W, const float* X_f32, const int32_t* ids,
-                         float* out_f32, int M, int K, int n_tokens,
-                         int n_experts, int n_expert_used, hipStream_t stream);
+int ds41_mmq_iq2_xxs_moe(
+    const void    * W,
+    const float   * X_f32,
+    const int32_t * ids,
+    float         * out_f32,
+    int             M,
+    int             K,
+    int             n_tokens,
+    int             n_experts,
+    int             n_expert_used,
+    hipStream_t    stream);
 
 // ds4 (P4 Inc3): same contract as ds41_mmq_q2_K_moe but W_soa is the aligned
 // row-pair-SoA artifact (weight server --repack-q2k-aligned, layout in
@@ -188,18 +257,41 @@ int ds41_mmq_iq2_xxs_moe(const void* W, const float* X_f32, const int32_t* ids,
 // nonfinite-sanitized; the routed-MoE consumers (moe_mmq_swiglu / moe_sum
 // with guard_nonfinite=1) sanitize at read, so the standalone whole-buffer
 // pass is skipped.  New callers must sanitize at consumption.
-int ds41_mmq_q2_K_moe_soa(const void* W_soa, const float* X_f32,
-                          const int32_t* ids, float* out_f32, int M, int K,
-                          int n_tokens, int n_experts, int n_expert_used,
-                          hipStream_t stream);
+int ds41_mmq_q2_K_moe_soa(
+    const void    * W_soa,
+    const float   * X_f32,
+    const int32_t * ids,
+    float         * out_f32,
+    int             M,
+    int             K,
+    int             n_tokens,
+    int             n_experts,
+    int             n_expert_used,
+    hipStream_t    stream);
 
-int ds41_mmq_q4_K_moe(const void* W, const float* X_f32, const int32_t* ids,
-                      float* out_f32, int M, int K, int n_tokens, int n_experts,
-                      int n_expert_used, hipStream_t stream);
+int ds41_mmq_q4_K_moe(
+    const void    * W,
+    const float   * X_f32,
+    const int32_t * ids,
+    float         * out_f32,
+    int             M,
+    int             K,
+    int             n_tokens,
+    int             n_experts,
+    int             n_expert_used,
+    hipStream_t    stream);
 
-int ds41_mmq_mxfp4_moe(const void* W, const float* X_f32, const int32_t* ids,
-                       float* out_f32, int M, int K, int n_tokens,
-                       int n_experts, int n_expert_used, hipStream_t stream);
+int ds41_mmq_mxfp4_moe(
+    const void    * W,
+    const float   * X_f32,
+    const int32_t * ids,
+    float         * out_f32,
+    int             M,
+    int             K,
+    int             n_tokens,
+    int             n_experts,
+    int             n_expert_used,
+    hipStream_t    stream);
 
 // Paired MoE entries. Compute gate AND up over the same activation in a
 // single call so the Q8_1 quantize of X (and the mm_ids_helper bookkeeping)
@@ -211,38 +303,75 @@ int ds41_mmq_mxfp4_moe(const void* W, const float* X_f32, const int32_t* ids,
 //
 // Returns 0 on success; on error neither output is guaranteed valid.
 
-int ds41_mmq_iq2_xxs_moe_pair(const void* W_a, const void* W_b,
-                              const float* X_f32, const int32_t* ids,
-                              float* out_a, float* out_b, int M, int K,
-                              int n_tokens, int n_experts, int n_expert_used,
-                              hipStream_t stream);
+int ds41_mmq_iq2_xxs_moe_pair(
+    const void    * W_a,
+    const void    * W_b,
+    const float   * X_f32,
+    const int32_t * ids,
+    float         * out_a,
+    float         * out_b,
+    int             M,
+    int             K,
+    int             n_tokens,
+    int             n_experts,
+    int             n_expert_used,
+    hipStream_t    stream);
 
 // Same operation, with the additional contract that each token's selected
 // experts are unique. This permits an n_tokens upper bound for every expert
 // bucket instead of n_tokens * n_expert_used.
 int ds41_mmq_iq2_xxs_moe_pair_token_bound(
-    const void* W_a, const void* W_b, const float* X_f32, const int32_t* ids,
-    float* out_a, float* out_b, int M, int K, int n_tokens, int n_experts,
-    int n_expert_used, hipStream_t stream);
+    const void    * W_a,
+    const void    * W_b,
+    const float   * X_f32,
+    const int32_t * ids,
+    float         * out_a,
+    float         * out_b,
+    int             M,
+    int             K,
+    int             n_tokens,
+    int             n_experts,
+    int             n_expert_used,
+    hipStream_t    stream);
 
 // Non-stream-K variant for ROCm prefill. The up result stays in the MMQ
 // write-back register and is combined with the materialized gate, router
 // weight, clamp, and SwiGLU directly into pair-major FP32/FP16 mid outputs.
 // discard must be a valid, disjoint device pointer but is not written.
 int ds41_mmq_iq2_xxs_moe_pair_token_bound_swiglu(
-    const void* W_gate, const void* W_up, const float* X_f32,
-    const int32_t* ids, const float* router_weights, float* gate_f32,
-    float* discard, float* mid_f32, void* mid_f16, int M, int K, int n_tokens,
-    int n_experts, int n_expert_used, float clamp, hipStream_t stream);
+    const void    * W_gate,
+    const void    * W_up,
+    const float   * X_f32,
+    const int32_t * ids,
+    const float   * router_weights,
+    float         * gate_f32,
+    float         * discard,
+    float         * mid_f32,
+    void          * mid_f16,
+    int             M,
+    int             K,
+    int             n_tokens,
+    int             n_experts,
+    int             n_expert_used,
+    float           clamp,
+    hipStream_t    stream);
 
 // ds4 (P4 Inc3): same contract as ds41_mmq_iq2_xxs_moe_pair but over the
 // aligned-SoA artifacts (weight server --repack-iq2-aligned); see
 // ds41_mmq_q2_K_moe_soa.
-int ds41_mmq_iq2_xxs_moe_pair_soa(const void* Wa_soa, const void* Wb_soa,
-                                  const float* X_f32, const int32_t* ids,
-                                  float* out_a, float* out_b, int M, int K,
-                                  int n_tokens, int n_experts,
-                                  int n_expert_used, hipStream_t stream);
+int ds41_mmq_iq2_xxs_moe_pair_soa(
+    const void    * Wa_soa,
+    const void    * Wb_soa,
+    const float   * X_f32,
+    const int32_t * ids,
+    float         * out_a,
+    float         * out_b,
+    int             M,
+    int             K,
+    int             n_tokens,
+    int             n_experts,
+    int             n_expert_used,
+    hipStream_t    stream);
 
 /* v0.5 inc-9 (F7): fused target-prefill pipeline over the aligned-SoA
  * IQ2_XXS gate/up and Q2_K down artifacts.  Builds the expert-major
@@ -251,11 +380,24 @@ int ds41_mmq_iq2_xxs_moe_pair_soa(const void* Wa_soa, const void* Wb_soa,
  * rows for the Q2_K down MMQ through the same ids_dst/expert_bounds.  No
  * second mm_ids_helper; gate/up/mid/down keep the pair-major layout. */
 int ds41_mmq_iq2_xxs_q2_K_moe_fused_soa(
-    const void* W_gate_soa, const void* W_up_soa, const void* W_down_soa,
-    const float* X_f32, const int32_t* ids, const float* router_weights,
-    float* gate_f32, float* up_f32, float* mid_f32, float* down_f32,
-    int expert_mid_dim, int expert_in_dim, int out_dim, int n_tokens,
-    int n_experts, int n_expert_used, float clamp, hipStream_t stream);
+    const void    * W_gate_soa,
+    const void    * W_up_soa,
+    const void    * W_down_soa,
+    const float   * X_f32,
+    const int32_t * ids,
+    const float   * router_weights,
+    float         * gate_f32,
+    float         * up_f32,
+    float         * mid_f32,
+    float         * down_f32,
+    int             expert_mid_dim,
+    int             expert_in_dim,
+    int             out_dim,
+    int             n_tokens,
+    int             n_experts,
+    int             n_expert_used,
+    float           clamp,
+    hipStream_t    stream);
 
 /* Aligned-artifact production fast path: gate/up stay in registers, weighted
  * SwiGLU is quantized directly into down_q8_scratch, and only the pair-major
@@ -269,25 +411,57 @@ int ds41_mmq_iq2_xxs_q2_K_moe_fused_soa(
  * gate/up D2R kernel reads it through the p5b ids_src indirection.
  * Ignored (classic gathered quantize) when DS41_MMQ_NO_YIND is set. */
 int ds41_mmq_iq2_xxs_q2_K_moe_fused_direct_soa(
-    const void* W_gate_soa, const void* W_up_soa, const void* W_down_soa,
-    const float* X_f32, const int32_t* ids, const float* router_weights,
-    void* input_q8_scratch, size_t input_q8_scratch_bytes,
-    void* down_q8_scratch, size_t down_q8_scratch_bytes, void* work_scratch,
-    size_t work_scratch_bytes, const void* input_q8_ext,
-    size_t input_q8_ext_bytes, float* down_f32, int expert_mid_dim,
-    int expert_in_dim, int out_dim, int n_tokens, int n_experts,
-    int n_expert_used, float clamp, hipStream_t stream);
+    const void    * W_gate_soa,
+    const void    * W_up_soa,
+    const void    * W_down_soa,
+    const float   * X_f32,
+    const int32_t * ids,
+    const float   * router_weights,
+    void          * input_q8_scratch,
+    size_t          input_q8_scratch_bytes,
+    void          * down_q8_scratch,
+    size_t          down_q8_scratch_bytes,
+    void          * work_scratch,
+    size_t          work_scratch_bytes,
+    const void    * input_q8_ext,
+    size_t          input_q8_ext_bytes,
+    float         * down_f32,
+    int             expert_mid_dim,
+    int             expert_in_dim,
+    int             out_dim,
+    int             n_tokens,
+    int             n_experts,
+    int             n_expert_used,
+    float           clamp,
+    hipStream_t    stream);
 
-int ds41_mmq_q4_K_moe_pair(const void* W_a, const void* W_b, const float* X_f32,
-                           const int32_t* ids, float* out_a, float* out_b,
-                           int M, int K, int n_tokens, int n_experts,
-                           int n_expert_used, hipStream_t stream);
+int ds41_mmq_q4_K_moe_pair(
+    const void    * W_a,
+    const void    * W_b,
+    const float   * X_f32,
+    const int32_t * ids,
+    float         * out_a,
+    float         * out_b,
+    int             M,
+    int             K,
+    int             n_tokens,
+    int             n_experts,
+    int             n_expert_used,
+    hipStream_t    stream);
 
-int ds41_mmq_mxfp4_moe_pair(const void* W_a, const void* W_b,
-                            const float* X_f32, const int32_t* ids,
-                            float* out_a, float* out_b, int M, int K,
-                            int n_tokens, int n_experts, int n_expert_used,
-                            hipStream_t stream);
+int ds41_mmq_mxfp4_moe_pair(
+    const void    * W_a,
+    const void    * W_b,
+    const float   * X_f32,
+    const int32_t * ids,
+    float         * out_a,
+    float         * out_b,
+    int             M,
+    int             K,
+    int             n_tokens,
+    int             n_experts,
+    int             n_expert_used,
+    hipStream_t    stream);
 
 // MoE vector matmul entries. Same signature and semantics as the
 // ds41_mmq_<type>_moe entries above, but route through llama.cpp's mmvq
@@ -309,27 +483,65 @@ int ds41_mmq_mxfp4_moe_pair(const void* W_a, const void* W_b,
 //
 // Returns 0 on success, non-zero on validation or launch failure.
 
-int ds41_mmq_q8_0_moe_vec(const void* W, const float* X_f32, const int32_t* ids,
-                          float* out_f32, int M, int K, int n_tokens,
-                          int n_experts, int n_expert_used, hipStream_t stream);
+int ds41_mmq_q8_0_moe_vec(
+    const void    * W,
+    const float   * X_f32,
+    const int32_t * ids,
+    float         * out_f32,
+    int             M,
+    int             K,
+    int             n_tokens,
+    int             n_experts,
+    int             n_expert_used,
+    hipStream_t    stream);
 
-int ds41_mmq_q2_K_moe_vec(const void* W, const float* X_f32, const int32_t* ids,
-                          float* out_f32, int M, int K, int n_tokens,
-                          int n_experts, int n_expert_used, hipStream_t stream);
+int ds41_mmq_q2_K_moe_vec(
+    const void    * W,
+    const float   * X_f32,
+    const int32_t * ids,
+    float         * out_f32,
+    int             M,
+    int             K,
+    int             n_tokens,
+    int             n_experts,
+    int             n_expert_used,
+    hipStream_t    stream);
 
-int ds41_mmq_iq2_xxs_moe_vec(const void* W, const float* X_f32,
-                             const int32_t* ids, float* out_f32, int M, int K,
-                             int n_tokens, int n_experts, int n_expert_used,
-                             hipStream_t stream);
+int ds41_mmq_iq2_xxs_moe_vec(
+    const void    * W,
+    const float   * X_f32,
+    const int32_t * ids,
+    float         * out_f32,
+    int             M,
+    int             K,
+    int             n_tokens,
+    int             n_experts,
+    int             n_expert_used,
+    hipStream_t    stream);
 
-int ds41_mmq_q4_K_moe_vec(const void* W, const float* X_f32, const int32_t* ids,
-                          float* out_f32, int M, int K, int n_tokens,
-                          int n_experts, int n_expert_used, hipStream_t stream);
+int ds41_mmq_q4_K_moe_vec(
+    const void    * W,
+    const float   * X_f32,
+    const int32_t * ids,
+    float         * out_f32,
+    int             M,
+    int             K,
+    int             n_tokens,
+    int             n_experts,
+    int             n_expert_used,
+    hipStream_t    stream);
 
-int ds41_mmq_mxfp4_moe_vec(const void* W, const float* X_f32,
-                           const int32_t* ids, float* out_f32, int M, int K,
-                           int n_tokens, int n_experts, int n_expert_used,
-                           hipStream_t stream);
+int ds41_mmq_mxfp4_moe_vec(
+    const void    * W,
+    const float   * X_f32,
+    const int32_t * ids,
+    float         * out_f32,
+    int             M,
+    int             K,
+    int             n_tokens,
+    int             n_experts,
+    int             n_expert_used,
+    hipStream_t    stream);
 
 // Aligned-SoA IQ2_XXS decode matvec (megakernel program M1-Inc1).
 //
@@ -355,9 +567,13 @@ uint64_t ds41_mmq_iq2_xxs_aligned_bytes(int M, int K, int n_experts);
 // device->device on `stream`.  Lets the batched/mmq raw-layout consumers run
 // from a device scratch instead of the client mmap when the raw spans were
 // excluded from the upload.
-int ds41_mmq_iq2_xxs_aligned_derepack(const void* W_aligned, void* raw_out,
-                                      int M, int K, int n_experts,
-                                      hipStream_t stream);
+int ds41_mmq_iq2_xxs_aligned_derepack(
+    const void    * W_aligned,
+    void          * raw_out,
+    int             M,
+    int             K,
+    int             n_experts,
+    hipStream_t    stream);
 
 // M2 moe-down: aligned row-pair-SoA Q2_K routed-expert decode matvec.  Twin
 // of mul_mat_vec_q_moe<GGML_TYPE_Q2_K, 2> at the down-leg call shape
@@ -375,17 +591,29 @@ int ds41_mmq_iq2_xxs_aligned_derepack(const void* W_aligned, void* raw_out,
 // artifact.  Unsupported shapes return non-zero so the caller can fall back.
 uint64_t ds41_mmq_q2_k_aligned_bytes(int M, int K, int n_experts);
 
-int ds41_mmq_q2_K_aligned_moe_vec(const void* W_aligned, const float* X_f32,
-                                  const int32_t* ids, float* out_f32, int M,
-                                  int K, int n_tokens, int n_experts,
-                                  int n_expert_used, hipStream_t stream);
+int ds41_mmq_q2_K_aligned_moe_vec(
+    const void    * W_aligned,
+    const float   * X_f32,
+    const int32_t * ids,
+    float         * out_f32,
+    int             M,
+    int             K,
+    int             n_tokens,
+    int             n_experts,
+    int             n_expert_used,
+    hipStream_t    stream);
 
 // Exact inverse of the weight-server repack: fills raw_out (nblk * 84 bytes,
 // raw block_q2_K stream) from an aligned artifact, device->device on
 // `stream`, for the batched/mmq raw-layout consumers (same role as
 // ds41_mmq_iq2_xxs_aligned_derepack).
-int ds41_mmq_q2_K_aligned_derepack(const void* W_aligned, void* raw_out, int M,
-                                   int K, int n_experts, hipStream_t stream);
+int ds41_mmq_q2_K_aligned_derepack(
+    const void    * W_aligned,
+    void          * raw_out,
+    int             M,
+    int             K,
+    int             n_experts,
+    hipStream_t    stream);
 
 // M1-Inc3: aligned-SoA Q8_0 dense decode matvec.  Artifact layout
 // [__half dq[nblk]][pad to 64B][int8 qs[nblk*32]], nblk = M * (K/32), block
@@ -395,14 +623,26 @@ int ds41_mmq_q2_K_aligned_derepack(const void* W_aligned, void* raw_out, int M,
 // return non-zero so the caller can fall back to ds41_mmq_q8_0_dense_vec.
 uint64_t ds41_mmq_q8_0_aligned_bytes(int M, int K);
 
-int ds41_mmq_q8_0_aligned_dense_vec(const void* W_aligned, const float* X_f32,
-                                    float* out_f32, int M, int N, int K,
-                                    hipStream_t stream);
+int ds41_mmq_q8_0_aligned_dense_vec(
+    const void  * W_aligned,
+    const float * X_f32,
+    float       * out_f32,
+    int           M,
+    int           N,
+    int           K,
+    hipStream_t  stream);
 
-int ds41_mmq_iq2_xxs_aligned_moe_vec(const void* W_aligned, const float* X_f32,
-                                     const int32_t* ids, float* out_f32, int M,
-                                     int K, int n_tokens, int n_experts,
-                                     int n_expert_used, hipStream_t stream);
+int ds41_mmq_iq2_xxs_aligned_moe_vec(
+    const void    * W_aligned,
+    const float   * X_f32,
+    const int32_t * ids,
+    float         * out_f32,
+    int             M,
+    int             K,
+    int             n_tokens,
+    int             n_experts,
+    int             n_expert_used,
+    hipStream_t    stream);
 
 // M1-Inc2 variants over the same aligned artifacts (n_tokens == 1 only).
 //
@@ -414,15 +654,33 @@ int ds41_mmq_iq2_xxs_aligned_moe_vec(const void* W_aligned, const float* X_f32,
 // epilogue (identical semantics to ds41_mmq_moe_gate_up_mid_q8_1_qwarp32) and
 // writes mid[slot * M + row] directly.
 int ds41_mmq_iq2_xxs_aligned_moe_pair_vec(
-    const void* W_gate_aligned, const void* W_up_aligned, const float* X_f32,
-    const int32_t* ids, float* gate_out, float* up_out, int M, int K,
-    int n_tokens, int n_experts, int n_expert_used, hipStream_t stream);
+    const void    * W_gate_aligned,
+    const void    * W_up_aligned,
+    const float   * X_f32,
+    const int32_t * ids,
+    float         * gate_out,
+    float         * up_out,
+    int             M,
+    int             K,
+    int             n_tokens,
+    int             n_experts,
+    int             n_expert_used,
+    hipStream_t    stream);
 
 int ds41_mmq_iq2_xxs_aligned_moe_gate_up_mid_vec(
-    const void* W_gate_aligned, const void* W_up_aligned, const float* X_f32,
-    const int32_t* ids, const float* weights, float* mid_f32, int M, int K,
-    int n_tokens, int n_experts, int n_expert_used, float clamp,
-    hipStream_t stream);
+    const void    * W_gate_aligned,
+    const void    * W_up_aligned,
+    const float   * X_f32,
+    const int32_t * ids,
+    const float   * weights,
+    float         * mid_f32,
+    int             M,
+    int             K,
+    int             n_tokens,
+    int             n_experts,
+    int             n_expert_used,
+    float           clamp,
+    hipStream_t    stream);
 
 // Fused down+sum vector entries for routed MoE with top_k=6. These preserve
 // the canonical Q8_1 activation quantization used by the regular _moe_vec
@@ -444,20 +702,41 @@ int ds41_mmq_iq2_xxs_aligned_moe_gate_up_mid_vec(
 //
 // Returns 0 on success, non-zero on validation or launch failure.
 
-int ds41_mmq_q2_K_moe_down_sum6_vec(const void* W, const float* X_f32,
-                                    const int32_t* ids, float* out_f32, int M,
-                                    int K, int n_tokens, int n_experts,
-                                    int n_expert_used, hipStream_t stream);
+int ds41_mmq_q2_K_moe_down_sum6_vec(
+    const void    * W,
+    const float   * X_f32,
+    const int32_t * ids,
+    float         * out_f32,
+    int             M,
+    int             K,
+    int             n_tokens,
+    int             n_experts,
+    int             n_expert_used,
+    hipStream_t    stream);
 
-int ds41_mmq_q4_K_moe_down_sum6_vec(const void* W, const float* X_f32,
-                                    const int32_t* ids, float* out_f32, int M,
-                                    int K, int n_tokens, int n_experts,
-                                    int n_expert_used, hipStream_t stream);
+int ds41_mmq_q4_K_moe_down_sum6_vec(
+    const void    * W,
+    const float   * X_f32,
+    const int32_t * ids,
+    float         * out_f32,
+    int             M,
+    int             K,
+    int             n_tokens,
+    int             n_experts,
+    int             n_expert_used,
+    hipStream_t    stream);
 
-int ds41_mmq_mxfp4_moe_down_sum6_vec(const void* W, const float* X_f32,
-                                     const int32_t* ids, float* out_f32, int M,
-                                     int K, int n_tokens, int n_experts,
-                                     int n_expert_used, hipStream_t stream);
+int ds41_mmq_mxfp4_moe_down_sum6_vec(
+    const void    * W,
+    const float   * X_f32,
+    const int32_t * ids,
+    float         * out_f32,
+    int             M,
+    int             K,
+    int             n_tokens,
+    int             n_experts,
+    int             n_expert_used,
+    hipStream_t    stream);
 
 // Fused gate+up+SwiGLU vector entries for routed MoE with top_k=6. These use
 // canonical Q8_1 activation quantization and compute weighted mid directly:
@@ -483,26 +762,50 @@ int ds41_mmq_mxfp4_moe_down_sum6_vec(const void* W, const float* X_f32,
 //
 // Returns 0 on success, non-zero on validation or launch failure.
 
-int ds41_mmq_iq2_xxs_moe_gate_up_mid_vec(const void* W_gate, const void* W_up,
-                                         const float* X_f32, const int32_t* ids,
-                                         const float* weights, float* mid_f32,
-                                         int M, int K, int n_tokens,
-                                         int n_experts, int n_expert_used,
-                                         float clamp, hipStream_t stream);
+int ds41_mmq_iq2_xxs_moe_gate_up_mid_vec(
+    const void    * W_gate,
+    const void    * W_up,
+    const float   * X_f32,
+    const int32_t * ids,
+    const float   * weights,
+    float         * mid_f32,
+    int             M,
+    int             K,
+    int             n_tokens,
+    int             n_experts,
+    int             n_expert_used,
+    float           clamp,
+    hipStream_t    stream);
 
-int ds41_mmq_q4_K_moe_gate_up_mid_vec(const void* W_gate, const void* W_up,
-                                      const float* X_f32, const int32_t* ids,
-                                      const float* weights, float* mid_f32,
-                                      int M, int K, int n_tokens, int n_experts,
-                                      int n_expert_used, float clamp,
-                                      hipStream_t stream);
+int ds41_mmq_q4_K_moe_gate_up_mid_vec(
+    const void    * W_gate,
+    const void    * W_up,
+    const float   * X_f32,
+    const int32_t * ids,
+    const float   * weights,
+    float         * mid_f32,
+    int             M,
+    int             K,
+    int             n_tokens,
+    int             n_experts,
+    int             n_expert_used,
+    float           clamp,
+    hipStream_t    stream);
 
-int ds41_mmq_mxfp4_moe_gate_up_mid_vec(const void* W_gate, const void* W_up,
-                                       const float* X_f32, const int32_t* ids,
-                                       const float* weights, float* mid_f32,
-                                       int M, int K, int n_tokens,
-                                       int n_experts, int n_expert_used,
-                                       float clamp, hipStream_t stream);
+int ds41_mmq_mxfp4_moe_gate_up_mid_vec(
+    const void    * W_gate,
+    const void    * W_up,
+    const float   * X_f32,
+    const int32_t * ids,
+    const float   * weights,
+    float         * mid_f32,
+    int             M,
+    int             K,
+    int             n_tokens,
+    int             n_experts,
+    int             n_expert_used,
+    float           clamp,
+    hipStream_t    stream);
 
 // Pair-fused MoE vector matmul entries. Computes
 //
@@ -524,15 +827,29 @@ int ds41_mmq_mxfp4_moe_gate_up_mid_vec(const void* W_gate, const void* W_up,
 //
 // Returns 0 on success, non-zero on validation or launch failure.
 
-int ds41_mmq_iq2_xxs_moe_pair_vec(const void* W_a, const void* W_b,
-                                  const float* X_f32, const int32_t* ids,
-                                  float* out_silu, int M, int K, int n_experts,
-                                  int n_expert_used, hipStream_t stream);
+int ds41_mmq_iq2_xxs_moe_pair_vec(
+    const void    * W_a,
+    const void    * W_b,
+    const float   * X_f32,
+    const int32_t * ids,
+    float         * out_silu,
+    int             M,
+    int             K,
+    int             n_experts,
+    int             n_expert_used,
+    hipStream_t    stream);
 
-int ds41_mmq_q4_K_moe_pair_vec(const void* W_a, const void* W_b,
-                               const float* X_f32, const int32_t* ids,
-                               float* out_silu, int M, int K, int n_experts,
-                               int n_expert_used, hipStream_t stream);
+int ds41_mmq_q4_K_moe_pair_vec(
+    const void    * W_a,
+    const void    * W_b,
+    const float   * X_f32,
+    const int32_t * ids,
+    float         * out_silu,
+    int             M,
+    int             K,
+    int             n_experts,
+    int             n_expert_used,
+    hipStream_t    stream);
 
 // Raw pair MoE vector entries. They quantize X to canonical Q8_1 once, then
 // run the same mmvq matvec kernel twice to produce the unfused gate and up
@@ -544,17 +861,33 @@ int ds41_mmq_q4_K_moe_pair_vec(const void* W_a, const void* W_b,
 //   out_[token * n_expert_used + slot, row]
 //   K must be a multiple of 256.
 
-int ds41_mmq_iq2_xxs_moe_pair_raw_vec(const void* W_a, const void* W_b,
-                                      const float* X_f32, const int32_t* ids,
-                                      float* out_a, float* out_b, int M, int K,
-                                      int n_tokens, int n_experts,
-                                      int n_expert_used, hipStream_t stream);
+int ds41_mmq_iq2_xxs_moe_pair_raw_vec(
+    const void    * W_a,
+    const void    * W_b,
+    const float   * X_f32,
+    const int32_t * ids,
+    float         * out_a,
+    float         * out_b,
+    int             M,
+    int             K,
+    int             n_tokens,
+    int             n_experts,
+    int             n_expert_used,
+    hipStream_t    stream);
 
-int ds41_mmq_q4_K_moe_pair_raw_vec(const void* W_a, const void* W_b,
-                                   const float* X_f32, const int32_t* ids,
-                                   float* out_a, float* out_b, int M, int K,
-                                   int n_tokens, int n_experts,
-                                   int n_expert_used, hipStream_t stream);
+int ds41_mmq_q4_K_moe_pair_raw_vec(
+    const void    * W_a,
+    const void    * W_b,
+    const float   * X_f32,
+    const int32_t * ids,
+    float         * out_a,
+    float         * out_b,
+    int             M,
+    int             K,
+    int             n_tokens,
+    int             n_experts,
+    int             n_expert_used,
+    hipStream_t    stream);
 
 // Dense vector matmul entry. Same shape semantics as
 // ds41_mmq_q8_0_dense but routed through mmvq for batch counts that
@@ -562,9 +895,14 @@ int ds41_mmq_q4_K_moe_pair_raw_vec(const void* W_a, const void* W_b,
 //
 // Returns 0 on success, non-zero on validation or launch failure.
 
-int ds41_mmq_q8_0_dense_vec(const void* W_q8_0, const float* X_f32,
-                            float* out_f32, int M, int N, int K,
-                            hipStream_t stream);
+int ds41_mmq_q8_0_dense_vec(
+    const void  * W_q8_0,
+    const float * X_f32,
+    float       * out_f32,
+    int           M,
+    int           N,
+    int           K,
+    hipStream_t  stream);
 
 // Set the thread-local stream that the internal cuda pool uses for
 // hipMallocAsync / hipFreeAsync.  Defaults to hipStreamPerThread.
@@ -573,6 +911,16 @@ int ds41_mmq_q8_0_dense_vec(const void* W_q8_0, const float* X_f32,
 // Pass NULL to reset to hipStreamPerThread.
 void ds41_pool_set_stream(hipStream_t stream);
 
+// V4.1 Flash matvecs over a weight type chosen at run time (ggml type codes).
+// Same contracts as ds41_mmq_q8_0_dense_vec and ds41_mmq_q8_0_moe_vec.
+int ds41_mmq_dense_vec_typed(int type, const void* W, const float* X_f32,
+                             float* out_f32, int M, int N, int K,
+                             hipStream_t stream);
+int ds41_mmq_moe_vec_typed(int type, const void* W, const float* X_f32,
+                           const int32_t* ids, float* out_f32, int M, int K,
+                           int n_tokens, int n_experts, int n_expert_used,
+                           hipStream_t stream);
+
 #ifdef __cplusplus
-}  // extern "C"
+} // extern "C"
 #endif

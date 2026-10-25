@@ -754,8 +754,10 @@ struct accelerator_tensor_span {
   uint64_t end;
 };
 
-static uint64_t accelerator_rocm_preload_span_bytes(void) {
-  return 1024ull * 1048576ull;
+/* Spans never split a tensor: device lookups need each tensor in one range. */
+static uint64_t accelerator_rocm_preload_span_bytes(const ds41_model* m) {
+  const uint64_t floor = 1024ull * 1048576ull;
+  return m->max_tensor_bytes > floor ? m->max_tensor_bytes : floor;
 }
 
 static bool accelerator_cache_model_tensor_spans(const ds41_model* m,
@@ -778,7 +780,7 @@ static bool accelerator_cache_model_tensor_spans(const ds41_model* m,
                      (left.off == right.off && left.end < right.end);
             });
 
-  const uint64_t max_span = accelerator_rocm_preload_span_bytes();
+  const uint64_t max_span = accelerator_rocm_preload_span_bytes(m);
   uint64_t cached = 0;
   uint64_t merged = 0;
   for (size_t i = 0; i < spans.size();) {

@@ -20,8 +20,8 @@ same GGUF.
 | Milestone | State |
 |---|---|
 | M0 Oracle and loader | done |
-| M1 Correct AR decode on IQ1_M | next |
-| M2 Resident performance | planned |
+| M1 Correct AR decode on IQ1_M | done |
+| M2 Resident performance | next |
 | M3 SSD expert streaming (IQ2_XXS) | planned |
 | M4 Component cache and serving | planned |
 | M5 DSpark and approximations | planned |
@@ -92,29 +92,34 @@ speed.
 - Tokenizer: identical to the official `tokenizer.json` on about 19k tokens of
   mixed text, code, scripts and special tokens.
 
-### M1 Correct AR decode on IQ1_M
+### M1 Correct AR decode on IQ1_M (done)
 
-1. Kernels: instantiate the vendored MMVQ/MMQ device functions for IQ1_S,
-   IQ1_M and IQ2_S experts with a per-projection, per-layer type; Q5_K dense
-   GEMV/GEMM; BF16 router, compressor and indexer.
-2. Graph: a V4.1 graph reusing the forked kernels, with CSA2 own/rescore/reuse
-   modes, ratio-2 and ratio-1 compressors, index K from the latent, candidate
-   blocks, shifted mHC and sqrtsoftplus routing.
-3. Engram v1: CPU hashing, synchronous `pread` of 24 rows per layer, IQ4_NL
-   row dequant, `wkv` and gated add.
-4. Expert store v1: all resident, with peak-memory logging.
-5. Per-layer parity against the oracle, then token goldens, then chat
-   template, DSML tool calls and reasoning effort. Template and parser goldens
-   come from the official `encoding/encoding.py` and the `deepseek-recipe`
-   0.2.0 renderer/output parser. Server defaults follow `deepseek-recipe`:
-   thinking uses temperature 1.0 and top_p >= 0.95; max_tokens 8192, 65536
-   when thinking, 131072 at maximum effort.
-6. Wire `deepseek41` into serve, prompt, bench and sampling defaults.
-7. Exit: coherent chat through `gufo serve` on IQ1_M and a parity report in
-   `QUALITY.md`.
+- Single-token decoder (`runtime/v41_decode.cpp`) over plain kernels
+  (`kernels/rocm/ds41_v41.hip.cpp`) and typed MMVQ entries for every expert
+  and dense type in the ISTA builds. It covers CSA2 own/rescore/reuse modes,
+  ratio-2 and ratio-1 compressors, index K from the latent, candidate blocks,
+  shifted mHC, sqrtsoftplus routing and Engram (CPU hashing, synchronous
+  `pread` of 24 rows per layer). All experts are resident; model spans are
+  sized to the largest tensor so no expert stack is split.
+- Sessions: prefix reuse and snapshots of the full decoder state.
+- Chat template: official V4.1 encoding with numeric reasoning effort,
+  mid-conversation system turns and V4.1 DSML tags, pinned to the GGUF
+  template and the official encoder by SHA-256.
+- Serving: `deepseek41` in `gufo serve` with the V4 Flash runner, a V4.1
+  state ABI and cache identity, DSML grammar (`ToolFormat::kDeepSeek41`) and
+  output parsing, and V4 Flash sampling defaults (temperature 1.0, top_p
+  0.95), as in deepseek-recipe. The core GGUF reader now accepts the IQ1_S,
+  IQ1_M, IQ2_XS, IQ2_S, IQ3_XXS and I64 storage types.
+- Results in [QUALITY.md](QUALITY.md): 3K-token perplexity 6.306 against the
+  oracle's 6.309; 12/12 template goldens; working chat, thinking and tool
+  loops through `gufo serve`. Decode 12-14 tok/s at short context.
+- Moved to M2: `gufo prompt` and `gufo bench` support, and candidate-block
+  parity beyond 16K tokens.
 
 ### M2 Resident performance
 
+- `deepseek41` in `gufo prompt` and `gufo bench`; candidate-block parity
+  beyond 16K tokens.
 - Batched layer-major prefill; fused gate/up + SwiGLU for IQ1/IQ2 experts;
   LDS padding and bank-conflict passes.
 - Engram v2: start row reads as soon as token ids are known (layer 1 overlaps

@@ -15,53 +15,53 @@
 #define DS41_SESSION_NEG_INF (-1.0e30f)
 
 struct ds41_session {
-  ds41_engine* engine;
-  ds41_rocm_graph* graph;
-  ds41_tokens checkpoint;
-  std::unique_ptr<float[]> logits;
-  ds41_session_cancel_fn cancel;
-  void* cancel_user_data;
-  uint32_t prefill_capacity;
-  int context_size;
-  bool checkpoint_valid;
-  bool use_dspark;
-  ds41_dspark_request_state dspark_state{};
-  /* Verified target rows for a sampled concurrent cycle; grown on demand. */
-  std::unique_ptr<float[]> spec_rows;
-  uint32_t spec_rows_cap = 0;
+    ds41_engine *engine;
+    ds41_rocm_graph *graph;
+    ds41_tokens checkpoint;
+    std::unique_ptr<float[]> logits;
+    ds41_session_cancel_fn cancel;
+    void *cancel_user_data;
+    uint32_t prefill_capacity;
+    int context_size;
+    bool checkpoint_valid;
+    bool use_dspark;
+    ds41_dspark_request_state dspark_state{};
+    /* Verified target rows for a sampled concurrent cycle; grown on demand. */
+    std::unique_ptr<float[]> spec_rows;
+    uint32_t spec_rows_cap = 0;
 };
 
-static void set_error(char* error, size_t error_capacity, const char* message) {
-  if (error && error_capacity != 0) {
-    snprintf(error, error_capacity, "%s", message);
-  }
+static void set_error(char *error,
+                      size_t error_capacity,
+                      const char *message) {
+    if (error && error_capacity != 0) {
+        snprintf(error, error_capacity, "%s", message);
+    }
 }
 
-static bool session_cancelled(const ds41_session* session) {
-  return session && session->cancel &&
-         session->cancel(session->cancel_user_data);
+static bool session_cancelled(const ds41_session *session) {
+    return session && session->cancel &&
+           session->cancel(session->cancel_user_data);
 }
 
-static void session_dspark_reset_request_state(ds41_session* session,
+static void session_dspark_reset_request_state(ds41_session *session,
                                                bool preserve_force_plain) {
-  if (!session)
-    return;
-  const bool force_plain =
-      !session->use_dspark ||
-      (preserve_force_plain && session->dspark_state.force_plain_request);
-  session->dspark_state = {};
-  session->dspark_state.force_plain_request = force_plain;
-  session->dspark_state.plain_only = force_plain;
-  ds41_rocm_graph_dspark_set_capture_enabled(session->graph, !force_plain);
+    if (!session) return;
+    const bool force_plain =
+        !session->use_dspark ||
+        (preserve_force_plain && session->dspark_state.force_plain_request);
+    session->dspark_state = {};
+    session->dspark_state.force_plain_request = force_plain;
+    session->dspark_state.plain_only = force_plain;
+    ds41_rocm_graph_dspark_set_capture_enabled(session->graph, !force_plain);
 }
 
-int ds41_session_create(ds41_session** out, ds41_engine* engine,
-                        int context_size, bool use_dspark) {
+int ds41_session_create(ds41_session** out, ds41_engine* engine, int context_size,
+                       bool use_dspark) {
   if (!out || !engine || context_size <= 0 || (use_dspark && !engine->dspark))
     return 1;
 
-  auto session =
-      std::unique_ptr<ds41_session>(new (std::nothrow) ds41_session{});
+  auto session = std::unique_ptr<ds41_session>(new (std::nothrow) ds41_session{});
   if (!session)
     return 1;
 
@@ -90,8 +90,7 @@ int ds41_session_create(ds41_session** out, ds41_engine* engine,
   /* Prefill captures target features and seeds the attached support model's
    * KV. */
   if (use_dspark) {
-    if (!ds41_rocm_graph_dspark_attach(session->graph, engine,
-                                       engine->dspark)) {
+    if (!ds41_rocm_graph_dspark_attach(session->graph, engine, engine->dspark)) {
       ds41_rocm_graph_destroy(session->graph);
       return 1;
     }
@@ -101,52 +100,49 @@ int ds41_session_create(ds41_session** out, ds41_engine* engine,
   return 0;
 }
 
-void ds41_session_free(ds41_session* session) {
-  if (!session)
-    return;
-  ds41_rocm_graph_destroy(session->graph);
-  ds41_tokens_free(&session->checkpoint);
-  delete session;
+void ds41_session_free(ds41_session *session) {
+    if (!session) return;
+    ds41_rocm_graph_destroy(session->graph);
+    ds41_tokens_free(&session->checkpoint);
+    delete session;
 }
 
 bool ds41_session_dspark_enabled(const ds41_session* session) {
   return session && session->use_dspark;
 }
 
-void ds41_session_set_cancel(ds41_session* session,
-                             ds41_session_cancel_fn callback, void* user_data) {
-  if (!session)
-    return;
-  session->cancel = callback;
-  session->cancel_user_data = user_data;
+void ds41_session_set_cancel(ds41_session *session,
+                            ds41_session_cancel_fn callback,
+                            void *user_data) {
+    if (!session) return;
+    session->cancel = callback;
+    session->cancel_user_data = user_data;
 }
 
-void ds41_session_invalidate(ds41_session* session) {
-  if (!session)
-    return;
-  session->checkpoint_valid = false;
-  session_dspark_reset_request_state(session, false);
+void ds41_session_invalidate(ds41_session *session) {
+    if (!session) return;
+    session->checkpoint_valid = false;
+    session_dspark_reset_request_state(session, false);
 }
 
 void ds41_session_begin_request(ds41_session* session) {
   if (!session)
     return;
   const bool incomplete_support =
-      session->use_dspark &&
-      ds41_rocm_graph_dspark_context_len(session->graph) <
-          static_cast<uint32_t>(session->checkpoint.len);
+      session->use_dspark && ds41_rocm_graph_dspark_context_len(session->graph) <
+                                 static_cast<uint32_t>(session->checkpoint.len);
   session_dspark_reset_request_state(session, false);
   if (incomplete_support)
     ds41_session_prepare_batch_execution(session);
 }
 
-void ds41_session_prepare_batch_execution(ds41_session* session) {
-  if (!session || ds41_rocm_graph_dspark_block_size(session->graph) == 0u) {
-    return;
-  }
-  session->dspark_state.force_plain_request = true;
-  session->dspark_state.plain_only = true;
-  ds41_rocm_graph_dspark_set_capture_enabled(session->graph, false);
+void ds41_session_prepare_batch_execution(ds41_session *session) {
+    if (!session || ds41_rocm_graph_dspark_block_size(session->graph) == 0u) {
+        return;
+    }
+    session->dspark_state.force_plain_request = true;
+    session->dspark_state.plain_only = true;
+    ds41_rocm_graph_dspark_set_capture_enabled(session->graph, false);
 }
 
 /*
@@ -154,18 +150,21 @@ void ds41_session_prepare_batch_execution(ds41_session* session) {
  * features captured by that decode. An injection after disabled capture cannot
  * claim contiguous coverage across the missing support rows.
  */
-static bool session_commit_and_extend(ds41_session* session, int token) {
-  const uint32_t position = (uint32_t)session->checkpoint.len;
-  if (!ds41_rocm_graph_eval(session->graph, session->engine, token, position,
-                            session->logits.get())) {
-    return false;
-  }
-  ds41_tokens_push(&session->checkpoint, token);
-  if (ds41_rocm_graph_dspark_block_size(session->graph) != 0 &&
-      ds41_rocm_graph_dspark_capture_ready(session->graph)) {
-    return ds41_rocm_graph_dspark_inject(session->graph, position, 1u);
-  }
-  return true;
+static bool session_commit_and_extend(ds41_session *session, int token) {
+    const uint32_t position = (uint32_t)session->checkpoint.len;
+    if (!ds41_rocm_graph_eval(session->graph,
+                             session->engine,
+                             token,
+                             position,
+                             session->logits.get())) {
+        return false;
+    }
+    ds41_tokens_push(&session->checkpoint, token);
+    if (ds41_rocm_graph_dspark_block_size(session->graph) != 0 &&
+        ds41_rocm_graph_dspark_capture_ready(session->graph)) {
+      return ds41_rocm_graph_dspark_inject(session->graph, position, 1u);
+    }
+    return true;
 }
 
 static bool sessions_commit_and_extend_batch(
@@ -184,7 +183,7 @@ static bool sessions_commit_and_extend_batch(
     };
   }
   if (!ds41_rocm_graph_eval_batch(items[0].session->engine, batch.data(),
-                                  item_count)) {
+                                 item_count)) {
     return false;
   }
   for (size_t index = 0; index < item_count; ++index) {
@@ -206,26 +205,26 @@ static bool sessions_commit_and_extend_batch(
  * resumed-prefill suffix; contiguous injections compose without repeating
  * already seeded rows.
  */
-static bool session_dspark_seed_pending(ds41_session* session,
+static bool session_dspark_seed_pending(ds41_session *session,
                                         uint32_t required_context) {
-  if (!session || ds41_rocm_graph_dspark_block_size(session->graph) == 0) {
-    return false;
-  }
-  uint32_t context = ds41_rocm_graph_dspark_context_len(session->graph);
-  if (context >= required_context)
-    return true;
+    if (!session || ds41_rocm_graph_dspark_block_size(session->graph) == 0) {
+        return false;
+    }
+    uint32_t context =
+        ds41_rocm_graph_dspark_context_len(session->graph);
+    if (context >= required_context) return true;
 
-  uint32_t start = 0;
-  const uint32_t rows =
-      ds41_rocm_graph_dspark_batch_capture_rows(session->graph, &start);
-  if (rows == 0 || start > context || start + rows < required_context) {
-    return false;
-  }
-  if (!ds41_rocm_graph_dspark_inject(session->graph, start, rows)) {
-    return false;
-  }
-  context = ds41_rocm_graph_dspark_context_len(session->graph);
-  return context >= required_context;
+    uint32_t start = 0;
+    const uint32_t rows =
+        ds41_rocm_graph_dspark_batch_capture_rows(session->graph, &start);
+    if (rows == 0 || start > context || start + rows < required_context) {
+        return false;
+    }
+    if (!ds41_rocm_graph_dspark_inject(session->graph, start, rows)) {
+        return false;
+    }
+    context = ds41_rocm_graph_dspark_context_len(session->graph);
+    return context >= required_context;
 }
 
 /*
@@ -243,8 +242,7 @@ static int session_dspark_anchor(ds41_session* session,
   const int pending = session->dspark_state.pending_anchor;
   session->dspark_state.pending_anchor = -1;
   if (pending >= 0) {
-    if (sampler->accept)
-      sampler->accept(sampler->ctx, pending);
+    if (sampler->accept) sampler->accept(sampler->ctx, pending);
     return pending;
   }
   return sampler->sample(sampler->ctx, session->logits.get(),
@@ -253,8 +251,7 @@ static int session_dspark_anchor(ds41_session* session,
 
 static float* session_spec_rows(ds41_session* session, uint32_t rows,
                                 int vocabulary_size) {
-  if (rows == 0u)
-    return nullptr;
+  if (rows == 0u) return nullptr;
   if (session->spec_rows_cap < rows) {
     session->spec_rows.reset(
         new (std::nothrow) float[(size_t)rows * (size_t)vocabulary_size]);
@@ -264,15 +261,16 @@ static float* session_spec_rows(ds41_session* session, uint32_t rows,
 }
 
 int ds41_session_dspark_take_pending_anchor(ds41_session* session) {
-  if (!session)
-    return -1;
+  if (!session) return -1;
   const int pending = session->dspark_state.pending_anchor;
   session->dspark_state.pending_anchor = -1;
   return pending;
 }
 
-int ds41_session_sync(ds41_session* session, const ds41_tokens* prompt,
-                      char* error, size_t error_capacity) {
+int ds41_session_sync(ds41_session *session,
+                     const ds41_tokens *prompt,
+                     char *error,
+                     size_t error_capacity) {
   if (!session || !prompt || !prompt->v || prompt->len <= 0 ||
       prompt->len >= session->context_size) {
     set_error(error, error_capacity, "prompt exceeds context");
@@ -286,78 +284,84 @@ int ds41_session_sync(ds41_session* session, const ds41_tokens* prompt,
     set_error(error, error_capacity, "prompt contains an invalid token ID");
     return 1;
   }
-  if (session_cancelled(session)) {
-    set_error(error, error_capacity, "prefill cancelled");
-    return DS41_SESSION_SYNC_INTERRUPTED;
-  }
-
-  if (session->checkpoint_valid && prompt->len >= session->checkpoint.len &&
-      ds41_tokens_starts_with(prompt, &session->checkpoint)) {
-    const int suffix = prompt->len - session->checkpoint.len;
-    if (suffix > 0) {
-      /* Materialize any pending capture before suffix prefill reuses its
-       * storage. */
-      (void)session_dspark_seed_pending(session,
-                                        (uint32_t)session->checkpoint.len);
+    if (session_cancelled(session)) {
+        set_error(error, error_capacity, "prefill cancelled");
+        return DS41_SESSION_SYNC_INTERRUPTED;
     }
-    const uint32_t resume_minimum = ds41_rocm_graph_resume_prefill_min_tokens();
-    if (suffix > 0 && (uint32_t)suffix >= resume_minimum) {
-      const bool ok = ds41_rocm_graph_prefill_range(
-          session->graph, session->engine, prompt,
-          (uint32_t)session->checkpoint.len, (uint32_t)suffix,
-          session->logits.get());
-      if (!ok) {
-        set_error(error, error_capacity,
-                  "ROCm resumed prefill failed while extending checkpoint");
-        session->checkpoint_valid = false;
-        return 1;
+
+    if (session->checkpoint_valid && prompt->len >= session->checkpoint.len &&
+        ds41_tokens_starts_with(prompt, &session->checkpoint)) {
+      const int suffix = prompt->len - session->checkpoint.len;
+      if (suffix > 0) {
+        /* Materialize any pending capture before suffix prefill reuses its
+         * storage. */
+        (void)session_dspark_seed_pending(session,
+                                          (uint32_t)session->checkpoint.len);
       }
-      ds41_tokens_copy(&session->checkpoint, prompt);
-      session->checkpoint_valid = true;
+      const uint32_t resume_minimum =
+          ds41_rocm_graph_resume_prefill_min_tokens();
+      if (suffix > 0 && (uint32_t)suffix >= resume_minimum) {
+        const bool ok = ds41_rocm_graph_prefill_range(
+            session->graph, session->engine, prompt,
+            (uint32_t)session->checkpoint.len, (uint32_t)suffix,
+            session->logits.get());
+        if (!ok) {
+          set_error(error, error_capacity,
+                    "ROCm resumed prefill failed while extending checkpoint");
+          session->checkpoint_valid = false;
+          return 1;
+        }
+        ds41_tokens_copy(&session->checkpoint, prompt);
+        session->checkpoint_valid = true;
+        return 0;
+      }
+
+      for (int i = session->checkpoint.len; i < prompt->len; ++i) {
+        if (session_cancelled(session)) {
+          set_error(error, error_capacity, "prefill cancelled");
+          return DS41_SESSION_SYNC_INTERRUPTED;
+        }
+        if (!session_commit_and_extend(session, prompt->v[i])) {
+          set_error(error, error_capacity,
+                    "ROCm decode failed while extending checkpoint");
+          session->checkpoint_valid = false;
+          return 1;
+        }
+      }
       return 0;
     }
 
-    for (int i = session->checkpoint.len; i < prompt->len; ++i) {
-      if (session_cancelled(session)) {
-        set_error(error, error_capacity, "prefill cancelled");
-        return DS41_SESSION_SYNC_INTERRUPTED;
-      }
-      if (!session_commit_and_extend(session, prompt->v[i])) {
-        set_error(error, error_capacity,
-                  "ROCm decode failed while extending checkpoint");
-        session->checkpoint_valid = false;
+    session->checkpoint_valid = false;
+    session_dspark_reset_request_state(session, true);
+    if (!ds41_rocm_graph_reset(session->graph)) {
+        set_error(error, error_capacity, "ROCm prefill state reset failed");
         return 1;
-      }
     }
+    if (!ds41_rocm_graph_prefill(session->graph,
+                                session->engine,
+                                prompt,
+                                session->logits.get())) {
+        set_error(error, error_capacity, "ROCm prefill failed");
+        return 1;
+    }
+    ds41_tokens_copy(&session->checkpoint, prompt);
+    session->checkpoint_valid = true;
     return 0;
-  }
-
-  session->checkpoint_valid = false;
-  session_dspark_reset_request_state(session, true);
-  if (!ds41_rocm_graph_reset(session->graph)) {
-    set_error(error, error_capacity, "ROCm prefill state reset failed");
-    return 1;
-  }
-  if (!ds41_rocm_graph_prefill(session->graph, session->engine, prompt,
-                               session->logits.get())) {
-    set_error(error, error_capacity, "ROCm prefill failed");
-    return 1;
-  }
-  ds41_tokens_copy(&session->checkpoint, prompt);
-  session->checkpoint_valid = true;
-  return 0;
 }
 
-int ds41_session_argmax(const ds41_session* session) {
+int ds41_session_argmax(const ds41_session *session) {
   if (!session || !session->checkpoint_valid || !session->logits)
     return -1;
   return ds41_sample_argmax(session->logits.get(),
-                            (uint32_t)ds41_engine_vocab_size(session->engine));
+                           (uint32_t)ds41_engine_vocab_size(session->engine));
 }
 
-int ds41_session_sample(const ds41_session* session, float temperature,
-                        int top_k, float top_p, float min_p,
-                        uint64_t* rng_state) {
+int ds41_session_sample(const ds41_session *session,
+                       float temperature,
+                       int top_k,
+                       float top_p,
+                       float min_p,
+                       uint64_t *rng_state) {
   if (!session || !session->checkpoint_valid || !session->logits || !rng_state)
     return -1;
   return ds41_sample_top_p_min_p(
@@ -365,8 +369,9 @@ int ds41_session_sample(const ds41_session* session, float temperature,
       temperature, top_k, top_p, min_p, rng_state);
 }
 
-int ds41_session_copy_logits(const ds41_session* session, float* out,
-                             int capacity) {
+int ds41_session_copy_logits(const ds41_session *session,
+                            float *out,
+                            int capacity) {
   if (!session || !session->checkpoint_valid || !out)
     return 0;
   const int vocabulary_size = ds41_engine_vocab_size(session->engine);
@@ -376,155 +381,164 @@ int ds41_session_copy_logits(const ds41_session* session, float* out,
   return vocabulary_size;
 }
 
-int ds41_session_eval(ds41_session* session, int token, char* error,
-                      size_t error_capacity) {
-  if (!session) {
-    set_error(error, error_capacity, "invalid session");
-    return 1;
-  }
-  if (!session->checkpoint_valid ||
-      session->checkpoint.len >= session->context_size || token < 0 ||
-      token >= ds41_engine_vocab_size(session->engine)) {
-    set_error(error, error_capacity,
-              "decode needs a valid checkpoint, token, and context position");
-    return 1;
-  }
-  if (session_cancelled(session)) {
-    set_error(error, error_capacity, "decode cancelled");
-    return DS41_SESSION_SYNC_INTERRUPTED;
-  }
-  if (!session_commit_and_extend(session, token)) {
-    set_error(error, error_capacity, "ROCm decode failed");
-    session->checkpoint_valid = false;
-    return 1;
-  }
-  session->checkpoint_valid = true;
-  return 0;
-}
-
-int ds41_sessions_eval_batch(const ds41_session_batch_item* items,
-                             size_t item_count, char* error,
-                             size_t error_capacity) {
-  if (!items || item_count < 2 || item_count > 8) {
-    set_error(error, error_capacity,
-              "batch decode requires two to eight sessions");
-    return 1;
-  }
-
-  ds41_engine* engine = nullptr;
-  std::array<ds41_rocm_batch_item, 8> graph_items{};
-  size_t graph_item_count = 0;
-  for (size_t index = 0; index < item_count; ++index) {
-    ds41_session* session = items[index].session;
-    if (!session || !session->checkpoint_valid) {
-      set_error(error, error_capacity,
-                "batch decode contains an invalid session");
-      return 1;
+int ds41_session_eval(ds41_session *session,
+                     int token,
+                     char *error,
+                     size_t error_capacity) {
+    if (!session) {
+        set_error(error, error_capacity, "invalid session");
+        return 1;
     }
-    if (engine == nullptr) {
-      engine = session->engine;
-    } else if (session->engine != engine) {
+    if (!session->checkpoint_valid ||
+        session->checkpoint.len >= session->context_size || token < 0 ||
+        token >= ds41_engine_vocab_size(session->engine)) {
       set_error(error, error_capacity,
-                "batch decode sessions do not share one model");
+                "decode needs a valid checkpoint, token, and context position");
       return 1;
     }
     if (session_cancelled(session)) {
-      set_error(error, error_capacity, "batch decode cancelled");
-      return DS41_SESSION_SYNC_INTERRUPTED;
+        set_error(error, error_capacity, "decode cancelled");
+        return DS41_SESSION_SYNC_INTERRUPTED;
     }
-    if (items[index].token < 0 ||
-        items[index].token >= ds41_engine_vocab_size(session->engine)) {
-      set_error(error, error_capacity,
-                "batch decode contains an invalid token");
-      return 1;
-    }
-    if (session->checkpoint.len < 0 ||
-        session->checkpoint.len >= session->context_size) {
-      set_error(error, error_capacity,
-                "batch decode exceeds a session context");
-      return 1;
-    }
-    for (size_t previous = 0; previous < index; ++previous) {
-      if (items[previous].session == session) {
-        set_error(error, error_capacity,
-                  "batch decode contains a duplicate session");
+    if (!session_commit_and_extend(session, token)) {
+        set_error(error, error_capacity, "ROCm decode failed");
+        session->checkpoint_valid = false;
         return 1;
-      }
     }
-    graph_items[graph_item_count++] = {
-        .graph = session->graph,
-        .token = items[index].token,
-        .position = static_cast<uint32_t>(session->checkpoint.len),
-        .logits = session->logits.get(),
-    };
-  }
-
-  if (!ds41_rocm_graph_eval_batch(engine, graph_items.data(),
-                                  graph_item_count)) {
-    for (size_t index = 0; index < item_count; ++index) {
-      items[index].session->checkpoint_valid = false;
-    }
-    set_error(error, error_capacity, "ROCm batch decode failed");
-    return 1;
-  }
-
-  for (size_t index = 0; index < item_count; ++index) {
-    ds41_tokens_push(&items[index].session->checkpoint, items[index].token);
-    items[index].session->checkpoint_valid = true;
-    /*
-     * The multi-session target path does not capture per-session sampled
-     * hidden states for the support ring. Keep this request on exact target
-     * batching after its first concurrent step; a cold request reset
-     * enables DSpark again.
-     */
-    items[index].session->dspark_state.plain_only = true;
-    items[index].session->dspark_state.force_plain_request = true;
-    ds41_rocm_graph_dspark_set_capture_enabled(items[index].session->graph,
-                                               false);
-  }
-  return 0;
-}
-
-uint64_t ds41_session_payload_bytes(const ds41_session* session) {
-  if (!session || !session->checkpoint_valid)
+    session->checkpoint_valid = true;
     return 0;
-  return ds41_rocm_graph_snapshot_bytes(session->graph, &session->checkpoint);
 }
 
-int ds41_session_save_snapshot(const ds41_session* session,
-                               ds41_session_snapshot* snapshot, char* error,
-                               size_t error_capacity) {
-  if (!session || !session->checkpoint_valid) {
-    set_error(error, error_capacity, "session has no valid checkpoint");
-    return 1;
-  }
-  return ds41_rocm_graph_save_snapshot(
-      session->graph, &session->checkpoint, session->logits.get(),
-      session->prefill_capacity, session->context_size, &session->dspark_state,
-      snapshot, error, error_capacity);
+int ds41_sessions_eval_batch(const ds41_session_batch_item *items,
+                            size_t item_count,
+                            char *error,
+                            size_t error_capacity) {
+    if (!items || item_count < 2 || item_count > 8) {
+        set_error(error,
+                  error_capacity,
+                  "batch decode requires two to eight sessions");
+        return 1;
+    }
+
+    ds41_engine *engine = nullptr;
+    std::array<ds41_rocm_batch_item, 8> graph_items{};
+    size_t graph_item_count = 0;
+    for (size_t index = 0; index < item_count; ++index) {
+        ds41_session *session = items[index].session;
+        if (!session || !session->checkpoint_valid) {
+            set_error(error,
+                      error_capacity,
+                      "batch decode contains an invalid session");
+            return 1;
+        }
+        if (engine == nullptr) {
+            engine = session->engine;
+        } else if (session->engine != engine) {
+            set_error(error,
+                      error_capacity,
+                      "batch decode sessions do not share one model");
+            return 1;
+        }
+        if (session_cancelled(session)) {
+            set_error(error, error_capacity, "batch decode cancelled");
+            return DS41_SESSION_SYNC_INTERRUPTED;
+        }
+        if (items[index].token < 0 ||
+            items[index].token >= ds41_engine_vocab_size(session->engine)) {
+          set_error(error, error_capacity,
+                    "batch decode contains an invalid token");
+          return 1;
+        }
+        if (session->checkpoint.len < 0 ||
+            session->checkpoint.len >= session->context_size) {
+          set_error(error, error_capacity,
+                    "batch decode exceeds a session context");
+          return 1;
+        }
+        for (size_t previous = 0; previous < index; ++previous) {
+            if (items[previous].session == session) {
+                set_error(error,
+                          error_capacity,
+                          "batch decode contains a duplicate session");
+                return 1;
+            }
+        }
+        graph_items[graph_item_count++] = {
+            .graph = session->graph,
+            .token = items[index].token,
+            .position = static_cast<uint32_t>(session->checkpoint.len),
+            .logits = session->logits.get(),
+        };
+    }
+
+    if (!ds41_rocm_graph_eval_batch(engine,
+                                   graph_items.data(),
+                                   graph_item_count)) {
+        for (size_t index = 0; index < item_count; ++index) {
+            items[index].session->checkpoint_valid = false;
+        }
+        set_error(error, error_capacity, "ROCm batch decode failed");
+        return 1;
+    }
+
+    for (size_t index = 0; index < item_count; ++index) {
+        ds41_tokens_push(&items[index].session->checkpoint, items[index].token);
+        items[index].session->checkpoint_valid = true;
+        /*
+         * The multi-session target path does not capture per-session sampled
+         * hidden states for the support ring. Keep this request on exact target
+         * batching after its first concurrent step; a cold request reset
+         * enables DSpark again.
+         */
+        items[index].session->dspark_state.plain_only = true;
+        items[index].session->dspark_state.force_plain_request = true;
+        ds41_rocm_graph_dspark_set_capture_enabled(
+            items[index].session->graph, false);
+    }
+    return 0;
 }
 
-int ds41_session_load_snapshot(ds41_session* session,
-                               const ds41_session_snapshot* snapshot,
-                               char* error, size_t error_capacity) {
-  if (!session) {
-    set_error(error, error_capacity, "invalid session snapshot load");
-    return 1;
-  }
-  session->checkpoint_valid = false;
-  const int result = ds41_rocm_graph_load_snapshot(
-      session->graph, &session->checkpoint, session->logits.get(),
-      session->prefill_capacity, session->context_size, &session->dspark_state,
-      snapshot, error, error_capacity);
-  session->checkpoint_valid = result == 0;
-  return result;
+uint64_t ds41_session_payload_bytes(const ds41_session *session) {
+    if (!session || !session->checkpoint_valid) return 0;
+    return ds41_rocm_graph_snapshot_bytes(session->graph,
+                                         &session->checkpoint);
 }
 
-void ds41_session_snapshot_free(ds41_session_snapshot* snapshot) {
-  if (!snapshot)
-    return;
-  free(snapshot->ptr);
-  memset(snapshot, 0, sizeof(*snapshot));
+int ds41_session_save_snapshot(const ds41_session *session,
+                              ds41_session_snapshot *snapshot,
+                              char *error,
+                              size_t error_capacity) {
+    if (!session || !session->checkpoint_valid) {
+        set_error(error, error_capacity, "session has no valid checkpoint");
+        return 1;
+    }
+    return ds41_rocm_graph_save_snapshot(
+        session->graph, &session->checkpoint, session->logits.get(),
+        session->prefill_capacity, session->context_size,
+        &session->dspark_state, snapshot, error, error_capacity);
+}
+
+int ds41_session_load_snapshot(ds41_session *session,
+                              const ds41_session_snapshot *snapshot,
+                              char *error,
+                              size_t error_capacity) {
+    if (!session) {
+        set_error(error, error_capacity, "invalid session snapshot load");
+        return 1;
+    }
+    session->checkpoint_valid = false;
+    const int result = ds41_rocm_graph_load_snapshot(
+        session->graph, &session->checkpoint, session->logits.get(),
+        session->prefill_capacity, session->context_size,
+        &session->dspark_state, snapshot, error, error_capacity);
+    session->checkpoint_valid = result == 0;
+    return result;
+}
+
+void ds41_session_snapshot_free(ds41_session_snapshot *snapshot) {
+    if (!snapshot) return;
+    free(snapshot->ptr);
+    memset(snapshot, 0, sizeof(*snapshot));
 }
 
 /* C1 retains the established four-probe/64-token acceptance policy. Concurrent
@@ -561,8 +575,8 @@ static void session_dspark_note_cycle(ds41_session* session,
 
 // Cost units are hundredths of one ordinary batch decode step, calibrated
 // offline on gfx1151 at 0/4K/16K with tg128, rounded up to five units.
-// See docs/models/deepseek-v4-flash/artifacts/cost-calibration.json. Runtime
-// wall clocks never influence token decisions.
+// See docs/models/deepseek-v4-flash/artifacts/cost-calibration.json. Runtime wall clocks
+// never influence token decisions.
 static uint32_t session_dspark_cycle_cost(const ds41_session* session,
                                           uint32_t tail, size_t concurrency) {
   return ds41_dspark_cycle_cost(session->checkpoint.len, tail, concurrency);
@@ -775,8 +789,8 @@ static int session_dspark_finish_verified(
              row_logits + (size_t)(drafted - 1u) * (size_t)vocabulary_size,
              (size_t)vocabulary_size * sizeof(float));
     } else if (!concurrent_batch &&
-               !ds41_rocm_graph_read_spec_logits_row(
-                   session->graph, drafted - 1u, session->logits.get())) {
+               !ds41_rocm_graph_read_spec_logits_row(session->graph, drafted - 1u,
+                                                    session->logits.get())) {
       set_error(error, error_capacity, "DSpark frontier logits read failed");
       session->checkpoint_valid = false;
       return 1;
@@ -784,7 +798,7 @@ static int session_dspark_finish_verified(
     session->checkpoint_valid = true;
     if (ds41_rocm_graph_dspark_capture_ready(session->graph)) {
       (void)ds41_rocm_graph_dspark_inject(session->graph, (uint32_t)length,
-                                          drafted);
+                                         drafted);
     }
     for (uint32_t i = 0; i < drafted; ++i) {
       emitted[(*n_emitted)++] = drafts[i];
@@ -813,7 +827,7 @@ static int session_dspark_finish_verified(
     committed_prefix =
         (concurrent_batch || frontier_read ||
          ds41_rocm_graph_read_spec_logits_row(session->graph, accepted - 1u,
-                                              session->logits.get())) &&
+                                             session->logits.get())) &&
         ds41_rocm_graph_spec_frontier_commit_prefix(session->graph, accepted);
     if (committed_prefix) {
       session->checkpoint.len = length + (int)accepted;
@@ -866,7 +880,7 @@ static int session_dspark_finish_verified(
     const int sequential_top =
         sampled ? drafts[i]
                 : ds41_sample_argmax(session->logits.get(),
-                                     (uint32_t)vocabulary_size);
+                                    (uint32_t)vocabulary_size);
     if (sequential_top < 0) {
       set_error(error, error_capacity,
                 "DSpark replay logits contain no finite values");
@@ -1046,8 +1060,8 @@ static int session_dspark_step(ds41_session* session, int* emitted,
 }
 
 int ds41_sessions_dspark_step_batch(const ds41_session_dspark_batch_item* items,
-                                    size_t item_count, char* error,
-                                    size_t error_capacity) {
+                                   size_t item_count, char* error,
+                                   size_t error_capacity) {
   if (!items || item_count == 0u || item_count > 8u) {
     set_error(error, error_capacity,
               "DSpark batch requires one to eight sessions");
@@ -1057,8 +1071,7 @@ int ds41_sessions_dspark_step_batch(const ds41_session_dspark_batch_item* items,
     const auto& item = items[0];
     if (!item.session || !item.session->checkpoint_valid ||
         item.max_draft_tokens == 0u) {
-      set_error(error, error_capacity,
-                "DSpark batch contains an invalid session");
+      set_error(error, error_capacity, "DSpark batch contains an invalid session");
       return 1;
     }
     if (session_cancelled(item.session)) {
@@ -1208,7 +1221,8 @@ int ds41_sessions_dspark_step_batch(const ds41_session_dspark_batch_item* items,
   std::array<uint32_t, 8> drafted_counts{};
   std::array<uint32_t, 8> verify_counts{};
   std::array<uint32_t, 8> tail_drafted{};
-  const bool trace_timing = getenv("GUFO_DEEPSEEK41_DSPARK_TIMING") != nullptr;
+  const bool trace_timing =
+      getenv("GUFO_DEEPSEEK41_DSPARK_TIMING") != nullptr;
   const double draft_t0 = trace_timing ? ds41_now_seconds() : 0.0;
   std::array<ds41_rocm_dspark_draft_item, 8> draft_items{};
   size_t draft_item_count = 0;
@@ -1347,7 +1361,8 @@ int ds41_sessions_dspark_step_batch(const ds41_session_dspark_batch_item* items,
       }
       return result;
     }
-    total_emitted += static_cast<uint32_t>(*items[index].n_emitted);
+    total_emitted +=
+        static_cast<uint32_t>(*items[index].n_emitted);
     if (can_draft_items[index]) {
       const uint32_t maximum = std::min(
           {items[index].max_draft_tokens, block, DS41_DSPARK_MAX_BLOCK});
@@ -1366,7 +1381,8 @@ int ds41_sessions_dspark_step_batch(const ds41_session_dspark_batch_item* items,
     }
   }
   if (trace_timing) {
-    const double commit_ms = (ds41_now_seconds() - commit_t0) * 1000.0;
+    const double commit_ms =
+        (ds41_now_seconds() - commit_t0) * 1000.0;
     fprintf(stderr,
             "ds41: DSpark batch timing c=%zu rows=%u emitted=%u "
             "draft=%.3f ms verify=%.3f ms commit=%.3f ms\n",
@@ -1376,44 +1392,49 @@ int ds41_sessions_dspark_step_batch(const ds41_session_dspark_batch_item* items,
   return 0;
 }
 
-void ds41_session_dspark_stats(const ds41_session* session, uint64_t* drafted,
-                               uint64_t* accepted, uint64_t* support_drafted,
-                               uint64_t* support_accepted,
-                               uint64_t* positional_accepted, uint64_t* anchors,
-                               uint64_t* full_blocks, uint64_t* steps,
-                               uint64_t* skipped, uint32_t* context_tokens) {
-  if (!session)
-    return;
-  if (drafted)
-    *drafted = session->dspark_state.drafted;
-  if (accepted)
-    *accepted = session->dspark_state.accepted;
-  if (support_drafted)
-    *support_drafted = session->dspark_state.support_drafted;
-  if (support_accepted)
-    *support_accepted = session->dspark_state.support_accepted;
-  if (positional_accepted) {
-    *positional_accepted = session->dspark_state.positional_accepted;
-  }
-  if (anchors)
-    *anchors = session->dspark_state.anchors;
-  if (full_blocks)
-    *full_blocks = session->dspark_state.full_blocks;
-  if (steps)
-    *steps = session->dspark_state.steps;
-  if (skipped)
-    *skipped = session->dspark_state.skipped;
-  if (context_tokens) {
-    *context_tokens = ds41_rocm_graph_dspark_context_len(session->graph);
-  }
+void ds41_session_dspark_stats(const ds41_session *session,
+                              uint64_t *drafted,
+                              uint64_t *accepted,
+                              uint64_t *support_drafted,
+                              uint64_t *support_accepted,
+                              uint64_t *positional_accepted,
+                              uint64_t *anchors,
+                              uint64_t *full_blocks,
+                              uint64_t *steps,
+                              uint64_t *skipped,
+                              uint32_t *context_tokens) {
+    if (!session) return;
+    if (drafted)
+      *drafted = session->dspark_state.drafted;
+    if (accepted)
+      *accepted = session->dspark_state.accepted;
+    if (support_drafted)
+      *support_drafted = session->dspark_state.support_drafted;
+    if (support_accepted)
+      *support_accepted = session->dspark_state.support_accepted;
+    if (positional_accepted) {
+      *positional_accepted = session->dspark_state.positional_accepted;
+    }
+    if (anchors)
+      *anchors = session->dspark_state.anchors;
+    if (full_blocks)
+      *full_blocks = session->dspark_state.full_blocks;
+    if (steps)
+      *steps = session->dspark_state.steps;
+    if (skipped)
+      *skipped = session->dspark_state.skipped;
+    if (context_tokens) {
+        *context_tokens =
+            ds41_rocm_graph_dspark_context_len(session->graph);
+    }
 }
 
-int ds41_session_pos(const ds41_session* session) {
-  return session ? session->checkpoint.len : 0;
+int ds41_session_pos(const ds41_session *session) {
+    return session ? session->checkpoint.len : 0;
 }
 
-int ds41_session_ctx(const ds41_session* session) {
-  return session ? session->context_size : 0;
+int ds41_session_ctx(const ds41_session *session) {
+    return session ? session->context_size : 0;
 }
 
 uint32_t ds41_session_prefill_capacity(const ds41_session* session) {

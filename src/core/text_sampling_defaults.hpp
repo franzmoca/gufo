@@ -29,7 +29,8 @@ struct SamplingOverrides {
 };
 
 inline TextModelPreset TextPreset(const core::ModelConfig& config) {
-  if (config.architecture == "deepseek4")
+  // V4.1 Flash is served with the V4 Flash defaults (deepseek-recipe).
+  if (config.architecture == "deepseek4" || config.architecture == "deepseek41")
     return TextModelPreset::kDeepSeekV4Flash;
   if (config.architecture == "qwen4exp" ||
       (config.num_layers == 64 && config.hidden_size == 5120 &&

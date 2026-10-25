@@ -22,6 +22,10 @@ namespace gufo::models::deepseek_v4_flash {
 class Model;
 }
 
+namespace gufo::models::deepseek_v41_flash {
+class Model;
+}
+
 namespace gufo::models::qwen38_flash_next {
 class Model;
 }
@@ -98,6 +102,14 @@ public:
 
   /// Installs a previously loaded DeepSeek model with request-owned sessions.
   bool load(std::shared_ptr<models::deepseek_v4_flash::Model> model,
+            std::string* error, std::uint32_t max_context = 0,
+            std::size_t session_count = 1,
+            TextPrefillPolicy prefill_policy = {},
+            TextSchedulerPolicy scheduler_policy = {},
+            TextSpeculativeConfig speculative_config = {},
+            TextDiskCacheConfig disk_cache_config = {},
+            TextRunnerRamCacheOptions ram_cache_config = {});
+  bool load(std::shared_ptr<models::deepseek_v41_flash::Model> model,
             std::string* error, std::uint32_t max_context = 0,
             std::size_t session_count = 1,
             TextPrefillPolicy prefill_policy = {},
@@ -189,6 +201,15 @@ public:
       const ChatRequest& request) const override;
 
 private:
+  template<class Ds>
+  bool LoadDeepSeek(std::shared_ptr<typename Ds::Model> model,
+                    std::string* error, std::uint32_t max_context,
+                    std::size_t session_count, TextPrefillPolicy prefill_policy,
+                    TextSchedulerPolicy scheduler_policy,
+                    TextSpeculativeConfig speculative_config,
+                    TextDiskCacheConfig disk_cache_config,
+                    TextRunnerRamCacheOptions ram_cache_config);
+
   struct Impl;
   std::unique_ptr<Impl> impl_;
 };
