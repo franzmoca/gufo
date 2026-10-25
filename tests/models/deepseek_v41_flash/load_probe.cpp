@@ -12,6 +12,7 @@
 #include <cstring>
 #include <fstream>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include "src/models/deepseek_v41_flash/runtime/model.h"
@@ -82,6 +83,146 @@ void Report(const char* stage) {
       stage, MeminfoKiB("MemAvailable:") * 1024.0 / kGiB, GttUsedBytes() / kGiB,
       StatusKiB("VmRSS:") * 1024.0 / kGiB, StatusKiB("VmHWM:") * 1024.0 / kGiB);
 }
+int Argmax(const float* row, std::size_t vocab) {
+  int best = 0;
+  for (std::size_t i = 1; i < vocab; ++i)
+    if (row[i] > row[(std::size_t)best])
+      best = (int)i;
+  return best;
+}
+
+/* Prefills `prompt` into a new decoder in batches. */
+ds41_decoder* Prefill(ds41_engine* engine, const std::vector<int>& prompt,
+                      uint32_t context, std::vector<float>* last) {
+  ds41_decoder* d = ds41_decoder_create(engine, context);
+  if (!d)
+    return nullptr;
+  const uint32_t cap = ds41_decoder_batch_capacity(d);
+  for (uint32_t at = 0; at < prompt.size();) {
+    const uint32_t n = std::min<uint32_t>(cap, (uint32_t)prompt.size() - at);
+    const bool final = at + n == prompt.size();
+    if (ds41_decoder_eval(d, prompt.data() + at, n, last->data(), final ? 1 : 0,
+                          nullptr, nullptr) != 0) {
+      ds41_decoder_destroy(d);
+      return nullptr;
+    }
+    at += n;
+  }
+  return d;
+}
+
+/* --spec-check: speculative batches of four rows keeping 1, 2, 3, 4 rows in
+ * turn. Pass A drafts the greedy continuation, pass B replaces the rows past
+ * the kept prefix with other tokens. Exact rollback leaves both passes with
+ * bit-identical logits for every kept row.
+ * --spec-bench N: times speculative batches of N rows (0: 1 to 8), commit 1. */
+int SpeculativeProbe(ds41_engine* engine, const std::vector<int>& prompt,
+                     uint32_t context, int cycles, int bench) {
+  const std::size_t vocab = (std::size_t)ds41_engine_vocab_size(engine);
+  context = std::max<uint32_t>(context, (uint32_t)prompt.size() + 4096);
+  std::vector<float> last(vocab);
+  if (bench >= 0) {
+    ds41_decoder* d = Prefill(engine, prompt, context, &last);
+    if (!d)
+      return 1;
+    std::vector<float> rows(vocab * DS41_DECODER_MAX_SPECULATIVE);
+    int token = Argmax(last.data(), vocab);
+    for (uint32_t n = bench ? (uint32_t)bench : 1;
+         n <= (bench ? (uint32_t)bench : 8); ++n) {
+      std::vector<double> ms;
+      for (int rep = 0; rep < 7; ++rep) {
+        /* The greedy token, then prompt text: distinct tokens route to as
+         * many experts as a real draft. */
+        std::vector<int> batch(n, token);
+        for (uint32_t i = 1; i < n; ++i)
+          batch[i] = prompt[(97 * (std::size_t)rep + i) % prompt.size()];
+        const auto t0 = std::chrono::steady_clock::now();
+        if (ds41_decoder_eval_speculative(d, batch.data(), n, rows.data()) ||
+            ds41_decoder_commit(d, 1))
+          return 1;
+        ms.push_back(std::chrono::duration<double, std::milli>(
+                         std::chrono::steady_clock::now() - t0)
+                         .count());
+        token = Argmax(rows.data(), vocab);
+        /* DS41_PROBE_GAP=1 separates repetitions by an idle gap for GPU
+         * profiles; it lowers the clocks, so timings run without it. */
+        if (std::getenv("DS41_PROBE_GAP"))
+          std::this_thread::sleep_for(std::chrono::milliseconds(30));
+      }
+      std::sort(ms.begin() + 1, ms.end());  // the first repetition warms up
+      std::printf("spec-bench n=%u at %u: median %.1f ms min %.1f ms\n", n,
+                  ds41_decoder_pos(d), ms[1 + ms.size() / 2 - 1], ms[1]);
+    }
+    ds41_decoder_destroy(d);
+    return 0;
+  }
+  /* Greedy continuation for pass A's drafts, from single-token steps. */
+  std::vector<int> greedy;
+  std::vector<std::vector<float>> greedy_logits;
+  {
+    ds41_decoder* d = Prefill(engine, prompt, context, &last);
+    if (!d)
+      return 1;
+    greedy.push_back(Argmax(last.data(), vocab));
+    for (int i = 0; i < cycles * 4 + 4; ++i) {
+      if (ds41_decoder_step(d, greedy.back(), last.data(), nullptr, nullptr))
+        return 1;
+      greedy_logits.push_back(last);
+      greedy.push_back(Argmax(last.data(), vocab));
+    }
+    ds41_decoder_destroy(d);
+  }
+  std::vector<std::vector<float>> kept[2];
+  std::vector<int> kept_tokens[2];
+  for (int pass = 0; pass < 2; ++pass) {
+    ds41_decoder* d = Prefill(engine, prompt, context, &last);
+    if (!d)
+      return 1;
+    std::vector<float> rows(vocab * 4);
+    std::size_t at = 0;  // greedy index of the next row's token
+    for (int c = 0; c < cycles; ++c) {
+      const uint32_t keep = 1 + (uint32_t)c % 4;
+      int batch[4];
+      for (uint32_t r = 0; r < 4; ++r)
+        batch[r] =
+            pass == 1 && r >= keep ? (int)(1000 + 37 * r + c) : greedy[at + r];
+      if (ds41_decoder_eval_speculative(d, batch, 4, rows.data()) ||
+          ds41_decoder_commit(d, keep))
+        return 1;
+      for (uint32_t r = 0; r < keep; ++r) {
+        kept[pass].emplace_back(
+            rows.begin() + (std::ptrdiff_t)(r * vocab),
+            rows.begin() + (std::ptrdiff_t)((r + 1) * vocab));
+        kept_tokens[pass].push_back(Argmax(rows.data() + r * vocab, vocab));
+      }
+      at += keep;
+    }
+    ds41_decoder_destroy(d);
+  }
+  std::size_t identical = 0, agree = 0, as_single = 0;
+  double worst = 0.0, worst_single = 0.0;
+  for (std::size_t i = 0; i < kept[0].size(); ++i) {
+    double diff = 0.0, diff_single = 0.0;
+    for (std::size_t v = 0; v < vocab; ++v) {
+      diff = std::max(diff, (double)std::fabs(kept[0][i][v] - kept[1][i][v]));
+      diff_single = std::max(
+          diff_single, (double)std::fabs(kept[0][i][v] - greedy_logits[i][v]));
+    }
+    identical += diff == 0.0;
+    as_single += diff_single == 0.0;
+    worst = std::max(worst, diff);
+    worst_single = std::max(worst_single, diff_single);
+    /* Row i of pass A predicts greedy[i + 1] under exact single-token decode.
+     */
+    agree += kept_tokens[0][i] == greedy[i + 1];
+  }
+  std::printf(
+      "spec-check: %zu kept rows, %zu bit-identical between passes (max |diff| "
+      "%.3g); against single-token decode: argmax matches on %zu, logits "
+      "bit-identical on %zu (max |diff| %.3g)\n",
+      kept[0].size(), identical, worst, agree, as_single, worst_single);
+  return identical == kept[0].size() ? 0 : 1;
+}
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -97,6 +238,8 @@ int main(int argc, char** argv) {
   bool batch = false;
   bool upload = false;
   bool rendered = false;
+  int spec_check = 0;
+  int spec_bench = -1;
   for (int i = 1; i < argc; ++i) {
     if (std::strcmp(argv[i], "--engram") == 0 && i + 1 < argc) {
       engram = argv[++i];
@@ -117,6 +260,12 @@ int main(int argc, char** argv) {
       batch = true;
     } else if (std::strcmp(argv[i], "--out") == 0 && i + 1 < argc) {
       out_dir = argv[++i];
+    } else if (std::strcmp(argv[i], "--spec-check") == 0 && i + 1 < argc) {
+      spec_check = std::atoi(argv[++i]);
+      upload = true;
+    } else if (std::strcmp(argv[i], "--spec-bench") == 0 && i + 1 < argc) {
+      spec_bench = std::atoi(argv[++i]);
+      upload = true;
     } else if (std::strcmp(argv[i], "--rendered") == 0) {
       rendered = true;
     } else if (std::strcmp(argv[i], "--upload") == 0) {
@@ -133,7 +282,7 @@ int main(int argc, char** argv) {
                  "usage: %s MODEL-00001-of-N.gguf [--engram FILE] [--upload] "
                  "[--tokenize TEXTS [--rendered]] [--decode IDS [--generate N] "
                  "[--score] [--batch] [--context N] [--prefill-batch N] "
-                 "[--out DIR]]\n",
+                 "[--out DIR]] [--spec-check CYCLES | --spec-bench N]\n",
                  argv[0]);
     return 2;
   }
@@ -180,6 +329,17 @@ int main(int argc, char** argv) {
       std::printf("\n");
       ds41_tokens_free(&tokens);
     }
+  }
+  if (decode && (spec_check || spec_bench >= 0)) {
+    std::vector<int> prompt;
+    for (const char* p = decode; *p;) {
+      prompt.push_back(std::atoi(p));
+      while (*p && *p != ',')
+        ++p;
+      if (*p == ',')
+        ++p;
+    }
+    return SpeculativeProbe(engine, prompt, context, spec_check, spec_bench);
   }
   if (decode) {
     /* Feed comma-separated ids one at a time (--batch: in decoder batches),

@@ -182,6 +182,17 @@ uint32_t ds41_decoder_batch_capacity(const ds41_decoder* decoder);
 int ds41_decoder_eval(ds41_decoder* decoder, const int* tokens, uint32_t n,
                       float* logits, uint32_t logit_rows,
                       ds41_decoder_layer_fn layer_fn, void* ctx);
+/* Rows a speculative batch may hold. */
+#define DS41_DECODER_MAX_SPECULATIVE 16
+/* ds41_decoder_eval of `n` tokens (n <= DS41_DECODER_MAX_SPECULATIVE) with
+ * logits for every row, whose window rows and compressor inputs stay pending
+ * until ds41_decoder_commit keeps a prefix of them. The decoder's position
+ * advances by n meanwhile; no other evaluation may run before the commit. */
+int ds41_decoder_eval_speculative(ds41_decoder* decoder, const int* tokens,
+                                  uint32_t n, float* logits);
+/* Keeps the first `keep` (1 to n) tokens of the pending speculative batch,
+ * leaving the state of an evaluation of exactly those tokens. */
+int ds41_decoder_commit(ds41_decoder* decoder, uint32_t keep);
 /* ds41_decoder_eval of one token. */
 int ds41_decoder_step(ds41_decoder* decoder, int token, float* logits,
                       ds41_decoder_layer_fn layer_fn, void* ctx);

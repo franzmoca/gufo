@@ -370,11 +370,11 @@ int main(int argc, char** argv) {
     (void)hipMemcpy(dxr, xr.data(), xr.size() * sizeof(float),
                     hipMemcpyHostToDevice);
     int rc = ds41_v41_gemv_experts(type, gate, expert_bytes, dids, kCheck, dxr,
-                                   kDim, rg, kFf, kDim);
+                                   kDim, 1, rg, kFf, kDim);
     rc |= ds41_v41_gemv_experts(type, up, expert_bytes, dids, kCheck, dxr, kDim,
-                                ru, kFf, kDim);
+                                1, ru, kFf, kDim);
     rc |= ds41_v41_gemv_experts(type, down, expert_bytes, dids, kCheck, mid,
-                                kFf, rd, kDim, kFf);
+                                kFf, 1, rd, kDim, kFf);
     std::vector<float> hg(kCheck * kFf), hu(kCheck * kFf), hd(kCheck * kDim),
         hm(kCheck * kFf), ho(kCheck * kDim);
     (void)hipMemcpy(hg.data(), rg, hg.size() * 4, hipMemcpyDeviceToHost);
