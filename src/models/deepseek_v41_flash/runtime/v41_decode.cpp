@@ -582,7 +582,9 @@ bool attention(ds41_decoder* d, uint32_t il, uint32_t n) {
 /* Bytes per 256 values of the routed-expert types the FP32-activation expert
  * GEMV decodes; 0 for others. */
 /* Batched routed projections on the FP16 matrix cores (ds41_v41_routed_f16). */
-bool routed_f16_type(int type) { return type == (int)DS41_TENSOR_IQ1_S; }
+bool routed_f16_type(int type) {
+  return type == (int)DS41_TENSOR_IQ1_S || type == (int)DS41_TENSOR_IQ1_M || type == (int)DS41_TENSOR_IQ2_XXS;
+}
 
 /* ds41_v41_routed_plan's rows, bounds and tiles for batches up to cap tokens. */
 uint64_t routed_plan_ints(uint64_t cap) {
