@@ -273,9 +273,12 @@ __global__ __launch_bounds__(256) void routed_f16_kernel(
   Block ring[2];
   ring[0] = load_raw<F::kWords>(own);
   if (blocks > 1) ring[1] = load_raw<F::kWords>(own + F::kBytes);
-  const auto step = [&](uint32_t sb, Block& slot) {
-    const Block mine = slot;
-    if (sb + 2 < blocks) slot = load_raw<F::kWords>(own + (uint64_t)(sb + 2) * F::kBytes);
+  /* One copy of the block body (the kernel's code stays within the
+   * instruction cache); the ring shifts by register moves. */
+  for (uint32_t sb = 0; sb < blocks; ++sb) {
+    const Block mine = ring[0];
+    ring[0] = ring[1];
+    if (sb + 2 < blocks) ring[1] = load_raw<F::kWords>(own + (uint64_t)(sb + 2) * F::kBytes);
     Block blk[2];
 #pragma unroll
     for (int i = 0; i < F::kWords; ++i) {
@@ -340,12 +343,7 @@ __global__ __launch_bounds__(256) void routed_f16_kernel(
         }
       }
     }
-  };
-  for (uint32_t sb = 0; sb + 1 < blocks; sb += 2) {
-    step(sb, ring[0]);
-    step(sb + 1, ring[1]);
   }
-  if (blocks % 2) step(blocks - 1, ring[0]);
 
   /* Accumulator element e of a lane is (slot 2 e + lane / 16, row lane % 16). */
 #pragma unroll
