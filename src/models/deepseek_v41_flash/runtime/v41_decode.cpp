@@ -299,7 +299,7 @@ bool gemv_type(uint32_t type) { return type == DS41_TENSOR_Q5_K || type == DS41_
 
 /* Batches of Q5_K rows run on the FP16 matrix cores (ds41_v41_dense_f16). */
 bool dense_f16(uint32_t type, uint32_t rows, uint32_t k, uint32_t n) {
-  return n > 8 && type == DS41_TENSOR_Q5_K && rows % 128 == 0 && k % 256 == 0;
+  return n > 8 && type == DS41_TENSOR_Q5_K && rows % 256 == 0 && k % 256 == 0;
 }
 
 /* out[t] = W x[t] for n tokens and a [rows, k] weight at `p` of `type`. */

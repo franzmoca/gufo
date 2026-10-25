@@ -4,8 +4,9 @@
  * as (d sc) q - dmin m, so the K loop has no per-block scale arithmetic
  * beside the matrix-core products; the products accumulate in FP32.
  *
- * A workgroup takes 128 weight rows and 128 tokens: each wave holds 16 rows
- * as the B operand (lane = weight row) against eight 16-token tiles. A K16
+ * A workgroup takes 256 weight rows and 128 tokens: each of its 16 waves
+ * holds 16 rows as the B operand (lane = weight row) against eight 16-token
+ * tiles, so each staged activation tile feeds 256 rows. A K16
  * step covers two 8-value groups of a 32-value sub-block; each half-wave
  * loads and decodes one of them (half h: group 2 e + h of step e) and takes
  * the other from the opposite half with permlanex16, so half 1 holds every
@@ -26,7 +27,9 @@ typedef _Float16 half16 __attribute__((ext_vector_type(16)));
 typedef float float8 __attribute__((ext_vector_type(8)));
 typedef uint32_t u32x4 __attribute__((ext_vector_type(4)));
 
-constexpr int kTile = 128;              // weight rows and tokens per workgroup
+constexpr int kRows = 256;              // weight rows per workgroup, 16 per wave
+constexpr int kTile = 128;              // tokens per workgroup
+constexpr int kThreads = kRows * 2;
 constexpr int kStageK = 64;             // activation values per LDS stage
 constexpr int kPitch = kStageK + 8;     // halves; token rows land on distinct banks
 constexpr int kQ5Bytes = 176;           // d, dmin, scales[12], qh[32], qs[128]
@@ -94,19 +97,25 @@ __device__ __forceinline__ void q5_decode8(const Q5Lane& q, int j, int part, uin
     out[i] = __builtin_bit_cast(uint32_t, (__builtin_bit_cast(half2_t, p[i]) + magic) * scale + bias);
 }
 
+/* A barrier that waits only for LDS traffic: __syncthreads also waits for
+ * every outstanding global load, which would wait for the weight and
+ * activation prefetches at once. */
+__device__ __forceinline__ void lds_barrier() { asm volatile("s_waitcnt lgkmcnt(0)\n\ts_barrier" ::: "memory"); }
+
 __device__ __forceinline__ float finite_or_zero(float v) { return __builtin_isfinite(v) ? v : 0.0f; }
 
 /* out[t, z m + r] = sum_c W_z[r, c] x[t, z k + c] for group z = blockIdx.z;
  * x rows are groups * k floats, out rows groups * m. */
 template <bool kFull>
-__global__ __launch_bounds__(256) void dense_q5k_f16_kernel(const uint8_t* __restrict__ w, const float* __restrict__ x,
-                                                            float* __restrict__ out, uint32_t m, uint32_t n,
-                                                            uint32_t k, uint32_t groups, uint32_t tile0) {
+__global__ __launch_bounds__(kThreads) void dense_q5k_f16_kernel(const uint8_t* __restrict__ w,
+                                                                 const float* __restrict__ x, float* __restrict__ out,
+                                                                 uint32_t m, uint32_t n, uint32_t k, uint32_t groups,
+                                                                 uint32_t tile0) {
   __shared__ __attribute__((aligned(16))) _Float16 act[kTile * kPitch];
   const int tid = threadIdx.x, wave = tid / 32, lane = tid % 32, h = lane / 16;
   const uint32_t z = blockIdx.z;
   const uint64_t row_bytes = (uint64_t)k / 256 * kQ5Bytes;
-  const uint32_t row = blockIdx.x * kTile + wave * 16 + lane % 16;
+  const uint32_t row = blockIdx.x * kRows + wave * 16 + lane % 16;
   const uint8_t* wr = w + ((uint64_t)z * m + row) * row_bytes;
   const uint32_t t0 = (tile0 + blockIdx.y) * kTile;
   /* Live 16-token tiles; a runtime count even for full tiles, since a
@@ -114,23 +123,25 @@ __global__ __launch_bounds__(256) void dense_q5k_f16_kernel(const uint8_t* __res
   const int live = (int)min<uint32_t>(8, (n - t0 + 15) / 16);
   const uint64_t x_stride = (uint64_t)groups * k;
 
-  /* Activation staging: half a stage row (32 values) of one token per
-   * thread. */
+  /* Activation staging: a quarter of a stage row (16 values) of one token
+   * per thread. */
+  constexpr int kPer = kStageK * kTile / kThreads;
   const uint32_t st = tid % kTile, sh = tid / kTile;
-  const float* xs = kFull || t0 + st < n ? x + (t0 + st) * x_stride + (uint64_t)z * k + 32 * sh : nullptr;
-  _Float16* as = act + st * kPitch + 32 * sh;
-  /* The next stage's activations, loaded while the current one computes. */
-  float4 pre[8];
+  const float* xs = kFull || t0 + st < n ? x + (t0 + st) * x_stride + (uint64_t)z * k + kPer * sh : nullptr;
+  _Float16* as = act + st * kPitch + kPer * sh;
+  /* The next two stages' activations, loaded while the current one
+   * computes. */
+  float4 pre[kPer / 4], pre2[kPer / 4];
   const auto fetch = [&](uint32_t k0) {
     if (kFull || xs) {
 #pragma unroll
-      for (int c = 0; c < 8; ++c) pre[c] = reinterpret_cast<const float4*>(xs + k0)[c];
+      for (int c = 0; c < kPer / 4; ++c) pre2[c] = reinterpret_cast<const float4*>(xs + k0)[c];
     }
   };
   const auto store = [&]() {
     if (kFull || xs) {
 #pragma unroll
-      for (int c = 0; c < 4; ++c) {
+      for (int c = 0; c < kPer / 8; ++c) {
         const float4 a = pre[2 * c], b = pre[2 * c + 1];
         *reinterpret_cast<half8*>(as + 8 * c) = half8{(_Float16)a.x, (_Float16)a.y, (_Float16)a.z, (_Float16)a.w,
                                                       (_Float16)b.x, (_Float16)b.y, (_Float16)b.z, (_Float16)b.w};
@@ -145,16 +156,21 @@ __global__ __launch_bounds__(256) void dense_q5k_f16_kernel(const uint8_t* __res
   const uint32_t blocks = k / 256;
   Q5Lane next = load_q5(wr, h);
   fetch(0);
+#pragma unroll
+  for (int c = 0; c < kPer / 4; ++c) pre[c] = pre2[c];
+  if (kStageK < k) fetch(kStageK);
   for (uint32_t sb = 0; sb < blocks; ++sb) {
     const Q5Lane q = next;
     if (sb + 1 < blocks) next = load_q5(wr + (uint64_t)(sb + 1) * kQ5Bytes, h);
 #pragma unroll
     for (int stage = 0; stage < 4; ++stage) {
       const uint32_t k0 = sb * 256 + stage * kStageK;
-      __syncthreads();
+      lds_barrier();
       store();
-      __syncthreads();
-      if (k0 + kStageK < k) fetch(k0 + kStageK);
+      lds_barrier();
+#pragma unroll
+      for (int c = 0; c < kPer / 4; ++c) pre[c] = pre2[c];
+      if (k0 + 2 * kStageK < k) fetch(k0 + 2 * kStageK);
 #pragma unroll
       for (int jj = 0; jj < 2; ++jj) {
         const int j = stage * 2 + jj;
@@ -203,12 +219,12 @@ __global__ __launch_bounds__(256) void dense_q5k_f16_kernel(const uint8_t* __res
 
 extern "C" int ds41_v41_dense_f16(int type, const void* w, const float* x, float* out, uint32_t m, uint32_t n,
                                   uint32_t k, uint32_t groups) {
-  if (type != 13 || m % kTile != 0 || k % 256 != 0 || n == 0 || groups == 0) return 1;
+  if (type != 13 || m % kRows != 0 || k % 256 != 0 || n == 0 || groups == 0) return 1;
   const auto* wb = static_cast<const uint8_t*>(w);
   const uint32_t full = n / kTile;
   if (full)
-    dense_q5k_f16_kernel<true><<<dim3(m / kTile, full, groups), 256>>>(wb, x, out, m, n, k, groups, 0);
+    dense_q5k_f16_kernel<true><<<dim3(m / kRows, full, groups), kThreads>>>(wb, x, out, m, n, k, groups, 0);
   if (n % kTile)
-    dense_q5k_f16_kernel<false><<<dim3(m / kTile, 1, groups), 256>>>(wb, x, out, m, n, k, groups, full);
+    dense_q5k_f16_kernel<false><<<dim3(m / kRows, 1, groups), kThreads>>>(wb, x, out, m, n, k, groups, full);
   return hipGetLastError() == hipSuccess ? 0 : 1;
 }
