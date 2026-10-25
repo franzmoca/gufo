@@ -574,10 +574,12 @@ bool moe(ds41_decoder* d, uint32_t il, uint32_t n) {
     ds41_mmq_set_routed_max_expert_rows((int)most);
     ds41_mmq_set_routed_tile_cols(ds41_mmq_routed_tile_cols_for_counts(counts.data(), DS41_N_EXPERT));
   }
-  const bool iq1_pair = gate_type == up_type &&
-                        (gate_type == (int)DS41_TENSOR_IQ1_S || gate_type == (int)DS41_TENSOR_IQ1_M);
-  if (n == 1 && iq1_pair) {
-    /* Gate, up and SwiGLU in one pass. */
+  /* Single tokens take gate, up and SwiGLU in one pass when gate and up share
+   * a type (IQ2_XXS too: the pair runs as fast as two mmvq launches). */
+  const bool fused_pair = gate_type == up_type && (gate_type == (int)DS41_TENSOR_IQ1_S ||
+                                                   gate_type == (int)DS41_TENSOR_IQ1_M ||
+                                                   gate_type == (int)DS41_TENSOR_IQ2_XXS);
+  if (n == 1 && fused_pair) {
     if (ds41_v41_gemv_experts_swiglu(gate_type, gate, up,
                                      (uint64_t)DS41_N_FF_EXP * kDim / 256 * expert_block_bytes(gate_type),
                                      d->route_ids, used, d->xn, d->route_w, kSwigluLimit, d->mid6, DS41_N_FF_EXP,
@@ -599,7 +601,7 @@ bool moe(ds41_decoder* d, uint32_t il, uint32_t n) {
                                 used, 0)) {
     return false;
   }
-  if (!(n == 1 && iq1_pair) &&
+  if (!(n == 1 && fused_pair) &&
       ds41_v41_swiglu(d->g6, d->u6, d->route_w, d->mid6, rows, DS41_N_FF_EXP, kSwigluLimit))
     return false;
   /* Each (token, slot) row multiplies its own expert's down projection. */
