@@ -170,6 +170,7 @@ endfunction()
 
 if (ENGINE_ENABLE_HIP)
   add_subdirectory(src/models/deepseek_v4_flash)
+  add_subdirectory(src/models/deepseek_v41_flash)
 endif()
 
 # Qwen3.8-Flash-Next — model-private CPU reference plus ROCm runtime.
@@ -353,6 +354,7 @@ add_subdirectory(src/models/qwen_image_21)
 target_link_libraries(gufo_qwen3_tts PUBLIC gufo_core)
 if (ENGINE_ENABLE_HIP)
   target_link_libraries(gufo_deepseek_v4_flash PUBLIC gufo_core)
+  target_link_libraries(gufo_deepseek_v41_flash PUBLIC gufo_core)
 endif()
 
 find_package(OpenMP)
@@ -402,6 +404,7 @@ target_compile_features(gufo_logging PUBLIC cxx_std_20)
 # the threshold that `--log-level` arms.
 if (ENGINE_ENABLE_HIP)
   target_link_libraries(gufo_deepseek_v4_flash PUBLIC gufo_logging)
+  target_link_libraries(gufo_deepseek_v41_flash PUBLIC gufo_logging)
 endif()
 
 add_library(gufo_http STATIC
@@ -722,6 +725,7 @@ if (BUILD_TESTING)
   endif()
 
   add_subdirectory(tests/models/deepseek_v4_flash)
+  add_subdirectory(tests/models/deepseek_v41_flash)
   add_subdirectory(tests/models/qwen38_flash_next)
 
   if(ENGINE_ENABLE_HIP)

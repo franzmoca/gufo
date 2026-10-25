@@ -1,0 +1,436 @@
+#ifndef GUFO_MODELS_DEEPSEEK_V41_FLASH_ROCM_RESIDENT_API_H_
+#define GUFO_MODELS_DEEPSEEK_V41_FLASH_ROCM_RESIDENT_API_H_
+
+#include <cstdint>
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+struct ds41_gpu_tensor;
+
+/* Publish an F16 mirror of an activation buffer so the projections that consume
+ * it in this layer share one conversion. Cleared by ds41_gpu_clear_f16_input,
+ * which the caller must issue at every layer boundary. */
+int ds41_gpu_publish_f16_input_tensor(const ds41_gpu_tensor* x, uint64_t count);
+void ds41_gpu_clear_f16_input(void);
+int ds41_gpu_attention_decode_heads_tensor(
+    ds41_gpu_tensor* heads, const void* model_map, uint64_t model_size,
+    uint64_t sinks_offset, const ds41_gpu_tensor* q,
+    const ds41_gpu_tensor* raw_kv, uint32_t n_raw, uint32_t raw_cap,
+    uint32_t raw_start, const ds41_gpu_tensor* comp_kv, uint32_t comp_kv_f16,
+    uint32_t n_comp, const ds41_gpu_tensor* comp_mask, uint32_t use_mask,
+    uint32_t n_head, uint32_t head_dim);
+int ds41_gpu_attention_decode_mixed_batch_heads_tensor(
+    ds41_gpu_tensor* heads, const void* model_map, uint64_t model_size,
+    uint64_t sinks_offset, const ds41_gpu_tensor* q,
+    const ds41_gpu_tensor* raw_kv, const ds41_gpu_tensor* comp_kv,
+    uint32_t comp_kv_f16, const ds41_gpu_tensor* comp_mask,
+    uint32_t use_comp_mask, uint32_t n_tokens, uint32_t pos0, uint32_t n_raw,
+    uint32_t raw_cap, uint32_t raw_start, uint32_t n_comp, uint32_t window,
+    uint32_t ratio, uint32_t n_head, uint32_t head_dim);
+int ds41_gpu_attention_decode_raw_batch_heads_tensor(
+    ds41_gpu_tensor* heads, const void* model_map, uint64_t model_size,
+    uint64_t sinks_offset, const ds41_gpu_tensor* q,
+    const ds41_gpu_tensor* raw_kv, uint32_t n_tokens, uint32_t pos0,
+    uint32_t n_raw, uint32_t raw_cap, uint32_t raw_start, uint32_t window,
+    uint32_t n_head, uint32_t head_dim);
+int ds41_gpu_attention_indexed_mixed_batch_heads_tensor(
+    ds41_gpu_tensor* heads, const void* model_map, uint64_t model_size,
+    uint64_t sinks_offset, const ds41_gpu_tensor* q,
+    const ds41_gpu_tensor* raw_kv, const ds41_gpu_tensor* comp_kv,
+    uint32_t comp_kv_f16, const ds41_gpu_tensor* topk, uint32_t n_tokens,
+    uint32_t pos0, uint32_t n_raw, uint32_t raw_cap, uint32_t raw_start,
+    uint32_t n_comp, uint32_t top_k, uint32_t window, uint32_t ratio,
+    uint32_t n_head, uint32_t head_dim);
+int ds41_gpu_attention_output_low_q8_tensor(
+    ds41_gpu_tensor* low, const void* model_map, uint64_t model_size,
+    uint64_t out_a_offset, uint64_t group_dim, uint64_t rank, uint32_t n_groups,
+    const ds41_gpu_tensor* heads);
+int ds41_gpu_attention_output_q8_batch_tensor(
+    ds41_gpu_tensor* out, ds41_gpu_tensor* low, ds41_gpu_tensor* group_tmp,
+    ds41_gpu_tensor* low_tmp, const void* model_map, uint64_t model_size,
+    uint64_t out_a_offset, uint64_t out_b_offset, uint64_t group_dim,
+    uint64_t rank, uint32_t n_groups, uint64_t out_dim,
+    const ds41_gpu_tensor* heads, uint32_t n_tokens);
+int ds41_gpu_attention_output_q8_exact_batch_tensor(
+    ds41_gpu_tensor* out, ds41_gpu_tensor* low, const void* model_map,
+    uint64_t model_size, uint64_t out_a_offset, uint64_t out_b_offset,
+    uint64_t group_dim, uint64_t rank, uint32_t n_groups, uint64_t out_dim,
+    const ds41_gpu_tensor* heads, uint32_t n_tokens);
+/* Same projection with the inverse rotated tail folded into the F16 group pack,
+ * which removes a read-modify-write pass over the whole heads tensor. Returns 0
+ * when the shape, width, or output route cannot absorb it, so the caller keeps
+ * its separate ds41_gpu_rope_tail_tensor launch. */
+int ds41_gpu_attention_output_q8_batch_inv_rope_tensor(
+    ds41_gpu_tensor* out, ds41_gpu_tensor* low, ds41_gpu_tensor* group_tmp,
+    ds41_gpu_tensor* low_tmp, const void* model_map, uint64_t model_size,
+    uint64_t out_a_offset, uint64_t out_b_offset, uint64_t group_dim,
+    uint64_t rank, uint32_t n_groups, uint64_t out_dim,
+    const ds41_gpu_tensor* heads, uint32_t n_tokens, uint32_t head_dim,
+    uint32_t n_rot, uint32_t pos0, uint32_t n_ctx_orig, float freq_base,
+    float freq_scale, float ext_factor, float attn_factor, float beta_fast,
+    float beta_slow);
+int ds41_gpu_attention_prefill_raw_heads_tensor(
+    ds41_gpu_tensor* heads, const void* model_map, uint64_t model_size,
+    uint64_t sinks_offset, const ds41_gpu_tensor* q,
+    const ds41_gpu_tensor* raw_kv, uint32_t n_tokens, uint32_t window,
+    uint32_t n_head, uint32_t head_dim);
+int ds41_gpu_attention_prefill_static_mixed_heads_tensor(
+    ds41_gpu_tensor* heads, const void* model_map, uint64_t model_size,
+    uint64_t sinks_offset, const ds41_gpu_tensor* q,
+    const ds41_gpu_tensor* raw_kv, const ds41_gpu_tensor* comp_kv,
+    uint32_t comp_kv_f16, uint32_t n_tokens, uint32_t n_comp, uint32_t window,
+    uint32_t ratio, uint32_t n_head, uint32_t head_dim);
+int ds41_gpu_begin_commands(void);
+int ds41_gpu_cache_model_range(const void* model_map, uint64_t model_size,
+                               uint64_t offset, uint64_t bytes,
+                               const char* label);
+int ds41_gpu_release_model_staging(void);
+int ds41_gpu_reserve_support_map(const void* support_map, uint64_t support_size,
+                                 uint64_t arena_bytes);
+int ds41_gpu_cache_support_range(const void* support_map, uint64_t support_size,
+                                 uint64_t offset, uint64_t bytes,
+                                 const char* label);
+void ds41_gpu_release_support_map(void);
+/* Enables verification-block kernel selection. Off for prefill and decode so
+ * their kernel choice, output, and throughput stay exactly as baselined. */
+void ds41_gpu_set_small_batch_mode(int enabled);
+int ds41_gpu_dspark_capture_features_tensor(
+    ds41_gpu_tensor* out, const ds41_gpu_tensor* hc, uint32_t out_row_stride,
+    uint32_t slot_offset, uint32_t n_embd, uint32_t n_hc, uint32_t n_rows);
+void ds41_gpu_cleanup(void);
+int ds41_gpu_compressor_prefill_ratio4_replay_tensor(
+    ds41_gpu_tensor* comp_cache, ds41_gpu_tensor* state_kv,
+    ds41_gpu_tensor* state_score, const ds41_gpu_tensor* kv,
+    const ds41_gpu_tensor* sc, const void* model_map, uint64_t model_size,
+    uint64_t ape_offset, uint32_t ape_type, uint64_t norm_offset,
+    uint32_t norm_type, uint32_t head_dim, uint32_t pos0, uint32_t n_tokens,
+    uint32_t n_rot, uint32_t n_ctx_orig, bool quantize_fp8, float freq_base,
+    float freq_scale, float ext_factor, float attn_factor, float beta_fast,
+    float beta_slow, float rms_eps, ds41_gpu_tensor* comp_mirror_f16);
+int ds41_gpu_compressor_prefill_state_ratio4_tensor(
+    ds41_gpu_tensor* state_kv, ds41_gpu_tensor* state_score,
+    const ds41_gpu_tensor* kv_tail, const ds41_gpu_tensor* sc_tail,
+    const void* model_map, uint64_t model_size, uint64_t ape_offset,
+    uint32_t ape_type, uint32_t head_dim, uint32_t pos0);
+int ds41_gpu_compressor_prefill_tensor(
+    ds41_gpu_tensor* comp_cache, ds41_gpu_tensor* state_kv,
+    ds41_gpu_tensor* state_score, const ds41_gpu_tensor* kv,
+    const ds41_gpu_tensor* sc, const void* model_map, uint64_t model_size,
+    uint64_t ape_offset, uint32_t ape_type, uint64_t norm_offset,
+    uint32_t norm_type, uint32_t head_dim, uint32_t ratio, uint32_t pos0,
+    uint32_t n_tokens, uint32_t n_rot, uint32_t n_ctx_orig, bool quantize_fp8,
+    float freq_base, float freq_scale, float ext_factor, float attn_factor,
+    float beta_fast, float beta_slow, float rms_eps,
+    ds41_gpu_tensor* comp_mirror_f16);
+int ds41_gpu_compressor_update_tensor(
+    const ds41_gpu_tensor* kv_cur, const ds41_gpu_tensor* sc_cur,
+    ds41_gpu_tensor* state_kv, ds41_gpu_tensor* state_score,
+    ds41_gpu_tensor* comp_cache, const void* model_map, uint64_t model_size,
+    uint64_t ape_offset, uint32_t ape_type, uint64_t norm_offset,
+    uint32_t norm_type, uint32_t head_dim, uint32_t ratio, uint32_t pos,
+    uint32_t comp_row, uint32_t n_rot, uint32_t n_ctx_orig, float freq_base,
+    float freq_scale, float ext_factor, float attn_factor, float beta_fast,
+    float beta_slow, float rms_eps, bool state_already_stored,
+    bool decode_one_token, bool defer_finalize);
+int ds41_gpu_dsv4_fp8_kv_quantize_tensor(ds41_gpu_tensor* x, uint32_t n_tok,
+                                         uint32_t head_dim, uint32_t n_rot);
+int ds41_gpu_dsv4_fp8_kv_quantize_mirror_f16_tensor(ds41_gpu_tensor* x,
+                                                    ds41_gpu_tensor* mirror_f16,
+                                                    uint32_t n_tok,
+                                                    uint32_t head_dim,
+                                                    uint32_t n_rot);
+int ds41_gpu_dsv4_indexer_qat_tensor(ds41_gpu_tensor* x, uint32_t n_rows,
+                                     uint32_t head_dim);
+int ds41_gpu_dsv4_qkv_rms_norm_rows_tensor(
+    ds41_gpu_tensor* q_out, const ds41_gpu_tensor* q, const void* model_map,
+    uint64_t model_size, uint64_t q_weight_offset, uint32_t q_n,
+    ds41_gpu_tensor* kv_out, const ds41_gpu_tensor* kv,
+    uint64_t kv_weight_offset, uint32_t kv_n, uint32_t rows, float eps);
+int ds41_gpu_embed_token_hc_tensor(ds41_gpu_tensor* out_hc,
+                                   const void* model_map, uint64_t model_size,
+                                   uint64_t weight_offset, uint32_t n_vocab,
+                                   uint32_t token, uint32_t n_embd,
+                                   uint32_t n_hc);
+int ds41_gpu_embed_tokens_hc_tensor(ds41_gpu_tensor* out_hc,
+                                    const ds41_gpu_tensor* tokens,
+                                    const void* model_map, uint64_t model_size,
+                                    uint64_t weight_offset, uint32_t n_vocab,
+                                    uint32_t n_tokens, uint32_t n_embd,
+                                    uint32_t n_hc);
+int ds41_gpu_end_commands(void);
+int ds41_gpu_flush_commands(void);
+int ds41_gpu_hc_expand_add_split_tensor(ds41_gpu_tensor* out_hc,
+                                        const ds41_gpu_tensor* block_out,
+                                        const ds41_gpu_tensor* block_add,
+                                        const ds41_gpu_tensor* residual_hc,
+                                        const ds41_gpu_tensor* split,
+                                        uint32_t n_embd, uint32_t n_hc);
+/* Same expansion with the routed per-expert F16 rows summed in place of a
+ * materialized block_out. Pair with ds41_gpu_set_routed_defer_sum and only use
+ * it when ds41_gpu_routed_sum_deferred() reports the routed MoE skipped its
+ * sum. */
+int ds41_gpu_hc_expand_add_split_moesum_tensor(
+    ds41_gpu_tensor* out_hc, const ds41_gpu_tensor* down_h,
+    const ds41_gpu_tensor* block_add, const ds41_gpu_tensor* residual_hc,
+    const ds41_gpu_tensor* split, uint32_t n_embd, uint32_t n_hc,
+    uint32_t n_expert, uint32_t n_tokens);
+void ds41_gpu_set_routed_defer_sum(int enabled);
+int ds41_gpu_routed_sum_deferred(void);
+int ds41_gpu_hc_expand_split_tensor(ds41_gpu_tensor* out_hc,
+                                    const ds41_gpu_tensor* block_out,
+                                    const ds41_gpu_tensor* residual_hc,
+                                    const ds41_gpu_tensor* split,
+                                    uint32_t n_embd, uint32_t n_hc);
+int ds41_gpu_hc_split_weighted_sum_norm_tensor(
+    ds41_gpu_tensor* out, ds41_gpu_tensor* norm_out, ds41_gpu_tensor* split,
+    const ds41_gpu_tensor* mix, const ds41_gpu_tensor* residual_hc,
+    const void* model_map, uint64_t model_size, uint64_t scale_offset,
+    uint64_t base_offset, uint64_t norm_weight_offset, uint32_t n_embd,
+    uint32_t n_hc, uint32_t sinkhorn_iters, float eps, float norm_eps);
+int ds41_gpu_hc_split_weighted_sum_tensor(
+    ds41_gpu_tensor* out, ds41_gpu_tensor* split, const ds41_gpu_tensor* mix,
+    const ds41_gpu_tensor* residual_hc, const void* model_map,
+    uint64_t model_size, uint64_t scale_offset, uint64_t base_offset,
+    uint32_t n_embd, uint32_t n_hc, uint32_t sinkhorn_iters, float eps);
+/* The whole pre-block chain -- norm, mix projection, split, weighted sum -- in
+ * one pass over the hyper-connection row. Returns 0 when the shape does not fit
+ * the register tiling, so the caller keeps the separate chain. */
+int ds41_gpu_hc_norm_mix_split_weighted_sum_tensor(
+    ds41_gpu_tensor* out, ds41_gpu_tensor* mix, ds41_gpu_tensor* split,
+    const ds41_gpu_tensor* residual_hc, const void* model_map,
+    uint64_t model_size, uint64_t mix_weight_offset, uint64_t scale_offset,
+    uint64_t base_offset, uint32_t n_embd, uint32_t n_hc, uint32_t n_rows,
+    uint32_t sinkhorn_iters, float eps, float norm_eps);
+int ds41_gpu_hc_weighted_sum_tensor(ds41_gpu_tensor* out,
+                                    const ds41_gpu_tensor* residual_hc,
+                                    const ds41_gpu_tensor* weights,
+                                    uint32_t n_embd, uint32_t n_hc);
+int ds41_gpu_head_rms_norm_tensor(ds41_gpu_tensor* x, uint32_t n_tok,
+                                  uint32_t n_head, uint32_t head_dim,
+                                  float eps);
+/* Fused head RMS norm plus rotated tail. Returns 0 when the shape is not
+ * supported so the caller keeps the separate norm and rope launches. */
+int ds41_gpu_head_rms_norm_rope_tail_tensor(
+    ds41_gpu_tensor* x, uint32_t n_tok, uint32_t n_head, uint32_t head_dim,
+    uint32_t n_rot, uint32_t pos0, uint32_t n_ctx_orig, bool inverse,
+    float freq_base, float freq_scale, float ext_factor, float attn_factor,
+    float beta_fast, float beta_slow, float eps);
+int ds41_gpu_indexer_score_one_tensor(ds41_gpu_tensor* scores,
+                                      const ds41_gpu_tensor* q,
+                                      const ds41_gpu_tensor* weights,
+                                      const ds41_gpu_tensor* index_comp,
+                                      uint32_t n_comp, uint32_t n_head,
+                                      uint32_t head_dim, float scale);
+int ds41_gpu_indexer_scores_decode_batch_tensor(
+    ds41_gpu_tensor* scores, const ds41_gpu_tensor* q,
+    const ds41_gpu_tensor* weights, const ds41_gpu_tensor* index_comp,
+    uint32_t n_comp, uint32_t n_tokens, uint32_t pos0, uint32_t n_head,
+    uint32_t head_dim, uint32_t ratio, float scale,
+    ds41_gpu_tensor* score_scratch);
+int ds41_gpu_indexer_scores_prefill_tensor(
+    ds41_gpu_tensor* scores, const ds41_gpu_tensor* q,
+    const ds41_gpu_tensor* weights, const ds41_gpu_tensor* index_comp,
+    uint32_t n_comp, uint32_t n_tokens, uint32_t n_head, uint32_t head_dim,
+    uint32_t ratio, float scale, ds41_gpu_tensor* score_scratch);
+int ds41_gpu_indexer_topk_tensor(ds41_gpu_tensor* selected,
+                                 const ds41_gpu_tensor* scores, uint32_t n_comp,
+                                 uint32_t n_tokens, uint32_t top_k);
+int ds41_gpu_init(void);
+int ds41_gpu_kv_fp8_store_raw_tensor(ds41_gpu_tensor* kv,
+                                     ds41_gpu_tensor* raw_cache,
+                                     uint32_t raw_cap, uint32_t row,
+                                     uint32_t head_dim, uint32_t n_rot);
+int ds41_gpu_matmul_f16_pair_tensor(ds41_gpu_tensor* out_a,
+                                    ds41_gpu_tensor* out_b,
+                                    const void* model_map, uint64_t model_size,
+                                    uint64_t weight_a_offset,
+                                    uint64_t weight_b_offset, uint64_t in_dim,
+                                    uint64_t out_dim, const ds41_gpu_tensor* x,
+                                    uint64_t n_tok);
+int ds41_gpu_matmul_f16_pair_narrow_tensor(
+    ds41_gpu_tensor* out_a, ds41_gpu_tensor* out_b, const void* model_map,
+    uint64_t model_size, uint64_t weight_a_offset, uint64_t weight_b_offset,
+    uint64_t in_dim, uint64_t out_dim, const ds41_gpu_tensor* x,
+    uint64_t n_tok);
+int ds41_gpu_matmul_f16_group_pairs_tensor(
+    ds41_gpu_tensor* out, const void* model_map, uint64_t model_size,
+    uint64_t weight_offset, uint64_t in_dim, uint64_t out_dim,
+    const ds41_gpu_tensor* x, uint64_t n_tok, const uint32_t* group_offsets,
+    uint32_t group_count);
+int ds41_gpu_matmul_f16_tensor(ds41_gpu_tensor* out, const void* model_map,
+                               uint64_t model_size, uint64_t weight_offset,
+                               uint64_t in_dim, uint64_t out_dim,
+                               const ds41_gpu_tensor* x, uint64_t n_tok);
+int ds41_gpu_matmul_f32_tensor(ds41_gpu_tensor* out, const void* model_map,
+                               uint64_t model_size, uint64_t weight_offset,
+                               uint64_t in_dim, uint64_t out_dim,
+                               const ds41_gpu_tensor* x, uint64_t n_tok);
+int ds41_gpu_matmul_q8_0_hc_expand_tensor(
+    ds41_gpu_tensor* out_hc, ds41_gpu_tensor* block_out, const void* model_map,
+    uint64_t model_size, uint64_t weight_offset, uint64_t in_dim,
+    uint64_t out_dim, const ds41_gpu_tensor* x,
+    const ds41_gpu_tensor* residual_hc, const ds41_gpu_tensor* split,
+    uint32_t n_embd, uint32_t n_hc);
+int ds41_gpu_matmul_q8_0_group_pairs_tensor(
+    ds41_gpu_tensor* out, const void* model_map, uint64_t model_size,
+    uint64_t weight_offset, uint64_t in_dim, uint64_t out_dim,
+    const ds41_gpu_tensor* x, uint64_t n_tok, const uint32_t* group_offsets,
+    uint32_t group_count);
+int ds41_gpu_matmul_q8_0_tensor(ds41_gpu_tensor* out, const void* model_map,
+                                uint64_t model_size, uint64_t weight_offset,
+                                uint64_t in_dim, uint64_t out_dim,
+                                const ds41_gpu_tensor* x, uint64_t n_tok);
+int ds41_gpu_output_hc_weights_tensor(
+    ds41_gpu_tensor* out, const ds41_gpu_tensor* pre, const void* model_map,
+    uint64_t model_size, uint64_t scale_offset, uint64_t base_offset,
+    uint32_t n_hc, float eps);
+int ds41_gpu_rms_norm_plain_rows_tensor(ds41_gpu_tensor* out,
+                                        const ds41_gpu_tensor* x, uint32_t n,
+                                        uint32_t rows, float eps);
+/* F16-result form of the hyper-connection row norm, paired with
+ * ds41_gpu_matmul_f16_f16_input_tensor so the separate conversion pass over the
+ * 16,384-wide row disappears. Returns 0 when the shape is unsupported. */
+int ds41_gpu_matmul_f16_f16_input_tensor(
+    ds41_gpu_tensor* out, const void* model_map, uint64_t model_size,
+    uint64_t weight_offset, uint64_t in_dim, uint64_t out_dim,
+    const ds41_gpu_tensor* x_h, uint64_t n_tok);
+int ds41_gpu_rms_norm_plain_tensor(ds41_gpu_tensor* out,
+                                   const ds41_gpu_tensor* x, uint32_t n,
+                                   float eps);
+int ds41_gpu_rms_norm_weight_rows_tensor(ds41_gpu_tensor* out,
+                                         const ds41_gpu_tensor* x,
+                                         const void* model_map,
+                                         uint64_t model_size,
+                                         uint64_t weight_offset, uint32_t n,
+                                         uint32_t rows, float eps);
+int ds41_gpu_rms_norm_weight_tensor(ds41_gpu_tensor* out,
+                                    const ds41_gpu_tensor* x,
+                                    const void* model_map, uint64_t model_size,
+                                    uint64_t weight_offset, uint32_t n,
+                                    float eps);
+int ds41_gpu_rope_tail_tensor(ds41_gpu_tensor* x, uint32_t n_tok,
+                              uint32_t n_head, uint32_t head_dim,
+                              uint32_t n_rot, uint32_t pos0,
+                              uint32_t n_ctx_orig, bool inverse,
+                              float freq_base, float freq_scale,
+                              float ext_factor, float attn_factor,
+                              float beta_fast, float beta_slow);
+int ds41_gpu_routed_moe_batch_tensor(
+    ds41_gpu_tensor* out, ds41_gpu_tensor* gate, ds41_gpu_tensor* up,
+    ds41_gpu_tensor* mid, ds41_gpu_tensor* experts, const void* model_map,
+    uint64_t model_size, uint64_t gate_offset, uint64_t up_offset,
+    uint64_t down_offset, uint32_t gate_type, uint32_t down_type,
+    uint64_t gate_expert_bytes, uint64_t gate_row_bytes,
+    uint64_t down_expert_bytes, uint64_t down_row_bytes, uint32_t expert_in_dim,
+    uint32_t expert_mid_dim, uint32_t out_dim, const ds41_gpu_tensor* selected,
+    const ds41_gpu_tensor* weights, uint32_t n_total_expert, uint32_t n_expert,
+    float clamp, const ds41_gpu_tensor* x, uint32_t n_tokens);
+int ds41_gpu_routed_moe_one_tensor(
+    ds41_gpu_tensor* out, ds41_gpu_tensor* gate, ds41_gpu_tensor* up,
+    ds41_gpu_tensor* mid, ds41_gpu_tensor* experts, const void* model_map,
+    uint64_t model_size, uint64_t gate_offset, uint64_t up_offset,
+    uint64_t down_offset, uint32_t gate_type, uint32_t down_type,
+    uint64_t gate_expert_bytes, uint64_t gate_row_bytes,
+    uint64_t down_expert_bytes, uint64_t down_row_bytes, uint32_t expert_in_dim,
+    uint32_t expert_mid_dim, uint32_t out_dim, const ds41_gpu_tensor* selected,
+    const ds41_gpu_tensor* weights, uint32_t n_total_expert, uint32_t n_expert,
+    float clamp, const ds41_gpu_tensor* x);
+int ds41_gpu_router_select_batch_tensor(
+    ds41_gpu_tensor* selected, ds41_gpu_tensor* weights, ds41_gpu_tensor* probs,
+    const void* model_map, uint64_t model_size, uint64_t bias_offset,
+    uint64_t hash_offset, uint32_t hash_rows, uint32_t n_expert_groups,
+    uint32_t n_group_used, bool has_bias, bool hash_mode,
+    const ds41_gpu_tensor* logits, const ds41_gpu_tensor* tokens,
+    uint32_t n_expert, uint32_t n_expert_used, float expert_weight_scale,
+    uint32_t n_tokens);
+int ds41_gpu_router_select_tensor(
+    ds41_gpu_tensor* selected, ds41_gpu_tensor* weights, ds41_gpu_tensor* probs,
+    const void* model_map, uint64_t model_size, uint64_t bias_offset,
+    uint64_t hash_offset, uint32_t hash_rows, uint32_t token, uint32_t n_expert,
+    uint32_t n_expert_used, float expert_weight_scale, uint32_t n_expert_groups,
+    uint32_t n_group_used, bool has_bias, bool hash_mode,
+    const ds41_gpu_tensor* logits);
+int ds41_gpu_set_model_shards(const int* fds, const uint64_t* offsets,
+                              const uint64_t* sizes, uint32_t count);
+int ds41_gpu_set_model_map_range(const void* model_map, uint64_t model_size,
+                                 uint64_t map_offset, uint64_t map_size,
+                                 uint64_t max_tensor_bytes);
+int ds41_gpu_shared_down_hc_expand_q8_0_tensor(
+    ds41_gpu_tensor* out_hc, ds41_gpu_tensor* shared_out, const void* model_map,
+    uint64_t model_size, uint64_t weight_offset, uint64_t in_dim,
+    uint64_t out_dim, const ds41_gpu_tensor* shared_mid,
+    const ds41_gpu_tensor* routed_out, const ds41_gpu_tensor* residual_hc,
+    const ds41_gpu_tensor* split, uint32_t n_embd, uint32_t n_hc);
+int ds41_gpu_shared_gate_up_swiglu_q8_0_tensor(
+    ds41_gpu_tensor* gate, ds41_gpu_tensor* up, ds41_gpu_tensor* mid,
+    const void* model_map, uint64_t model_size, uint64_t gate_offset,
+    uint64_t up_offset, uint64_t in_dim, uint64_t out_dim,
+    const ds41_gpu_tensor* x, float clamp, uint32_t n_tok);
+int ds41_gpu_should_use_managed_kv_cache(uint64_t kv_cache_bytes,
+                                         uint64_t context_bytes);
+int ds41_gpu_spec_row_argmax_tensor(ds41_gpu_tensor* out_index,
+                                    const ds41_gpu_tensor* logits,
+                                    uint32_t vocab, uint32_t n_rows);
+int ds41_gpu_attention_noncausal_raw_batch_heads_tensor(
+    ds41_gpu_tensor* heads, const void* model_map, uint64_t model_size,
+    uint64_t sinks_offset, const ds41_gpu_tensor* q,
+    const ds41_gpu_tensor* raw_kv, uint32_t n_tokens, uint32_t n_raw,
+    uint32_t raw_cap, uint32_t raw_start, uint32_t n_head, uint32_t head_dim);
+int ds41_gpu_dspark_markov_argmax_tensor(
+    ds41_gpu_tensor* out_index, ds41_gpu_tensor* scratch_key,
+    const ds41_gpu_tensor* logits_row, const void* model_map,
+    uint64_t model_size, uint64_t w1_offset, uint64_t w2_offset, uint32_t vocab,
+    uint32_t markov_rank, uint32_t previous_token);
+int ds41_gpu_dspark_candidates_tensor(
+    ds41_gpu_tensor* out, ds41_gpu_tensor* scratch,
+    const ds41_gpu_tensor* logits, uint64_t logits_stride,
+    const ds41_gpu_tensor* hidden, uint64_t hidden_stride,
+    const ds41_gpu_tensor* previous, const void* model_map, uint64_t model_size,
+    uint64_t w1_offset, uint64_t w2_offset, uint64_t confidence_offset,
+    uint32_t vocab, uint32_t rank, uint32_t hidden_width, uint32_t requests);
+int ds41_gpu_dspark_markov_argmax_batch_tensor(
+    ds41_gpu_tensor* out_index, ds41_gpu_tensor* scratch_key,
+    const ds41_gpu_tensor* logits_rows, const ds41_gpu_tensor* previous_tokens,
+    const void* model_map, uint64_t model_size, uint64_t w1_offset,
+    uint64_t w2_offset, uint32_t vocab, uint32_t markov_rank, uint32_t n_rows,
+    uint64_t logits_row_stride);
+int ds41_gpu_store_raw_kv_batch_tensor(ds41_gpu_tensor* raw_cache,
+                                       const ds41_gpu_tensor* kv,
+                                       uint32_t raw_cap, uint32_t pos0,
+                                       uint32_t n_tokens, uint32_t head_dim);
+int ds41_gpu_store_raw_kv_tensor(ds41_gpu_tensor* raw_cache,
+                                 const ds41_gpu_tensor* kv, uint32_t raw_cap,
+                                 uint32_t row, uint32_t head_dim);
+int ds41_gpu_swiglu_tensor(ds41_gpu_tensor* out, const ds41_gpu_tensor* gate,
+                           const ds41_gpu_tensor* up, uint32_t n, float clamp,
+                           float weight);
+int ds41_gpu_synchronize(void);
+ds41_gpu_tensor* ds41_gpu_tensor_alloc(uint64_t bytes);
+ds41_gpu_tensor* ds41_gpu_tensor_alloc_managed(uint64_t bytes);
+uint64_t ds41_gpu_tensor_bytes(const ds41_gpu_tensor* tensor);
+int ds41_gpu_tensor_copy(ds41_gpu_tensor* dst, uint64_t dst_offset,
+                         const ds41_gpu_tensor* src, uint64_t src_offset,
+                         uint64_t bytes);
+int ds41_gpu_tensor_convert_f32_to_f16(ds41_gpu_tensor* dst,
+                                       const ds41_gpu_tensor* src,
+                                       uint64_t count);
+int ds41_gpu_tensor_fill_f32(ds41_gpu_tensor* tensor, float value,
+                             uint64_t count);
+void ds41_gpu_tensor_free(ds41_gpu_tensor* tensor);
+int ds41_gpu_tensor_read(const ds41_gpu_tensor* tensor, uint64_t offset,
+                         void* data, uint64_t bytes);
+/// Reads a completed, frozen session without joining unrelated execution.
+int ds41_gpu_tensor_snapshot_read(const ds41_gpu_tensor* tensor,
+                                  uint64_t offset, void* data, uint64_t bytes);
+ds41_gpu_tensor* ds41_gpu_tensor_view(const ds41_gpu_tensor* base,
+                                      uint64_t offset, uint64_t bytes);
+int ds41_gpu_tensor_write(ds41_gpu_tensor* tensor, uint64_t offset,
+                          const void* data, uint64_t bytes);
+
+#ifdef __cplusplus
+}  // extern "C"
+#endif
+
+#endif  // GUFO_MODELS_DEEPSEEK_V41_FLASH_ROCM_RESIDENT_API_H_
