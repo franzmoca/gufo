@@ -4141,11 +4141,11 @@ static void launch_mul_mat_q(ds41_ggml_hip_context & ctx, const mmq_args & args,
         // selector can reach on this path rather than only 80.
         if constexpr (type == GGML_TYPE_IQ2_XXS) {
             if (cc == DS41_GGML_HIP_CC_OFFSET_AMD + 0x1151 &&
-                args.ids_dst != nullptr && !args.sanitize_output &&
+                args.ids_dst != nullptr &&
                 args.x_soa == nullptr && args.stride_row_x == 16 &&
                 args.nrows_x % mmq_y == 0) {
                 constexpr bool need_check = false;
-                constexpr bool sanitize_output = false;
+                constexpr bool sanitize_output = true;  // see launch_tiled below
                 constexpr bool iq2_raw_stride16 = true;
                 mul_mat_q<type, mmq_x, need_check, sanitize_output, iq2_raw_stride16>
                     <<<block_nums_xy_tiling, block_dims, nbytes_shared, stream>>>(
@@ -4191,6 +4191,10 @@ static void launch_mul_mat_q(ds41_ggml_hip_context & ctx, const mmq_args & args,
                         args.epilogue_clamp);
             }
         };
+        // ds41: tiled launches of every type but Q8_0 zero non-finite outputs
+        // at the store, so callers skip the separate whole-buffer sanitize
+        // pass; consumers that guarded at read see the same values. Q8_0
+        // keeps both variants for its callers.
         if constexpr (type == GGML_TYPE_Q8_0) {
             if (args.sanitize_output) {
                 launch_tiled(std::true_type{});
@@ -4198,8 +4202,7 @@ static void launch_mul_mat_q(ds41_ggml_hip_context & ctx, const mmq_args & args,
                 launch_tiled(std::false_type{});
             }
         } else {
-            GGML_ASSERT(!args.sanitize_output);
-            launch_tiled(std::false_type{});
+            launch_tiled(std::true_type{});
         }
         return;
     }

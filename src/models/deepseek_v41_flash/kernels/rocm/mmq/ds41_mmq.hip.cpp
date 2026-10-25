@@ -498,8 +498,8 @@ int ds41_mmq_dense_impl(
         /*use_stream_k=*/use_stream_k,
         /*ncols_max=*/ne11,
     };
-    const bool inline_sanitize =
-        type == GGML_TYPE_Q8_0 && !use_stream_k;
+    /* Tiled launches sanitize at the store (see mul_mat_q_case). */
+    const bool inline_sanitize = !use_stream_k;
     args.sanitize_output = inline_sanitize;
 
     mul_mat_q_case<type>(*ctx, args, stream);
@@ -972,7 +972,8 @@ int ds41_mmq_moe_impl(
         fprintf(stderr, "%s: mul_mat_q_case (moe) launch failed: %s\n", tag, hipGetErrorString(err));
         return -4;
     }
-    if (sanitize_out) {
+    /* Tiled launches of these types sanitize at the store (see mul_mat_q_case). */
+    if (sanitize_out && (use_stream_k || type == GGML_TYPE_Q8_0)) {
         ds41_mmq_sanitize_f32(out_f32, (uint64_t)M * (uint64_t)ne_get_rows, stream);
     }
     return 0;
@@ -1112,8 +1113,7 @@ int ds41_mmq_moe_pair_impl(
     return -1;
   }
   if (swiglu_epilogue &&
-      (type != GGML_TYPE_IQ2_XXS || fused_down ||
-       !swiglu_epilogue->router_weights || !swiglu_epilogue->mid_f32)) {
+      (fused_down || !swiglu_epilogue->router_weights || !swiglu_epilogue->mid_f32)) {
     fprintf(stderr, "%s: invalid weighted SwiGLU epilogue\n", tag);
     return -1;
   }
@@ -4363,6 +4363,28 @@ extern "C" int ds41_mmq_moe_typed(int type, const void* W, const float* X,
 #undef DS41_CASE
     default:
       fprintf(stderr, "ds41_mmq_moe_typed: unsupported type %d\n", type);
+      return -1;
+  }
+}
+
+extern "C" int ds41_mmq_moe_swiglu_typed(int type, const void* W_gate, const void* W_up,
+                                         const float* X, const int32_t* ids,
+                                         const float* router_weights, float* gate,
+                                         float* mid, int M, int K, int n_tokens,
+                                         int n_experts, int n_expert_used, float clamp,
+                                         hipStream_t stream) {
+  const ds41_mmq_swiglu_epilogue epilogue = {router_weights, mid, nullptr, clamp};
+  switch ((ggml_type)type) {
+#define DS41_CASE(T)                                                                 \
+  case T:                                                                            \
+    return ds41_mmq_moe_pair_impl<T>("ds41_mmq_moe_swiglu_typed", W_gate, W_up, X, ids, \
+                                     gate, nullptr, M, K, n_tokens, n_experts,       \
+                                     n_expert_used, stream, nullptr, nullptr, 0,     \
+                                     /*sanitize_out=*/false, nullptr, &epilogue);
+    DS41_MMQ_BATCH_CASES(DS41_CASE)
+#undef DS41_CASE
+    default:
+      fprintf(stderr, "ds41_mmq_moe_swiglu_typed: unsupported type %d\n", type);
       return -1;
   }
 }

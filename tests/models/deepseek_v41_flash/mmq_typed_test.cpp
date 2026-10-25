@@ -273,6 +273,73 @@ bool MoeCase(const TypeCase& t, int M, int K, int n_tokens, int n_experts,
   return e < 2e-3;
 }
 
+/* The routed gate/up pair with the SwiGLU store against two routed launches
+ * and the separate SwiGLU pass, under the decoder's launch bounds. */
+bool MoeSwigluCase(const TypeCase& t, int M, int K, int n_tokens, int n_experts,
+                   int used, std::mt19937& rng) {
+  constexpr float kLimit = 7.0f;
+  const std::size_t blocks =
+      static_cast<std::size_t>(n_experts) * M * K / t.block_values;
+  const auto gate = RandomBlocks(t, blocks, rng);
+  const auto up = RandomBlocks(t, blocks, rng);
+  std::normal_distribution<float> normal;
+  std::vector<float> x(static_cast<std::size_t>(n_tokens) * K);
+  for (auto& v : x)
+    v = normal(rng);
+  const int rows = n_tokens * used;
+  std::vector<float> route(rows);
+  for (auto& v : route)
+    v = 1.0f + 0.1f * normal(rng);
+  std::vector<int32_t> ids(rows);
+  std::vector<unsigned int> counts(n_experts, 0u);
+  unsigned int most = 0;
+  for (int token = 0; token < n_tokens; ++token)
+    for (int s = 0; s < used; ++s) {
+      const int e = (token % 3 + s * 7 + (rng() % 2) * 31) % n_experts;
+      ids[token * used + s] = e;
+      most = std::max(most, ++counts[e]);
+    }
+  auto* dg = Device(gate);
+  auto* du = Device(up);
+  auto* dx = Device(x);
+  auto* dids = Device(ids);
+  auto* droute = Device(route);
+  const std::size_t n_out = static_cast<std::size_t>(M) * rows;
+  float *g = nullptr, *u = nullptr, *want = nullptr, *g2 = nullptr,
+        *got = nullptr;
+  for (float** p : {&g, &u, &want, &g2, &got})
+    (void)hipMalloc(p, sizeof(float) * n_out);
+  ds41_mmq_set_routed_max_expert_rows(static_cast<int>(most));
+  ds41_mmq_set_routed_tile_cols(
+      ds41_mmq_routed_tile_cols_for_counts(counts.data(), n_experts));
+  bool ok =
+      ds41_mmq_moe_typed(t.type, dg, dx, dids, g, M, K, n_tokens, n_experts,
+                         used, 0) == 0 &&
+      ds41_mmq_moe_typed(t.type, du, dx, dids, u, M, K, n_tokens, n_experts,
+                         used, 0) == 0 &&
+      ds41_v41_swiglu(g, u, droute, want, rows, M, kLimit) == 0 &&
+      ds41_mmq_moe_swiglu_typed(t.type, dg, du, dx, dids, droute, g2, got, M, K,
+                                n_tokens, n_experts, used, kLimit, 0) == 0;
+  ds41_mmq_set_routed_max_expert_rows(0);
+  ds41_mmq_set_routed_tile_cols(0);
+  double eg = INFINITY, e = INFINITY;
+  if (ok) {
+    eg = RelativeError(Host(g2, n_out), Host(g, n_out));
+    e = RelativeError(Host(got, n_out), Host(want, n_out));
+  }
+  std::printf(
+      "moe swiglu %-8s M=%d K=%d tokens=%d used=%d gate_err=%.2e "
+      "rel_err=%.2e\n",
+      t.name, M, K, n_tokens, used, eg, e);
+  for (void* p :
+       {static_cast<void*>(dg), static_cast<void*>(du), static_cast<void*>(dx),
+        static_cast<void*>(dids), static_cast<void*>(droute),
+        static_cast<void*>(g), static_cast<void*>(u), static_cast<void*>(want),
+        static_cast<void*>(g2), static_cast<void*>(got)})
+    (void)hipFree(p);
+  return eg == 0.0 && e < 1e-6;
+}
+
 /* Routed-expert GEMV against the ggml matvec (Q8_1 activations, so the
  * agreement is at that rounding, ~5e-3): one shared input (gate/up) or one
  * input per slot (down), with a dropped slot (id -1) that must write 0. */
@@ -426,6 +493,7 @@ int main() {
       ok = MoeCase(t, 128, 2304, 23, 16, 1, bounded, rng) && ok;
       ok = MoeCase(t, 256, 1024, 200, 384, 6, bounded, rng) && ok;
     }
+    ok = MoeSwigluCase(t, 256, 1024, 200, 384, 6, rng) && ok;
   }
   ds41_mmq_cleanup();
   std::printf("%s\n", ok ? "PASS" : "FAIL");

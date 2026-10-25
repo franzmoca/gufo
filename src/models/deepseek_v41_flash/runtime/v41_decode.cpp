@@ -613,14 +613,19 @@ bool moe(ds41_decoder* d, uint32_t il, uint32_t n) {
       status = ds41_mmq_moe_vec_typed(up_type, up, d->xn, d->route_ids, d->u6, DS41_N_FF_EXP, kDim, 1, DS41_N_EXPERT,
                                       used, 0);
     if (status) return false;
+  } else if (gate_type == up_type) {
+    /* Batches quantize the input once and store SwiGLU from the up pass. */
+    if (ds41_mmq_moe_swiglu_typed(gate_type, gate, up, d->xn, d->route_ids, d->route_w, d->g6, d->mid6,
+                                  DS41_N_FF_EXP, kDim, (int)n, DS41_N_EXPERT, used, kSwigluLimit, 0))
+      return false;
   } else if (ds41_mmq_moe_typed(gate_type, gate, d->xn, d->route_ids, d->g6, DS41_N_FF_EXP, kDim, (int)n,
                                 DS41_N_EXPERT, used, 0) ||
              ds41_mmq_moe_typed(up_type, up, d->xn, d->route_ids, d->u6, DS41_N_FF_EXP, kDim, (int)n, DS41_N_EXPERT,
                                 used, 0)) {
     return false;
   }
-  if (!(n == 1 && fused_pair) &&
-      ds41_v41_swiglu(d->g6, d->u6, d->route_w, d->mid6, rows, DS41_N_FF_EXP, kSwigluLimit))
+  const bool mid_done = (n == 1 && fused_pair) || (n > 1 && gate_type == up_type);
+  if (!mid_done && ds41_v41_swiglu(d->g6, d->u6, d->route_w, d->mid6, rows, DS41_N_FF_EXP, kSwigluLimit))
     return false;
   /* Each (token, slot) row multiplies its own expert's down projection. */
   if (n == 1) {
