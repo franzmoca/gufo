@@ -35,6 +35,8 @@ teacher-forced score against the oracle's perplexity 6.309
 | Routed-expert sum (six down rows plus the shared expert) folded into the FFN hc expand | Retained. Bit-identical; 40 fewer launches. `gufo bench` tg64 23.81 → 23.88, tg64 @ d2048 23.43 → 23.47 t/s. |
 | Attention output rope + FP8 quantization fused into the split-attention merge (head row staged in shared memory) | Rejected. 40 fewer launches but no measured gain (`gufo bench` tg64 @ d2048 23.47 → 23.48 ± 0.01 t/s), and the merge rounds differently in rare cases (3K decode path: 115 argmax changes, perplexity 6.311 → 6.309). |
 | IQ2_XXS routed gate/up through the fused FP32 pair instead of two mmvq launches and SwiGLU | Retained. 252 µs against 251 µs for the three launches at 2K, so the gain is the launches (`gufo bench` tg64 23.84 → 23.94, tg64 @ d2048 23.46 → 23.57 t/s). Decode-path 3K perplexity 6.313, agreement 96.0%, mean \|ΔNLL\| 0.073. |
+| Split decode attention with 10 or 40 row splits (20 retained) | Rejected. At 2K, split + merge per token: 20 splits 1,107 + 208 µs; 10 splits 1,312 + 94 µs (half the partial traffic, half the blocks); 40 splits 1,213 + 438 µs. |
+| Routing kernel with one wave or four waves per token (eight retained) | Rejected. Per call at 2K decode: 8 waves 7.0 µs, 4 waves 7.4 µs, 1 wave 13.4 µs (12 serial softplus evaluations per lane). Same selections. |
 
 ## Measured limits
 

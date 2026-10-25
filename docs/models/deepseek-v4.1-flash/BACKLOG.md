@@ -8,13 +8,14 @@ decode at 2K context unless stated.
 
 ## Where the time goes
 
-Decode, one token at 2K context: 46.5 ms wall, ~42 ms of GPU time and
-~4.6 ms of host time between launches (~1,660 dispatches per token). The
-routed expert matvecs take ~10 ms of the GPU time at 160-175 GB/s (IQ1) and
-125-145 GB/s (IQ2), against 230-238 GB/s for a plain read of the same six
-DRAM-cold experts. The dense Q5_K/Q8_0 projections run at 207-237 GB/s.
+Decode, one token at 2K context: 42.4 ms wall, ~39.9 ms of GPU time and
+~2.7 ms of gaps between ~1,000 dependent launches. The dense Q5_K/Q8_0
+projections and the output head take ~23.9 ms for ~4.8 GB, near the
+measured 235 GB/s DRAM read peak; the routed expert matvecs take ~10 ms at
+160-175 GB/s (IQ1) and 125-145 GB/s (IQ2), against 230-238 GB/s for a plain
+read of the same six DRAM-cold experts.
 
-Prefill, 2048-token batches: ~350 tok/s at depth 0, 268 tok/s at 32K. The
+Prefill, 2048-token batches: ~363 tok/s at depth 0, 330 tok/s at 32K. The
 IQ1_S routed-expert MMQ is the largest prefill cost.
 
 ## Open items
@@ -22,7 +23,7 @@ IQ1_S routed-expert MMQ is the largest prefill cost.
 | # | Item | Area | Effort | Est. impact | Confidence |
 | ---: | --- | --- | --- | --- | --- |
 | 1 | Routed-expert GEMV with wide-load weight tiles | Decode | Hard | Up to ~3 ms/token (~6%) if the experts reach ~210 GB/s | Low |
-| 2 | Host overhead between decode launches | Decode | Medium | Up to ~4.6 ms/token | Medium |
+| 2 | Launch gaps between decode kernels | Decode | Medium | Up to ~2.7 ms/token | Medium |
 | 3 | IQ1_S routed-expert MMQ | Prefill | Hard | Unmeasured | Low |
 
 ### 1. Routed-expert GEMV with wide-load weight tiles
@@ -53,22 +54,23 @@ the SGPRs. Starting points for a retry:
 - Measure with `ds41_gemv_bench` (DRAM-cold six-expert launches) against
   the ceiling probe of a plain read of the same pattern (230-238 GB/s).
 
-### 2. Host overhead between decode launches
+### 2. Launch gaps between decode kernels
 
-~1,660 dispatches per token; ~4.6 ms per token is not covered by GPU work.
-In progress. Done: the MMQ scratch pool reuses buffers instead of
-allocating and freeing per call; Engram rows upload asynchronously from
-pinned memory; hc collapse + RMSNorm, rope + FP8 quantization, (below 16
-tokens) hc mixes + Sinkhorn, (single tokens) gate + up + SwiGLU and q_a + KV
-projections, the q_a/KV norms and the routed sum + hc expand run as single
-kernels; the top-k threshold and decode indexer scores have their
-own faster kernels. Remaining, from a `rocprofv3` trace of 2K decode:
+~1,000 dependent launches per token leave ~2.7 ms of the GPU idle (~2.5 µs
+each; the host stays ahead of the queue). Done: the MMQ scratch pool reuses
+buffers instead of allocating and freeing per call; Engram rows upload
+asynchronously from pinned memory; hc collapse + RMSNorm, rope + FP8
+quantization, (below 16 tokens) hc mixes + Sinkhorn, (single tokens) gate +
+up + SwiGLU and q_a + KV projections, the q_a/KV norms and the routed sum +
+hc expand run as single kernels; the top-k threshold and decode indexer
+scores have their own faster kernels. Remaining, from a `rocprofv3` trace
+of 2K decode:
 
-- ~1,550 dependent-launch gaps of ~2.5 µs per token (~4 ms). Fusion
-  candidates by count per token: rope_tail 53 (40 on q after q_b),
-  attention_combine 40 followed by the output rope + FP8, route 40, the
-  window copyBuffer 43 (it cannot run before attention, which still reads
-  the slot it overwrites).
+- Launches left to fuse, per token: the q rope after q_b (40, would need a
+  GEMV epilogue pairing rows 8 lanes apart), route after the router matvec
+  (40; 7 µs each, the block size does not help), the window copy (43; it
+  cannot run before attention, which still reads the slot it overwrites).
+  Fusing the output rope + FP8 into the attention merge measured no gain.
 - hc mixes read 2 MB of F32 weights in ~14 µs (80 per token) regardless of
   how many blocks share a row.
 - ~90 µs of host work at the start of each step (embedding dequant and two
