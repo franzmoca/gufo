@@ -11,6 +11,7 @@
 #include <cstdlib>
 #include <memory>
 #include <mutex>
+#include <vector>
 
 // Device properties are queried once and shared by the matrix dispatchers.
 const ds41_ggml_hip_device_info & ds41_ggml_hip_info() {
@@ -109,12 +110,45 @@ extern "C" hipStream_t ds41_pool_get_stream(void) {
 
 namespace {
 
+/* Freed buffers stay cached for reuse on the stream that freed them: work on
+ * one stream runs in order, so a later call on that stream cannot overlap the
+ * previous user. hipFreeAsync cost ~0.45 ms of host time per call and the
+ * pool's first allocation after a synchronize ~0.9 ms, enough to drain the
+ * single-token decode queue. */
+struct ds41_cached_buffer {
+    void * ptr;
+    size_t size;
+    hipStream_t stream;
+    int device;
+};
+
+std::mutex g_ds41_pool_mutex;
+std::vector<ds41_cached_buffer> g_ds41_pool_free;
+constexpr size_t kDs41PoolMaxCached = 16;
+
 struct ds41_naive_pool : public ds41_ggml_hip_pool {
     int device;
 
     explicit ds41_naive_pool(int device) : device(device) {}
 
     void * alloc(size_t size, size_t * actual_size) override {
+        {
+            std::lock_guard<std::mutex> lock(g_ds41_pool_mutex);
+            size_t best = g_ds41_pool_free.size();
+            for (size_t i = 0; i < g_ds41_pool_free.size(); ++i) {
+                const ds41_cached_buffer & b = g_ds41_pool_free[i];
+                if (b.device == device && b.stream == t_ds41_pool_stream && b.size >= size &&
+                    (best == g_ds41_pool_free.size() || b.size < g_ds41_pool_free[best].size)) {
+                    best = i;
+                }
+            }
+            if (best < g_ds41_pool_free.size()) {
+                const ds41_cached_buffer b = g_ds41_pool_free[best];
+                g_ds41_pool_free.erase(g_ds41_pool_free.begin() + best);
+                if (actual_size) *actual_size = b.size;
+                return b.ptr;
+            }
+        }
         ds41_ggml_hip_set_device(device);
         void * ptr = nullptr;
         DS41_HIP_CHECK(hipMallocAsync(&ptr, size, t_ds41_pool_stream));
@@ -122,14 +156,30 @@ struct ds41_naive_pool : public ds41_ggml_hip_pool {
         return ptr;
     }
 
-    void free(void * ptr, size_t /*size*/) override {
+    void free(void * ptr, size_t size) override {
         if (!ptr) return;
+        {
+            std::lock_guard<std::mutex> lock(g_ds41_pool_mutex);
+            if (g_ds41_pool_free.size() < kDs41PoolMaxCached) {
+                g_ds41_pool_free.push_back({ptr, size, t_ds41_pool_stream, device});
+                return;
+            }
+        }
         ds41_ggml_hip_set_device(device);
         DS41_HIP_CHECK(hipFreeAsync(ptr, t_ds41_pool_stream));
     }
 };
 
 } // anonymous namespace
+
+extern "C" void ds41_pool_release_cached(void) {
+    std::lock_guard<std::mutex> lock(g_ds41_pool_mutex);
+    for (const ds41_cached_buffer & b : g_ds41_pool_free) {
+        ds41_ggml_hip_set_device(b.device);
+        (void)hipFreeAsync(b.ptr, b.stream);
+    }
+    g_ds41_pool_free.clear();
+}
 
 std::unique_ptr<ds41_ggml_hip_pool> ds41_ggml_hip_context::new_pool_for_device(int device, int /*stream_no*/) {
     return std::unique_ptr<ds41_ggml_hip_pool>(new ds41_naive_pool(device));
