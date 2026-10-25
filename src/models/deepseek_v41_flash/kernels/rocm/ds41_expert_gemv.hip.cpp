@@ -257,53 +257,43 @@ constexpr int kPlanGroup = 2 + kPlanCols;
 
 __global__ void expert_plan_kernel(const int32_t* __restrict__ ids, uint32_t slots, int32_t* __restrict__ plan) {
   __shared__ int32_t sid[64];
-  __shared__ int32_t group_of[64];
+  __shared__ int32_t first_of[64];  // the first slot holding each slot's expert
+  __shared__ int32_t group_of[64];  // the group of each leading slot
   const uint32_t s = threadIdx.x;
   if (s < slots) sid[s] = ids[s];
   __syncthreads();
-  int32_t id = 0, col = 0, count = 0, group = 0;
-  bool leader = false;
+  int32_t id = 0, col = 0, count = 0, first = (int32_t)s;
   if (s < slots) {
     id = sid[s];
-    leader = true;
     for (uint32_t o = 0; o < slots; ++o) {
       const bool same = sid[o] == id;
       count += same;
       if (o < s && same) {
         ++col;
-        leader = false;
+        if ((int32_t)o < first) first = (int32_t)o;
       }
     }
-    /* Groups are numbered by their first slot. */
-    for (uint32_t o = 0; o < s; ++o) {
-      bool first = true;
-      for (uint32_t p = 0; p < o && first; ++p) first = sid[p] != sid[o];
-      group += first;
-    }
-    if (leader) group_of[s] = group;
+    first_of[s] = first;
+  }
+  __syncthreads();
+  /* Groups are numbered by their first slot: a leader's group counts the
+   * leaders before it. */
+  if (s < slots && first == (int32_t)s) {
+    int32_t group = 0;
+    for (uint32_t o = 0; o < s; ++o) group += first_of[o] == (int32_t)o;
+    group_of[s] = group;
   }
   __syncthreads();
   if (s >= slots) return;
-  if (!leader) {
-    for (uint32_t o = 0; o < s; ++o)
-      if (sid[o] == id) {
-        group = group_of[o];
-        break;
-      }
-  }
-  int32_t* g = plan + 1 + group * kPlanGroup;
-  if (leader) {
+  int32_t* g = plan + 1 + group_of[first] * kPlanGroup;
+  if (first == (int32_t)s) {
     g[0] = id;
     g[1] = count;
   }
   if (col < kPlanCols) g[2 + col] = (int32_t)s;
   if (s == slots - 1) {
     int32_t groups = 0;
-    for (uint32_t o = 0; o < slots; ++o) {
-      bool first = true;
-      for (uint32_t p = 0; p < o && first; ++p) first = sid[p] != sid[o];
-      groups += first;
-    }
+    for (uint32_t o = 0; o < slots; ++o) groups += first_of[o] == (int32_t)o;
     plan[0] = groups;
   }
 }

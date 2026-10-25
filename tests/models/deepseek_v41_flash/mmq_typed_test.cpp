@@ -630,14 +630,27 @@ bool ExpertTokensCase(const TypeCase& t, int M, int K, int n,
                                     dx, K, kSlots, droute, 10.0f, single, M,
                                     K) == 0;
   const bool grouped_swiglu = ok && same();
+  /* One input row per slot, as for the down projection. */
+  std::vector<float> xs(static_cast<std::size_t>(slots) * K);
+  for (auto& v : xs)
+    v = normal(rng);
+  auto* dxs = Device(xs);
+  ok = ds41_v41_gemv_experts_grouped(t.type, dg, nullptr, nullptr, 0.0f,
+                                     expert_bytes, dplan, slots, n, dxs, K, 1,
+                                     batched, M, K) == 0 &&
+       ds41_v41_gemv_experts(t.type, dg, expert_bytes, dgids, slots, dxs, K, 1,
+                             single, M, K) == 0;
+  const bool grouped_slots = ok && same();
+  (void)hipFree(dxs);
   (void)hipFree(dgids);
   (void)hipFree(dplan);
   std::printf(
       "experts tokens %-8s M=%d K=%d n=%d plain=%s swiglu=%s grouped=%s "
-      "grouped swiglu=%s\n",
+      "grouped swiglu=%s grouped per-slot=%s\n",
       t.name, M, K, n, plain ? "exact" : "DIFF", fused ? "exact" : "DIFF",
-      grouped ? "exact" : "DIFF", grouped_swiglu ? "exact" : "DIFF");
-  fused = fused && grouped && grouped_swiglu;
+      grouped ? "exact" : "DIFF", grouped_swiglu ? "exact" : "DIFF",
+      grouped_slots ? "exact" : "DIFF");
+  fused = fused && grouped && grouped_swiglu && grouped_slots;
   (void)hipFree(dg);
   (void)hipFree(du);
   (void)hipFree(dx);
@@ -945,7 +958,7 @@ int main() {
     if (t.type != 8 && t.type != 13) {
       ok = ExpertGemvCase(t, 2304, 5120, false, rng) && ok;
       ok = ExpertGemvCase(t, 512, 2304, true, rng) && ok;
-      for (const int n : {2, 4, 8})
+      for (const int n : {2, 3, 4, 6, 8})
         ok = ExpertTokensCase(t, 512, 2304, n, rng) && ok;
       if (t.type == 19 || t.type == 29 || t.type == 16)
         ok = SwigluCase(t, 2304, 5120, rng) && ok;

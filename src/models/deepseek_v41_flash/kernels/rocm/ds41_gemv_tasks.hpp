@@ -91,29 +91,47 @@ __device__ __forceinline__ float Accumulate(float acc, const float* w,
 // from bit 2 p (low) or 2 p + 1 (high) of qh[16 h + i]. The 16-byte header
 // (d, dmin, 12 scale bytes) is one aligned load. w[16 r + i] belongs to
 // activation 64 p + 16 h + 32 r + i.
+/// The three 16-byte loads of a Q4_K/Q5_K task, so callers can issue them
+/// ahead of the decode.
+struct RawQ45K {
+  uint4 header, q, h;
+};
+
 template<bool kFiveBit>
-__device__ __forceinline__ void DecodeQ45K(const std::uint8_t* block, int t,
-                                           float (&w)[32]) {
+__device__ __forceinline__ RawQ45K LoadQ45K(const std::uint8_t* block,
+                                            int t) {
   const int p = t >> 1;
   const int h = t & 1;
-  const uint4 header = *reinterpret_cast<const uint4*>(block);
+  const int qs = kFiveBit ? 48 : 16;
+  RawQ45K raw{};
+  raw.header = *reinterpret_cast<const uint4*>(block);
+  raw.q = *reinterpret_cast<const uint4*>(block + qs + 32 * p + 16 * h);
+  if constexpr (kFiveBit)
+    raw.h = *reinterpret_cast<const uint4*>(block + 16 + 16 * h);
+  return raw;
+}
+
+template<bool kFiveBit>
+__device__ __forceinline__ void DecodeQ45K(const RawQ45K& raw, int t,
+                                           float (&w)[32]) {
+  const int p = t >> 1;
+  const uint4 header = raw.header;
   const float d = HalfBits(header.x);
   const float dmin = HalfBits(header.x >> 16);
   float sc0, m0, sc1, m1;
   ScaleMin(header.y, header.z, header.w, 2 * p, &sc0, &m0);
   ScaleMin(header.y, header.z, header.w, 2 * p + 1, &sc1, &m1);
-  const int qs = kFiveBit ? 48 : 16;
-  const uint4 raw_q =
-      *reinterpret_cast<const uint4*>(block + qs + 32 * p + 16 * h);
-  const auto* q = reinterpret_cast<const std::uint8_t*>(&raw_q);
-  uint4 raw_h{};
-  const std::uint8_t* qh = nullptr;
-  if constexpr (kFiveBit) {
-    raw_h = *reinterpret_cast<const uint4*>(block + 16 + 16 * h);
-    qh = reinterpret_cast<const std::uint8_t*>(&raw_h);
-  }
+  const auto* q = reinterpret_cast<const std::uint8_t*>(&raw.q);
+  const std::uint8_t* qh =
+      kFiveBit ? reinterpret_cast<const std::uint8_t*>(&raw.h) : nullptr;
   Dequant16(q, 0, qh, 2 * p, 1, d * sc0, -(dmin * m0), w);
   Dequant16(q, 4, qh, 2 * p + 1, 1, d * sc1, -(dmin * m1), w + 16);
+}
+
+template<bool kFiveBit>
+__device__ __forceinline__ void DecodeQ45K(const std::uint8_t* block, int t,
+                                           float (&w)[32]) {
+  DecodeQ45K<kFiveBit>(LoadQ45K<kFiveBit>(block, t), t, w);
 }
 
 /// Q4_K/Q5_K sub-block pair p (64 values, one header load): w[i] belongs to
