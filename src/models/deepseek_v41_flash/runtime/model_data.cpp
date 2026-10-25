@@ -31,6 +31,7 @@
 #include "model.h"
 #include "model_data_internal.h"
 #include "native_internal.h"
+#include "v41_dspark.h"
 #include "src/cli/serve/logging.hpp"
 #include "src/core/mapped_prefetch.hpp"
 
@@ -272,7 +273,7 @@ struct gguf_type_info {
 };
 
 static constexpr auto gguf_types = [] {
-  std::array<gguf_type_info, 31> types{};
+  std::array<gguf_type_info, 40> types{};
   types[0] = {"f32", 1, 4};
   types[1] = {"f16", 1, 2};
   types[2] = {"q4_0", 32, 18};
@@ -302,6 +303,7 @@ static constexpr auto gguf_types = [] {
   types[28] = {"f64", 1, 8};
   types[29] = {"iq1_m", 256, 56};
   types[30] = {"bf16", 1, 2};
+  types[39] = {"mxfp4", 32, 17};
   return types;
 }();
 
@@ -1404,6 +1406,129 @@ static void weights_free(ds41_weights* w) {
 }
 
 /* =========================================================================
+ * DSpark Drafter.
+ * =========================================================================
+ *
+ * Two GGUF layouts of the official mtp.* weights: "dflash" (block tensors
+ * blk.N.*, fc, enc.output_norm, markov_w1/w2) and "deepseek41-dflash-draft"
+ * (dflash.fc, dflash.hidden_norm, dflash.dspark.markov.w1/w2). Dense
+ * projections may be any type the GEMV paths take; F16 tensors are converted
+ * to F32 at upload.
+ */
+
+static void dspark_bind(ds41_dspark_model* d, ds41_dspark_tensor* dst,
+                        const ds41_tensor* t, uint32_t k, uint64_t rows) {
+  if (t->dim[0] != k || t->elements != (uint64_t)k * rows) {
+    fprintf(stderr, "ds41: DSpark tensor %.*s has an unexpected shape\n",
+            (int)t->name.len, t->name.ptr);
+    throw std::runtime_error("incompatible DSpark drafter");
+  }
+  dst->k = k;
+  dst->rows = rows;
+  dst->type = t->type;
+  d->sources.push_back({dst, t});
+}
+
+static void dspark_open(ds41_dspark_model* d, const char* path) {
+  ds41_model* m = &d->file;
+  model_open(m, path);
+  const std::string arch = required_string(m, "general.architecture");
+  const bool lucebox = arch == "deepseek41-dflash-draft";
+  if (arch != "dflash" && !lucebox)
+    ds41_die("DSpark drafter architecture is not dflash");
+  const auto key = [&](const char* name) { return arch + "." + name; };
+  config_expect_u32("dspark block_count",
+                    required_u32(m, key("block_count").c_str()),
+                    DS41_DSPARK_STAGES);
+  config_expect_u32("dspark embedding_length",
+                    required_u32(m, key("embedding_length").c_str()),
+                    DS41_N_EMBD);
+  config_expect_u32("dspark expert_count",
+                    required_u32(m, key("expert_count").c_str()),
+                    DS41_DSPARK_EXPERTS);
+  config_expect_u32("dspark expert_used_count",
+                    required_u32(m, key("expert_used_count").c_str()),
+                    DS41_DSPARK_EXPERTS_USED);
+  config_expect_u32("dspark sliding_window",
+                    required_u32(m, key("attention.sliding_window").c_str()),
+                    DS41_N_SWA);
+  config_expect_f32("dspark rope.freq_base",
+                    required_f32(m, key("rope.freq_base").c_str()),
+                    DS41_ROPE_FREQ_BASE);
+  config_expect_f32("dspark expert_weights_scale",
+                    required_f32(m, key("expert_weights_scale").c_str()),
+                    DS41_EXPERT_WEIGHT_SCALE);
+  const std::string block_key =
+      lucebox ? key("dflash.block_size") : key("block_size");
+  config_expect_u32("dspark block_size", required_u32(m, block_key.c_str()),
+                    DS41_DSPARK_BLOCK);
+  const uint64_t targets[DS41_DSPARK_TARGET_LAYERS] = {
+      DS41_DSPARK_TARGET_LAYER[0], DS41_DSPARK_TARGET_LAYER[1],
+      DS41_DSPARK_TARGET_LAYER[2]};
+  config_expect_int_array(
+      m,
+      (lucebox ? key("dflash.target_layer_ids") : key("target_layers")).c_str(),
+      targets, DS41_DSPARK_TARGET_LAYERS, false);
+  uint32_t mask = 0;
+  if (model_get_u32(m, key("dflash.mask_token_id").c_str(), &mask))
+    config_expect_u32("dspark mask_token_id", mask, DS41_DSPARK_NOISE_TOKEN);
+
+  const uint32_t dim = DS41_N_EMBD;
+  const uint32_t q_dim = DS41_N_HEAD * DS41_N_HEAD_DIM;
+  const uint32_t mixes = 2 * DS41_N_HC + DS41_N_HC * DS41_N_HC;
+  for (uint32_t s = 0; s < DS41_DSPARK_STAGES; s++) {
+    ds41_dspark_stage* st = &d->stage[s];
+    const auto bind = [&](ds41_dspark_tensor* dst, const char* fmt, uint32_t k,
+                          uint64_t rows) {
+      dspark_bind(d, dst, required_tensorf(m, fmt, s), k, rows);
+    };
+    bind(&st->hc_attn_fn, "blk.%u.hc_attn_fn.weight", DS41_N_HC * dim, mixes);
+    bind(&st->hc_attn_scale, "blk.%u.hc_attn_scale.weight", 3, 1);
+    bind(&st->hc_attn_base, "blk.%u.hc_attn_base.weight", mixes, 1);
+    bind(&st->attn_norm, "blk.%u.attn_norm.weight", dim, 1);
+    bind(&st->q_a, "blk.%u.attn_q_a.weight", dim, DS41_N_LORA_Q);
+    bind(&st->q_a_norm, "blk.%u.attn_q_a_norm.weight", DS41_N_LORA_Q, 1);
+    bind(&st->q_b, "blk.%u.attn_q_b.weight", DS41_N_LORA_Q, q_dim);
+    bind(&st->kv, "blk.%u.attn_kv.weight", dim, DS41_N_HEAD_DIM);
+    bind(&st->kv_a_norm, "blk.%u.attn_kv_a_norm.weight", DS41_N_HEAD_DIM, 1);
+    bind(&st->sinks, "blk.%u.attn_sinks.weight", DS41_N_HEAD, 1);
+    bind(&st->o_a, "blk.%u.attn_output_a.weight", q_dim / DS41_N_OUT_GROUP,
+         (uint64_t)DS41_N_OUT_GROUP * DS41_N_LORA_O);
+    bind(&st->o_b, "blk.%u.attn_output_b.weight",
+         DS41_N_OUT_GROUP * DS41_N_LORA_O, dim);
+    bind(&st->hc_ffn_fn, "blk.%u.hc_ffn_fn.weight", DS41_N_HC * dim, mixes);
+    bind(&st->hc_ffn_scale, "blk.%u.hc_ffn_scale.weight", 3, 1);
+    bind(&st->hc_ffn_base, "blk.%u.hc_ffn_base.weight", mixes, 1);
+    bind(&st->ffn_norm, "blk.%u.ffn_norm.weight", dim, 1);
+    bind(&st->gate_inp, "blk.%u.ffn_gate_inp.weight", dim, DS41_DSPARK_EXPERTS);
+    bind(&st->probs_b, "blk.%u.exp_probs_b.bias", DS41_DSPARK_EXPERTS, 1);
+    bind(&st->gate_shexp, "blk.%u.ffn_gate_shexp.weight", dim, DS41_N_FF_EXP);
+    bind(&st->up_shexp, "blk.%u.ffn_up_shexp.weight", dim, DS41_N_FF_EXP);
+    bind(&st->down_shexp, "blk.%u.ffn_down_shexp.weight", DS41_N_FF_EXP, dim);
+    bind(&st->gate_exps, "blk.%u.ffn_gate_exps.weight", dim,
+         (uint64_t)DS41_N_FF_EXP * DS41_DSPARK_EXPERTS);
+    bind(&st->up_exps, "blk.%u.ffn_up_exps.weight", dim,
+         (uint64_t)DS41_N_FF_EXP * DS41_DSPARK_EXPERTS);
+    bind(&st->down_exps, "blk.%u.ffn_down_exps.weight", DS41_N_FF_EXP,
+         (uint64_t)dim * DS41_DSPARK_EXPERTS);
+  }
+  const auto bind = [&](ds41_dspark_tensor* dst, const char* name, uint32_t k,
+                        uint64_t rows) {
+    dspark_bind(d, dst, required_tensor(m, name), k, rows);
+  };
+  bind(&d->fc, lucebox ? "dflash.fc.weight" : "fc.weight",
+       DS41_DSPARK_TARGET_LAYERS * dim, dim);
+  bind(&d->main_norm,
+       lucebox ? "dflash.hidden_norm.weight" : "enc.output_norm.weight", dim,
+       1);
+  bind(&d->out_norm, "output_norm.weight", dim, 1);
+  bind(&d->markov_w1, lucebox ? "dflash.dspark.markov.w1" : "markov_w1.weight",
+       DS41_DSPARK_MARKOV_RANK, DS41_N_VOCAB);
+  bind(&d->markov_w2, lucebox ? "dflash.dspark.markov.w2" : "markov_w2.weight",
+       DS41_DSPARK_MARKOV_RANK, DS41_N_VOCAB);
+}
+
+/* =========================================================================
  * Engram Tables.
  * =========================================================================
  *
@@ -1599,6 +1724,10 @@ int ds41_engine_open(ds41_engine** out, const ds41_engine_options* opt) {
           (double)model_resident_bytes(&e->engram->file) / 1073741824.0,
           e->engram->row_bytes);
     }
+    if (opt->dspark_model_path && opt->dspark_model_path[0]) {
+      e->dspark = new ds41_dspark_model();
+      dspark_open(e->dspark, opt->dspark_model_path);
+    }
     if (opt->validate_only) {
       *out = e;
       return 0;
@@ -1633,6 +1762,18 @@ int ds41_engine_open(ds41_engine** out, const ds41_engine_options* opt) {
       *out = NULL;
       return 1;
     }
+    if (e->dspark) {
+      if (!ds41_dspark_upload(e->dspark)) {
+        fprintf(stderr, "ds41: DSpark drafter upload failed\n");
+        ds41_engine_close(e);
+        *out = NULL;
+        return 1;
+      }
+      gufo::server::Logger::LogFormatted(
+          gufo::server::LogLevel::kInfo, "ds41",
+          "DSpark drafter %s: %.2f GiB resident", opt->dspark_model_path,
+          (double)e->dspark->device_bytes / 1073741824.0);
+    }
 
     *out = e;
     return 0;
@@ -1646,8 +1787,7 @@ int ds41_engine_open(ds41_engine** out, const ds41_engine_options* opt) {
 }
 
 bool ds41_engine_has_dspark(const ds41_engine* e) {
-  (void)e;
-  return false;
+  return e && e->dspark && e->dspark->device;
 }
 
 int ds41_engine_vocab_size(const ds41_engine* e) {
@@ -1663,6 +1803,12 @@ void ds41_engine_close(ds41_engine* e) {
   if (!e)
     return;
   weights_free(e->weights);
+  if (e->dspark) {
+    ds41_dspark_free(e->dspark);
+    model_close(&e->dspark->file);
+    delete e->dspark;
+    e->dspark = NULL;
+  }
   engram_close(e->engram);
   e->engram = NULL;
   ds41_vocab_destroy(e->vocab);

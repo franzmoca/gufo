@@ -4370,7 +4370,8 @@ extern "C" int ds41_mmq_q8_0_dense_vec(
   X(GGML_TYPE_IQ3_S)            \
   X(GGML_TYPE_IQ4_NL)           \
   X(GGML_TYPE_Q2_K)             \
-  X(GGML_TYPE_Q4_K)
+  X(GGML_TYPE_Q4_K)             \
+  X(GGML_TYPE_MXFP4)
 
 extern "C" int ds41_mmq_dense_vec_typed(int type, const void* W, const float* X,
                                         float* out, int M, int N, int K,

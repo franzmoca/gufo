@@ -4137,9 +4137,18 @@ bool InferenceBackend::load(
       SetError(error, "DeepSeek V4.1 does not support --mmproj");
       return false;
     }
-    if (speculative_config.backend != TextSpeculativeBackend::kDisabled) {
+    if (speculative_config.backend != TextSpeculativeBackend::kDisabled &&
+        speculative_config.backend != TextSpeculativeBackend::kDSpark) {
       SetError(error,
-               "DeepSeek V4.1 HTTP models do not support speculative decoding");
+               "DeepSeek V4.1 HTTP models support only DSpark "
+               "speculative decoding");
+      return false;
+    }
+    const bool dspark =
+        speculative_config.backend == TextSpeculativeBackend::kDSpark;
+    if (dspark && speculative_config.draft_model_path.empty()) {
+      SetError(error,
+               "DeepSeek V4.1 DSpark HTTP decoding requires --dspark-model");
       return false;
     }
     if (!models::deepseek_v41_flash::ValidateGgufTemplate(*reader,
@@ -4151,7 +4160,9 @@ bool InferenceBackend::load(
         model_path,
         models::deepseek_v41_flash::ModelOptions{
             .max_context = max_context,
-            .prefill_batch = deepseek_prefill_batch_},
+            .prefill_batch = deepseek_prefill_batch_,
+            .dspark_model_path =
+                dspark ? speculative_config.draft_model_path : std::string{}},
         &load_error);
     if (model == nullptr) {
       SetError(error, "Failed to create DeepSeek V4.1 model: " + load_error);
@@ -4162,6 +4173,14 @@ bool InferenceBackend::load(
         !FingerprintArtifact(
             "DeepSeek V4.1", *reader,
             &resolved_disk_cache_config.model_artifact_fingerprint, error)) {
+      return false;
+    }
+    if (DiskCacheEnabled(resolved_disk_cache_config) && dspark &&
+        resolved_disk_cache_config.draft_model_artifact_fingerprint.empty() &&
+        !FingerprintArtifactFile(
+            "DSpark", speculative_config.draft_model_path,
+            &resolved_disk_cache_config.draft_model_artifact_fingerprint,
+            error)) {
       return false;
     }
     return load(std::move(model), error, max_context, session_count,

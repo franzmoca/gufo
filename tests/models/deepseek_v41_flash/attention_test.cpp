@@ -473,6 +473,123 @@ double Bench(uint32_t pos0, uint32_t n, uint32_t ratio, bool rope,
   return ms;
 }
 
+/* DSpark block attention: every query attends n_ring ring rows from
+ * position `first` (slot pos % window) and all block rows, with sinks. */
+double DsparkCase(uint32_t first, uint32_t n_ring, uint32_t n_block,
+                  std::mt19937& rng) {
+  std::normal_distribution<float> dist(0.0f, 1.0f);
+  auto fill = [&](std::size_t n, float scale) {
+    std::vector<float> v(n);
+    for (float& x : v)
+      x = scale * dist(rng);
+    return v;
+  };
+  const std::vector<float> q =
+      fill((std::size_t)n_block * kHeads * kDim, 0.05f);
+  const std::vector<float> ring = fill((std::size_t)kWindow * kDim, 1.0f);
+  const std::vector<float> block = fill((std::size_t)n_block * kDim, 1.0f);
+  const std::vector<float> sinks = fill(kHeads, 1.0f);
+  std::vector<float> out(q.size());
+  float* dq = Device(q);
+  float* dring = Device(ring);
+  float* dblock = Device(block);
+  float* dsinks = Device(sinks);
+  float* dout = Device(out);
+  const float scale = 1.0f / std::sqrt((float)kDim);
+  if (ds41_v41_dspark_attention(dq, dring, first, n_ring, kWindow, dblock,
+                                n_block, dsinks, dout, kHeads, kDim, scale) ||
+      hipMemcpy(out.data(), dout, out.size() * sizeof(float),
+                hipMemcpyDeviceToHost) != hipSuccess)
+    return 1.0;
+  for (float* p : {dq, dring, dblock, dsinks, dout})
+    (void)hipFree(p);
+  double err = 0.0, norm = 0.0;
+  for (uint32_t t = 0; t < n_block; t++) {
+    for (uint32_t h = 0; h < kHeads; h++) {
+      const float* qh = &q[((std::size_t)t * kHeads + h) * kDim];
+      std::vector<const float*> keys;
+      for (uint32_t j = 0; j < n_ring; j++)
+        keys.push_back(&ring[(std::size_t)((first + j) % kWindow) * kDim]);
+      for (uint32_t j = 0; j < n_block; j++)
+        keys.push_back(&block[(std::size_t)j * kDim]);
+      std::vector<double> score(keys.size());
+      double m = sinks[h];
+      for (std::size_t j = 0; j < keys.size(); j++) {
+        double dot = 0.0;
+        for (uint32_t d = 0; d < kDim; d++)
+          dot += (double)qh[d] * keys[j][d];
+        score[j] = dot * scale;
+        m = std::max(m, score[j]);
+      }
+      double sum = std::exp(sinks[h] - m);
+      for (double& v : score)
+        sum += v = std::exp(v - m);
+      for (uint32_t d = 0; d < kDim; d++) {
+        double ref = 0.0;
+        for (std::size_t j = 0; j < keys.size(); j++)
+          ref += score[j] * keys[j][d];
+        ref /= sum;
+        const double got = out[((std::size_t)t * kHeads + h) * kDim + d];
+        err = std::max(err, std::abs(got - ref));
+        norm = std::max(norm, std::abs(ref));
+      }
+    }
+  }
+  return err / norm;
+}
+
+/* hc mean into a strided row, and the biased argmax: first index of the
+ * largest finite sum, non-finite values skipped, -1 when none is finite. */
+bool DsparkHelpers(std::mt19937& rng) {
+  std::normal_distribution<float> dist(0.0f, 1.0f);
+  constexpr uint32_t kHc = 4, kRowDim = 300, kRows = 3, kStride = 1000;
+  std::vector<float> h(kRows * kHc * kRowDim);
+  for (float& v : h)
+    v = dist(rng);
+  std::vector<float> out(kRows * kStride, 0.0f);
+  float* dh = Device(h);
+  float* dout = Device(out);
+  bool ok = ds41_v41_hc_mean(dh, dout + 7, kStride, kHc, kRowDim, kRows) == 0 &&
+            hipMemcpy(out.data(), dout, out.size() * sizeof(float),
+                      hipMemcpyDeviceToHost) == hipSuccess;
+  for (uint32_t t = 0; t < kRows && ok; t++)
+    for (uint32_t i = 0; i < kRowDim; i++) {
+      float sum = 0.0f;
+      for (uint32_t c = 0; c < kHc; c++)
+        sum += h[((std::size_t)t * kHc + c) * kRowDim + i];
+      ok = ok && out[(std::size_t)t * kStride + 7 + i] == sum / kHc;
+    }
+  (void)hipFree(dh);
+  (void)hipFree(dout);
+  const uint32_t n = 129280;
+  std::vector<float> x(n), bias(n);
+  for (uint32_t i = 0; i < n; i++) {
+    x[i] = dist(rng);
+    bias[i] = dist(rng);
+  }
+  x[5000] = 40.0f;
+  x[90000] =
+      40.0f + bias[5000] - bias[90000];  // equal sum: the first index wins
+  x[100] = INFINITY;
+  x[200] = NAN;
+  std::vector<int32_t> tokens(3, -2);
+  float* dx = Device(x);
+  float* dbias = Device(bias);
+  int32_t* dtokens = Device(tokens);
+  std::vector<float> none(16, NAN);
+  float* dnone = Device(none);
+  ok = ok && ds41_v41_argmax_bias(dx, dbias, n, dtokens, 1) == 0 &&
+       ds41_v41_argmax_bias(dnone, nullptr, 16, dtokens, 2) == 0 &&
+       hipMemcpy(tokens.data(), dtokens, tokens.size() * sizeof(int32_t),
+                 hipMemcpyDeviceToHost) == hipSuccess;
+  for (void* p : {(void*)dx, (void*)dbias, (void*)dtokens, (void*)dnone})
+    (void)hipFree(p);
+  std::printf(
+      "dspark hc mean %s, argmax %d (expect 5000), none %d (expect -1)\n",
+      ok ? "exact" : "MISMATCH", tokens[1], tokens[2]);
+  return ok && tokens[1] == 5000 && tokens[2] == -1 && tokens[0] == -2;
+}
+
 int main(int argc, char** argv) {
   int devices = 0;
   if (hipGetDeviceCount(&devices) != hipSuccess || devices == 0) {
@@ -542,6 +659,14 @@ int main(int argc, char** argv) {
                 m[2], e);
     ok = e < 2e-6 && ok;
   }
+  const uint32_t dspark[][3] = {{1743, 128, 5}, {0, 3, 5}, {60, 61, 2}};
+  for (const auto& c : dspark) {
+    const double e = DsparkCase(c[0], c[1], c[2], rng);
+    std::printf("dspark attention first=%u ring=%u block=%u rel_err=%.2e\n",
+                c[0], c[1], c[2], e);
+    ok = e < 1e-5 && ok;
+  }
+  ok = DsparkHelpers(rng) && ok;
   std::printf("fp4 row format mismatches %d\n", g_format_errors);
   ok = g_format_errors == 0 && ok;
   std::printf("%s\n", ok ? "PASS" : "FAIL");

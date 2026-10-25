@@ -228,6 +228,21 @@ int ds41_v41_swiglu(const float* gate, const float* up, const float* weight, flo
 int ds41_v41_engram_gate(float* h, const float* kv, const uint16_t* q, const uint16_t* k, uint32_t hc,
                          uint32_t dim, float eps, uint32_t n);
 
+/* DSpark block attention: each of the n_block queries attends the ring rows
+ * of positions first .. first + n_ring - 1 (slot pos % window) and all
+ * n_block rows of block_kv, with sinks; keys equal values. No rotation. */
+int ds41_v41_dspark_attention(const float* q, const float* ring, uint32_t first, uint32_t n_ring, uint32_t window,
+                              const float* block_kv, uint32_t n_block, const float* sinks, float* out, uint32_t heads,
+                              uint32_t head_dim, float scale);
+/* out[t * out_stride + i] = mean over the hc streams of h[t, :, i]. */
+int ds41_v41_hc_mean(const float* h, float* out, uint64_t out_stride, uint32_t hc, uint32_t dim, uint32_t n);
+/* out[0:rank] = row tokens[index] of an F32 (bf16 0) or BF16 table. */
+int ds41_v41_gather_row(const void* table, int bf16, const int32_t* tokens, uint32_t index, float* out,
+                        uint32_t rank);
+/* tokens[index] = the first index of the largest finite x[v] + bias[v]
+ * (bias may be NULL), or -1 when none is finite. */
+int ds41_v41_argmax_bias(const float* x, const float* bias, uint32_t n, int32_t* tokens, uint32_t index);
+
 #ifdef __cplusplus
 }
 #endif
