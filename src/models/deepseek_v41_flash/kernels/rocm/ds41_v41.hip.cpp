@@ -890,10 +890,10 @@ __global__ void topk_kernel(const float* all_score, uint64_t score_stride, uint3
   }
 }
 
-__global__ void clear_mask_kernel(uint8_t* mask, uint64_t stride, uint32_t pos0, uint32_t ratio) {
+__global__ void clear_mask_kernel(uint8_t* mask, uint64_t stride, uint32_t pos0, uint32_t ratio, uint32_t block) {
   const uint32_t token = blockIdx.y;
-  const uint32_t i = blockIdx.x * blockDim.x + threadIdx.x;
-  if (i < comp_len(pos0 + token, ratio)) mask[token * stride + i] = 0;
+  const uint32_t b = blockIdx.x * blockDim.x + threadIdx.x;
+  if (b < (comp_len(pos0 + token, ratio) + block - 1) / block) mask[token * stride + b] = 0;
 }
 
 __global__ void block_max_kernel(const float* score, uint64_t score_stride, float* blocks, uint64_t block_stride,
@@ -909,22 +909,22 @@ __global__ void block_max_kernel(const float* score, uint64_t score_stride, floa
   blocks[token * block_stride + b] = b == nb - 1 ? INFINITY : m;
 }
 
-/* Block (selected block, token). */
+/* Thread per selected block, grid.y per token. */
 __global__ void fill_mask_kernel(uint8_t* mask, uint64_t stride, const uint32_t* selected, uint32_t k_max,
                                  uint32_t pos0, uint32_t ratio, uint32_t block) {
   const uint32_t token = blockIdx.y;
   const uint32_t n = comp_len(pos0 + token, ratio);
-  const uint32_t j = blockIdx.x;
+  const uint32_t j = blockIdx.x * blockDim.x + threadIdx.x;
   if (j >= min(k_max, (n + block - 1) / block)) return;
-  const uint32_t b = selected[(uint64_t)token * k_max + j];
-  for (uint32_t i = b * block + threadIdx.x; i < min(n, (b + 1) * block); i += blockDim.x)
-    mask[token * stride + i] = 1;
+  mask[token * stride + selected[(uint64_t)token * k_max + j]] = 1;
 }
 
-__global__ void apply_mask_kernel(float* score, uint64_t stride, const uint8_t* mask, uint32_t pos0, uint32_t ratio) {
+__global__ void apply_mask_kernel(float* score, uint64_t stride, const uint8_t* mask, uint64_t mask_stride,
+                                  uint32_t pos0, uint32_t ratio, uint32_t block) {
   const uint32_t token = blockIdx.y;
   const uint32_t i = blockIdx.x * blockDim.x + threadIdx.x;
-  if (i < comp_len(pos0 + token, ratio) && !mask[token * stride + i]) score[token * stride + i] = -INFINITY;
+  if (i < comp_len(pos0 + token, ratio) && !mask[token * mask_stride + i / block])
+    score[token * stride + i] = -INFINITY;
 }
 
 /* Block (head, token). Scores for every key are kept in shared memory. */
@@ -1516,22 +1516,23 @@ extern "C" int ds41_v41_candidate_mask(const float* score, uint64_t score_stride
   const uint32_t len = max_comp_len(pos0, n, ratio);
   if (len == 0) return 0;
   const uint32_t nb = (len + block - 1) / block;
-  clear_mask_kernel<<<dim3(blocks_for(len), n), kThreads>>>(mask, score_stride, pos0, ratio);
+  clear_mask_kernel<<<dim3(blocks_for(nb), n), kThreads>>>(mask, block_stride, pos0, ratio, block);
   block_max_kernel<<<dim3(blocks_for(nb), n), kThreads>>>(score, score_stride, block_scratch, block_stride, pos0,
                                                           ratio, block);
   if (launch_ok("candidate block max")) return 1;
   /* Every block is kept while there are at most topk_blocks of them. */
   if (ds41_v41_topk(block_scratch, block_stride, select_scratch, topk_blocks, pos0, n, ratio, block)) return 1;
-  fill_mask_kernel<<<dim3(topk_blocks, n), 32>>>(mask, score_stride, select_scratch, topk_blocks, pos0, ratio,
-                                                 block);
+  fill_mask_kernel<<<dim3(blocks_for(topk_blocks), n), kThreads>>>(mask, block_stride, select_scratch, topk_blocks,
+                                                                    pos0, ratio, block);
   return launch_ok("candidate mask");
 }
 
-extern "C" int ds41_v41_apply_mask(float* score, uint64_t score_stride, const uint8_t* mask, uint32_t pos0,
-                                   uint32_t n, uint32_t ratio) {
+extern "C" int ds41_v41_apply_mask(float* score, uint64_t score_stride, const uint8_t* mask, uint64_t mask_stride,
+                                   uint32_t pos0, uint32_t n, uint32_t ratio, uint32_t block) {
   const uint32_t len = max_comp_len(pos0, n, ratio);
   if (len == 0) return 0;
-  apply_mask_kernel<<<dim3(blocks_for(len), n), kThreads>>>(score, score_stride, mask, pos0, ratio);
+  apply_mask_kernel<<<dim3(blocks_for(len), n), kThreads>>>(score, score_stride, mask, mask_stride, pos0, ratio,
+                                                            block);
   return launch_ok("apply mask");
 }
 

@@ -15,8 +15,12 @@ measured 235 GB/s DRAM read peak; the routed expert matvecs take ~10 ms at
 160-175 GB/s (IQ1) and 125-145 GB/s (IQ2), against 230-238 GB/s for a plain
 read of the same six DRAM-cold experts.
 
-Prefill, 2048-token batches: ~363 tok/s at depth 0, 330 tok/s at 32K. The
-IQ1_S routed-expert MMQ is the largest prefill cost.
+Prefill, 2048-token batches: ~363 tok/s at depth 0, 349 tok/s at 32K. A
+`rocprofv3` trace of a 2K prefill (6.0 s GPU time, 94% busy): MMQ 64%
+(routed experts 2.72 s at 10-15 TOPS: IQ1_S 1.73 s, IQ2_XXS 0.48 s, IQ1_M
+0.45 s; dense Q5_K/Q8_0 1.10 s near 27 TOPS, against 57 TOPS measured int8
+WMMA), attention 8.8%, Q8_1 activation quantization 5.0%, BF16 matmuls
+4.7%, the MMQ non-finite sanitize pass 2.5%, row gathers 2.1%.
 
 ## Open items
 
@@ -24,7 +28,9 @@ IQ1_S routed-expert MMQ is the largest prefill cost.
 | ---: | --- | --- | --- | --- | --- |
 | 1 | Routed-expert GEMV with wide-load weight tiles | Decode | Hard | Up to ~3 ms/token (~6%) if the experts reach ~210 GB/s | Low |
 | 2 | Launch gaps between decode kernels | Decode | Medium | Up to ~2.7 ms/token | Medium |
-| 3 | IQ1_S routed-expert MMQ | Prefill | Hard | Unmeasured | Low |
+| 3 | Routed-expert MMQ tiles | Prefill | Hard | Up to ~1.4 s per 2K prefill (~20%) at the dense rate | Low |
+| 4 | Prefill glue passes | Prefill | Medium | ~0.3 s per 2K prefill (~5%) | Medium |
+| 5 | Compact KV state at long context | Memory / prefill | Medium | 1M-context batch 576 → 2048 tokens | Medium |
 
 ### 1. Routed-expert GEMV with wide-load weight tiles
 
@@ -77,7 +83,29 @@ of 2K decode:
   synchronous uploads take ~70 µs); a device-side embedding lookup would
   remove most of it.
 
-### 3. IQ1_S routed-expert MMQ
+### 3. Routed-expert MMQ tiles
 
-The vendored MMQ tiles with routed launch bounds from the real expert
-buckets. Not profiled in detail since the bounds change.
+The vendored MMQ (int8 WMMA) with routed launch bounds from the real expert
+buckets. 2048 tokens give each expert ~32 rows, so a 64-row weight tile is
+unpacked from its IQ1/IQ2 codebook for only 32 columns: IQ1_S gate/up runs
+at 14.6 TOPS (19.9 ms per launch), IQ1_M at 9.8, IQ2_XXS at 12, while the
+dense Q5_K tiles reach ~27. Directions: unpack each weight tile once for
+several column tiles of the same expert, or keep IQ1 tiles in a cheaper
+int8 form; see the Qwen 3.8 Flash Next routed GEMM rows in
+`docs/models/qwen3.8-flash-next/EXPERIMENTS.md` for a routed WMMA kernel
+reaching 22-32 TFLOPS on this GPU.
+
+### 4. Prefill glue passes
+
+Per 2K prefill: Q8_1 activation quantization 302 ms over 722 launches, the
+MMQ non-finite sanitize pass 150 ms over 642, routed row gathers 128 ms,
+standalone SwiGLU 65 ms. Folding the sanitize into the quantization or the
+MMQ store, and SwiGLU into the down projection's quantization, removes
+passes over the activations.
+
+### 5. Compact KV state at long context
+
+The compressed KV and index-K rows are stored as FP32 although they hold
+FP8- and FP4-quantized values; at the native 1M context they take ~6 GiB,
+which leaves room for 576-token prefill batches only. Storing them packed
+would restore 2048-token batches at 1M and shrink the cache snapshots.

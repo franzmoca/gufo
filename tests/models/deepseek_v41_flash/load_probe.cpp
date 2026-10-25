@@ -3,6 +3,7 @@
  * reported; otherwise the artifacts are only parsed, validated and bound. */
 #include <glob.h>
 
+#include <algorithm>
 #include <chrono>
 #include <cmath>
 #include <cstdint>
@@ -90,6 +91,7 @@ int main(int argc, char** argv) {
   const char* decode = nullptr;
   const char* out_dir = nullptr;
   int generate = 0;
+  uint32_t context = 0;
   bool score = false;
   bool batch = false;
   bool upload = false;
@@ -104,6 +106,8 @@ int main(int argc, char** argv) {
       upload = true;
     } else if (std::strcmp(argv[i], "--generate") == 0 && i + 1 < argc) {
       generate = std::atoi(argv[++i]);
+    } else if (std::strcmp(argv[i], "--context") == 0 && i + 1 < argc) {
+      context = (uint32_t)std::strtoul(argv[++i], nullptr, 10);
     } else if (std::strcmp(argv[i], "--score") == 0) {
       score = true;
     } else if (std::strcmp(argv[i], "--batch") == 0) {
@@ -125,7 +129,7 @@ int main(int argc, char** argv) {
     std::fprintf(stderr,
                  "usage: %s MODEL-00001-of-N.gguf [--engram FILE] [--upload] "
                  "[--tokenize TEXTS [--rendered]] [--decode IDS [--generate N] "
-                 "[--score] [--batch] [--out DIR]]\n",
+                 "[--score] [--batch] [--context N] [--out DIR]]\n",
                  argv[0]);
     return 2;
   }
@@ -184,7 +188,8 @@ int main(int argc, char** argv) {
         ++p;
     }
     const uint32_t total = (uint32_t)tokens.size() + (uint32_t)generate;
-    ds41_decoder* decoder = ds41_decoder_create(engine, total + 1);
+    ds41_decoder* decoder =
+        ds41_decoder_create(engine, std::max(context, total + 1));
     if (!decoder)
       return 1;
     Report("decoder");
