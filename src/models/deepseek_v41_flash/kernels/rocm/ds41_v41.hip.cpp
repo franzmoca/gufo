@@ -201,14 +201,40 @@ __global__ void rope_tail_kernel(float* x, uint32_t rows, uint32_t row_dim, uint
   p[1] = re * s + im * c;
 }
 
-__global__ void fp8_fake_quant_kernel(float* x, uint32_t blocks) {
+/* Thread per 32-value block: the rope_tail rotation of the block's pairs
+ * when it lies in the rope tail, then the FP8 fake quantization. */
+__global__ void rope_fp8_kernel(float* x, uint32_t blocks, uint32_t row_dim, uint32_t rope_dim,
+                                const float* inv_freq, uint32_t pos0, uint32_t rows_per_pos, uint32_t pos_step,
+                                int inverse) {
   const uint32_t b = blockIdx.x * blockDim.x + threadIdx.x;
   if (b >= blocks) return;
-  float* v = x + (uint64_t)b * 32;
+  const uint32_t per_row = row_dim / 32;
+  const uint32_t row = b / per_row;
+  const uint32_t col = (b % per_row) * 32;
+  float* p = x + (uint64_t)b * 32;
+  float v[32];
+#pragma unroll
+  for (int i = 0; i < 32; i++) v[i] = p[i];
+  if (col >= row_dim - rope_dim) {
+    const uint32_t pos = pos0 + (row / rows_per_pos) * pos_step;
+    const uint32_t pair0 = (col - (row_dim - rope_dim)) / 2;
+#pragma unroll
+    for (int k = 0; k < 16; k++) {
+      const float angle = (float)pos * inv_freq[pair0 + k];
+      const float c = cosf(angle);
+      const float s = inverse ? -sinf(angle) : sinf(angle);
+      const float re = v[2 * k];
+      const float im = v[2 * k + 1];
+      v[2 * k] = re * c - im * s;
+      v[2 * k + 1] = re * s + im * c;
+    }
+  }
   float amax = 0.0f;
+#pragma unroll
   for (int i = 0; i < 32; i++) amax = fmaxf(amax, fabsf(v[i]));
   const float scale = pow2_ceil(fmaxf(amax, 1.0e-4f) / 448.0f);
-  for (int i = 0; i < 32; i++) v[i] = round_e4m3(fminf(fmaxf(v[i] / scale, -448.0f), 448.0f)) * scale;
+#pragma unroll
+  for (int i = 0; i < 32; i++) p[i] = round_e4m3(fminf(fmaxf(v[i] / scale, -448.0f), 448.0f)) * scale;
 }
 
 __global__ void fp4_fake_quant_kernel(float* x, uint32_t blocks, uint32_t block, int e4m3_scale) {
@@ -350,14 +376,40 @@ __global__ void hc_sinkhorn_kernel(const float* all_mixes, const float* scale, c
     for (uint32_t b = 0; b < hc; b++) comb[a * hc + b] = c[a][b];
 }
 
-__global__ void hc_collapse_kernel(const float* h, const float* pre, float* out, uint32_t hc, uint32_t dim) {
-  const uint32_t i = blockIdx.x * blockDim.x + threadIdx.x;
-  if (i >= dim) return;
-  const uint64_t t = blockIdx.y;
-  const float* ht = h + t * hc * dim;
-  float acc = 0.0f;
-  for (uint32_t c = 0; c < hc; c++) acc += pre[t * hc + c] * ht[(uint64_t)c * dim + i];
-  out[t * dim + i] = acc;
+/* Block per token; each thread keeps its kPer collapsed values in registers
+ * between the sum of squares and the scaled store, so every load of a row is
+ * issued up front instead of one per loop iteration. */
+constexpr uint32_t kCollapseThreads = 1024;
+constexpr uint32_t kCollapsePer = 8;
+
+template <uint32_t kHcN>
+__global__ void __launch_bounds__(kCollapseThreads)
+    hc_collapse_norm_kernel(const float* h, const float* pre, const float* weight, float* out, uint32_t dim,
+                            float eps) {
+  const uint64_t t = blockIdx.x;
+  const float* ht = h + t * kHcN * dim;
+  float p[kHcN];
+#pragma unroll
+  for (uint32_t c = 0; c < kHcN; c++) p[c] = pre[t * kHcN + c];
+  float v[kCollapsePer];
+  float ss = 0.0f;
+#pragma unroll
+  for (uint32_t j = 0; j < kCollapsePer; j++) {
+    const uint32_t i = threadIdx.x + j * kCollapseThreads;
+    float acc = 0.0f;
+    if (i < dim) {
+#pragma unroll
+      for (uint32_t c = 0; c < kHcN; c++) acc += p[c] * ht[(uint64_t)c * dim + i];
+    }
+    v[j] = acc;
+    ss += acc * acc;
+  }
+  const float scale = rsqrtf(block_sum(ss) / (float)dim + eps);
+#pragma unroll
+  for (uint32_t j = 0; j < kCollapsePer; j++) {
+    const uint32_t i = threadIdx.x + j * kCollapseThreads;
+    if (i < dim) out[t * dim + i] = weight[i] * (v[j] * scale);
+  }
 }
 
 __global__ void hc_expand_kernel(const float* y, const float* residual, const float* post, const float* comb,
@@ -1084,10 +1136,15 @@ extern "C" int ds41_v41_rope_tail(float* x, uint32_t rows, uint32_t row_dim, uin
   return launch_ok("rope");
 }
 
-extern "C" int ds41_v41_fp8_fake_quant(float* x, uint32_t n) {
-  if (n == 0) return 0;
-  fp8_fake_quant_kernel<<<blocks_for(n / 32), kThreads>>>(x, n / 32);
-  return launch_ok("fp8 quant");
+extern "C" int ds41_v41_rope_fp8(float* x, uint32_t rows, uint32_t row_dim, uint32_t rope_dim,
+                                 const float* inv_freq, uint32_t pos0, uint32_t rows_per_pos, uint32_t pos_step,
+                                 int inverse) {
+  if (row_dim % 32 != 0 || rope_dim % 32 != 0 || rope_dim > row_dim) return 1;
+  if (rows == 0) return 0;
+  const uint32_t blocks = rows * (row_dim / 32);
+  rope_fp8_kernel<<<blocks_for(blocks), kThreads>>>(x, blocks, row_dim, rope_dim, inv_freq, pos0, rows_per_pos,
+                                                    pos_step, inverse);
+  return launch_ok("rope fp8 quant");
 }
 
 extern "C" int ds41_v41_fp4_fake_quant(float* x, uint32_t n, uint32_t block, int e4m3_scale) {
@@ -1114,10 +1171,12 @@ extern "C" int ds41_v41_hc_sinkhorn(const float* mixes, const float* scale, cons
   return launch_ok("hc sinkhorn");
 }
 
-extern "C" int ds41_v41_hc_collapse(const float* h, const float* pre, float* out, uint32_t hc, uint32_t dim,
-                                    uint32_t n) {
-  hc_collapse_kernel<<<dim3(blocks_for(dim), n), kThreads>>>(h, pre, out, hc, dim);
-  return launch_ok("hc collapse");
+extern "C" int ds41_v41_hc_collapse_norm(const float* h, const float* pre, const float* weight, float* out,
+                                         uint32_t hc, uint32_t dim, float eps, uint32_t n) {
+  if (hc != 4 || dim > kCollapseThreads * kCollapsePer) return 1;
+  if (n == 0) return 0;
+  hc_collapse_norm_kernel<4><<<n, kCollapseThreads>>>(h, pre, weight, out, dim, eps);
+  return launch_ok("hc collapse norm");
 }
 
 extern "C" int ds41_v41_hc_expand(const float* y, const float* residual, const float* post, const float* comb,

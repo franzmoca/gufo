@@ -113,4 +113,7 @@ GEMV with an fp64 dot of the dequantized rows, and the IQ routed-expert GEMV
 with the ggml matvec (shared and per-slot inputs, dropped slots write zeros).
 With it the decode path scores perplexity 6.305 on the 3K positions,
 agreement 96.5%, mean |ΔNLL| 0.075; the smoke continuation keeps all 9 greedy
-tokens, KL ≤ 1.6e-3 per step.
+tokens, KL ≤ 1.6e-3 per step. With the hc collapse fused into the following RMSNorm (a different
+summation order) the decode path scores 6.291, agreement 96.0%, mean |ΔNLL|
+0.073, and the batched path 6.324, agreement 95.9%, mean |ΔNLL| 0.078; the
+smoke continuation keeps all 9 greedy tokens, KL ≤ 3.2e-3 per step.

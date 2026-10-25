@@ -46,11 +46,13 @@ int ds41_v41_rms_norm(const float* x, const float* weight, float* out, uint32_t 
 int ds41_v41_rope_tail(float* x, uint32_t rows, uint32_t row_dim, uint32_t rope_dim, const float* inv_freq,
                        uint32_t pos0, uint32_t rows_per_pos, uint32_t pos_step, int inverse);
 
-/* In-place fake quantization (quantize then dequantize) of n values.
- * FP8 E4M3 with a power-of-two scale per 32 values (act_quant, ue8m0).
- * FP4 E2M1 per `block` values with an E4M3 scale (e4m3_scale) or a
- * power-of-two scale. */
-int ds41_v41_fp8_fake_quant(float* x, uint32_t n);
+/* In-place fake quantization (quantize then dequantize). rope_fp8 applies
+ * ds41_v41_rope_tail (same arguments) and then FP8 E4M3 with a power-of-two
+ * scale per 32 values (act_quant, ue8m0); row_dim and rope_dim are multiples
+ * of 32. fp4 quantizes n values as FP4 E2M1 per `block` values with an E4M3
+ * scale (e4m3_scale) or a power-of-two scale. */
+int ds41_v41_rope_fp8(float* x, uint32_t rows, uint32_t row_dim, uint32_t rope_dim, const float* inv_freq,
+                      uint32_t pos0, uint32_t rows_per_pos, uint32_t pos_step, int inverse);
 int ds41_v41_fp4_fake_quant(float* x, uint32_t n, uint32_t block, int e4m3_scale);
 
 /* mHC per token. mixes[t, 24] = (fn . flatten(h[t])) * rsqrt(mean(h[t]^2) + eps). */
@@ -59,8 +61,9 @@ int ds41_v41_hc_mixes(const float* fn, const float* h, float* mixes, uint32_t hc
 /* Split mixes into pre[t, hc], post[t, hc] and Sinkhorn-normalized comb[t, hc*hc]. */
 int ds41_v41_hc_sinkhorn(const float* mixes, const float* scale, const float* base, float* pre, float* post,
                          float* comb, uint32_t hc, uint32_t iters, float eps, uint32_t n);
-/* out[t, i] = sum_c pre[t, c] * h[t, c, i]. */
-int ds41_v41_hc_collapse(const float* h, const float* pre, float* out, uint32_t hc, uint32_t dim, uint32_t n);
+/* x[t, i] = sum_c pre[t, c] * h[t, c, i]; out[t] = weight * RMSNorm(x[t]). */
+int ds41_v41_hc_collapse_norm(const float* h, const float* pre, const float* weight, float* out, uint32_t hc,
+                              uint32_t dim, float eps, uint32_t n);
 /* out[t, b, i] = post[t, b] * y[t, i] + sum_a comb[t, a, b] * residual[t, a, i]. */
 int ds41_v41_hc_expand(const float* y, const float* residual, const float* post, const float* comb, float* out,
                        uint32_t hc, uint32_t dim, uint32_t n);
