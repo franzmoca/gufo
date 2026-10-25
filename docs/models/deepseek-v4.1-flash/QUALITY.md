@@ -173,6 +173,13 @@ with DSpark is token-identical to plain decoding in every probe run (128,
 256 and 384 tokens, both drafters, every draft width) and over HTTP, also
 when the request follows a sampled one and restores from the cache.
 
+Served through the component cache (`cache` functional suite, 32K
+context, 2 sessions, Q2_K/Q4_K drafter) every case passes, and 29 of 33
+replies are byte-identical to the run without a drafter. The other four are
+sampled cancellation cases interrupted after a fixed time: DSpark samples in
+a different order and generates more tokens before the cut, so the partial
+reply and its follow-up differ; each passes its exact-continuation check.
+
 `ds41.attention` checks the drafter's block attention (ring rows with
 wrap-around plus every block row, with sinks) against an fp64 reference
 (≤ 7e-7 relative), the hc mean exactly and the Markov argmax (first index
