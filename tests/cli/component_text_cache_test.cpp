@@ -1390,6 +1390,36 @@ void StagingCountsAgainstRamCeiling() {
   }
   std::filesystem::remove_all(directory);
 }
+// On a host with less free RAM than twice the reserve, the headroom ceiling
+// falls below the automatic budget (half the available RAM). The automatic
+// budget still applies, as for whole-state snapshots; an explicit limit keeps
+// the reserve.
+void AutomaticBudgetIgnoresHeadroomCeiling() {
+  class LowHostRunner final : public Runner {
+  public:
+    mutable std::size_t committed{};
+    TextRunnerResourceClaim ResourceClaim() const override {
+      auto claim = Runner::ResourceClaim();
+      claim.retained_snapshot_capacity_bytes = 2 << 20;
+      claim.retained_snapshot_ceiling_bytes = 1 << 20;
+      return claim;
+    }
+    std::unique_ptr<ComponentCacheResources> CreateComponentCacheResources(
+        cache::ResourceLedger& ledger, std::size_t ram) const override {
+      auto resources = Runner::CreateComponentCacheResources(ledger, ram);
+      resources->commit_backing = [this](std::size_t budget) {
+        committed = budget;
+      };
+      return resources;
+    }
+  };
+  for (const auto& [requested, backing] :
+       {std::pair{0ULL, 2ULL << 20}, std::pair{4ULL << 20, 1ULL << 20}}) {
+    auto runner = std::make_shared<LowHostRunner>();
+    TextRunnerPool pool(runner, 1, {}, {.capacity_bytes = requested});
+    assert(runner->committed == backing);
+  }
+}
 // Slots that pin host memory lower both measured budgets and are charged in
 // the ledger. They count once, on top of the cache's budget: backing gets the
 // whole budget unless the host ceiling binds.
@@ -2192,6 +2222,7 @@ int main() {
   OrphansLeaveBeforeCheckpoints();
   StagingIsInternal();
   StagingCountsAgainstRamCeiling();
+  AutomaticBudgetIgnoresHeadroomCeiling();
   PinnedSlotBytesCountOnce();
   UnpinnedRunnersKeepTheirLimit();
   DiskDirectoryHasOneOwner();

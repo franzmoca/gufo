@@ -325,6 +325,8 @@ bool linear_raw(uint32_t type, const void* p, uint32_t rows, uint32_t k, const f
     return ds41_v41_matmul_bf16((const uint16_t*)p, x, out, rows, k, n) == 0;
   case DS41_TENSOR_F32:
     return ds41_v41_matmul_f32((const float*)p, x, out, rows, k, n) == 0;
+  case DS41_TENSOR_F16:
+    return ds41_v41_matmul_f16((const uint16_t*)p, x, out, rows, k, n) == 0;
   default:
     /* Up to eight tokens: FP32 activations, no Q8_1 pass, each weight read once. */
     if (n <= DS41_V41_GEMV_MAX_TOKENS && gemv_type(type))

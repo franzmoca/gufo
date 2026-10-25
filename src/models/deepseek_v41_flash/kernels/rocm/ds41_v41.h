@@ -18,6 +18,8 @@ extern "C" {
 
 /* out[t, r] = sum_k W[r, k] * x[t, k]; W is row-major BF16 or F32. */
 int ds41_v41_matmul_bf16(const uint16_t* w, const float* x, float* out, uint32_t rows, uint32_t k, uint32_t n);
+/* F16 weights, the same per-row sums as F32 weights (the conversion is exact). */
+int ds41_v41_matmul_f16(const uint16_t* w, const float* x, float* out, uint32_t rows, uint32_t k, uint32_t n);
 int ds41_v41_matmul_f32(const float* w, const float* x, float* out, uint32_t rows, uint32_t k, uint32_t n);
 
 /* Decode projections y[c, r] = W[r] . x_c for Q5_K (13) or Q8_0 (8) W
@@ -236,8 +238,9 @@ int ds41_v41_dspark_attention(const float* q, const float* ring, uint32_t first,
                               uint32_t head_dim, float scale);
 /* out[t * out_stride + i] = mean over the hc streams of h[t, :, i]. */
 int ds41_v41_hc_mean(const float* h, float* out, uint64_t out_stride, uint32_t hc, uint32_t dim, uint32_t n);
-/* out[0:rank] = row tokens[index] of an F32 (bf16 0) or BF16 table. */
-int ds41_v41_gather_row(const void* table, int bf16, const int32_t* tokens, uint32_t index, float* out,
+enum { DS41_V41_ROW_F32, DS41_V41_ROW_BF16, DS41_V41_ROW_F16 };
+/* out[0:rank] = row tokens[index] of an F32, BF16 or F16 table (DS41_V41_ROW_*). */
+int ds41_v41_gather_row(const void* table, int format, const int32_t* tokens, uint32_t index, float* out,
                         uint32_t rank);
 /* tokens[index] = the first index of the largest finite x[v] + bias[v]
  * (bias may be NULL), or -1 when none is finite. */

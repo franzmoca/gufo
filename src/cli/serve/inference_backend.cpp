@@ -976,17 +976,62 @@ private:
   mutable bool probe_pending_{false};
 };
 
+// Admits component-cache backing segments. Pinned host pages come out of
+// the device heap that session and scratch allocations draw on; growth stops
+// when a segment would leave less than kCacheBackingReserve there, or more
+// than half the available host RAM (the automatic budget's rule) and more
+// than the explicit-limit ceiling. Pressure retries ask once per capture;
+// refusals are rechecked at most once a second.
+std::function<bool(std::size_t)> CacheBackingGrowthGate() {
+  struct Limited {
+    std::mutex mutex;
+    std::chrono::steady_clock::time_point refused;
+    bool active{};
+  };
+  return [limited = std::make_shared<Limited>()](std::size_t bytes) {
+    const std::lock_guard lock(limited->mutex);
+    const auto now = std::chrono::steady_clock::now();
+    if (limited->active && now - limited->refused < std::chrono::seconds(1))
+      return false;
+    const auto ceiling =
+        std::max(HostSnapshotCeilingBytes(), HostSnapshotBudgetBytes());
+    std::size_t heap_free = 0, heap_total = 0;
+    const bool heap_fits =
+        hipMemGetInfo(&heap_free, &heap_total) == hipSuccess &&
+        hip::HeapFitsAboveReserve(heap_free, bytes, hip::kCacheBackingReserve);
+    if (ceiling >= bytes && heap_fits) {
+      limited->active = false;
+      return true;
+    }
+    if (!limited->active)
+      Logger::Warn("cache",
+                   "schema=component-cache-v1 event=backing_limited reason=" +
+                       std::string(heap_fits ? "host_reserve "
+                                             : "device_heap_reserve ") +
+                       "segment_bytes=" + std::to_string(bytes) +
+                       " host_headroom_bytes=" + std::to_string(ceiling) +
+                       " device_heap_free_bytes=" + std::to_string(heap_free));
+    limited->active = true;
+    limited->refused = now;
+    return false;
+  };
+}
+
+// `streams` bounds concurrent transfers; each HIP stream keeps about 9 MiB
+// of host memory resident.
 template<typename AdapterType>
 std::unique_ptr<ComponentCacheResources> CreateHipComponentCacheResources(
-    std::unique_ptr<AdapterType> adapter, cache::ResourceLedger& ledger) {
+    std::unique_ptr<AdapterType> adapter, cache::ResourceLedger& ledger,
+    std::size_t streams = 64) {
   struct Backing {
-    hip::TransferPool streams{64};
+    explicit Backing(std::size_t count) : streams(count) {}
+    hip::TransferPool streams;
     std::unique_ptr<hip::CommittedBackingPool> pool;
     std::map<std::uint32_t, std::size_t> component_classes;
   };
   auto result = std::make_unique<ComponentCacheResources>();
   result->adapter = std::move(adapter);
-  auto backing = std::make_shared<Backing>();
+  auto backing = std::make_shared<Backing>(streams);
   result->transfer_batch_size = 16;
   const auto rounded = [](std::size_t bytes) {
     return (bytes + 4095) / 4096 * 4096;
@@ -1009,7 +1054,7 @@ std::unique_ptr<ComponentCacheResources> CreateHipComponentCacheResources(
     // so segments of about 128 MiB bound registration pauses and stranded
     // edge space, fitting at least two of the largest payloads. Prefill
     // chunks prepare backing before GPU work, after any fallback capture.
-    // Growth stops when the host keeps less than its reserve.
+    // CacheBackingGrowthGate admits each segment.
     std::size_t largest = 0;
     for (const auto& [id, bytes] : backing->component_classes)
       largest = std::max(largest, bytes);
@@ -1019,51 +1064,12 @@ std::unique_ptr<ComponentCacheResources> CreateHipComponentCacheResources(
     const auto parts =
         std::max<std::size_t>((allocation.blocks + target - 1) / target, 1);
     const auto segment = (allocation.blocks + parts - 1) / parts * block;
-    struct Limited {
-      std::mutex mutex;
-      std::chrono::steady_clock::time_point refused;
-      bool active{};
-    };
     backing->pool = std::make_unique<hip::CommittedBackingPool>(
-        ledger,
-        hip::BackingPoolConfig{
-            allocation.blocks * allocation.block_bytes +
-                allocation.metadata_bytes,
-            allocation.block_bytes, allocation.metadata_bytes, segment,
-            [limited = std::make_shared<Limited>()](std::size_t bytes) {
-              const std::lock_guard lock(limited->mutex);
-              const auto now = std::chrono::steady_clock::now();
-              // Pressure retries ask once per capture; recheck at most
-              // once a second while the host is short.
-              if (limited->active &&
-                  now - limited->refused < std::chrono::seconds(1))
-                return false;
-              const auto ceiling = HostSnapshotCeilingBytes();
-              // Pinned host pages come out of the same device heap that
-              // session and scratch allocations draw on; keep its dispatch
-              // reserve so they do not fall back to managed memory.
-              std::size_t heap_free = 0, heap_total = 0;
-              const bool heap_fits =
-                  hipMemGetInfo(&heap_free, &heap_total) == hipSuccess &&
-                  hip::HeapFitsAboveReserve(heap_free, bytes);
-              if (ceiling >= bytes && heap_fits) {
-                limited->active = false;
-                return true;
-              }
-              if (!limited->active)
-                Logger::Warn(
-                    "cache",
-                    "schema=component-cache-v1 "
-                    "event=backing_limited reason=" +
-                        std::string(heap_fits ? "host_reserve "
-                                              : "device_heap_reserve ") +
-                        "segment_bytes=" + std::to_string(bytes) +
-                        " host_headroom_bytes=" + std::to_string(ceiling) +
-                        " device_heap_free_bytes=" + std::to_string(heap_free));
-              limited->active = true;
-              limited->refused = now;
-              return false;
-            }});
+        ledger, hip::BackingPoolConfig{
+                    allocation.blocks * allocation.block_bytes +
+                        allocation.metadata_bytes,
+                    allocation.block_bytes, allocation.metadata_bytes, segment,
+                    CacheBackingGrowthGate()});
     // Prepare a bounded reserve before readiness. The first shared-prefix
     // capture needs more than one segment; preparing 2 GiB avoids moving
     // registration onto that request's capture or decode path.
@@ -1763,6 +1769,11 @@ const DeepSeekTextRunnerState<Ds>& RequireDeepSeekState(
   return *deepseek;
 }
 
+// Transfer streams of the DeepSeek component cache: one capture or restore
+// batch (16 transfers) runs at once. 64 streams kept ~0.4 GiB more host
+// memory resident, which DeepSeek V4.1 with a DSpark drafter does not have.
+constexpr std::size_t kDeepSeekCacheStreams = 16;
+
 template<class Ds>
 class DeepSeekTextRunner final : public HipTextModelRunner {
 public:
@@ -1803,7 +1814,7 @@ public:
   }
 
   [[nodiscard]] bool UsesComponentCache() const override {
-    return Ds::kComponentCache && !use_dspark_;
+    return Ds::kComponentCache;
   }
   [[nodiscard]] std::unique_ptr<ComponentCacheResources>
   CreateComponentCacheResources(cache::ResourceLedger& ledger,
@@ -1812,8 +1823,8 @@ public:
       (void)ram;
       return CreateHipComponentCacheResources(
           std::make_unique<typename Ds::ContinuationAdapter>(
-              model_, max_context_, component_identity_),
-          ledger);
+              model_, max_context_, component_identity_, use_dspark_),
+          ledger, kDeepSeekCacheStreams);
     } else {
       return TextModelRunner::CreateComponentCacheResources(ledger, ram);
     }
@@ -3223,45 +3234,12 @@ std::unique_ptr<ComponentCacheResources> CreateGemma4ComponentResources(
     const auto parts =
         std::max<std::size_t>((allocation.blocks + target - 1) / target, 1);
     const auto segment = (allocation.blocks + parts - 1) / parts * block;
-    struct Limited {
-      std::mutex mutex;
-      std::chrono::steady_clock::time_point refused;
-      bool active{};
-    };
     backing->pool = std::make_unique<hip::CommittedBackingPool>(
-        ledger,
-        hip::BackingPoolConfig{
-            allocation.blocks * allocation.block_bytes +
-                allocation.metadata_bytes,
-            allocation.block_bytes, allocation.metadata_bytes, segment,
-            [limited = std::make_shared<Limited>()](std::size_t bytes) {
-              const std::lock_guard lock(limited->mutex);
-              const auto now = std::chrono::steady_clock::now();
-              if (limited->active &&
-                  now - limited->refused < std::chrono::seconds(1))
-                return false;
-              const auto ceiling = HostSnapshotCeilingBytes();
-              std::size_t heap_free = 0, heap_total = 0;
-              const bool heap_fits =
-                  hipMemGetInfo(&heap_free, &heap_total) == hipSuccess &&
-                  hip::HeapFitsAboveReserve(heap_free, bytes);
-              if (ceiling >= bytes && heap_fits) {
-                limited->active = false;
-                return true;
-              }
-              if (!limited->active)
-                Logger::Warn(
-                    "cache",
-                    "schema=component-cache-v1 event=backing_limited reason=" +
-                        std::string(heap_fits ? "host_reserve "
-                                              : "device_heap_reserve ") +
-                        "segment_bytes=" + std::to_string(bytes) +
-                        " host_headroom_bytes=" + std::to_string(ceiling) +
-                        " device_heap_free_bytes=" + std::to_string(heap_free));
-              limited->active = true;
-              limited->refused = now;
-              return false;
-            }});
+        ledger, hip::BackingPoolConfig{
+                    allocation.blocks * allocation.block_bytes +
+                        allocation.metadata_bytes,
+                    allocation.block_bytes, allocation.metadata_bytes, segment,
+                    CacheBackingGrowthGate()});
     backing->pool->GrowAhead(2ULL << 30);
     backing->pool->WaitForGrowth();
     Logger::Info(

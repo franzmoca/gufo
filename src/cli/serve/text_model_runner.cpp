@@ -642,8 +642,15 @@ struct TextRunnerPool::Impl {
       const auto resources = validated.runner->ResourceClaim();
       const auto automatic =
           resources.retained_snapshot_capacity_bytes.value_or(0);
+      // An automatic budget is not capped by the headroom ceiling, as for
+      // whole-state snapshots; explicit limits keep the host reserve.
       const auto ceiling =
-          resources.retained_snapshot_ceiling_bytes.value_or(automatic);
+          ram_cache_options.capacity_bytes
+              ? resources.retained_snapshot_ceiling_bytes.value_or(automatic)
+              : std::max(resources.retained_snapshot_ceiling_bytes.value_or(
+                             automatic),
+                         std::min(TextRunnerRamCacheOptions::kAutomaticMaxBytes,
+                                  automatic));
       const auto requested =
           ram_cache_options.capacity_bytes
               ? ram_cache_options.capacity_bytes

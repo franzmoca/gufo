@@ -72,6 +72,10 @@ ds41_dspark_state* ds41_dspark_state_create(ds41_engine* engine, ds41_decoder* d
 void ds41_dspark_state_destroy(ds41_dspark_state* s);
 void ds41_dspark_state_reset(ds41_dspark_state* s, uint32_t pos);
 uint32_t ds41_dspark_state_end(const ds41_dspark_state* s);
+/* The device rings ([stage][128][head_dim] floats) and their positions. */
+float* ds41_dspark_state_ring(ds41_dspark_state* s, uint64_t* bytes);
+void ds41_dspark_state_range(const ds41_dspark_state* s, uint32_t* start, uint32_t* end);
+bool ds41_dspark_state_set_range(ds41_dspark_state* s, uint32_t start, uint32_t end);
 /* Appends the main KV rows of the decoder's captured features of positions
  * [pos0, pos0 + rows); rows that do not continue the ring restart it. */
 bool ds41_dspark_inject(ds41_dspark_state* s, uint32_t pos0, uint32_t rows);
