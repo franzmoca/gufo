@@ -15,8 +15,9 @@ measured 235 GB/s DRAM read peak; the routed expert matvecs take ~10 ms at
 160-175 GB/s (IQ1) and 125-145 GB/s (IQ2), against 230-238 GB/s for a plain
 read of the same six DRAM-cold experts.
 
-Prefill, 2048-token batches: ~394 tok/s at depth 0, 362 tok/s at 32K. A
-`rocprofv3` trace of a 2K prefill (6.0 s GPU time, 94% busy): MMQ 64%
+Prefill, 2048-token batches: ~420 tok/s at depth 0, 379 tok/s at 32K. A
+`rocprofv3` trace of a 2K prefill before the prefill changes of 2026-10-25
+(6.0 s GPU time, 94% busy): MMQ 64%
 (routed experts 2.72 s at 10-15 TOPS: IQ1_S 1.73 s, IQ2_XXS 0.48 s, IQ1_M
 0.45 s; dense Q5_K/Q8_0 1.10 s near 27 TOPS, against 57 TOPS measured int8
 WMMA), attention 8.8%, Q8_1 activation quantization 5.0%, BF16 matmuls
@@ -28,7 +29,7 @@ WMMA), attention 8.8%, Q8_1 activation quantization 5.0%, BF16 matmuls
 | ---: | --- | --- | --- | --- | --- |
 | 1 | Routed-expert GEMV with wide-load weight tiles | Decode | Hard | Up to ~3 ms/token (~6%) if the experts reach ~210 GB/s | Low |
 | 2 | Launch gaps between decode kernels | Decode | Medium | Up to ~2.7 ms/token | Medium |
-| 3 | Routed-expert MMQ tiles | Prefill | Hard | Up to ~1.4 s per 2K prefill (~20%) at the dense rate | Low |
+| 3 | Routed-expert MMQ unpack and rate | Prefill | Hard | Up to ~1 s per 2K prefill at the dense rate | Low |
 | 4 | Q8_1 quantization in the producing kernels | Prefill | Medium | ~0.2 s per 2K prefill (~3%) | Low |
 | 5 | FP4-packed KV state | Memory | Medium | ~2.2 GiB more free at 1M context | Medium |
 
@@ -85,17 +86,14 @@ of 2K decode:
 
 ### 3. Routed-expert MMQ tiles
 
-The vendored MMQ (int8 WMMA) with routed launch bounds from the real expert
-buckets. 2048 tokens give each expert ~32 rows, so a 64-row weight tile is
-unpacked from its IQ1/IQ2 codebook for only 32 columns: IQ1_S gate/up runs
-at 14.6 TOPS (19.9 ms per launch), IQ1_M at 9.8, IQ2_XXS at 12, while the
-dense Q5_K tiles reach ~27. Measured since: a 32-column tile is 67% full
-at 2048 tokens and its fixed weight-panel unpack costs about 40% of the
-tile; neither wider batches (4096 tokens: −10-20% per token) nor a fixed
-16/48/64 width help (see EXPERIMENTS.md). Directions: a tile width per
-expert within one launch (16 columns for small buckets, 64 for the
-largest), or a cheaper IQ1 unpack (int8 codebook rows in LDS); see the Qwen
-3.8 Flash Next routed GEMM rows in
+The vendored MMQ (int8 WMMA) with routed launch bounds and, since the last
+change, a tile width per expert (16, 32 or 64 columns by bucket size, one
+launch per width). Before it, a 32-column tile was 67% full at 2048 tokens
+and its weight-panel unpack cost about 40% of the tile; wider batches and
+fixed widths did not help (see EXPERIMENTS.md). Left: the unpack itself (a
+cheaper IQ1 path, e.g. int8 codebook rows in LDS) and the kernel rate,
+~21 TOPS on issued columns against ~27 for the dense tiles and 57 measured
+int8 WMMA; see the Qwen 3.8 Flash Next routed GEMM rows in
 `docs/models/qwen3.8-flash-next/EXPERIMENTS.md` for a routed WMMA kernel
 reaching 22-32 TFLOPS on this GPU.
 

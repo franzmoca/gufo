@@ -32,6 +32,12 @@ static void  *g_aligned_q81_scratch_ptr = nullptr;
 static size_t g_aligned_q81_scratch_bytes = 0;
 static int    g_routed_max_expert_rows = 0;
 static int    g_routed_tile_cols = 0;
+/* ds41: per-expert tile-width classes, see ds41_mmq_set_routed_classes. */
+constexpr int kRoutedClassesMax = 4;
+static const uint8_t *g_routed_class_dev = nullptr;
+static int    g_routed_class_count = 0;
+static int    g_routed_class_width[kRoutedClassesMax] = {};
+static int    g_routed_class_rows[kRoutedClassesMax] = {};
 
 struct ds41_hip_persistent_scratch {
     void *ptr = nullptr;
@@ -90,6 +96,35 @@ extern "C" void ds41_mmq_set_routed_tile_cols(int cols) {
     g_routed_tile_cols = cols > 0 ? cols : 0;
 }
 
+extern "C" void ds41_mmq_set_routed_classes(const uint8_t *expert_class, int count, const int *widths,
+                                            const int *max_rows) {
+    const bool on = expert_class && widths && max_rows && count > 0 && count <= kRoutedClassesMax;
+    g_routed_class_dev = on ? expert_class : nullptr;
+    g_routed_class_count = on ? count : 0;
+    for (int i = 0; i < g_routed_class_count; i++) {
+        g_routed_class_width[i] = widths[i];
+        g_routed_class_rows[i] = max_rows[i];
+    }
+}
+
+/* Routed launches: one per tile-width class over its experts when the caller
+ * set classes, otherwise one launch over every expert. */
+template <ggml_type type>
+static void ds41_mmq_routed_case(ds41_ggml_hip_context &ctx, mmq_args args, hipStream_t stream) {
+    if (g_routed_class_count == 0 || !args.ids_dst || args.use_stream_k) {
+        mul_mat_q_case<type>(ctx, args, stream);
+        return;
+    }
+    for (int i = 0; i < g_routed_class_count; i++) {
+        if (g_routed_class_rows[i] <= 0) continue;
+        args.expert_class = g_routed_class_dev;
+        args.expert_class_id = i;
+        args.mmq_x_request = g_routed_class_width[i];
+        args.ncols_grid_max = g_routed_class_rows[i];
+        mul_mat_q_case<type>(ctx, args, stream);
+    }
+}
+
 extern "C" int ds41_mmq_routed_tile_cols_for_counts(
         const unsigned int *counts, int n_experts) {
     /* Pick the column-tile width that minimizes what the routed gate/up pass
@@ -130,6 +165,41 @@ extern "C" int ds41_mmq_routed_tile_cols_for_counts(
         }
     }
     return best_cols;
+}
+
+extern "C" int ds41_mmq_routed_classes_for_counts(const unsigned int *counts, int n_experts,
+                                                  uint8_t *expert_class, int *widths, int *max_rows) {
+    /* ds41: a tile width per expert instead of one per launch. Expert e with
+     * c_e rows costs ceil(c_e / w) tiles of (w + kPanel) column-equivalents,
+     * kPanel pricing the per-tile weight-panel unpack. Fitted on V4.1 Flash
+     * (IQ1_S/IQ1_M/IQ2_XXS experts, 2048-token batches): forced widths of 16,
+     * 32, 48 and 64 gave tile cost ~ 2.6e-6 s per column plus 5.4e-5 s per
+     * tile summed over a layer's three projections, i.e. kPanel ~ 21. 48 is
+     * left out: it measured slower than that line. Adding 128-column tiles
+     * or moving kPanel within 14-28 measured within noise. */
+    constexpr int kN = 3;
+    constexpr int kWidths[kN] = {16, 32, 64};
+    constexpr int kPanel = 21;
+    if (!counts || !expert_class || !widths || !max_rows || n_experts <= 0) return 0;
+    for (int i = 0; i < kN; i++) {
+        widths[i] = kWidths[i];
+        max_rows[i] = 0;
+    }
+    for (int e = 0; e < n_experts; e++) {
+        const long long c = counts[e];
+        int best = 0;
+        long long best_cost = -1;
+        for (int i = 0; i < kN; i++) {
+            const long long cost = (c + kWidths[i] - 1) / kWidths[i] * (kWidths[i] + kPanel);
+            if (best_cost < 0 || cost < best_cost) {
+                best = i;
+                best_cost = cost;
+            }
+        }
+        expert_class[e] = (uint8_t)best;
+        if ((int)c > max_rows[best]) max_rows[best] = (int)c;
+    }
+    return kN;
 }
 
 // M2-Inc2a: registry of producer-emitted q8_1 activations (ds41_cuda.cu).
@@ -991,7 +1061,7 @@ int ds41_mmq_moe_impl(
     args.ncols_grid_max = g_routed_max_expert_rows;
     args.mmq_x_request = g_routed_tile_cols;
 
-    mul_mat_q_case<type>(*ctx, args, stream);
+    ds41_mmq_routed_case<type>(*ctx, args, stream);
 
     err = hipGetLastError();
     if (err != hipSuccess) {
@@ -1486,7 +1556,7 @@ int ds41_mmq_moe_pair_impl(
     args.mmq_x_request = g_routed_tile_cols;
 
     {
-      mul_mat_q_case<type>(*ctx, args, stream);
+      ds41_mmq_routed_case<type>(*ctx, args, stream);
       err = hipGetLastError();
       if (err != hipSuccess) {
         fprintf(stderr, "%s: mul_mat_q_case (pair a) launch failed: %s\n", tag,
@@ -1507,7 +1577,7 @@ int ds41_mmq_moe_pair_impl(
         args.epilogue_clamp = swiglu_epilogue->clamp;
     }
     {
-      mul_mat_q_case<type>(*ctx, args, stream);
+      ds41_mmq_routed_case<type>(*ctx, args, stream);
       err = hipGetLastError();
       if (err != hipSuccess) {
         fprintf(stderr, "%s: mul_mat_q_case (pair b) launch failed: %s\n", tag,

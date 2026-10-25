@@ -54,6 +54,19 @@ void ds41_mmq_set_routed_max_expert_rows(int rows);
 // Purely a tiling choice: each output element still walks K once in the same
 // order, so results are unchanged.
 void ds41_mmq_set_routed_tile_cols(int cols);
+// V4.1: a tile width per expert. expert_class (device, one byte per expert)
+// assigns each expert one of `count` classes; routed launches then run once
+// per class with widths[i] columns, over experts of class i only, bounded by
+// max_rows[i] (classes with max_rows[i] == 0 are skipped). count 0 or a null
+// pointer turns it off. The host arrays are copied. Tile widths change the
+// matrix-core accumulation split, so outputs may differ in the last ulp.
+void ds41_mmq_set_routed_classes(const uint8_t * expert_class, int count,
+                                 const int * widths, const int * max_rows);
+// Fills expert_class[n_experts] (host), widths[3] and max_rows[3] from the
+// per-expert row counts; returns the class count (3), 0 on bad input.
+int ds41_mmq_routed_classes_for_counts(const unsigned int * counts, int n_experts,
+                                       uint8_t * expert_class, int * widths,
+                                       int * max_rows);
 
 // The width the model above picks for one per-expert assignment-count array.
 // Returns 0 when the counts are unusable, which the setter treats as "default".

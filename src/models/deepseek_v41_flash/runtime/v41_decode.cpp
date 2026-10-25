@@ -209,6 +209,7 @@ struct ds41_decoder {
   float *o = nullptr, *o_group = nullptr, *oa_group = nullptr, *oa = nullptr, *attn_out = nullptr;
   float *router = nullptr, *route_w = nullptr;
   int32_t* route_ids = nullptr;
+  uint8_t* expert_class = nullptr;  // routed tile-width class per expert
   float *g6 = nullptr, *u6 = nullptr, *mid6 = nullptr, *down6 = nullptr;
   float *sg = nullptr, *su = nullptr, *sm = nullptr, *sd = nullptr;
   float *engram_in = nullptr, *engram_kv = nullptr, *logits = nullptr;
@@ -598,6 +599,7 @@ bool moe(ds41_decoder* d, uint32_t il, uint32_t n) {
     ~RoutedBounds() {
       ds41_mmq_set_routed_max_expert_rows(0);
       ds41_mmq_set_routed_tile_cols(0);
+      ds41_mmq_set_routed_classes(nullptr, 0, nullptr, nullptr);
     }
   } routed_bounds;
   if (n > 1) {
@@ -610,6 +612,15 @@ bool moe(ds41_decoder* d, uint32_t il, uint32_t n) {
       if (e >= 0 && e < (int32_t)DS41_N_EXPERT) most = std::max(most, ++counts[(size_t)e]);
     ds41_mmq_set_routed_max_expert_rows((int)most);
     ds41_mmq_set_routed_tile_cols(ds41_mmq_routed_tile_cols_for_counts(counts.data(), DS41_N_EXPERT));
+    /* Each expert's tiles take the width that suits its bucket (16 to 64 columns). */
+    uint8_t classes[DS41_N_EXPERT];
+    int widths[3], class_rows[3];
+    const int n_classes =
+        ds41_mmq_routed_classes_for_counts(counts.data(), DS41_N_EXPERT, classes, widths, class_rows);
+    if (n_classes > 0) {
+      if (hipMemcpy(d->expert_class, classes, sizeof(classes), hipMemcpyHostToDevice) != hipSuccess) return false;
+      ds41_mmq_set_routed_classes(d->expert_class, n_classes, widths, class_rows);
+    }
   }
   /* Single tokens take gate, up and SwiGLU in one pass when gate and up share
    * a type (IQ2_XXS too: the pair runs as fast as two mmvq launches). */
@@ -806,7 +817,8 @@ ds41_decoder* ds41_decoder_create(ds41_engine* engine, uint32_t context) {
     d->topk = alloc<uint32_t>(d, cap * DS41_N_INDEXER_TOP_K);
     d->block_select = alloc<uint32_t>(d, (uint64_t)d->score_rows * DS41_CANDIDATE_TOPK_BLOCKS);
     d->route_ids = alloc<int32_t>(d, cap * DS41_N_EXPERT_USED);
-    ok = d->candidates && d->topk && d->block_select && d->route_ids;
+    d->expert_class = alloc<uint8_t>(d, DS41_N_EXPERT);
+    ok = d->candidates && d->topk && d->block_select && d->route_ids && d->expert_class;
   }
   if (!ok) {
     fprintf(stderr, "ds41: decoder allocation failed\n");

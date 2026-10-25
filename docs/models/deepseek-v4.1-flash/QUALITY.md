@@ -124,4 +124,7 @@ summation order) the decode path scores 6.291, agreement 96.0%, mean |ΔNLL|
 0.073, and the batched path 6.324, agreement 95.9%, mean |ΔNLL| 0.078; the
 smoke continuation keeps all 9 greedy tokens, KL ≤ 3.2e-3 per step. With batched routed gate/up stored
 through the SwiGLU epilogue of one MMQ pair (one-ulp SwiGLU differences) the
-batched path scores 6.300, agreement 96.1%, mean |ΔNLL| 0.081.
+batched path scores 6.300, agreement 96.1%, mean |ΔNLL| 0.081. With a routed tile width per expert (rounding-level
+differences in the expert projections) the batched 3K run scores 6.307,
+agreement 95.5%, and the batched 18.5K run 6.277, agreement 95.9% (oracle
+6.267).

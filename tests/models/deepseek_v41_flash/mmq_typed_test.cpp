@@ -404,6 +404,65 @@ bool MoeSwigluCase(const TypeCase& t, int M, int K, int n_tokens, int n_experts,
   return eg == 0.0 && e < 1e-6;
 }
 
+/* Routed launches split into per-expert tile-width classes against one
+ * launch: same rows, rounding-level differences at most. Buckets from 1 to
+ * ~150 rows so every class runs. */
+bool MoeClassCase(const TypeCase& t, int M, int K, int n_tokens, int n_experts,
+                  int used, std::mt19937& rng) {
+  const auto w = RandomBlocks(
+      t, static_cast<std::size_t>(n_experts) * M * K / t.block_values, rng);
+  std::normal_distribution<float> normal;
+  std::vector<float> x(static_cast<std::size_t>(n_tokens) * K);
+  for (auto& v : x)
+    v = normal(rng);
+  std::vector<int32_t> ids(static_cast<std::size_t>(n_tokens) * used);
+  std::vector<unsigned int> counts(n_experts, 0u);
+  unsigned int most = 0;
+  for (int token = 0; token < n_tokens; ++token)
+    for (int s = 0; s < used; ++s) {
+      // Six experts take ~150 rows (64-column tiles), thirty ~30 rows
+      // (32 columns) and the rest a few rows each (16 columns).
+      const int e = token % 4 == 0   ? s * 5
+                    : token % 4 == 1 ? 40 + (token / 4) % 5 * 6 + s
+                                     : 80 + (token * 7 + s * 13) % 300;
+      ids[token * used + s] = e;
+      most = std::max(most, ++counts[e]);
+    }
+  auto* dw = Device(w);
+  auto* dx = Device(x);
+  auto* dids = Device(ids);
+  const std::size_t n_out = static_cast<std::size_t>(M) * n_tokens * used;
+  float *one = nullptr, *split = nullptr;
+  (void)hipMalloc(&one, sizeof(float) * n_out);
+  (void)hipMalloc(&split, sizeof(float) * n_out);
+  (void)hipMemset(split, 0xff, sizeof(float) * n_out);
+  std::vector<uint8_t> classes(n_experts);
+  int widths[3], rows[3];
+  const int n_classes = ds41_mmq_routed_classes_for_counts(
+      counts.data(), n_experts, classes.data(), widths, rows);
+  auto* dclasses = Device(classes);
+  ds41_mmq_set_routed_max_expert_rows(static_cast<int>(most));
+  bool ok = ds41_mmq_moe_typed(t.type, dw, dx, dids, one, M, K, n_tokens,
+                               n_experts, used, 0) == 0;
+  ds41_mmq_set_routed_classes(dclasses, n_classes, widths, rows);
+  ok = ok && ds41_mmq_moe_typed(t.type, dw, dx, dids, split, M, K, n_tokens,
+                                n_experts, used, 0) == 0;
+  ds41_mmq_set_routed_classes(nullptr, 0, nullptr, nullptr);
+  ds41_mmq_set_routed_max_expert_rows(0);
+  const double e =
+      ok ? RelativeError(Host(split, n_out), Host(one, n_out)) : INFINITY;
+  std::printf(
+      "moe classes %-8s M=%d K=%d tokens=%d rows/class %d/%d/%d "
+      "rel_err=%.2e\n",
+      t.name, M, K, n_tokens, rows[0], rows[1], rows[2], e);
+  for (void* p : {static_cast<void*>(dw), static_cast<void*>(dx),
+                  static_cast<void*>(dids), static_cast<void*>(dclasses),
+                  static_cast<void*>(one), static_cast<void*>(split)})
+    (void)hipFree(p);
+  return n_classes == 3 && rows[0] > 0 && rows[1] > 0 && rows[2] > 0 &&
+         e < 1e-6;
+}
+
 /* Routed-expert GEMV against the ggml matvec (Q8_1 activations, so the
  * agreement is at that rounding, ~5e-3): one shared input (gate/up) or one
  * input per slot (down), with a dropped slot (id -1) that must write 0. */
@@ -560,6 +619,7 @@ int main() {
       ok = MoeCase(t, 256, 1024, 200, 384, 6, bounded, rng) && ok;
     }
     ok = MoeSwigluCase(t, 256, 1024, 200, 384, 6, rng) && ok;
+    ok = MoeClassCase(t, 256, 1024, 600, 384, 6, rng) && ok;
   }
   ds41_mmq_cleanup();
   std::printf("%s\n", ok ? "PASS" : "FAIL");

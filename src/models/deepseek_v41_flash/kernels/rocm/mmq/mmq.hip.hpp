@@ -3607,7 +3607,8 @@ static __global__ void mul_mat_q(
         const uint3 ntx, const char * __restrict__ x_soa, const int64_t soa_blocks,
         const float * __restrict__ epilogue_gate, const float * __restrict__ epilogue_weights,
         float * __restrict__ epilogue_mid, half * __restrict__ epilogue_mid_h,
-        const float epilogue_clamp) {
+        const float epilogue_clamp,
+        const uint8_t * __restrict__ expert_class, const int expert_class_id) {
 
     // Skip unused template specializations for faster compilation:
     if (mmq_x > get_mmq_x_max_device() || mmq_x % mmq_get_granularity_device(mmq_x) != 0) {
@@ -3655,6 +3656,11 @@ static __global__ void mul_mat_q(
         int base_off_dst = wt*stride_sample_dst + zt*stride_channel_dst;
 
         if (ids_dst) {
+            // ds41: one launch per tile width; the other widths' experts
+            // belong to the other launches (see mmq_args::expert_class).
+            if (expert_class && expert_class[zt] != expert_class_id) {
+                return;
+            }
             col_low  = expert_bounds[zt + 0];
             col_high = expert_bounds[zt + 1];
             col_diff = col_high - col_low;
@@ -4060,6 +4066,11 @@ struct mmq_args {
     // rows and an 80-column tile spends most of its matrix-core issue on
     // padding. Zero keeps the default rule. See ds41_mmq_set_routed_tile_cols.
     int mmq_x_request;
+    // ds41: per-expert tile-width class (device, one byte per expert); the
+    // launch skips experts whose class is not expert_class_id. Null runs
+    // every expert.
+    const uint8_t * expert_class;
+    int expert_class_id;
 };
 
 template<ggml_type type>
@@ -4157,7 +4168,7 @@ static void launch_mul_mat_q(ds41_ggml_hip_context & ctx, const mmq_args & args,
                         args.stride_sample_y, args.stride_sample_dst, ntx_fd,
                         args.x_soa, args.soa_blocks, args.epilogue_gate,
                         args.epilogue_weights, args.epilogue_mid, args.epilogue_mid_h,
-                        args.epilogue_clamp);
+                        args.epilogue_clamp, args.expert_class, args.expert_class_id);
                 return;
             }
         }
@@ -4175,7 +4186,7 @@ static void launch_mul_mat_q(ds41_ggml_hip_context & ctx, const mmq_args & args,
                         args.stride_sample_y, args.stride_sample_dst, ntx_fd,
                         args.x_soa, args.soa_blocks, args.epilogue_gate,
                         args.epilogue_weights, args.epilogue_mid, args.epilogue_mid_h,
-                        args.epilogue_clamp);
+                        args.epilogue_clamp, args.expert_class, args.expert_class_id);
             } else {
                 constexpr bool need_check = true;
                 mul_mat_q<type, mmq_x, need_check, sanitize_output>
@@ -4188,7 +4199,7 @@ static void launch_mul_mat_q(ds41_ggml_hip_context & ctx, const mmq_args & args,
                         args.stride_sample_y, args.stride_sample_dst, ntx_fd,
                         args.x_soa, args.soa_blocks, args.epilogue_gate,
                         args.epilogue_weights, args.epilogue_mid, args.epilogue_mid_h,
-                        args.epilogue_clamp);
+                        args.epilogue_clamp, args.expert_class, args.expert_class_id);
             }
         };
         // ds41: tiled launches of every type but Q8_0 zero non-finite outputs
@@ -4240,7 +4251,7 @@ static void launch_mul_mat_q(ds41_ggml_hip_context & ctx, const mmq_args & args,
              sample_ratio_fd, nsamples_y_fd, args.stride_sample_x, args.stride_sample_y, args.stride_sample_dst,
              ntx_fd, args.x_soa, args.soa_blocks,
              args.epilogue_gate, args.epilogue_weights, args.epilogue_mid,
-             args.epilogue_mid_h, args.epilogue_clamp);
+             args.epilogue_mid_h, args.epilogue_clamp, args.expert_class, args.expert_class_id);
 
         if (!fixup_needed) {
             return;
@@ -4260,7 +4271,7 @@ static void launch_mul_mat_q(ds41_ggml_hip_context & ctx, const mmq_args & args,
              sample_ratio_fd, nsamples_y_fd, args.stride_sample_x, args.stride_sample_y, args.stride_sample_dst,
              ntx_fd, args.x_soa, args.soa_blocks,
              args.epilogue_gate, args.epilogue_weights, args.epilogue_mid,
-             args.epilogue_mid_h, args.epilogue_clamp);
+             args.epilogue_mid_h, args.epilogue_clamp, args.expert_class, args.expert_class_id);
 
         if (!fixup_needed) {
             return;
