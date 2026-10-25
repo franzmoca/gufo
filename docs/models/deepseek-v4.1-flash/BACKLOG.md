@@ -58,12 +58,16 @@ the SGPRs. Starting points for a retry:
 ~1,660 dispatches per token; ~4.6 ms per token is not covered by GPU work.
 In progress. Done: the MMQ scratch pool reuses buffers instead of
 allocating and freeing per call; Engram rows upload asynchronously from
-pinned memory. Remaining, from a `rocprofv3` trace of 2K decode:
+pinned memory; hc collapse + RMSNorm and rope + FP8 quantization run as
+single kernels. Remaining, from a `rocprofv3` trace of 2K decode:
 
 - ~1,550 dependent-launch gaps of ~2.5 µs per token (~4 ms). Fusion
-  candidates by count per token: rms_norm 166, rope_tail 133,
-  hc_collapse/hc_mixes/hc_sinkhorn/hc_expand 80 each, fp8_fake_quant 80,
-  swiglu 80, copyBuffer 46.
+  candidates by count per token: rope_tail 53, hc_mixes/hc_sinkhorn/
+  hc_expand 80 each, swiglu 80, copyBuffer 46, the q_a and KV RMSNorms 40
+  each.
+- hc_mixes reads its 2 MB of F32 weights at ~150 GB/s (13 µs, 80 per token).
+- `topk_kernel` takes 41-45 µs per call at 2K context on the indexer layers
+  and grows with context.
 - ~90 µs of host work at the start of each step (embedding dequant and two
   synchronous uploads take ~70 µs); a device-side embedding lookup would
   remove most of it.

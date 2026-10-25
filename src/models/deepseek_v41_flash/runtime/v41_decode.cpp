@@ -190,7 +190,7 @@ struct ds41_decoder {
   float* freq_compress = nullptr;
 
   /* Per-token activations, `capacity` rows each. */
-  float *h = nullptr, *h2 = nullptr, *x = nullptr, *xn = nullptr;
+  float *h = nullptr, *h2 = nullptr, *xn = nullptr;
   float *mixes = nullptr, *pre[2] = {}, *post = nullptr, *comb = nullptr, *ffn_post = nullptr, *ffn_comb = nullptr;
   float *qa = nullptr, *qr = nullptr, *q = nullptr, *kv = nullptr, *kvn = nullptr;
   float *ckv = nullptr, *cscore = nullptr, *craw = nullptr, *latent = nullptr;
@@ -405,8 +405,7 @@ bool attention(ds41_decoder* d, uint32_t il, uint32_t n) {
 
   if (!linear(d, l->attn_kv, d->xn, d->kv, n) ||
       ds41_v41_rms_norm(d->kv, f32(d, l->attn_kv_a_norm), d->kvn, n, kHeadDim, eps) ||
-      ds41_v41_rope_tail(d->kvn, n, kHeadDim, kRot, freq, pos0, 1, 1, 0) ||
-      ds41_v41_fp8_fake_quant(d->kvn, n * kHeadDim))
+      ds41_v41_rope_fp8(d->kvn, n, kHeadDim, kRot, freq, pos0, 1, 1, 0))
     return false;
 
   const float* comp = nullptr;
@@ -468,8 +467,7 @@ bool attention(ds41_decoder* d, uint32_t il, uint32_t n) {
                          f32(d, l->attn_sinks), d->o, d->attn_partial, pos0, n, DS41_N_HEAD, kHeadDim,
                          1.0f / sqrtf((float)kHeadDim)) ||
       !store_window(s, d->kvn, pos0, n) ||
-      ds41_v41_rope_tail(d->o, n * DS41_N_HEAD, kHeadDim, kRot, freq, pos0, DS41_N_HEAD, 1, 1) ||
-      ds41_v41_fp8_fake_quant(d->o, n * kQDim))
+      ds41_v41_rope_fp8(d->o, n * DS41_N_HEAD, kHeadDim, kRot, freq, pos0, DS41_N_HEAD, 1, 1))
     return false;
 
   /* Grouped LoRA output: group g maps head slice g of every token. */
@@ -609,14 +607,14 @@ bool block(ds41_decoder* d, uint32_t il, int prev, int next, uint32_t n) {
   const float eps = DS41_RMS_EPS;
   /* Attention uses the pre-mix of the previous FFN (shifted mHC). */
   if (!hc_mix(d, l->hc_attn_fn, l->hc_attn_scale, l->hc_attn_base, d->h, d->pre[next], d->post, d->comb, n) ||
-      ds41_v41_hc_collapse(d->h, d->pre[prev], d->x, kHc, kDim, n) ||
-      ds41_v41_rms_norm(d->x, f32(d, l->attn_norm), d->xn, n, kDim, eps) || !attention(d, il, n) ||
+      ds41_v41_hc_collapse_norm(d->h, d->pre[prev], f32(d, l->attn_norm), d->xn, kHc, kDim, eps, n) ||
+      !attention(d, il, n) ||
       ds41_v41_hc_expand(d->attn_out, d->h, d->post, d->comb, d->h2, kHc, kDim, n))
     return false;
   /* The FFN uses this layer's attention pre-mix; its own pre-mix feeds the next attention. */
   if (!hc_mix(d, l->hc_ffn_fn, l->hc_ffn_scale, l->hc_ffn_base, d->h2, d->pre[prev], d->ffn_post, d->ffn_comb, n) ||
-      ds41_v41_hc_collapse(d->h2, d->pre[next], d->x, kHc, kDim, n) ||
-      ds41_v41_rms_norm(d->x, f32(d, l->ffn_norm), d->xn, n, kDim, eps) || !moe(d, il, n) ||
+      ds41_v41_hc_collapse_norm(d->h2, d->pre[next], f32(d, l->ffn_norm), d->xn, kHc, kDim, eps, n) ||
+      !moe(d, il, n) ||
       ds41_v41_hc_expand(d->moe_out, d->h2, d->ffn_post, d->ffn_comb, d->h, kHc, kDim, n))
     return false;
   return true;
@@ -664,7 +662,6 @@ ds41_decoder* ds41_decoder_create(ds41_engine* engine, uint32_t context) {
   } floats[] = {
       {&d->h, cap * hd},
       {&d->h2, cap * hd},
-      {&d->x, cap * kDim},
       {&d->xn, cap * kDim},
       {&d->mixes, cap * kMixes},
       {&d->pre[0], cap * kHc},
@@ -911,9 +908,8 @@ int ds41_decoder_eval(ds41_decoder* d, const int* tokens, uint32_t n, float* log
   /* Final mix and norm for the requested rows, then the vocabulary projection in passes. */
   const uint32_t first = n - logit_rows;
   if (ok && logit_rows) {
-    ok = ds41_v41_hc_collapse(d->h + first * hd, d->pre[prev] + (uint64_t)first * kHc, d->x, kHc, kDim,
-                              logit_rows) == 0 &&
-         ds41_v41_rms_norm(d->x, f32(d, w->output_norm), d->xn, logit_rows, kDim, DS41_RMS_EPS) == 0;
+    ok = ds41_v41_hc_collapse_norm(d->h + first * hd, d->pre[prev] + (uint64_t)first * kHc, f32(d, w->output_norm),
+                                   d->xn, kHc, kDim, DS41_RMS_EPS, logit_rows) == 0;
     for (uint32_t r = 0; r < logit_rows && ok; r += kLogitRows) {
       const uint32_t rows = std::min(kLogitRows, logit_rows - r);
       ok = linear(d, w->output, d->xn + (uint64_t)r * kDim, d->logits, rows) &&
