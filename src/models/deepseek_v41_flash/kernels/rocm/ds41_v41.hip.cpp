@@ -547,6 +547,60 @@ __global__ void indexer_score_kernel(const float* q, const float* keys, const fl
   score[token * score_stride + j] = acc;
 }
 
+/* Small batches with head_dim 128 and 32 heads: a block takes 64 keys,
+ * staged in padded shared memory by coalesced loads; thread (key, group)
+ * computes the fp32 dots of heads 8 * group .. 8 * group + 7 against the
+ * queries (float4 broadcasts), and the four groups' relu-weighted sums are
+ * added in shared memory. Grid (ceil(len / 64), n). */
+constexpr uint32_t kScoreHeads = 32;
+constexpr uint32_t kScoreSmallTokens = 4;
+constexpr uint32_t kScoreKeys = 64;
+__global__ __launch_bounds__(256) void indexer_score_small_kernel(const float* q, const float* keys, const float* w,
+                                                                  float w_scale, float* score, uint64_t score_stride,
+                                                                  uint32_t pos0, uint32_t ratio) {
+  constexpr uint32_t DIM = 128, D4 = DIM / 4, PITCH4 = D4 + 1, GROUPS = 256 / kScoreKeys,
+                     HG = kScoreHeads / GROUPS;
+  const uint32_t token = blockIdx.y;
+  const uint32_t len = comp_len(pos0 + token, ratio);
+  const uint32_t key0 = blockIdx.x * kScoreKeys;
+  if (key0 >= len) return;
+  __shared__ float4 sk[kScoreKeys * PITCH4];
+  __shared__ float4 sq[kScoreHeads * D4];
+  __shared__ float sw[kScoreHeads];
+  __shared__ float part[GROUPS][kScoreKeys];
+  const float4* qt = reinterpret_cast<const float4*>(q + (uint64_t)token * kScoreHeads * DIM);
+  for (uint32_t i = threadIdx.x; i < kScoreHeads * D4; i += 256) sq[i] = qt[i];
+  const float4* kt = reinterpret_cast<const float4*>(keys + (uint64_t)key0 * DIM);
+  const uint32_t rows = min(kScoreKeys, len - key0);
+  for (uint32_t i = threadIdx.x; i < kScoreKeys * D4; i += 256) {
+    const uint32_t r = i / D4;
+    sk[r * PITCH4 + i % D4] = r < rows ? kt[i] : make_float4(0.0f, 0.0f, 0.0f, 0.0f);
+  }
+  if (threadIdx.x < kScoreHeads) sw[threadIdx.x] = w[(uint64_t)token * kScoreHeads + threadIdx.x] * w_scale;
+  __syncthreads();
+  const uint32_t key = threadIdx.x % kScoreKeys;
+  const uint32_t group = threadIdx.x / kScoreKeys;
+  float dot[HG] = {};
+#pragma unroll 4
+  for (uint32_t d4 = 0; d4 < D4; d4++) {
+    const float4 kv = sk[key * PITCH4 + d4];
+#pragma unroll
+    for (uint32_t h = 0; h < HG; h++) {
+      const float4 qv = sq[(group * HG + h) * D4 + d4];
+      dot[h] += qv.x * kv.x + qv.y * kv.y + qv.z * kv.z + qv.w * kv.w;
+    }
+  }
+  float acc = 0.0f;
+#pragma unroll
+  for (uint32_t h = 0; h < HG; h++) acc += fmaxf(dot[h], 0.0f) * sw[group * HG + h];
+  part[group][key] = acc;
+  __syncthreads();
+  if (group != 0 || key >= rows) return;
+#pragma unroll
+  for (uint32_t g = 1; g < GROUPS; g++) acc += part[g][key];
+  score[token * score_stride + key0 + key] = acc;
+}
+
 /* The same scores on the matrix cores, after the V4 engine's
  * indexer_scores_wmma128_kernel: a block covers 16 tokens and 128 compressed
  * rows, stages the rows once as half and each head's queries (double
@@ -1311,6 +1365,11 @@ extern "C" int ds41_v41_indexer_score(const float* q, const float* keys, const f
   if (heads > 64) return 1;
   const uint32_t len = max_comp_len(pos0, n, ratio);
   if (len == 0) return 0;
+  if (head_dim == 128 && heads == kScoreHeads && n <= kScoreSmallTokens) {
+    indexer_score_small_kernel<<<dim3((len + kScoreKeys - 1) / kScoreKeys, n), 256>>>(q, keys, w, w_scale, score, score_stride, pos0,
+                                                                    ratio);
+    return launch_ok("indexer score");
+  }
   if (head_dim == 128) {
     indexer_score_wmma_kernel<<<dim3((len + 127) / 128, (n + 15) / 16), 256>>>(q, keys, w, w_scale, score,
                                                                                score_stride, pos0, n, ratio, heads);
