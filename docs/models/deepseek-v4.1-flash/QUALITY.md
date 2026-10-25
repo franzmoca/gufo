@@ -76,13 +76,14 @@ short prompts, prefill one token at a time. Current speeds are in
 The same 3K positions scored through 2048-token batches (matrix-core
 attention and indexer, bounded routed MoE tiles): perplexity 6.310 against
 the oracle's 6.309, argmax agreement 95.8%, mean |ΔNLL| 0.080. Scored token by
-token through the decode path (split-row attention): perplexity 6.307,
-agreement 96.0%. Across the M2 changes the batched perplexity moved within
+token through the decode path (split-row attention, FP32-activation dense
+GEMV): perplexity 6.303, agreement 96.1%, mean |ΔNLL| 0.077. Across the M2 changes the batched perplexity moved within
 6.296-6.319: half-precision attention operands and the FP8 fake quantization
 of the attention output turn rounding-level differences into small logit
-changes. The smoke continuation keeps all 9 greedy tokens, KL ≤ 1e-3 per step.
+changes. The smoke continuation keeps all 9 greedy tokens, KL ≤ 5.4e-3 per step.
 
 Kernel checks: `ds41.attention` compares both attention paths with an fp64
 reference (split decode 1.6e-7, batched 3e-4 relative error);
 `ds41.mmq_typed` compares batched, bounded-routed and grouped matvec launches
-with the matvec path for every V4.1 weight type.
+with the matvec path for every V4.1 weight type, and the single-token Q5_K/Q8_0
+GEMV with an fp64 dot of the dequantized rows.

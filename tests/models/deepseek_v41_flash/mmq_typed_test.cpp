@@ -11,6 +11,8 @@
 #include <vector>
 
 #include "ds41_mmq.h"
+#include "ds41_v41.h"
+#include "src/core/quant/ggml_dequant.hpp"
 
 namespace {
 
@@ -119,6 +121,60 @@ bool DenseCase(const TypeCase& t, int M, int N, int K, std::mt19937& rng) {
   (void)hipFree(batched);
   (void)hipFree(vec);
   return e < 2e-3;
+}
+
+/* The single-token FP32-activation GEMV against a double-precision dot of
+ * the dequantized rows, for every slice count and a grouped layout. */
+bool GemvCase(const TypeCase& t, int M, int K, int rows_per_x,
+              std::mt19937& rng) {
+  const auto w =
+      RandomBlocks(t, static_cast<std::size_t>(M) * K / t.block_values, rng);
+  const int x_groups = rows_per_x ? M / rows_per_x : 1;
+  std::normal_distribution<float> normal;
+  std::vector<float> x(static_cast<std::size_t>(x_groups) * K);
+  for (auto& v : x)
+    v = normal(rng);
+  std::vector<float> row(K);
+  std::vector<double> want(M);
+  const std::size_t row_bytes =
+      static_cast<std::size_t>(K) / t.block_values * t.block_bytes;
+  for (int r = 0; r < M; ++r) {
+    if (t.type == 13)
+      gufo::quant::DequantizeQ5_K(w.data() + r * row_bytes, row.data(), K);
+    else
+      gufo::quant::DequantizeQ8_0(w.data() + r * row_bytes, row.data(), K);
+    const float* xr =
+        x.data() +
+        static_cast<std::size_t>(rows_per_x ? r / rows_per_x : 0) * K;
+    double dot = 0.0;
+    for (int i = 0; i < K; ++i)
+      dot += static_cast<double>(row[i]) * xr[i];
+    want[r] = dot;
+  }
+  auto* dw = Device(w);
+  auto* dx = Device(x);
+  float* dy = nullptr;
+  (void)hipMalloc(&dy, sizeof(float) * M);
+  bool ok = true;
+  for (const int slices : {1, 2, 4, 8}) {
+    double e = INFINITY;
+    if (ds41_v41_gemv(t.type, dw, dx, dy, M, K, rows_per_x, slices) == 0) {
+      const auto got = Host(dy, M);
+      double err = 0.0, ref = 0.0;
+      for (int r = 0; r < M; ++r) {
+        err += (got[r] - want[r]) * (got[r] - want[r]);
+        ref += want[r] * want[r];
+      }
+      e = std::sqrt(err / std::max(ref, 1e-30));
+    }
+    std::printf("gemv  %-8s M=%d K=%d rows_per_x=%d slices=%d rel_err=%.2e\n",
+                t.name, M, K, rows_per_x, slices, e);
+    ok = e < 1e-5 && ok;
+  }
+  (void)hipFree(dw);
+  (void)hipFree(dx);
+  (void)hipFree(dy);
+  return ok;
 }
 
 /* One grouped launch against a matvec per group. */
@@ -232,6 +288,10 @@ int main() {
   for (const auto& t : kTypes) {
     ok = DenseCase(t, 256, 37, 1024, rng) && ok;
     ok = DenseCase(t, 384, 130, 2304, rng) && ok;
+    if (t.type == 8 || t.type == 13) {
+      ok = GemvCase(t, 300, 1280, 0, rng) && ok;
+      ok = GemvCase(t, 256, 4096, 64, rng) && ok;
+    }
     ok = GroupedCase(t, 128, 1, 1024, 8, rng) && ok;
     ok = GroupedCase(t, 256, 3, 512, 8, rng) && ok;
     for (const bool bounded : {false, true}) {

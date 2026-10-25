@@ -1,0 +1,129 @@
+/* Single-token decode projections for the V4.1 Flash dense Q5_K and Q8_0
+ * weights, after the Gemma 4 K-quant GEMV (src/models/gemma4/kernels/rocm/
+ * gemv.hip.cpp): weights stay in their GGUF blocks, activations stay FP32. A
+ * lane's unit of work is one 16-byte vector of quantized values; lanes
+ * holding the same task of different rows read the same activations, which
+ * the hardware broadcasts. A workgroup's eight waves form 8 / S row groups
+ * of S waves; the S waves of a group take interleaved super-blocks of its
+ * rows and are summed in wave order. */
+#include <hip/hip_runtime.h>
+
+#include <cstdint>
+#include <cstdio>
+
+#include "ds41_gemv_tasks.hpp"
+#include "ds41_v41.h"
+
+namespace {
+
+using namespace ds41_gemv_tasks;
+
+constexpr int kWave = 32;
+constexpr int kWaves = 8;
+
+template <int kType>
+struct Format;
+template <>
+struct Format<13> {  // Q5_K
+  static constexpr int kBlockBytes = 176;
+  static constexpr int kTasks = 8;
+  static __device__ __forceinline__ float Task(const uint8_t* b, int t, const float* x, float acc) {
+    return TaskQ45K<true>(b, t, x, acc);
+  }
+};
+template <>
+struct Format<8> {  // Q8_0, eight 34-byte blocks per 256 values
+  static constexpr int kBlockBytes = 272;
+  static constexpr int kTasks = 8;
+  static __device__ __forceinline__ float Task(const uint8_t* b, int t, const float* x, float acc) {
+    return TaskQ80(b, t, x, acc);
+  }
+};
+
+/* Row r reads x + (r / rows_per_x) * k. */
+template <int kType, int S>
+__global__ void __launch_bounds__(kWave* kWaves)
+    gemv_kernel(const uint8_t* __restrict__ w, const float* __restrict__ x, float* __restrict__ y, uint32_t m,
+                uint32_t k, uint32_t rows_per_x) {
+  using F = Format<kType>;
+  constexpr int kRowsPerWave = kWave / F::kTasks;
+  constexpr int kGroups = kWaves / S;
+  __shared__ float partial[kWaves][kWave];
+  const int lane = threadIdx.x % kWave;
+  const int wave = threadIdx.x / kWave;
+  const int group = wave / S;
+  const int slice = wave % S;
+  const int t = lane % F::kTasks;
+  const uint32_t row = (blockIdx.x * kGroups + group) * kRowsPerWave + lane / F::kTasks;
+  const uint32_t blocks_per_row = k / 256;
+  float acc = 0.0f;
+  if (row < m) {
+    const uint8_t* base = w + (uint64_t)row * blocks_per_row * F::kBlockBytes;
+    const float* xr = x + (uint64_t)(row / rows_per_x) * k;
+#pragma unroll 2
+    for (uint32_t blk = slice; blk < blocks_per_row; blk += S)
+      acc = F::Task(base + (uint64_t)blk * F::kBlockBytes, t, xr + blk * 256, acc);
+  }
+#pragma unroll
+  for (int offset = F::kTasks / 2; offset > 0; offset >>= 1) acc += __shfl_xor(acc, offset, kWave);
+  if constexpr (S == 1) {
+    if (t == 0 && row < m) y[row] = acc;
+  } else {
+    partial[wave][lane] = acc;
+    __syncthreads();
+    if (slice == 0 && t == 0 && row < m) {
+      float sum = partial[wave][lane];
+#pragma unroll
+      for (int s = 1; s < S; ++s) sum += partial[wave + s][lane];
+      y[row] = sum;
+    }
+  }
+}
+
+template <int kType, int S>
+void launch(const void* w, const float* x, float* y, uint32_t m, uint32_t k, uint32_t rows_per_x) {
+  constexpr uint32_t kRows = (kWave / Format<kType>::kTasks) * (kWaves / S);
+  gemv_kernel<kType, S><<<(m + kRows - 1) / kRows, kWave * kWaves>>>(static_cast<const uint8_t*>(w), x, y, m, k,
+                                                                      rows_per_x);
+}
+
+template <int kType>
+int dispatch(const void* w, const float* x, float* y, uint32_t m, uint32_t k, uint32_t rows_per_x, int slices) {
+  switch (slices) {
+  case 1:
+    launch<kType, 1>(w, x, y, m, k, rows_per_x);
+    break;
+  case 2:
+    launch<kType, 2>(w, x, y, m, k, rows_per_x);
+    break;
+  case 4:
+    launch<kType, 4>(w, x, y, m, k, rows_per_x);
+    break;
+  case 8:
+    launch<kType, 8>(w, x, y, m, k, rows_per_x);
+    break;
+  default:
+    return 1;
+  }
+  const hipError_t err = hipGetLastError();
+  if (err == hipSuccess) return 0;
+  fprintf(stderr, "ds41: gemv launch failed: %s\n", hipGetErrorString(err));
+  return 1;
+}
+
+}  // namespace
+
+extern "C" int ds41_v41_gemv(int type, const void* w, const float* x, float* y, uint32_t m, uint32_t k,
+                             uint32_t rows_per_x, int slices) {
+  if (k % 256 != 0 || m == 0) return 1;
+  if (rows_per_x == 0) rows_per_x = m;
+  if (slices <= 0) slices = 8;
+  switch (type) {
+  case 13:
+    return dispatch<13>(w, x, y, m, k, rows_per_x, slices);
+  case 8:
+    return dispatch<8>(w, x, y, m, k, rows_per_x, slices);
+  default:
+    return 1;
+  }
+}
