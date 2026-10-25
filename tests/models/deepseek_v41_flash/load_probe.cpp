@@ -92,6 +92,7 @@ int main(int argc, char** argv) {
   const char* out_dir = nullptr;
   int generate = 0;
   uint32_t context = 0;
+  uint32_t prefill_batch = 0;
   bool score = false;
   bool batch = false;
   bool upload = false;
@@ -108,6 +109,8 @@ int main(int argc, char** argv) {
       generate = std::atoi(argv[++i]);
     } else if (std::strcmp(argv[i], "--context") == 0 && i + 1 < argc) {
       context = (uint32_t)std::strtoul(argv[++i], nullptr, 10);
+    } else if (std::strcmp(argv[i], "--prefill-batch") == 0 && i + 1 < argc) {
+      prefill_batch = (uint32_t)std::strtoul(argv[++i], nullptr, 10);
     } else if (std::strcmp(argv[i], "--score") == 0) {
       score = true;
     } else if (std::strcmp(argv[i], "--batch") == 0) {
@@ -129,7 +132,8 @@ int main(int argc, char** argv) {
     std::fprintf(stderr,
                  "usage: %s MODEL-00001-of-N.gguf [--engram FILE] [--upload] "
                  "[--tokenize TEXTS [--rendered]] [--decode IDS [--generate N] "
-                 "[--score] [--batch] [--context N] [--out DIR]]\n",
+                 "[--score] [--batch] [--context N] [--prefill-batch N] "
+                 "[--out DIR]]\n",
                  argv[0]);
     return 2;
   }
@@ -140,6 +144,7 @@ int main(int argc, char** argv) {
   options.model_path = model;
   options.engram_path = engram;
   options.validate_only = !upload;
+  options.prefill_batch = prefill_batch;
   if (ds41_engine_open(&engine, &options) != 0)
     return 1;
   const double seconds =

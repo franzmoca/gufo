@@ -18,6 +18,10 @@ gufo bench -m DeepSeek-V4.1-Flash-1017-GSQ-RCO-IQ1_M-00001-of-00004.gguf \
 | pp2048 @ d32768 | 585.30 ± 1.84 |
 | tg64 @ d32768 | 22.92 ± 0.01 |
 
+`--prefill-batch 4096` (default 2048) prefills a 4096-token prompt at
+720 tok/s instead of 694 (`gufo bench -p 4096 -r 3`) for about 1.2 GiB more
+activation memory.
+
 Prefill runs the routed experts, the dense Q5_K projections and attention on
 the FP16 matrix cores (previous card: pp2048 421.80, @ d8192 414.37,
 @ d32768 378.66; decode unchanged).

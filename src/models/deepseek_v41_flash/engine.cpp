@@ -55,8 +55,18 @@ std::shared_ptr<Model> Model::Load(const std::string& model_path,
     return nullptr;
   }
 
+  if (options.prefill_batch != 0 &&
+      (options.prefill_batch < DS41_MIN_PREFILL_BATCH ||
+       options.prefill_batch > DS41_MAX_PREFILL_BATCH)) {
+    AssignError(error_msg,
+                "DeepSeek V4.1 Flash prefill batch must be 16 to "
+                "4096 tokens");
+    return nullptr;
+  }
+
   ds41_engine_options engine_options{};
   engine_options.model_path = model_path.c_str();
+  engine_options.prefill_batch = options.prefill_batch;
   engine_options.dspark_model_path = options.dspark_model_path.empty()
                                          ? nullptr
                                          : options.dspark_model_path.c_str();

@@ -77,6 +77,11 @@ public:
   InferenceBackend(InferenceBackend&&) = delete;
   InferenceBackend& operator=(InferenceBackend&&) = delete;
 
+  /// DeepSeek V4.1 Flash --prefill-batch for the next load (0 is the default).
+  void set_deepseek_prefill_batch(std::uint32_t tokens) {
+    deepseek_prefill_batch_ = tokens;
+  }
+
   /// Loads weights from a GGUF file. Returns false and sets *error on failure.
   /// `enable_yarn` opts Flash-Next into static YaRN, required for (and only
   /// accepted with) a `max_context` above its native context.
@@ -212,6 +217,7 @@ private:
 
   struct Impl;
   std::unique_ptr<Impl> impl_;
+  std::uint32_t deepseek_prefill_batch_ = 0;
 };
 
 }  // namespace gufo::server

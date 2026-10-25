@@ -37,6 +37,8 @@ struct PromptOptions {
   std::string mtp_model_path;
   std::string dflash_model_path;
   std::string draft_policy;
+  /// DeepSeek V4.1 Flash prefill batch tokens; 0 is the model default.
+  std::uint32_t prefill_batch{0};
   // DeepSeek V4 Flash DSpark support model. DSpark is DS4's own drafter and
   // is unrelated to the Qwen DFlash paths above.
   std::string dspark_model_path;

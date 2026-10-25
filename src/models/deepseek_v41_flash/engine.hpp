@@ -18,6 +18,9 @@ namespace gufo::models::deepseek_v41_flash {
 
 struct ModelOptions {
   std::uint32_t max_context = 4096;
+  /// Most prompt tokens per prefill batch (16 to 4096; 0 is the default,
+  /// 2048). 4096 prefills about 5% faster for 1.2 GiB more activations.
+  std::uint32_t prefill_batch = 0;
   /// Optional DSpark support model. Empty leaves speculative decoding off.
   std::string dspark_model_path;
 };

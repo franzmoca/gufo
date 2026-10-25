@@ -91,9 +91,9 @@ only) IQ1_S gate/up drops 22.6 → 17.0 ms per layer and IQ2_XXS 26.0 →
 lookup ~1 ms. A decoded fragment feeds at most four 16-slot tiles, and on
 average 2.3 since most experts get under 64 slots. 128-slot tiles for the
 large experts would cut the decode work by 13-24% (recorded counts) but
-need 128 accumulator VGPRs and twice the activation LDS; 4096-token
-batches measured +21% routed throughput for ~1.2 GiB more activations
-(not adopted, memory).
+need 128 accumulator VGPRs and twice the activation LDS. 4096-token
+batches (`--prefill-batch 4096`) give +21% routed throughput, +3.7%
+end to end, for ~1.2 GiB more activations.
 
 ### 4. Dense FP16 kernel barriers
 

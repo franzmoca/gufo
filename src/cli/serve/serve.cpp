@@ -599,6 +599,7 @@ void PrintServeHelp(std::string_view program_name,
     std::string speculative_backend;
     std::string dflash_model_path;
     std::string draft_policy;
+    std::uint32_t prefill_batch = 0;
     std::string dspark_model_path;
     std::string mtp_model_path;
     std::string vision_model_path;
@@ -634,6 +635,12 @@ void PrintServeHelp(std::string_view program_name,
     parser.AddOption("", "--mmproj", "PATH",
                      "Qwen BF16 vision sidecar (auto-discovered beside model)",
                      "Model", &vision_model_path);
+    parser.AddOption(
+        "", "--prefill-batch", "N",
+        "DeepSeek V4.1 Flash: most prompt tokens per prefill batch, 16 to "
+        "4096; 4096 prefills about 5% faster for about 1.2 GiB more memory "
+        "(default: 2048)",
+        "Model", &prefill_batch);
     parser.AddOption("", "--served-model-name", "ID",
                      "Model identifier exposed by the OpenAI API (repeatable; "
                      "the first is primary)",
@@ -1209,6 +1216,7 @@ int RunServe(std::span<const char* const> args) {
     std::string speculative_backend;
     std::string dflash_model_path;
     std::string draft_policy;
+    std::uint32_t prefill_batch = 0;
     std::string dspark_model_path;
     std::string mtp_model_path;
     std::string vision_model_path;
@@ -1244,6 +1252,12 @@ int RunServe(std::span<const char* const> args) {
         "", "--mmproj", "PATH",
         "Qwen BF16 vision sidecar (auto-discovered beside model)", "Model",
         &vision_model_path);
+    llm_parser.AddOption(
+        "", "--prefill-batch", "N",
+        "DeepSeek V4.1 Flash: most prompt tokens per prefill batch, 16 to "
+        "4096; 4096 prefills about 5% faster for about 1.2 GiB more memory "
+        "(default: 2048)",
+        "Model", &prefill_batch);
     llm_parser.AddCustomOption(
         "", "--served-model-name", "ID",
         "Model identifier exposed by the OpenAI API (repeatable; the first "
@@ -1501,6 +1515,7 @@ int RunServe(std::span<const char* const> args) {
     // Answer 503 `Loading model` on the port meanwhile, as llama-server does,
     // so supervisors see a loading server rather than a refused connection.
     server::LoadingResponder loading(host, port);
+    backend->set_deepseek_prefill_batch(prefill_batch);
     const bool load_ok = backend->load(
         model, &err, max_context, session_count,
         server::TextPrefillPolicy{
