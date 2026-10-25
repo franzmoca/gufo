@@ -361,9 +361,19 @@ int ds41_mmq_dense_impl(
         int           M,
         int           N,
         int           K,
-        hipStream_t  stream) {
+        hipStream_t  stream,
+        /* ds41: `groups` independent [M, K] weights stored back to back; token
+         * rows of X hold the groups' K inputs side by side and rows of out the
+         * groups' M outputs (one MMQ channel per group). */
+        int           groups = 1,
+        /* ds41: further [M_extra[i], K] weights of the same type applied to
+         * the same X (quantized once), each into its own out_extra[i]. */
+        int           extra = 0,
+        const void  * const * W_extra = nullptr,
+        float       * const * out_extra = nullptr,
+        const int   * M_extra = nullptr) {
 
-    if (!W || !X_f32 || !out_f32) {
+    if (!W || !X_f32 || !out_f32 || groups <= 0 || (extra > 0 && (groups != 1 || !W_extra || !out_extra || !M_extra))) {
         fprintf(stderr, "%s: null pointer\n", tag);
         return -1;
     }
@@ -403,7 +413,7 @@ int ds41_mmq_dense_impl(
     const int64_t ne00         = K;
     const int64_t ne10_padded  = GGML_PAD((int64_t)K, MATRIX_ROW_PADDING);
     const int64_t ne11         = N;
-    const int64_t ne12         = 1;
+    const int64_t ne12         = groups;
     const int64_t ne13         = 1;
 
     const bool use_native_fp4 =
@@ -457,7 +467,7 @@ int ds41_mmq_dense_impl(
     } else {
         ds41_quantize_mmq_q8_1_hip(
             X_f32, /*ids=*/nullptr, (void *)src1_q8_1,
-            type, /*ne00=*/K, /*s11=*/(int64_t)K, /*s12=*/0, /*s13=*/0,
+            type, /*ne00=*/K, /*s11=*/(int64_t)K * groups, /*s12=*/groups > 1 ? (int64_t)K : 0, /*s13=*/0,
             /*ne0=*/ne10_padded, /*ne1=*/ne11, /*ne2=*/ne12, /*ne3=*/ne13,
             stream);
     }
@@ -473,7 +483,7 @@ int ds41_mmq_dense_impl(
     //    are K-quants with block size 256.
     const int64_t blck   = ggml_blck_size(type);
     const int64_t s01    = (int64_t)K / blck;
-    const int64_t s1     = (int64_t)M;
+    const int64_t s1     = (int64_t)M * groups;
     const int64_t s12    = ne11 * ne10_padded * y_block_size /
                            (y_values_per_block * sizeof(int));
     const int64_t s13    = ne12 * s12;
@@ -491,8 +501,8 @@ int ds41_mmq_dense_impl(
         /*dst=*/out_f32,
         /*ncols_x=*/ne00,    /*nrows_x=*/(int64_t)M,    /*ncols_dst=*/ne11,
         /*stride_row_x=*/s01,/*ncols_y=*/ne11,          /*nrows_dst=*/s1,
-        /*nchannels_x=*/1,   /*nchannels_y=*/1,
-        /*stride_channel_x=*/0, /*stride_channel_y=*/s12, /*stride_channel_dst=*/0,
+        /*nchannels_x=*/groups, /*nchannels_y=*/groups,
+        /*stride_channel_x=*/(int64_t)M * s01, /*stride_channel_y=*/s12, /*stride_channel_dst=*/(int64_t)M,
         /*nsamples_x=*/1,    /*nsamples_y=*/1,
         /*stride_sample_x=*/0, /*stride_sample_y=*/s13, /*stride_sample_dst=*/0,
         /*use_stream_k=*/use_stream_k,
@@ -510,7 +520,23 @@ int ds41_mmq_dense_impl(
         return -3;
     }
     if (!inline_sanitize) {
-        ds41_mmq_sanitize_f32(out_f32, (uint64_t)M * (uint64_t)N, stream);
+        ds41_mmq_sanitize_f32(out_f32, (uint64_t)s1 * (uint64_t)N, stream);
+    }
+    for (int i = 0; i < extra; i++) {
+        if (!W_extra[i] || !out_extra[i] || M_extra[i] <= 0) return -1;
+        args.x = (const char *)W_extra[i];
+        args.dst = out_extra[i];
+        args.nrows_x = M_extra[i];
+        args.nrows_dst = M_extra[i];
+        mul_mat_q_case<type>(*ctx, args, stream);
+        err = hipGetLastError();
+        if (err != hipSuccess) {
+            fprintf(stderr, "%s: mul_mat_q_case launch failed: %s\n", tag, hipGetErrorString(err));
+            return -3;
+        }
+        if (!inline_sanitize) {
+            ds41_mmq_sanitize_f32(out_extra[i], (uint64_t)M_extra[i] * (uint64_t)N, stream);
+        }
     }
     return 0;
 }
@@ -4346,6 +4372,40 @@ extern "C" int ds41_mmq_dense_typed(int type, const void* W, const float* X,
 #undef DS41_CASE
     default:
       fprintf(stderr, "ds41_mmq_dense_typed: unsupported type %d\n", type);
+      return -1;
+  }
+}
+
+extern "C" int ds41_mmq_dense_pair_typed(int type, const void* W1, float* out1, int M1,
+                                        const void* W2, float* out2, int M2, const float* X,
+                                        int N, int K, hipStream_t stream) {
+  const void* const w_extra[1] = {W2};
+  float* const out_extra[1] = {out2};
+  const int m_extra[1] = {M2};
+  switch ((ggml_type)type) {
+#define DS41_CASE(T)                                                                          \
+  case T:                                                                                     \
+    return ds41_mmq_dense_impl<T>("ds41_mmq_dense_pair_typed", W1, X, out1, M1, N, K, stream, 1, 1, \
+                                  w_extra, out_extra, m_extra);
+    DS41_MMQ_BATCH_CASES(DS41_CASE)
+#undef DS41_CASE
+    default:
+      fprintf(stderr, "ds41_mmq_dense_pair_typed: unsupported type %d\n", type);
+      return -1;
+  }
+}
+
+extern "C" int ds41_mmq_dense_grouped_typed(int type, const void* W, const float* X,
+                                           float* out, int M, int N, int K, int groups,
+                                           hipStream_t stream) {
+  switch ((ggml_type)type) {
+#define DS41_CASE(T) \
+  case T:            \
+    return ds41_mmq_dense_impl<T>("ds41_mmq_dense_grouped_typed", W, X, out, M, N, K, stream, groups);
+    DS41_MMQ_BATCH_CASES(DS41_CASE)
+#undef DS41_CASE
+    default:
+      fprintf(stderr, "ds41_mmq_dense_grouped_typed: unsupported type %d\n", type);
       return -1;
   }
 }

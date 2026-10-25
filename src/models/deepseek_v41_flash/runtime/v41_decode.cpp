@@ -294,6 +294,20 @@ bool linear(const ds41_decoder* d, const ds41_tensor* w, const float* x, float* 
   return linear_raw(w->type, dev(d, w), (uint32_t)(w->elements / k), k, x, out, n);
 }
 
+/* out1 = W1 x and out2 = W2 x; batches of one MMQ type quantize x once. */
+bool linear_pair(const ds41_decoder* d, const ds41_tensor* w1, float* out1, const ds41_tensor* w2, float* out2,
+                 const float* x, uint32_t n) {
+  const uint32_t k = (uint32_t)w1->dim[0];
+  if (n > 8 && w1->type == w2->type && w2->dim[0] == k && mmq_batched(w1->type)) {
+    const void* p1 = dev(d, w1);
+    const void* p2 = dev(d, w2);
+    return p1 && p2 &&
+           ds41_mmq_dense_pair_typed((int)w1->type, p1, out1, (int)(w1->elements / k), p2, out2,
+                                     (int)(w2->elements / k), x, (int)n, (int)k, 0) == 0;
+  }
+  return linear(d, w1, x, out1, n) && linear(d, w2, x, out2, n);
+}
+
 const float* f32(const ds41_decoder* d, const ds41_tensor* t) { return (const float*)dev(d, t); }
 
 const float* layer_freq(const ds41_decoder* d, uint32_t il) {
@@ -414,7 +428,7 @@ bool attention(ds41_decoder* d, uint32_t il, uint32_t n) {
     if (ds41_v41_gemv_pair((int)wqa->type, dev(d, wqa), d->qa, DS41_N_LORA_Q, dev(d, wkv), d->kv, kHeadDim, d->xn, k,
                            gemv_slices(m, k)))
       return false;
-  } else if (!linear(d, wqa, d->xn, d->qa, n) || !linear(d, wkv, d->xn, d->kv, n)) {
+  } else if (!linear_pair(d, wqa, d->qa, wkv, d->kv, d->xn, n)) {
     return false;
   }
   if (ds41_v41_q_kv_norm(d->qa, f32(d, l->attn_q_a_norm), d->qr, DS41_N_LORA_Q, d->kv, f32(d, l->attn_kv_a_norm),
@@ -508,6 +522,13 @@ bool attention(ds41_decoder* d, uint32_t il, uint32_t n) {
   if (n <= 8 && mmq_batched(wo_a->type)) {
     if (ds41_mmq_grouped_vec_typed((int)wo_a->type, wo_a_dev, d->o, d->oa, DS41_N_LORA_O, (int)n, kGroupDim,
                                    DS41_N_OUT_GROUP, 0))
+      return false;
+    return linear(d, l->attn_output_b, d->oa, d->attn_out, n);
+  }
+  /* Batches take all groups as MMQ channels: one input quantization and one launch. */
+  if (n > 8 && mmq_batched(wo_a->type)) {
+    if (ds41_mmq_dense_grouped_typed((int)wo_a->type, wo_a_dev, d->o, d->oa, DS41_N_LORA_O, (int)n, kGroupDim,
+                                     DS41_N_OUT_GROUP, 0))
       return false;
     return linear(d, l->attn_output_b, d->oa, d->attn_out, n);
   }
@@ -644,7 +665,7 @@ bool moe(ds41_decoder* d, uint32_t il, uint32_t n) {
     if (ds41_v41_gemv_swiglu((int)sg->type, dev(d, sg), dev(d, su), d->xn, d->sm, m, k, kSwigluLimit,
                              gemv_slices(m, k)))
       return false;
-  } else if (!linear(d, sg, d->xn, d->sg, n) || !linear(d, su, d->xn, d->su, n) ||
+  } else if (!linear_pair(d, sg, d->sg, su, d->su, d->xn, n) ||
              ds41_v41_swiglu(d->sg, d->su, nullptr, d->sm, n, DS41_N_FF_EXP, kSwigluLimit)) {
     return false;
   }

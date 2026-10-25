@@ -83,6 +83,17 @@ int ds41_mmq_moe_typed(int type, const void * W, const float * X_f32,
                        const int32_t * ids, float * out_f32, int M, int K,
                        int n_tokens, int n_experts, int n_expert_used,
                        hipStream_t stream);
+// Two [M1, K] and [M2, K] weights of one type over the same X ([N, K]),
+// quantized once: out1 = X W1^T ([N, M1]), out2 = X W2^T ([N, M2]).
+int ds41_mmq_dense_pair_typed(int type, const void * W1, float * out1, int M1,
+                              const void * W2, float * out2, int M2,
+                              const float * X_f32, int N, int K, hipStream_t stream);
+// `groups` [M, K] weights stored back to back, each applied to its own K
+// columns of every X row ([N, groups * K]); out is [N, groups * M]. One input
+// quantization and one launch (an MMQ channel per group).
+int ds41_mmq_dense_grouped_typed(int type, const void * W, const float * X_f32,
+                                 float * out_f32, int M, int N, int K, int groups,
+                                 hipStream_t stream);
 // Routed gate and up of one weight type over the same rows (input quantized
 // once): gate_f32 receives the gate rows, and the up pass stores
 // mid = router_weights[row] * silu(min(gate, clamp)) * clamp(up, +-clamp)

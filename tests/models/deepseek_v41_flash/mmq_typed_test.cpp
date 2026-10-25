@@ -178,6 +178,46 @@ bool GemvCase(const TypeCase& t, int M, int K, int rows_per_x,
 }
 
 /* One grouped launch against a matvec per group. */
+/* Two weights over one input (quantized once) against two separate batched
+ * launches: must match exactly. */
+bool PairCase(const TypeCase& t, int M1, int M2, int N, int K,
+              std::mt19937& rng) {
+  const auto w1 =
+      RandomBlocks(t, static_cast<std::size_t>(M1) * K / t.block_values, rng);
+  const auto w2 =
+      RandomBlocks(t, static_cast<std::size_t>(M2) * K / t.block_values, rng);
+  std::normal_distribution<float> normal;
+  std::vector<float> x(static_cast<std::size_t>(N) * K);
+  for (auto& v : x)
+    v = normal(rng);
+  auto* dw1 = Device(w1);
+  auto* dw2 = Device(w2);
+  auto* dx = Device(x);
+  float *a1 = nullptr, *a2 = nullptr, *b1 = nullptr, *b2 = nullptr;
+  (void)hipMalloc(&a1, sizeof(float) * N * M1);
+  (void)hipMalloc(&b1, sizeof(float) * N * M1);
+  (void)hipMalloc(&a2, sizeof(float) * N * M2);
+  (void)hipMalloc(&b2, sizeof(float) * N * M2);
+  const bool ok = ds41_mmq_dense_pair_typed(t.type, dw1, a1, M1, dw2, a2, M2,
+                                            dx, N, K, 0) == 0 &&
+                  ds41_mmq_dense_typed(t.type, dw1, dx, b1, M1, N, K, 0) == 0 &&
+                  ds41_mmq_dense_typed(t.type, dw2, dx, b2, M2, N, K, 0) == 0;
+  const double e =
+      ok ? std::max(RelativeError(Host(a1, static_cast<std::size_t>(N) * M1),
+                                  Host(b1, static_cast<std::size_t>(N) * M1)),
+                    RelativeError(Host(a2, static_cast<std::size_t>(N) * M2),
+                                  Host(b2, static_cast<std::size_t>(N) * M2)))
+         : INFINITY;
+  std::printf("pair  %-8s M=%d+%d N=%d K=%d rel_err=%.2e\n", t.name, M1, M2, N,
+              K, e);
+  for (void* p :
+       {static_cast<void*>(dw1), static_cast<void*>(dw2),
+        static_cast<void*>(dx), static_cast<void*>(a1), static_cast<void*>(a2),
+        static_cast<void*>(b1), static_cast<void*>(b2)})
+    (void)hipFree(p);
+  return e == 0.0;
+}
+
 bool GroupedCase(const TypeCase& t, int M, int N, int K, int groups,
                  std::mt19937& rng) {
   const auto w = RandomBlocks(
@@ -192,11 +232,35 @@ bool GroupedCase(const TypeCase& t, int M, int N, int K, int groups,
   float *grouped = nullptr, *single = nullptr;
   (void)hipMalloc(&grouped, sizeof(float) * n_out);
   (void)hipMalloc(&single, sizeof(float) * n_out);
-  bool ok = ds41_mmq_grouped_vec_typed(t.type, dw, dx, grouped, M, N, K, groups,
-                                       0) == 0;
+  // Batches run every group as an MMQ channel and must match one batched
+  // launch per group exactly; small N runs the grouped matvec.
+  const bool batched = N > 8;
+  bool ok = (batched ? ds41_mmq_dense_grouped_typed(t.type, dw, dx, grouped, M,
+                                                    N, K, groups, 0)
+                     : ds41_mmq_grouped_vec_typed(t.type, dw, dx, grouped, M, N,
+                                                  K, groups, 0)) == 0;
   const std::size_t group_bytes =
       static_cast<std::size_t>(M) * K / t.block_values * t.block_bytes;
-  for (int col = 0; col < N && ok; ++col)
+  for (int g = 0; g < groups && ok && batched; ++g) {
+    std::vector<float> xg(static_cast<std::size_t>(N) * K);
+    for (int col = 0; col < N; ++col)
+      std::copy_n(x.begin() + (static_cast<std::size_t>(col) * groups + g) * K,
+                  K, xg.begin() + static_cast<std::size_t>(col) * K);
+    auto* dxg = Device(xg);
+    float* yg = nullptr;
+    (void)hipMalloc(&yg, sizeof(float) * N * M);
+    ok = ds41_mmq_dense_typed(
+             t.type, reinterpret_cast<const uint8_t*>(dw) + g * group_bytes,
+             dxg, yg, M, N, K, 0) == 0;
+    const auto hy = Host(yg, static_cast<std::size_t>(N) * M);
+    for (int col = 0; col < N && ok; ++col)
+      (void)hipMemcpy(single + (static_cast<std::size_t>(col) * groups + g) * M,
+                      hy.data() + static_cast<std::size_t>(col) * M,
+                      sizeof(float) * M, hipMemcpyHostToDevice);
+    (void)hipFree(dxg);
+    (void)hipFree(yg);
+  }
+  for (int col = 0; col < N && ok && !batched; ++col)
     for (int g = 0; g < groups && ok; ++g)
       ok = ds41_mmq_dense_vec_typed(
                t.type, reinterpret_cast<const uint8_t*>(dw) + g * group_bytes,
@@ -214,7 +278,7 @@ bool GroupedCase(const TypeCase& t, int M, int N, int K, int groups,
   (void)hipFree(dx);
   (void)hipFree(grouped);
   (void)hipFree(single);
-  return e < 1e-5;
+  return batched ? e == 0.0 : e < 1e-5;
 }
 
 bool MoeCase(const TypeCase& t, int M, int K, int n_tokens, int n_experts,
@@ -488,6 +552,8 @@ int main() {
     }
     ok = GroupedCase(t, 128, 1, 1024, 8, rng) && ok;
     ok = GroupedCase(t, 256, 3, 512, 8, rng) && ok;
+    ok = GroupedCase(t, 256, 37, 512, 8, rng) && ok;
+    ok = PairCase(t, 320, 128, 37, 1024, rng) && ok;
     for (const bool bounded : {false, true}) {
       ok = MoeCase(t, 256, 1024, 19, 16, 6, bounded, rng) && ok;
       ok = MoeCase(t, 128, 2304, 23, 16, 1, bounded, rng) && ok;
