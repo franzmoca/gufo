@@ -118,6 +118,8 @@ speed.
 
 ### M2 Resident performance
 
+Open performance items are tracked in [BACKLOG.md](BACKLOG.md).
+
 - Done: `deepseek41` in `gufo prompt` and `gufo bench`
   ([BENCHMARKS.md](BENCHMARKS.md)); candidate-block parity beyond 16K
   tokens ([QUALITY.md](QUALITY.md)).
