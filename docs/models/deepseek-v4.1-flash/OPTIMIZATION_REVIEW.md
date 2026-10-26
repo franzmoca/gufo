@@ -32,6 +32,12 @@ batching remain open architectural priorities. E7 now builds stable plans on
 device for large batches in the 38/40 fully FP16-routed IQ1_M layers, with
 unchanged numerical controls and flat production throughput. Mixed-MMQ plan
 metadata and actual graph capture remain open.
+E9/E10 cut the draft stage 12.6 → 9.3 ms (fused Markov selection, Q4_K
+drafter GEMV). E11 gates greedy DSpark verification with the drafter's
+learned acceptance head (+13.1% greedy). E12 draws sampled verification rows
+on the device (+2.0% sampled); greedy host verification measured about 1% of
+a cycle and stays on the host. Section 9's logit transfer is 0.07 ms per
+cycle.
 
 ## Scope and source pins
 

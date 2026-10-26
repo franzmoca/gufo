@@ -468,3 +468,39 @@ but accepted tokens per step fell 2.00 → 1.92. It is not used there, and
 sampled outputs remain byte-identical to E10. Functional sampling, batch,
 stop and tool suites pass with DSpark. Runs, traces and the simulator are in
 [the E11 record](artifacts/2026-10-26-learned-confidence/summary.txt).
+
+### E12: device target draws for sampled DSpark verification (retained)
+
+A cycle split showed that copying verification logits to the host costs
+0.07 ms, and greedy host verification about 1.3 ms per six-row cycle (not
+worth moving). Sampled host verification cost about 5 ms per cycle: each row
+built a 129,280-entry FP64 softmax (0.6 ms), and a rejection added a hashed
+residual pass.
+
+Sampled rows are now drawn on the device while the request's selection is
+plain softmax sampling: positive temperature, no top-k, top-p 1, no min-p,
+penalties, active grammar, forced reasoning end or deferred draw. Three
+kernels compute per-span maxima, per-span FP64 softmax sums and the draw: p/q
+acceptance of a proposal with two or more tokens, otherwise a plain draw, and
+a residual draw after a rejection. The draw walks its span in token order
+with the host sampler's arithmetic. The session draws the host's uniforms in
+the host's order and restores the RNG to the consumed count. Rows the host
+would draw without a uniform (fewer than two nonzero probabilities) and every
+other configuration use the host sampler. The bonus draw after a full block
+(or a plain step) uses the same path. The device argmax supplies the
+positional statistic.
+
+The operator test compares 240 device draws (97 accepted and 23 rejected
+proposals, 120 plain draws, rows with NaN/−inf, temperatures 0.6 and 1) with
+the shared host sampler: tokens, acceptance, uniform consumption and argmax
+are identical, and a single-token row is reported degenerate. Sampled and
+greedy outputs and speculative statistics are identical to E11. Full-width
+verification falls 106.0 → 101.1 ms.
+
+12-pair sampled protocol against E11: +1.99% geometric mean, 12/12 faster
+(per-pair SD 0.6%; coding +2.6%, explanation +2.0%, prose +1.4%, Rust
++2.0%), pooled 32.58 → 33.21 tok/s, with identical outputs. Each device row
+still costs three launches and a synchronizing copy, so the realized gain is
+below the removed host time. Functional sampling, batch, stop and tool suites
+pass with DSpark. Runs are in
+[the E12 record](artifacts/2026-10-26-device-target-draws/summary.txt).

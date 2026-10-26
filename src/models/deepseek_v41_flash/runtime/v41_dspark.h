@@ -16,6 +16,9 @@
 
 #include "model_data_internal.h"
 
+struct ds41_v41_proposal;
+struct ds41_v41_sample_result;
+
 struct ds41_decoder;
 struct ds41_engine;
 struct ds41_dspark_sampler;
@@ -90,6 +93,8 @@ bool ds41_dspark_inject(ds41_dspark_state* s, uint32_t pos0, uint32_t rows);
 bool ds41_dspark_draft(ds41_dspark_state* s, int anchor, int32_t* drafts, uint32_t count,
                        const ds41_dspark_sampler* sampler = nullptr, float* top = nullptr,
                        float* confidence = nullptr);
+/* The last sampled draft's device proposals, one per drafted row. */
+const ds41_v41_proposal* ds41_dspark_proposals(const ds41_dspark_state* s);
 /* Whether the drafter has a usable learned acceptance head; without one,
  * ds41_dspark_draft writes -1 confidences. */
 bool ds41_dspark_has_confidence(const ds41_dspark_model* m);
@@ -104,6 +109,10 @@ bool ds41_dspark_state_load(ds41_dspark_state* s, const uint8_t* data, uint64_t 
  * target layers for the last rows of every evaluation. */
 inline constexpr uint32_t DS41_DSPARK_FEATURE_ROWS = 128;
 bool ds41_decoder_enable_features(ds41_decoder* d);
+/* ds41_v41_sample_row on row `row` of the last evaluation's logits, while
+ * resident (evaluations of at most 64 logit rows). */
+bool ds41_decoder_sample(ds41_decoder* d, uint32_t row, const ds41_v41_proposal* q, float temperature, double u,
+                         double u2, ds41_v41_sample_result* out);
 /* Device features [rows][3 * dim] of positions [*pos0, *pos0 + *rows). */
 const float* ds41_decoder_features(const ds41_decoder* d, uint32_t* pos0, uint32_t* rows);
 /* Row-major out[t] = W x[t] for a [rows, k] weight of GGUF `type`. */

@@ -227,6 +227,7 @@ struct SharedActivations {
   uint32_t context = 0;
   Activations views;
   std::vector<void*> device;
+  const ds41_decoder* logits_owner = nullptr;  // the decoder whose rows views.logits holds
   ~SharedActivations() {
     for (void* p : device) (void)hipFree(p);
     for (float* p : views.engram_pinned)
@@ -268,6 +269,11 @@ struct ds41_decoder : Activations {
    * the target layers' inputs for positions feature_pos0 .. + feature_rows. */
   float* features = nullptr;
   uint32_t feature_pos0 = 0, feature_rows = 0;
+  /* Rows of the last evaluation's logits still resident in the shared
+   * logits (all of them up to one output pass, until another decoder of the
+   * engine evaluates), and ds41_decoder_sample's scratch. */
+  uint32_t resident_logits = 0;
+  void* sample_scratch = nullptr;
   std::vector<int64_t> engram_history;
   /* Image spans (ds41_decoder_set_images) and, during an evaluation, its
    * runs of image positions as [first, end) pairs. */
@@ -1330,6 +1336,7 @@ int eval_rows(ds41_decoder* d, const int* tokens, uint32_t n, uint32_t keep_from
   if (!d || !tokens || n == 0 || n > d->capacity || logit_rows > n || (logit_rows && !logits) ||
       d->pos + n > d->context || d->spec_n)
     return 1;
+  d->resident_logits = 0;
   const uint32_t pos0 = d->pos;
   const uint32_t skip = std::clamp(keep_from, pos0, pos0 + n) - pos0;
   const uint32_t kept = n - skip;
@@ -1449,6 +1456,8 @@ int eval_rows(ds41_decoder* d, const int* tokens, uint32_t n, uint32_t keep_from
     d->pos = pos0;
     return 1;
   }
+  d->resident_logits = logit_rows <= kLogitRows ? logit_rows : 0;
+  d->shared->logits_owner = d;
   if (d->features) {
     d->feature_pos0 = pos0 + n - feature_rows;
     d->feature_rows = feature_rows;
@@ -1516,6 +1525,14 @@ int ds41_decoder_commit(ds41_decoder* d, uint32_t keep) {
 
 int ds41_decoder_step(ds41_decoder* d, int token, float* logits, ds41_decoder_layer_fn layer_fn, void* ctx) {
   return ds41_decoder_eval(d, &token, 1, logits, logits ? 1 : 0, layer_fn, ctx);
+}
+
+bool ds41_decoder_sample(ds41_decoder* d, uint32_t row, const ds41_v41_proposal* q, float temperature, double u,
+                         double u2, ds41_v41_sample_result* out) {
+  if (!d || row >= d->resident_logits || d->shared->logits_owner != d) return false;
+  if (!d->sample_scratch) d->sample_scratch = alloc<uint8_t>(d->allocations, DS41_V41_SAMPLE_SCRATCH_BYTES);
+  return d->sample_scratch && ds41_v41_sample_row(d->logits + (uint64_t)row * DS41_N_VOCAB, DS41_N_VOCAB, q,
+                                                  temperature, u, u2, d->sample_scratch, out) == 0;
 }
 
 bool ds41_decoder_enable_features(ds41_decoder* d) {

@@ -886,6 +886,230 @@ __global__ void __launch_bounds__(kCollapseThreads)
   if (threadIdx.x == 0) out[row] = 1.0f / (1.0f + expf(-(acc + (bias ? *bias : 0.0f))));
 }
 
+/* Exact target draws (ds41_v41_sample_row). Blocks own contiguous token
+ * spans: per-span maxima, then per-span FP64 softmax sums, then one block
+ * locates the draw's span and walks it in token order. */
+constexpr uint32_t kSampleBlocks = 128, kSampleThreads = 256, kSamplePer = 8;
+/* Softmax terms above this stay nonzero after normalization by any total
+ * of at most 2^17 (the vocabulary); smaller terms may round to zero. */
+constexpr double kSampleTiny = 1e-300;
+
+struct SampleScratch {
+  ds41_v41_sample_result result;
+  float max[kSampleBlocks];
+  int32_t arg[kSampleBlocks];
+  int32_t big[kSampleBlocks];
+  double sum[kSampleBlocks];
+};
+static_assert(sizeof(SampleScratch) <= DS41_V41_SAMPLE_SCRATCH_BYTES);
+
+/* Larger finite logit, lower token on ties; a < 0 is empty. */
+__device__ bool sample_better(float v, int32_t a, float best, int32_t best_a) {
+  return a >= 0 && (best_a < 0 || v > best || (v == best && a < best_a));
+}
+
+__device__ void sample_span(uint32_t n, uint32_t b, uint32_t* lo, uint32_t* hi) {
+  const uint32_t span = (n + kSampleBlocks - 1) / kSampleBlocks;
+  *lo = min(n, b * span);
+  *hi = min(n, *lo + span);
+}
+
+__global__ void __launch_bounds__(kSampleThreads) sample_max_kernel(const float* logits, uint32_t n, SampleScratch* s) {
+  __shared__ float sv[kSampleThreads];
+  __shared__ int32_t sa[kSampleThreads];
+  uint32_t lo, hi;
+  sample_span(n, blockIdx.x, &lo, &hi);
+  float v = -INFINITY;
+  int32_t a = -1;
+  for (uint32_t i = lo + threadIdx.x; i < hi; i += kSampleThreads) {
+    const float x = logits[i];
+    if (isfinite(x) && sample_better(x, (int32_t)i, v, a)) v = x, a = (int32_t)i;
+  }
+  sv[threadIdx.x] = v;
+  sa[threadIdx.x] = a;
+  __syncthreads();
+  for (uint32_t o = kSampleThreads / 2; o > 0; o >>= 1) {
+    if (threadIdx.x < o && sample_better(sv[threadIdx.x + o], sa[threadIdx.x + o], sv[threadIdx.x], sa[threadIdx.x]))
+      sv[threadIdx.x] = sv[threadIdx.x + o], sa[threadIdx.x] = sa[threadIdx.x + o];
+    __syncthreads();
+  }
+  if (threadIdx.x == 0) s->max[blockIdx.x] = sv[0], s->arg[blockIdx.x] = sa[0];
+}
+
+__device__ void sample_global_max(const SampleScratch* s, float* v, int32_t* a) {
+  *v = -INFINITY;
+  *a = -1;
+  for (uint32_t b = 0; b < kSampleBlocks; b++)
+    if (sample_better(s->max[b], s->arg[b], *v, *a)) *v = s->max[b], *a = s->arg[b];
+}
+
+/* The host's softmax term of a finite logit. */
+__device__ double sample_term(float x, double mx, double t) { return isfinite(x) ? exp(((double)x - mx) / t) : 0.0; }
+
+__global__ void __launch_bounds__(kSampleThreads)
+    sample_sum_kernel(const float* logits, uint32_t n, float temperature, SampleScratch* s) {
+  __shared__ double ss[kSampleThreads];
+  __shared__ int32_t sb[kSampleThreads];
+  __shared__ float smax;
+  if (threadIdx.x == 0) {
+    int32_t a;
+    sample_global_max(s, &smax, &a);
+  }
+  __syncthreads();
+  uint32_t lo, hi;
+  sample_span(n, blockIdx.x, &lo, &hi);
+  const double mx = smax, t = temperature;
+  double sum = 0.0;
+  int32_t big = 0;
+  if (isfinite(smax))
+    for (uint32_t i = lo + threadIdx.x; i < hi; i += kSampleThreads) {
+      const double e = sample_term(logits[i], mx, t);
+      sum += e;
+      big += e > kSampleTiny;
+    }
+  ss[threadIdx.x] = sum;
+  sb[threadIdx.x] = big;
+  __syncthreads();
+  for (uint32_t o = kSampleThreads / 2; o > 0; o >>= 1) {
+    if (threadIdx.x < o) ss[threadIdx.x] += ss[threadIdx.x + o], sb[threadIdx.x] += sb[threadIdx.x + o];
+    __syncthreads();
+  }
+  if (threadIdx.x == 0) s->sum[blockIdx.x] = ss[0], s->big[blockIdx.x] = sb[0];
+}
+
+__global__ void __launch_bounds__(kSampleThreads)
+    sample_pick_kernel(const float* logits, uint32_t n, const ds41_v41_proposal* q, float temperature, double u,
+                       double u2, SampleScratch* s) {
+  __shared__ double scan[kSampleThreads];
+  __shared__ double sh_total, sh_residual, sh_start;
+  __shared__ float sh_max;
+  __shared__ int32_t sh_owner, sh_found, sh_last, sh_done, sh_qsize;
+  __shared__ int32_t sh_qid[8];
+  __shared__ double sh_qp[8];
+  if (threadIdx.x == 0) {
+    ds41_v41_sample_result r{-1, 0, 1, 0, -1};
+    int32_t arg;
+    sample_global_max(s, &sh_max, &arg);
+    r.argmax = arg;
+    double total = 0.0;
+    int32_t big = 0;
+    for (uint32_t b = 0; b < kSampleBlocks; b++) total += s->sum[b], big += s->big[b];
+    const double mx = sh_max, t = temperature;
+    const int32_t qsize = q && q->size > 1 ? (int32_t)min(q->size, 8u) : 0;
+    sh_qsize = qsize;
+    sh_done = 1;
+    sh_total = total;
+    if (arg < 0 || !(total > 0.0)) {
+      r.degenerate = 1;
+    } else if (qsize) {
+      /* p/q acceptance of the proposal's token. */
+      double qd = 0.0;
+      int32_t q_big = 0;
+      for (int32_t k = 0; k < qsize; k++) {
+        sh_qid[k] = q->ids[k];
+        sh_qp[k] = (double)((float)q->masses[k] / 16777216.0f);
+        if (qd == 0.0 && q->ids[k] == q->token) qd = sh_qp[k];
+        q_big += q->ids[k] >= 0 && (uint32_t)q->ids[k] < n && sample_term(logits[q->ids[k]], mx, t) > kSampleTiny;
+      }
+      const double pd = q->token >= 0 && (uint32_t)q->token < n ? sample_term(logits[q->token], mx, t) / total : 0.0;
+      if (u * qd < pd) {
+        r.token = q->token;
+        r.accepted = 1;
+      } else if (big - q_big < 2) {
+        r.uniforms = 2;
+        r.degenerate = 1;
+      } else {
+        /* Residual mass per span: p minus min(p, q) at the proposal's tokens. */
+        r.uniforms = 2;
+        double residual = 0.0;
+        for (uint32_t b = 0; b < kSampleBlocks; b++) residual += s->sum[b] / total;
+        for (int32_t k = 0; k < qsize; k++) {
+          const double p = sample_term(logits[sh_qid[k]], mx, t) / total;
+          residual -= fmin(p, sh_qp[k]);
+        }
+        sh_residual = residual;
+        sh_done = !(residual > 0.0);
+        r.degenerate = sh_done;
+      }
+    } else if (big < 2) {
+      r.degenerate = 1;
+    } else {
+      sh_done = 0;
+    }
+    if (!sh_done) {
+      /* The span holding the draw: subtract span masses in token order. */
+      const double target = qsize ? u2 : u;
+      double left = target;
+      int32_t owner = -1, last = -1;
+      for (uint32_t b = 0; b < kSampleBlocks; b++) {
+        uint32_t lo, hi;
+        sample_span(n, b, &lo, &hi);
+        double w = s->sum[b] / total;
+        for (int32_t k = 0; qsize && k < qsize; k++)
+          if ((uint32_t)sh_qid[k] >= lo && (uint32_t)sh_qid[k] < hi)
+            w -= fmin(sample_term(logits[sh_qid[k]], mx, t) / total, sh_qp[k]);
+        if (qsize) w /= sh_residual;
+        if (!(w > 0.0)) continue;
+        last = (int32_t)b;
+        if (left - w < 0.0) {
+          owner = (int32_t)b;
+          break;
+        }
+        left -= w;
+      }
+      sh_owner = owner >= 0 ? owner : last;
+      sh_start = owner >= 0 ? left : INFINITY;
+      if (sh_owner < 0) r.degenerate = sh_done = 1;
+    }
+    s->result = r;
+  }
+  __syncthreads();
+  if (sh_done) return;
+  /* Walk the owning span in token order: per-thread runs of kSamplePer
+   * tokens, an exclusive scan of their masses, then each run's draw. */
+  uint32_t lo, hi;
+  sample_span(n, (uint32_t)sh_owner, &lo, &hi);
+  const double mx = sh_max, t = temperature, total = sh_total;
+  const int32_t qsize = sh_qsize;
+  const auto mass = [&](uint32_t i) {
+    double p = sample_term(logits[i], mx, t) / total;
+    if (!qsize || p == 0.0) return p;
+    for (int32_t k = 0; k < qsize; k++)
+      if ((uint32_t)sh_qid[k] == i) p = fmax(p - sh_qp[k], 0.0);
+    return p / sh_residual;
+  };
+  const uint32_t first = lo + threadIdx.x * kSamplePer;
+  double run[kSamplePer];
+  double local = 0.0;
+#pragma unroll
+  for (uint32_t j = 0; j < kSamplePer; j++) {
+    run[j] = first + j < hi ? mass(first + j) : 0.0;
+    local += run[j];
+  }
+  scan[threadIdx.x] = local;
+  if (threadIdx.x == 0) sh_found = INT32_MAX, sh_last = -1;
+  __syncthreads();
+  for (uint32_t o = 1; o < kSampleThreads; o <<= 1) {
+    const double add = threadIdx.x >= o ? scan[threadIdx.x - o] : 0.0;
+    __syncthreads();
+    scan[threadIdx.x] += add;
+    __syncthreads();
+  }
+  double left = sh_start - (scan[threadIdx.x] - local);
+  int32_t found = -1, last = -1;
+#pragma unroll
+  for (uint32_t j = 0; j < kSamplePer; j++) {
+    if (!(run[j] > 0.0)) continue;
+    last = (int32_t)(first + j);
+    left -= run[j];
+    if (found < 0 && left < 0.0) found = (int32_t)(first + j);
+  }
+  if (found >= 0) atomicMin(&sh_found, found);
+  if (last >= 0) atomicMax(&sh_last, last);
+  __syncthreads();
+  if (threadIdx.x == 0) s->result.token = sh_found != INT32_MAX ? sh_found : sh_last;
+}
+
 /* hc_expand of y = extra + sum_r x[r]. */
 __global__ void hc_expand_sum_kernel(const float* x, const float* extra, uint32_t rows, const float* residual,
                                      const float* post, const float* comb, float* out, uint32_t hc, uint32_t dim) {
@@ -2321,6 +2545,19 @@ extern "C" int ds41_v41_dspark_confidence(const float* h, const float* pre, cons
                                           float* out) {
   dspark_confidence_kernel<<<1, kCollapseThreads>>>(h, pre, markov_x, w, bias, dim, rank, row, out);
   return launch_ok("dspark confidence");
+}
+
+extern "C" int ds41_v41_sample_row(const float* logits, uint32_t n, const ds41_v41_proposal* q, float temperature,
+                                   double u, double u2, void* scratch, ds41_v41_sample_result* out) {
+  if (!logits || !scratch || !out || n == 0 || (n + kSampleBlocks - 1) / kSampleBlocks > kSampleThreads * kSamplePer ||
+      !(temperature > 0.0f))
+    return 1;
+  auto* s = static_cast<SampleScratch*>(scratch);
+  sample_max_kernel<<<kSampleBlocks, kSampleThreads>>>(logits, n, s);
+  sample_sum_kernel<<<kSampleBlocks, kSampleThreads>>>(logits, n, temperature, s);
+  sample_pick_kernel<<<1, kSampleThreads>>>(logits, n, q, temperature, u, u2, s);
+  if (launch_ok("sample row") != 0) return 1;
+  return hipMemcpy(out, &s->result, sizeof(*out), hipMemcpyDeviceToHost) == hipSuccess ? 0 : 1;
 }
 
 extern "C" int ds41_v41_hc_expand(const float* y, const float* residual, const float* post, const float* comb,

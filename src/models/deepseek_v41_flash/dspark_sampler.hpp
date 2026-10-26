@@ -36,7 +36,11 @@ public:
               .try_accept_argmax = sampler.config().temperature == 0.F &&
                                            !sampler.config().penalties_enabled()
                                        ? &TryAcceptArgmax
-                                       : nullptr} {}
+                                       : nullptr,
+              .device_temperature = &DeviceTemperature,
+              .uniform = &DrawUniform,
+              .rng = &Rng,
+              .set_rng = &SetRng} {}
 
   DsparkSamplerBridge(const DsparkSamplerBridge&) = delete;
   DsparkSamplerBridge& operator=(const DsparkSamplerBridge&) = delete;
@@ -192,6 +196,30 @@ private:
   static void Accept(void* ctx, int token) {
     static_cast<DsparkSamplerBridge*>(ctx)->working_.Accept(
         static_cast<sampling::TokenId>(token));
+  }
+
+  // Plain softmax sampling: what SamplerState::Sample draws through its
+  // unfiltered linear distribution, with no state that can change the row.
+  static float DeviceTemperature(void* ctx) {
+    const auto& working = static_cast<DsparkSamplerBridge*>(ctx)->working_;
+    const auto& config = working.config();
+    const bool plain =
+        config.temperature > 0.F && config.top_k == 0 && config.top_p == 1.F &&
+        config.min_p <= 0.F && !config.penalties_enabled() &&
+        !working.NeedsConstraintMask() && !working.SaveDrawState().pending;
+    return plain ? config.temperature : 0.F;
+  }
+
+  static double DrawUniform(void* ctx) {
+    return static_cast<DsparkSamplerBridge*>(ctx)->working_.Uniform();
+  }
+
+  static std::uint64_t Rng(void* ctx) {
+    return static_cast<DsparkSamplerBridge*>(ctx)->working_.rng_state();
+  }
+
+  static void SetRng(void* ctx, std::uint64_t state) {
+    static_cast<DsparkSamplerBridge*>(ctx)->working_.SetRngState(state);
   }
 
   static bool TryAcceptArgmax(void* ctx, int token) {

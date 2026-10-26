@@ -403,6 +403,124 @@ void Confidence() {
   for (float* ptr : {dh, dp, dx, dw, db, out})
     (void)hipFree(ptr);
 }
+// Device target draws against the shared host sampler: identical tokens,
+// acceptance and uniform consumption for plain draws, accepted and rejected
+// p/q proposals and residual draws, over rows with NaN/-inf logits. Rows the
+// host draws without a uniform are reported degenerate.
+void DeviceTargetDraw() {
+  using gufo::sampling::SamplerState;
+  constexpr uint32_t n = 129280;
+  std::vector<float> logits(n);
+  uint64_t state = 4242;
+  const auto next = [&] {
+    state = state * 6364136223846793005ULL + 1442695040888963407ULL;
+    return static_cast<float>((state >> 40) & 0xffffff) / 16777216.F;
+  };
+  float* dl = nullptr;
+  void* scratch = nullptr;
+  ds41_v41_proposal* dq = nullptr;
+  Check(hipMalloc(&dl, n * 4) == hipSuccess &&
+            hipMalloc(&scratch, DS41_V41_SAMPLE_SCRATCH_BYTES) == hipSuccess &&
+            hipMalloc(&dq, sizeof(ds41_v41_proposal)) == hipSuccess,
+        "target draw allocation");
+  uint32_t accepted = 0, rejected = 0, plain = 0;
+  for (uint32_t trial = 0; trial < 240; ++trial) {
+    const float scale = trial % 3 == 0 ? 1.F : (trial % 3 == 1 ? 4.F : 9.F);
+    const float temperature = trial % 4 == 0 ? .6F : 1.F;
+    for (auto& v : logits)
+      v = scale * (next() + next() + next() - 1.5F);
+    logits[next() * n] = NAN;
+    logits[next() * n] = -INFINITY;
+    // A peaked head so proposals overlap with most of the target mass.
+    std::vector<int32_t> order(n);
+    std::iota(order.begin(), order.end(), 0);
+    std::partial_sort(order.begin(), order.begin() + 16, order.end(),
+                      [&](int32_t a, int32_t b) {
+                        return std::isnan(logits[b]) || logits[a] > logits[b];
+                      });
+    for (uint32_t k = 0; k < 16; ++k)
+      logits[order[k]] += 10.F;
+    Check(hipMemcpy(dl, logits.data(), n * 4, hipMemcpyHostToDevice) ==
+              hipSuccess,
+          "target draw upload");
+    const bool propose = trial % 2 == 1;
+    ds41_v41_proposal q{};
+    std::vector<gufo::sampling::TokenId> ids;
+    std::vector<float> probabilities;
+    if (propose) {
+      // Shuffled head tokens with random masses summing to 2^24.
+      q.size = 8;
+      uint32_t total = 0;
+      for (uint32_t k = 0; k < 8; ++k) {
+        q.ids[k] = order[(k * 5 + trial) % 16];
+        q.masses[k] = 1 + static_cast<uint32_t>(next() * 1500000.F);
+        total += q.masses[k];
+      }
+      q.masses[0] += (1U << 24) - total;
+      q.token = q.ids[(trial / 2) % 8];
+      for (uint32_t k = 0; k < 8; ++k) {
+        ids.push_back(static_cast<gufo::sampling::TokenId>(q.ids[k]));
+        probabilities.push_back(static_cast<float>(q.masses[k]) / (1U << 24));
+      }
+      Check(hipMemcpy(dq, &q, sizeof(q), hipMemcpyHostToDevice) == hipSuccess,
+            "proposal upload");
+    }
+    SamplerState host(
+        {.temperature = temperature, .seed = static_cast<int64_t>(trial) + 1});
+    SamplerState device = host;
+    int expected = -1;
+    bool expected_accept = false;
+    if (propose) {
+      const auto target = host.Distribution(logits);
+      const double probability = probabilities[(trial / 2) % 8];
+      expected_accept =
+          host.Uniform() * probability < target.probability(q.token);
+      expected = expected_accept
+                     ? q.token
+                     : static_cast<int>(target.SampleResidual(
+                           ids, probabilities, host.mutable_rng_state()));
+    } else {
+      expected = static_cast<int>(host.Sample(logits));
+    }
+    const double u = device.Uniform();
+    const uint64_t after_one = device.rng_state();
+    const double u2 = device.Uniform();
+    ds41_v41_sample_result r{};
+    Check(ds41_v41_sample_row(dl, n, propose ? dq : nullptr, temperature, u, u2,
+                              scratch, &r) == 0,
+          "target draw launch");
+    Check(!r.degenerate, "target draw is not degenerate");
+    Check(r.token == expected && (r.accepted != 0) == expected_accept,
+          "device draw matches the host sampler");
+    if (r.uniforms == 1)
+      device.SetRngState(after_one);
+    Check(device.rng_state() == host.rng_state(),
+          "device draw consumes the host's uniforms");
+    int best = -1;
+    for (uint32_t i = 0; i < n; ++i)
+      if (std::isfinite(logits[i]) && (best < 0 || logits[i] > logits[best]))
+        best = static_cast<int>(i);
+    Check(r.argmax == best, "device argmax");
+    accepted += propose && expected_accept;
+    rejected += propose && !expected_accept;
+    plain += !propose;
+  }
+  Check(accepted > 10 && rejected > 10 && plain == 120, "target draw coverage");
+  // One finite logit far above the rest: the host draws without a uniform.
+  std::fill(logits.begin(), logits.end(), 0.F);
+  logits[77] = 2000.F;
+  Check(
+      hipMemcpy(dl, logits.data(), n * 4, hipMemcpyHostToDevice) == hipSuccess,
+      "target draw upload");
+  ds41_v41_sample_result r{};
+  Check(ds41_v41_sample_row(dl, n, nullptr, 1.F, .5, .5, scratch, &r) == 0 &&
+            r.degenerate && r.argmax == 77,
+        "single-token rows are degenerate");
+  for (void* ptr : {static_cast<void*>(dl), scratch, static_cast<void*>(dq)})
+    (void)hipFree(ptr);
+  std::printf("device target draws: %u accepted, %u rejected, %u plain\n",
+              accepted, rejected, plain);
+}
 }  // namespace
 
 int main() {
@@ -414,8 +532,9 @@ int main() {
   DeviceProposal();
   MarkovFused();
   Confidence();
+  DeviceTargetDraw();
   std::puts(
       "PASS: post-Markov top8, fused Markov selection, learned confidence, "
-      "device q, exact sampled "
+      "device target draws, device q, exact sampled "
       "correction and seeded replay");
 }
