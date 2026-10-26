@@ -1,0 +1,277 @@
+{
+  "decision": "retained: eliminates unused short-width draft work; aggregate throughput gain unqualified",
+  "baseline_revision": "2163cd59",
+  "model": "ISTA GSQ-RCO IQ1_M with IQ4_NL Engram",
+  "drafter": "Lucebox Q2_K/Q4_K",
+  "sampling": {
+    "temperature": 1,
+    "top_p": 1,
+    "seed": 73,
+    "tokens": 256
+  },
+  "scope": "Production CLI decode timer, C1, coding and prose prompts; trace enabled for all runs. Loading and prompt prefill excluded. Initial baseline coding overlapped compilation; clean baseline-control retained separately. Adaptive widths vary with wall time. No aggregate speedup qualification.",
+  "runs": [
+    {
+      "run": "baseline-coding",
+      "returncode": 0,
+      "tokens": 256,
+      "seconds": 6.83487,
+      "tps": 37.455,
+      "token_sha256": "d3216f5c1ab06d7d3686c264e7224164fbeaa45e508a20955da5c788cf3c90f5",
+      "pq_trace_rows": 0,
+      "binary_sha256": "2b53579c0928a3fbffea81f3a7d4e0dc52c2060661a2ded3c7e44c9232bfd764",
+      "speculation": {
+        "acceptance": 0.752896,
+        "drafted": 259.0,
+        "accepted": 195.0,
+        "verification_steps": 60.0,
+        "skipped": 0.0,
+        "positional_acceptance": 0.803089,
+        "positional_accepted": 208.0,
+        "full_block_rate": 0.633333,
+        "full_blocks": 38.0,
+        "anchors": 60.0,
+        "verifier_rows": 319.0,
+        "lookup_cycles": 0.0,
+        "lookup_copied": 0.0,
+        "lookup_accepted": 0.0
+      }
+    },
+    {
+      "run": "baseline-prose",
+      "returncode": 0,
+      "tokens": 256,
+      "seconds": 11.0256,
+      "tps": 23.2188,
+      "token_sha256": "ead294cb3cc72ff961222fcb7f6155e26ad15154a61d5f07d14c0bd05e51db13",
+      "pq_trace_rows": 0,
+      "binary_sha256": "2b53579c0928a3fbffea81f3a7d4e0dc52c2060661a2ded3c7e44c9232bfd764",
+      "speculation": {
+        "acceptance": 0.447368,
+        "drafted": 76.0,
+        "accepted": 34.0,
+        "verification_steps": 39.0,
+        "skipped": 0.0,
+        "positional_acceptance": 0.539474,
+        "positional_accepted": 41.0,
+        "full_block_rate": 0.307692,
+        "full_blocks": 12.0,
+        "anchors": 39.0,
+        "verifier_rows": 115.0,
+        "lookup_cycles": 0.0,
+        "lookup_copied": 0.0,
+        "lookup_accepted": 0.0
+      }
+    },
+    {
+      "run": "candidate-coding",
+      "returncode": 0,
+      "tokens": 256,
+      "seconds": 6.79846,
+      "tps": 37.6556,
+      "token_sha256": "d3216f5c1ab06d7d3686c264e7224164fbeaa45e508a20955da5c788cf3c90f5",
+      "pq_trace_rows": 0,
+      "binary_sha256": "f30cee7ce23fd1bde98a1e9bdded6ffe73f0e72bf71290a5ed2ba7242638f3d0",
+      "speculation": {
+        "acceptance": 0.745174,
+        "drafted": 259.0,
+        "accepted": 193.0,
+        "verification_steps": 62.0,
+        "skipped": 0.0,
+        "positional_acceptance": 0.795367,
+        "positional_accepted": 206.0,
+        "full_block_rate": 0.645161,
+        "full_blocks": 40.0,
+        "anchors": 62.0,
+        "verifier_rows": 321.0,
+        "lookup_cycles": 0.0,
+        "lookup_copied": 0.0,
+        "lookup_accepted": 0.0
+      }
+    },
+    {
+      "run": "candidate-prose",
+      "returncode": 0,
+      "tokens": 256,
+      "seconds": 10.5839,
+      "tps": 24.1878,
+      "token_sha256": "ead294cb3cc72ff961222fcb7f6155e26ad15154a61d5f07d14c0bd05e51db13",
+      "pq_trace_rows": 0,
+      "binary_sha256": "f30cee7ce23fd1bde98a1e9bdded6ffe73f0e72bf71290a5ed2ba7242638f3d0",
+      "speculation": {
+        "acceptance": 0.474684,
+        "drafted": 158.0,
+        "accepted": 75.0,
+        "verification_steps": 85.0,
+        "skipped": 0.0,
+        "positional_acceptance": 0.525316,
+        "positional_accepted": 83.0,
+        "full_block_rate": 0.388235,
+        "full_blocks": 33.0,
+        "anchors": 85.0,
+        "verifier_rows": 243.0,
+        "lookup_cycles": 0.0,
+        "lookup_copied": 0.0,
+        "lookup_accepted": 0.0
+      }
+    },
+    {
+      "run": "baseline-control-coding",
+      "returncode": 0,
+      "tokens": 256,
+      "seconds": 6.75944,
+      "tps": 37.873,
+      "token_sha256": "d3216f5c1ab06d7d3686c264e7224164fbeaa45e508a20955da5c788cf3c90f5",
+      "pq_trace_rows": 0,
+      "binary_sha256": "2b53579c0928a3fbffea81f3a7d4e0dc52c2060661a2ded3c7e44c9232bfd764",
+      "speculation": {
+        "acceptance": 0.745174,
+        "drafted": 259.0,
+        "accepted": 193.0,
+        "verification_steps": 62.0,
+        "skipped": 0.0,
+        "positional_acceptance": 0.799228,
+        "positional_accepted": 207.0,
+        "full_block_rate": 0.629032,
+        "full_blocks": 39.0,
+        "anchors": 62.0,
+        "verifier_rows": 321.0,
+        "lookup_cycles": 0.0,
+        "lookup_copied": 0.0,
+        "lookup_accepted": 0.0
+      }
+    },
+    {
+      "run": "baseline-control-prose",
+      "returncode": 0,
+      "tokens": 256,
+      "seconds": 10.608,
+      "tps": 24.1327,
+      "token_sha256": "ead294cb3cc72ff961222fcb7f6155e26ad15154a61d5f07d14c0bd05e51db13",
+      "pq_trace_rows": 0,
+      "binary_sha256": "2b53579c0928a3fbffea81f3a7d4e0dc52c2060661a2ded3c7e44c9232bfd764",
+      "speculation": {
+        "acceptance": 0.473988,
+        "drafted": 173.0,
+        "accepted": 82.0,
+        "verification_steps": 90.0,
+        "skipped": 0.0,
+        "positional_acceptance": 0.531792,
+        "positional_accepted": 92.0,
+        "full_block_rate": 0.355556,
+        "full_blocks": 32.0,
+        "anchors": 90.0,
+        "verifier_rows": 263.0,
+        "lookup_cycles": 0.0,
+        "lookup_copied": 0.0,
+        "lookup_accepted": 0.0
+      }
+    }
+  ],
+  "draft_ms_by_width": {
+    "baseline-coding": {
+      "2": {
+        "calls": 1,
+        "median_ms": 11.8
+      },
+      "3": {
+        "calls": 4,
+        "median_ms": 11.75
+      },
+      "4": {
+        "calls": 30,
+        "median_ms": 11.6
+      },
+      "5": {
+        "calls": 25,
+        "median_ms": 11.8
+      }
+    },
+    "baseline-prose": {
+      "1": {
+        "calls": 6,
+        "median_ms": 11.75
+      },
+      "2": {
+        "calls": 29,
+        "median_ms": 11.5
+      },
+      "3": {
+        "calls": 4,
+        "median_ms": 12.0
+      }
+    },
+    "candidate-coding": {
+      "2": {
+        "calls": 1,
+        "median_ms": 9.8
+      },
+      "3": {
+        "calls": 4,
+        "median_ms": 10.3
+      },
+      "4": {
+        "calls": 40,
+        "median_ms": 11.0
+      },
+      "5": {
+        "calls": 17,
+        "median_ms": 11.8
+      }
+    },
+    "candidate-prose": {
+      "1": {
+        "calls": 16,
+        "median_ms": 8.9
+      },
+      "2": {
+        "calls": 65,
+        "median_ms": 9.7
+      },
+      "3": {
+        "calls": 4,
+        "median_ms": 10.5
+      }
+    },
+    "baseline-control-coding": {
+      "2": {
+        "calls": 1,
+        "median_ms": 11.8
+      },
+      "3": {
+        "calls": 4,
+        "median_ms": 11.2
+      },
+      "4": {
+        "calls": 40,
+        "median_ms": 11.6
+      },
+      "5": {
+        "calls": 17,
+        "median_ms": 11.7
+      }
+    },
+    "baseline-control-prose": {
+      "1": {
+        "calls": 11,
+        "median_ms": 11.6
+      },
+      "2": {
+        "calls": 75,
+        "median_ms": 11.6
+      },
+      "3": {
+        "calls": 4,
+        "median_ms": 11.75
+      }
+    }
+  },
+  "checks": [
+    "Widths 1..5: proposal prefixes identical on 128-row target history",
+    "Caller output tails untouched",
+    "Widths 0 and 6 rejected",
+    "All coding output token SHA256 hashes identical; all prose hashes identical",
+    "Production/probe builds passed",
+    "C++ format passed (777 files)"
+  ]
+}

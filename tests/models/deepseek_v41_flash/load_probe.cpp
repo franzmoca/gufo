@@ -379,7 +379,7 @@ int DsparkDump(ds41_engine* engine, const std::vector<int>& prompt,
   }
   const int anchor = Argmax(logits.data(), logits.size());
   int32_t drafts[DS41_DSPARK_BLOCK];
-  if (!ds41_dspark_draft(s, anchor, drafts))
+  if (!ds41_dspark_draft(s, anchor, drafts, DS41_DSPARK_BLOCK))
     return 1;
   std::vector<float> host((std::size_t)rows * DS41_DSPARK_TARGET_LAYERS * 5120);
   std::vector<float> draft_logits((std::size_t)DS41_DSPARK_BLOCK *
@@ -403,6 +403,27 @@ int DsparkDump(ds41_engine* engine, const std::vector<int>& prompt,
   for (int32_t t : drafts)
     std::printf(" %d", t);
   std::printf("\n");
+  // The shortened Markov chain must produce the original prefix and must
+  // not overwrite the caller's unused output slots.
+  for (uint32_t width = 1; width < DS41_DSPARK_BLOCK; width++) {
+    int32_t prefix[DS41_DSPARK_BLOCK];
+    std::fill_n(prefix, DS41_DSPARK_BLOCK, -1);
+    if (!ds41_dspark_draft(s, anchor, prefix, width))
+      return 1;
+    for (uint32_t i = 0; i < DS41_DSPARK_BLOCK; i++) {
+      if (prefix[i] != (i < width ? drafts[i] : -1)) {
+        std::fprintf(stderr, "draft prefix mismatch: width %u slot %u\n", width,
+                     i);
+        return 1;
+      }
+    }
+  }
+  if (ds41_dspark_draft(s, anchor, drafts, 0) ||
+      ds41_dspark_draft(s, anchor, drafts, DS41_DSPARK_BLOCK + 1))
+    return 1;
+  std::printf(
+      "draft prefixes 1..5 identical; output tails untouched; invalid widths "
+      "rejected\n");
   ds41_dspark_state_destroy(s);
   ds41_decoder_destroy(d);
   return 0;

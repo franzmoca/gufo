@@ -185,3 +185,27 @@ builds and the C++ format check pass. No GPU model sweep was needed for unchange
 token IDs. Settings, corpus descriptions and output hashes are retained in
 [the E3 record](artifacts/2026-10-26-tokenizer-memo/summary.json); raw inputs and
 outputs are under `/tmp/gufo-ds41-tokenizer` on the measurement host.
+
+
+### E4: stop unused DSpark Markov suffixes (retained)
+
+Pass the controller's selected proposal count into the drafter. Keep the full
+five-row transformer, normalization and output head, then stop the dependent
+Markov gather/projection/argmax chain at that count and copy only those IDs.
+The used proposal prefix retains its arithmetic; no target or rollback work changes.
+
+The existing dump probe now checks widths 1–5 against the complete draft on a
+128-row history, checks untouched caller output tails, and rejects widths zero
+and six. It passes. Production and probe builds and the format gate pass.
+
+C1 production CLI, 256 sampled tokens, temperature/top-p 1.0 and seed 73:
+coding baseline 37.455 / clean control 37.873 tok/s, candidate 37.656; prose
+23.219 / clean control 24.133, candidate 24.188. Each corpus has identical
+output-token hashes in every run. Trace medians confirm short-width draft
+latency falls: one proposal about 11.7 → 8.9 ms, two 11.6 → 9.7 ms, four
+11.7 → 11.0 ms; five stays about 11.8 ms. Adaptive widths and plain-step
+backoff vary between runs. **Aggregate throughput is approximately flat and
+no general speedup is qualified.** Retained for removing measured unused work
+with unchanged proposal prefixes; no larger quality sweep was run. All runs,
+settings, trace distributions and focused checks are in
+[the E4 record](artifacts/2026-10-26-markov-tail/summary.json).

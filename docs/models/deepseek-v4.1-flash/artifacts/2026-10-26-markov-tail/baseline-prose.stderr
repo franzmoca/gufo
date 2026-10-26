@@ -1,0 +1,54 @@
+2026-10-26 05:24:13 [INFO] [ds41] DeepSeek V4.1 Flash: 4 backbone shard(s), 112.00 GiB resident weights; Engram /mnt/data/models/ds41/ista-gsq-rco-gguf/DeepSeek-V4.1-Flash-Engram-IQ4_NL.gguf (103.00 GiB, 144 B rows, read from disk)
+2026-10-26 05:24:13 [INFO] [ds4] backend initialized on AMD Radeon 8060S Graphics (sm_115)
+2026-10-26 05:24:13 [INFO] [ds4] native MMQ enabled
+2026-10-26 05:24:13 [INFO] [ds4] loading model tensors into device cache
+2026-10-26 05:24:15 [INFO] [ds4] loading model tensors 16.48 GiB cached
+2026-10-26 05:24:18 [INFO] [ds4] loading model tensors 32.33 GiB cached
+2026-10-26 05:24:20 [INFO] [ds4] loading model tensors 48.55 GiB cached
+2026-10-26 05:24:23 [INFO] [ds4] loading model tensors 64.57 GiB cached
+2026-10-26 05:24:25 [INFO] [ds4] loading model tensors 80.72 GiB cached
+2026-10-26 05:24:28 [INFO] [ds4] loading model tensors 96.74 GiB cached
+2026-10-26 05:24:30 [INFO] [ds4] loading model tensors 112.00 GiB cached
+2026-10-26 05:24:30 [INFO] [ds4] ROCm startup model cache prepared 112.00 GiB of tensor spans in 17.285s
+2026-10-26 05:24:32 [INFO] [ds41] DSpark drafter /mnt/data/models/ds41/dspark-lucebox-q2k/DeepSeek-V4.1-Flash-1017-DSpark-draft-Q2K-Q4K.gguf: 4.59 GiB resident
+ds41: DSpark pos=33 drafted=3 accepted=0 draft=11.4ms verify=80.5ms
+ds41: DSpark pos=34 drafted=3 accepted=0 draft=12.1ms verify=76.2ms
+ds41: DSpark pos=35 drafted=3 accepted=1 draft=11.9ms verify=79.4ms
+ds41: DSpark pos=37 drafted=3 accepted=2 draft=12.4ms verify=196.3ms
+ds41: DSpark pos=40 drafted=2 accepted=2 draft=16.8ms verify=66.4ms
+ds41: DSpark pos=43 drafted=2 accepted=1 draft=11.3ms verify=66.0ms
+ds41: DSpark pos=45 drafted=2 accepted=2 draft=11.3ms verify=68.1ms
+ds41: DSpark pos=48 drafted=2 accepted=2 draft=11.2ms verify=70.0ms
+ds41: DSpark pos=51 drafted=2 accepted=2 draft=11.3ms verify=68.9ms
+ds41: DSpark pos=54 drafted=2 accepted=1 draft=12.1ms verify=68.8ms
+ds41: DSpark pos=56 drafted=2 accepted=2 draft=12.7ms verify=70.6ms
+ds41: DSpark pos=59 drafted=2 accepted=2 draft=15.1ms verify=68.6ms
+ds41: DSpark pos=62 drafted=2 accepted=1 draft=11.4ms verify=65.2ms
+ds41: DSpark pos=64 drafted=2 accepted=0 draft=12.1ms verify=66.5ms
+ds41: DSpark pos=65 drafted=2 accepted=1 draft=12.9ms verify=68.1ms
+ds41: DSpark pos=67 drafted=2 accepted=1 draft=12.1ms verify=70.6ms
+ds41: DSpark pos=69 drafted=2 accepted=0 draft=11.3ms verify=65.9ms
+ds41: DSpark pos=70 drafted=2 accepted=2 draft=11.3ms verify=67.3ms
+ds41: DSpark pos=73 drafted=2 accepted=0 draft=12.1ms verify=63.9ms
+ds41: DSpark pos=74 drafted=2 accepted=2 draft=11.4ms verify=68.5ms
+ds41: DSpark pos=77 drafted=2 accepted=0 draft=11.4ms verify=68.0ms
+ds41: DSpark pos=78 drafted=2 accepted=0 draft=11.3ms verify=65.5ms
+ds41: DSpark pos=79 drafted=2 accepted=0 draft=11.3ms verify=65.1ms
+ds41: DSpark pos=83 drafted=1 accepted=1 draft=12.2ms verify=56.4ms
+ds41: DSpark pos=85 drafted=2 accepted=1 draft=11.4ms verify=68.0ms
+ds41: DSpark pos=87 drafted=2 accepted=0 draft=12.1ms verify=66.7ms
+ds41: DSpark pos=89 drafted=2 accepted=1 draft=11.4ms verify=65.9ms
+ds41: DSpark pos=91 drafted=2 accepted=2 draft=12.2ms verify=66.9ms
+ds41: DSpark pos=94 drafted=2 accepted=1 draft=13.4ms verify=69.6ms
+ds41: DSpark pos=96 drafted=2 accepted=1 draft=12.6ms verify=67.7ms
+ds41: DSpark pos=98 drafted=2 accepted=2 draft=11.5ms verify=68.2ms
+ds41: DSpark pos=101 drafted=2 accepted=0 draft=11.5ms verify=68.5ms
+ds41: DSpark pos=102 drafted=2 accepted=0 draft=11.6ms verify=67.7ms
+ds41: DSpark pos=103 drafted=2 accepted=0 draft=12.6ms verify=68.7ms
+ds41: DSpark pos=107 drafted=1 accepted=0 draft=11.5ms verify=55.3ms
+ds41: DSpark pos=115 drafted=1 accepted=0 draft=11.8ms verify=55.6ms
+ds41: DSpark pos=131 drafted=1 accepted=0 draft=11.7ms verify=55.9ms
+ds41: DSpark pos=163 drafted=1 accepted=0 draft=11.7ms verify=53.6ms
+ds41: DSpark pos=227 drafted=1 accepted=1 draft=12.4ms verify=57.0ms
+[Speculative]: acceptance=0.447368 drafted=76 accepted=34 verification_steps=39 skipped=0 positional_acceptance=0.539474 positional_accepted=41 full_block_rate=0.307692 full_blocks=12 anchors=39 verifier_rows=115 lookup_cycles=0 lookup_copied=0 lookup_accepted=0
+[TokenTrace]: count=256 sha256=ead294cb3cc72ff961222fcb7f6155e26ad15154a61d5f07d14c0bd05e51db13
