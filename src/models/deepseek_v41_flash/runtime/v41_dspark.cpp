@@ -69,7 +69,10 @@ struct ds41_dspark_scratch {
   int32_t* route_ids = nullptr;
   float *g = nullptr, *u = nullptr, *mid = nullptr, *down = nullptr, *sg = nullptr, *su = nullptr, *sm = nullptr;
   float *sd = nullptr, *logits = nullptr, *markov_x = nullptr, *bias = nullptr;
-  int32_t* tokens = nullptr;
+  int32_t *tokens = nullptr, *candidate_ids = nullptr;
+  float* candidate_logits = nullptr;
+  uint32_t* draws = nullptr;
+  ds41_v41_proposal* proposals = nullptr;
   float *main_raw = nullptr, *main_x = nullptr, *main_kv = nullptr, *main_kvn = nullptr;
   ~ds41_dspark_scratch() {
     for (void* p : owned) (void)hipFree(p);
@@ -119,7 +122,9 @@ bool alloc_scratch(ds41_dspark_scratch& s) {
          s.alloc(&s.down, r * kRouted * kDim) && s.alloc(&s.sg, r * DS41_N_FF_EXP) &&
          s.alloc(&s.su, r * DS41_N_FF_EXP) && s.alloc(&s.sm, r * DS41_N_FF_EXP) && s.alloc(&s.sd, r * kDim) &&
          s.alloc(&s.logits, r * DS41_N_VOCAB) && s.alloc(&s.markov_x, DS41_DSPARK_MARKOV_RANK) &&
-         s.alloc(&s.bias, DS41_N_VOCAB) && s.alloc(&s.tokens, r + 1) && s.alloc(&s.main_raw, f * kDim) &&
+         s.alloc(&s.bias, DS41_N_VOCAB) && s.alloc(&s.tokens, r + 1) && s.alloc(&s.candidate_ids, DS41_DSPARK_CANDIDATES) &&
+         s.alloc(&s.candidate_logits, DS41_DSPARK_CANDIDATES) &&
+         s.alloc(&s.draws, r) && s.alloc(&s.proposals, r) && s.alloc(&s.main_raw, f * kDim) &&
          s.alloc(&s.main_x, f * kDim) && s.alloc(&s.main_kv, f * kHeadDim) && s.alloc(&s.main_kvn, f * kHeadDim);
 }
 
@@ -333,7 +338,8 @@ bool ds41_dspark_inject(ds41_dspark_state* s, uint32_t pos0, uint32_t rows) {
   return hipDeviceSynchronize() == hipSuccess;
 }
 
-bool ds41_dspark_draft(ds41_dspark_state* s, int anchor, int32_t* drafts, uint32_t count) {
+bool ds41_dspark_draft(ds41_dspark_state* s, int anchor, int32_t* drafts, uint32_t count,
+                       const ds41_dspark_sampler* sampler, float* top) {
   if (count == 0 || count > kRows) return false;
   const ds41_dspark_model* m = s->engine->dspark;
   ds41_dspark_scratch& sc = *m->scratch;
@@ -351,7 +357,15 @@ bool ds41_dspark_draft(ds41_dspark_state* s, int anchor, int32_t* drafts, uint32
   for (uint32_t t = 1; t < n; t++) tokens[t] = DS41_DSPARK_NOISE_TOKEN;
   float one_hot[kRows * kHc] = {};
   for (uint32_t t = 0; t < n; t++) one_hot[t * kHc] = 1.0f;
-  bool ok = ds41_decoder_embed(s->decoder, tokens, n, s->host_rows.data()) &&
+  /* Sampled requests draw each proposal on the device from the biased top
+   * eight, so the next Markov row reads it without a host round trip; the
+   * request RNG supplies the draws up front and q returns once per cycle. */
+  const bool stochastic = sampler && sampler->draws && sampler->retain;
+  float temperature = 1.0f;
+  uint32_t draws[kRows] = {};
+  if (stochastic) temperature = sampler->draws(sampler->ctx, count, draws);
+  bool ok = (!stochastic || hipMemcpy(sc.draws, draws, count * sizeof(uint32_t), hipMemcpyHostToDevice) == hipSuccess) &&
+            ds41_decoder_embed(s->decoder, tokens, n, s->host_rows.data()) &&
             hipMemcpy(sc.xn, s->host_rows.data(), (uint64_t)n * kDim * sizeof(float), hipMemcpyHostToDevice) ==
                 hipSuccess &&
             hipMemcpy(sc.pre[0], one_hot, sizeof(one_hot), hipMemcpyHostToDevice) == hipSuccess &&
@@ -381,11 +395,26 @@ bool ds41_dspark_draft(ds41_dspark_state* s, int anchor, int32_t* drafts, uint32
                                                             : DS41_V41_ROW_F32;
   // Later Markov rows depend only on earlier proposals; unused suffixes
   // cannot affect the requested prefix. The transformer body keeps all five rows.
-  for (uint32_t i = 0; i < count && ok; i++)
+  for (uint32_t i = 0; i < count && ok; i++) {
+    const float* row = sc.logits + (uint64_t)i * DS41_N_VOCAB;
     ok = ds41_v41_gather_row(m->markov_w1.p, format, sc.tokens, i, sc.markov_x, DS41_DSPARK_MARKOV_RANK) == 0 &&
          lin(m->markov_w2, sc.markov_x, sc.bias, 1) &&
-         ds41_v41_argmax_bias(sc.logits + (uint64_t)i * DS41_N_VOCAB, sc.bias, DS41_N_VOCAB, sc.tokens, i + 1) == 0;
-  ok = ok && hipMemcpy(drafts, sc.tokens + 1, count * sizeof(int32_t), hipMemcpyDeviceToHost) == hipSuccess;
+         (stochastic ? ds41_v41_propose_top8(row, sc.bias, DS41_N_VOCAB, sc.candidate_ids, sc.candidate_logits,
+                                             sc.draws + i, temperature, sc.proposals + i, sc.tokens + i + 1)
+                     : ds41_v41_argmax_bias(row, sc.bias, DS41_N_VOCAB, sc.tokens, i + 1)) == 0;
+  }
+  if (stochastic) {
+    ds41_v41_proposal q[kRows];
+    ok = ok && hipMemcpy(q, sc.proposals, count * sizeof(q[0]), hipMemcpyDeviceToHost) == hipSuccess;
+    for (uint32_t i = 0; i < count && ok; i++) {
+      ok = q[i].token >= 0;  // fewer than eight finite candidates
+      if (ok) sampler->retain(sampler->ctx, i, q[i].ids, q[i].masses, q[i].size, q[i].token);
+      if (top) top[i] = (float)q[i].masses[0] / (float)(1u << 24);
+      drafts[i] = q[i].token;
+    }
+  } else {
+    ok = ok && hipMemcpy(drafts, sc.tokens + 1, count * sizeof(int32_t), hipMemcpyDeviceToHost) == hipSuccess;
+  }
   for (uint32_t i = 0; i < count && ok; i++) ok = drafts[i] >= 0;
   return ok;
 }

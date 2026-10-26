@@ -1,0 +1,48 @@
+== base -> e2a (e2.jsonl)
+coding   geomean +2.25% n=3
+explain  geomean +1.23% n=3
+prose    geomean -0.87% n=3
+rust     geomean +4.76% n=3
+ALL geomean +1.82%  wins 8/12  sd 7.6%
+base: pooled tok/s 29.37 acceptance 0.656 drafted 2269 accepted/step 1.89
+e2a: pooled tok/s 29.79 acceptance 0.675 drafted 2193 accepted/step 2.29
+== base -> e2b (e2.jsonl)
+coding   geomean -0.69% n=3
+explain  geomean +6.16% n=3
+prose    geomean -0.94% n=3
+rust     geomean +5.62% n=3
+ALL geomean +2.48%  wins 7/12  sd 6.1%
+base: pooled tok/s 29.37 acceptance 0.656 drafted 2269 accepted/step 1.89
+e2b: pooled tok/s 30.09 acceptance 0.686 drafted 2319 accepted/step 1.81
+== base -> e2c (e2dev.jsonl)
+coding   geomean +1.57% n=3
+explain  geomean -2.54% n=3
+prose    geomean -0.27% n=3
+rust     geomean +4.21% n=3
+ALL geomean +0.71%  wins 8/12  sd 10.0%
+base: pooled tok/s 29.99 acceptance 0.645 drafted 2451 accepted/step 1.81
+e2c: pooled tok/s 30.02 acceptance 0.701 drafted 2011 accepted/step 2.48
+== base -> e2d (e2dev.jsonl)
+coding   geomean +2.12% n=3
+explain  geomean +3.80% n=3
+prose    geomean -0.98% n=3
+rust     geomean +4.77% n=3
+ALL geomean +2.40%  wins 8/12  sd 5.3%
+base: pooled tok/s 29.99 acceptance 0.645 drafted 2451 accepted/step 1.81
+e2d: pooled tok/s 30.60 acceptance 0.686 drafted 2357 accepted/step 1.86
+== base -> e2q (e2q.jsonl)
+coding   geomean +4.73% n=3
+explain  geomean +4.17% n=3
+prose    geomean +4.64% n=3
+rust     geomean +1.90% n=3
+ALL geomean +3.85%  wins 9/12  sd 4.7%
+base: pooled tok/s 29.76 acceptance 0.641 drafted 2450 accepted/step 1.80
+e2q: pooled tok/s 30.93 acceptance 0.682 drafted 2802 accepted/step 2.07
+== e2d -> e2q (e2q.jsonl)
+coding   geomean +2.72% n=3
+explain  geomean +3.03% n=3
+prose    geomean +1.09% n=3
+rust     geomean -1.69% n=3
+ALL geomean +1.27%  wins 6/12  sd 6.5%
+e2d: pooled tok/s 30.50 acceptance 0.662 drafted 2558 accepted/step 1.74
+e2q: pooled tok/s 30.93 acceptance 0.682 drafted 2802 accepted/step 2.07

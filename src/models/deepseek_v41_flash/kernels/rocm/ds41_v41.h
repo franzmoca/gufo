@@ -257,6 +257,21 @@ enum { DS41_V41_ROW_F32, DS41_V41_ROW_BF16, DS41_V41_ROW_F16 };
 /* out[0:rank] = row tokens[index] of an F32, BF16 or F16 table (DS41_V41_ROW_*). */
 int ds41_v41_gather_row(const void* table, int format, const int32_t* tokens, uint32_t index, float* out,
                         uint32_t rank);
+/* Eight largest finite biased logits, descending; lowest token id on ties.
+ * Missing finite candidates have id -1 and logit -inf. */
+int ds41_v41_top8_bias(const float* x, const float* bias, uint32_t n, int32_t* ids, float* logits);
+/* A proposal drawn from the biased top eight: q in units of 2^-24 over
+ * ids[0, size), and the drawn token (-1 with fewer than eight finite). */
+struct ds41_v41_proposal {
+  int32_t ids[8];
+  uint32_t masses[8];
+  uint32_t size;
+  int32_t token;
+};
+/* Top eight plus a q draw, `*draw` in [0, 2^24); writes the token to
+ * `*token` (the next Markov row's input) and q to `*proposal`. */
+int ds41_v41_propose_top8(const float* x, const float* bias, uint32_t n, int32_t* ids, float* logits,
+                          const uint32_t* draw, float temperature, ds41_v41_proposal* proposal, int32_t* token);
 /* tokens[index] = the first index of the largest finite x[v] + bias[v]
  * (bias may be NULL), or -1 when none is finite. */
 int ds41_v41_argmax_bias(const float* x, const float* bias, uint32_t n, int32_t* tokens, uint32_t index);
