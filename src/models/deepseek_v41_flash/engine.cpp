@@ -7,6 +7,8 @@
 #include <stdexcept>
 #include <utility>
 
+#include "src/models/deepseek_v41_flash/runtime/model_data_internal.h"
+
 namespace gufo::models::deepseek_v41_flash {
 namespace {
 
@@ -269,6 +271,16 @@ bool Model::ExactPrefill() const {
   return ds41_engine_exact_prefill(engine_);
 }
 
+bool Model::SetImageRoutingBias(std::span<const float> bias,
+                                std::string* error_msg) {
+  if (bias.size() != std::size_t{DS41_N_LAYER} * DS41_N_EXPERT ||
+      ds41_engine_set_image_bias(engine_, bias.data()) != 0) {
+    AssignError(error_msg, "cannot set the DeepSeek V4.1 image routing bias");
+    return false;
+  }
+  return true;
+}
+
 Session::Session(std::shared_ptr<Model> model, ds41_session* session)
     : model_(std::move(model)), session_(session) {}
 
@@ -279,7 +291,8 @@ Session::~Session() {
 }
 
 bool Session::Sync(std::span<const int> prompt, std::string* error_msg,
-                   std::size_t prompt_end) {
+                   std::size_t prompt_end,
+                   std::span<const ds41_image_span> images) {
   if (prompt.empty()) {
     AssignError(error_msg, "DeepSeek V4.1 Flash prompt is empty");
     return false;
@@ -309,9 +322,9 @@ bool Session::Sync(std::span<const int> prompt, std::string* error_msg,
       .cap = static_cast<int>(prompt.size()),
   };
   std::array<char, kErrorCapacity> error{};
-  const int result =
-      ds41_session_sync(session_, &tokens, static_cast<int>(prompt_end),
-                        error.data(), error.size());
+  const int result = ds41_session_sync(
+      session_, &tokens, static_cast<int>(prompt_end), error.data(),
+      error.size(), images.data(), images.size());
   if (result != 0) {
     AssignError(error_msg, error[0] != '\0'
                                ? error.data()

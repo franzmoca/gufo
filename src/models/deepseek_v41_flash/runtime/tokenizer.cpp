@@ -172,6 +172,7 @@ struct ds41_vocab {
     int think_start_id;
     int think_end_id;
     int dsml_id;
+    int image_id;
     str_i32_table token_to_id;
     str_i32_table merge_rank;
 };
@@ -576,6 +577,7 @@ ds41_vocab *ds41_vocab_create(const ds41_model *model) {
     vocab->think_start_id = vocab_lookup(vocab, "<think>");
     vocab->think_end_id = vocab_lookup(vocab, "</think>");
     vocab->dsml_id = vocab_lookup(vocab, "｜DSML｜");
+    vocab->image_id = vocab_lookup(vocab, "<｜deepseek_image｜>");
     return owned.release();
 }
 
@@ -627,6 +629,8 @@ static bool special_token_at(const ds41_vocab *vocab, const char *p, int *token,
         {"<think>",                vocab->think_start_id},
         {"</think>",               vocab->think_end_id},
         {"｜DSML｜",                vocab->dsml_id},
+        /* Image content parts; the chat template rejects it in text. */
+        {"<｜deepseek_image｜>",    vocab->image_id},
     };
 
     for (size_t i = 0; i < sizeof(specials) / sizeof(specials[0]); i++) {

@@ -7,6 +7,13 @@ target_compile_definitions(ds41_chat_template_test PRIVATE
 add_test(NAME ds41.template COMMAND ds41_chat_template_test)
 set_tests_properties(ds41.template PROPERTIES LABELS "cpu;ds41;tokenization")
 
+add_executable(ds41_vision_prompt_test
+  vision_prompt_test.cpp
+  ${PROJECT_SOURCE_DIR}/src/models/deepseek_v41_flash/vision/prompt.cpp)
+target_link_libraries(ds41_vision_prompt_test PRIVATE gufo_core)
+add_test(NAME ds41.vision_prompt COMMAND ds41_vision_prompt_test)
+set_tests_properties(ds41.vision_prompt PROPERTIES LABELS "cpu;ds41;vision")
+
 if(ENGINE_ENABLE_HIP)
   add_executable(ds41_mmq_typed_test mmq_typed_test.cpp)
   target_link_libraries(ds41_mmq_typed_test PRIVATE gufo_deepseek_v41_flash)
@@ -41,6 +48,9 @@ if(ENGINE_ENABLE_HIP)
 
   add_executable(ds41_mmq_bench EXCLUDE_FROM_ALL mmq_bench.cpp)
   target_link_libraries(ds41_mmq_bench PRIVATE gufo_deepseek_v41_flash)
+
+  add_executable(ds41_vision_probe EXCLUDE_FROM_ALL vision_probe.cpp)
+  target_link_libraries(ds41_vision_probe PRIVATE gufo_deepseek_v41_flash)
 
   add_executable(ds41_load_probe EXCLUDE_FROM_ALL load_probe.cpp)
   target_link_libraries(ds41_load_probe PRIVATE gufo_deepseek_v41_flash)

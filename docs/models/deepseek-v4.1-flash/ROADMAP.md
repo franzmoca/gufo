@@ -24,7 +24,7 @@ same GGUF.
 | M2 Resident performance | done |
 | M4 Component cache and serving | done |
 | M5 DSpark, prompt lookup and approximations | in progress: DSpark and prompt lookup done |
-| M6 Vision | planned |
+| M6 Vision | done |
 | M3 SSD expert streaming (IQ2_XXS) | planned, after M6 |
 | M7 Higher-precision Engram tables | planned |
 
@@ -205,17 +205,38 @@ Open performance items are tracked in [BACKLOG.md](BACKLOG.md).
 
 ### M6 Vision
 
-- Vision tower from
-  [unsloth](https://huggingface.co/unsloth/DeepSeek-V4.1-Flash-1017-GGUF)
-  `mmproj-BF16.gguf` (0.91 GiB; `mmproj-F16.gguf` 0.90 GiB). The official
-  config has 32 layers, width 1024, patch 14, a 3x downsample and at most
-  1,024 image tokens per image (`<｜deepseek_image｜>`, token 129264).
-- Interleaved image blocks in the chat template, checked against the official
-  `encoding.py` image goldens; the image functional suites for this model.
-- Component cache for image prompts: the image identity in the cache
-  metadata, as for Qwen3.8-Flash-Next, so a restored prefix only serves
-  requests with the same images; the image cache suites (`image-count` RAM
-  and disk replay).
+Done. Image input is opt-in: `gufo serve` loads the vision tower only with an
+explicit `--mmproj` (0.90 GiB resident), never by discovery, since the
+resident IQ1_M model leaves little memory.
+
+- The sidecar is unsloth's
+  [`mmproj-BF16.gguf`](https://huggingface.co/unsloth/DeepSeek-V4.1-Flash-1017-GGUF)
+  plus each MoE gate's image routing bias (`bias_vl`, 40 × 384 FP32), which
+  no published GGUF carries. `tools/ds41/vision_sidecar.py` reads it from the
+  official checkpoint (HTTP range requests, or `--checkpoint DIR`) and writes
+  the extended sidecar:
+
+  ```sh
+  python3 -I tools/ds41/vision_sidecar.py --mmproj mmproj-BF16.gguf \
+    --out mmproj-ds41-BF16.gguf
+  gufo serve llm -m DeepSeek-V4.1-Flash-1017-GSQ-RCO-IQ1_M-00001-of-00004.gguf \
+    --mmproj mmproj-ds41-BF16.gguf
+  ```
+
+- Preprocessing as the official `image_processor.py` (grid planning, PIL
+  bicubic resize, gray padding; padded pixels byte-identical to PIL), the
+  32-layer ViT and 3 × 3 aligner on the GPU in the official BF16 rounding
+  (`tools/ds41/vision_reference.py` is the CPU teacher), and the span
+  `[START] + ([IMAGE] × w + [NEWLINE]) × h + [END]`.
+- Image positions (token 129264) follow the official image mask: no Engram
+  n-gram crosses them and they receive no Engram term, and their experts are
+  selected with the image bias. Both derive from the tokens, so snapshots,
+  cache restores and bounded replay need no extra state.
+- Chat template image blocks match the official `encoding.py` image goldens.
+  Image prompts carry their image identity in the component cache, as for
+  Qwen3.8-Flash-Next and Gemma 4.
+- Quality and speed: [QUALITY.md](QUALITY.md#vision-m6),
+  [BENCHMARKS.md](BENCHMARKS.md#vision-encoder).
 
 ### M7 Higher-precision Engram tables
 

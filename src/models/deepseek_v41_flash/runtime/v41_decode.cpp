@@ -18,6 +18,7 @@
 #include <memory>
 #include <mutex>
 #include <thread>
+#include <utility>
 #include <vector>
 
 #include "ds41_v41.h"
@@ -268,6 +269,10 @@ struct ds41_decoder : Activations {
   float* features = nullptr;
   uint32_t feature_pos0 = 0, feature_rows = 0;
   std::vector<int64_t> engram_history;
+  /* Image spans (ds41_decoder_set_images) and, during an evaluation, its
+   * runs of image positions as [first, end) pairs. */
+  std::vector<ds41_image_span> images;
+  std::vector<std::pair<uint32_t, uint32_t>> image_runs;
   std::vector<float> host_h;
   std::vector<int32_t> host_ids;
 };
@@ -373,7 +378,13 @@ const float* layer_freq(const ds41_decoder* d, uint32_t il) {
   return ds41_layer_compress_ratio(il) ? d->freq_compress : d->freq_plain;
 }
 
-/* Engram row ids for the newest token; mirrors NgramHashState.forward. */
+/* NgramHashState's cache entry for an image position. */
+constexpr int64_t kEngramDead = -1;
+
+bool is_image(const ds41_decoder* d, int token) { return d->engine->image_bias && token == DS41_IMAGE_TOKEN; }
+
+/* Engram row ids for the newest token; mirrors NgramHashState.forward,
+ * whose look-back stops at image positions. */
 void engram_hash(ds41_decoder* d, int token, int64_t (*rows)[DS41_ENGRAM_COLS]) {
   const ds41_weights* w = d->engine->weights;
   const int32_t* token_map = (const int32_t*)host(d, w->engram_token_map);
@@ -381,12 +392,12 @@ void engram_hash(ds41_decoder* d, int token, int64_t (*rows)[DS41_ENGRAM_COLS]) 
   const int64_t* offsets = (const int64_t*)host(d, w->engram_offsets);
   const int64_t* multipliers = (const int64_t*)host(d, w->engram_multipliers);
   const int64_t pad = token_map[DS41_ENGRAM_PAD_TOKEN];
-  d->engram_history.push_back(token_map[token]);
+  d->engram_history.push_back(is_image(d, token) ? kEngramDead : token_map[token]);
   const int64_t p = (int64_t)d->engram_history.size() - 1;
   int64_t grams[DS41_ENGRAM_MAX_NGRAM];
   bool blocked = false;
   for (int64_t shift = 0; shift < DS41_ENGRAM_MAX_NGRAM; shift++) {
-    blocked = blocked || p < shift;
+    blocked = blocked || p < shift || d->engram_history[p - shift] == kEngramDead;
     grams[shift] = blocked ? pad : d->engram_history[p - shift];
   }
   for (uint32_t layer = 0; layer < DS41_N_ENGRAM_LAYER; layer++) {
@@ -403,7 +414,8 @@ void engram_hash(ds41_decoder* d, int token, int64_t (*rows)[DS41_ENGRAM_COLS]) 
 }
 
 /* Reads and dequantizes the n * DS41_ENGRAM_COLS table rows of layer il into
- * out. Reads run on parallel threads: each is a small random read, so
+ * out; a negative row id (an image position) reads zeros, whose Engram term
+ * is exactly zero, as the official masked gate. Reads run on parallel threads: each is a small random read, so
  * throughput comes from queue depth. Touches only immutable engine state, so
  * it can run while the GPU works on earlier layers. */
 bool engram_read(const ds41_decoder* d, uint32_t il, const int64_t* rows, uint32_t n, float* out) {
@@ -417,6 +429,10 @@ bool engram_read(const ds41_decoder* d, uint32_t il, const int64_t* rows, uint32
   auto worker = [&] {
     std::vector<uint8_t> raw(e->row_bytes);
     for (uint64_t i = next++; i < count && ok; i = next++) {
+      if (rows[i] < 0) {
+        std::fill_n(out + i * DS41_ENGRAM_HEAD_DIM, DS41_ENGRAM_HEAD_DIM, 0.0f);
+        continue;
+      }
       const off_t at = (off_t)(base + (uint64_t)rows[i] * e->row_bytes);
       if (pread(e->file.shard_fd[0], raw.data(), raw.size(), at) != (ssize_t)raw.size() ||
           !dequant_row(table->type, raw.data(), out + i * DS41_ENGRAM_HEAD_DIM, DS41_ENGRAM_HEAD_DIM))
@@ -686,6 +702,17 @@ bool moe(ds41_decoder* d, uint32_t il, uint32_t n) {
       ds41_v41_route(d->router, f32(d, l->ffn_exp_probs_b), d->route_ids, d->route_w, DS41_N_EXPERT, used,
                      DS41_EXPERT_WEIGHT_SCALE, n))
     return false;
+  /* Image positions select with the image bias (the gate's bias_vl). */
+  for (const auto& [first, end] : d->image_runs) {
+    /* This layer's rows are the positions from d->pos. */
+    const uint32_t lo = std::max(first, d->pos), hi = std::min(end, d->pos + n);
+    if (lo >= hi) continue;
+    const uint64_t r = lo - d->pos;
+    if (ds41_v41_route(d->router + r * DS41_N_EXPERT, d->engine->image_bias + (uint64_t)il * DS41_N_EXPERT,
+                       d->route_ids + r * used, d->route_w + r * used, DS41_N_EXPERT, used, DS41_EXPERT_WEIGHT_SCALE,
+                       hi - lo))
+      return false;
+  }
   const void* gate = dev(d, l->ffn_gate_exps);
   const void* up = dev(d, l->ffn_up_exps);
   const void* down = dev(d, l->ffn_down_exps);
@@ -1208,7 +1235,7 @@ int ds41_decoder_adopt(ds41_decoder* d, const int* tokens, uint32_t n) {
   d->engram_history.resize(n);
   for (uint32_t i = 0; i < n; i++) {
     if (tokens[i] < 0 || tokens[i] >= DS41_N_VOCAB) return 1;
-    d->engram_history[i] = token_map[tokens[i]];
+    d->engram_history[i] = is_image(d, tokens[i]) ? kEngramDead : token_map[tokens[i]];
   }
   d->spec_n = 0;
   /* Every evaluation leaves the last KV source layer here. */
@@ -1291,11 +1318,20 @@ int eval_rows(ds41_decoder* d, const int* tokens, uint32_t n, uint32_t keep_from
   const uint64_t hd = (uint64_t)kHc * kDim;
   const size_t history = d->engram_history.size();
 
-  /* Engram rows, [layer][token][column]. */
+  /* Engram rows, [layer][token][column]; image positions read none. */
   std::vector<int64_t> engram_rows((uint64_t)DS41_N_ENGRAM_LAYER * n * DS41_ENGRAM_COLS);
+  d->image_runs.clear();
   for (uint32_t t = 0; t < n; t++) {
     int64_t rows[DS41_N_ENGRAM_LAYER][DS41_ENGRAM_COLS];
     engram_hash(d, tokens[t], rows);
+    const bool image = is_image(d, tokens[t]);
+    if (image) {
+      std::fill_n(&rows[0][0], DS41_N_ENGRAM_LAYER * DS41_ENGRAM_COLS, int64_t{-1});
+      if (!d->image_runs.empty() && d->image_runs.back().second == pos0 + t)
+        d->image_runs.back().second++;
+      else
+        d->image_runs.emplace_back(pos0 + t, pos0 + t + 1);
+    }
     for (uint32_t layer = 0; layer < DS41_N_ENGRAM_LAYER; layer++)
       memcpy(&engram_rows[((uint64_t)layer * n + t) * DS41_ENGRAM_COLS], rows[layer], sizeof(rows[layer]));
   }
@@ -1328,6 +1364,13 @@ int eval_rows(ds41_decoder* d, const int* tokens, uint32_t n, uint32_t keep_from
   /* One upload into xn (free until the first block), then a device copy per stream. */
   ok = ok && hipMemcpy(d->xn, d->host_h.data(), (uint64_t)n * kDim * sizeof(float), hipMemcpyHostToDevice) ==
                  hipSuccess;
+  /* Image rows replace their placeholder embeddings (merge_image_embeddings). */
+  for (const ds41_image_span& image : d->images) {
+    const uint32_t first = std::max(image.pos, pos0), end = std::min(image.pos + image.rows, pos0 + n);
+    if (first < end && ok)
+      ok = hipMemcpyAsync(d->xn + (uint64_t)(first - pos0) * kDim, image.data + (uint64_t)(first - image.pos) * kDim,
+                          (uint64_t)(end - first) * kDim * sizeof(float), hipMemcpyDeviceToDevice, 0) == hipSuccess;
+  }
   for (uint32_t c = 0; c < kHc && ok; c++)
     ok = hipMemcpy2DAsync(d->h + c * kDim, hd * sizeof(float), d->xn, kDim * sizeof(float), kDim * sizeof(float), n,
                           hipMemcpyDeviceToDevice, 0) == hipSuccess;
@@ -1393,6 +1436,10 @@ int eval_rows(ds41_decoder* d, const int* tokens, uint32_t n, uint32_t keep_from
 }
 
 }  // namespace
+
+void ds41_decoder_set_images(ds41_decoder* d, const ds41_image_span* images, size_t n_images) {
+  if (d) d->images.assign(images, images + (images ? n_images : 0));
+}
 
 int ds41_decoder_eval(ds41_decoder* d, const int* tokens, uint32_t n, float* logits, uint32_t logit_rows,
                       ds41_decoder_layer_fn layer_fn, void* ctx) {

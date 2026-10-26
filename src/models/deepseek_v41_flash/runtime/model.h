@@ -95,6 +95,17 @@ struct ds41_session_dspark_batch_item {
   bool stop_at_eos = false;
 };
 
+/* The image placeholder token: every position of an image span holds it. */
+inline constexpr int DS41_IMAGE_TOKEN = 129264;
+
+/* One image span's input embeddings: device rows [rows][5120] for the
+ * positions [pos, pos + rows), delimiters included. */
+struct ds41_image_span {
+  uint32_t pos;
+  uint32_t rows;
+  const float* data;
+};
+
 inline constexpr int DS41_SESSION_SYNC_INTERRUPTED = 2;
 inline constexpr std::uint32_t DS41_SESSION_PAYLOAD_VERSION = 5;
 
@@ -127,9 +138,12 @@ bool ds41_session_dspark_enabled(const ds41_session* session);
  * first part of a prompt ending at prompt_end (0: prompt->len), which
  * decides the decoder's bounded replay (ds41_decoder_eval_prompt; none with
  * the engine's exact_prefill); a state synced to a shorter part is complete
- * only for that same end. */
+ * only for that same end. `images` replace the input embeddings of the
+ * positions they cover (ds41_decoder_set_images). */
 int ds41_session_sync(ds41_session* session, const ds41_tokens* prompt,
-                      int prompt_end, char* error, size_t error_capacity);
+                      int prompt_end, char* error, size_t error_capacity,
+                      const ds41_image_span* images = nullptr,
+                      size_t n_images = 0);
 int ds41_session_argmax(const ds41_session* session);
 int ds41_session_sample(const ds41_session* session, float temperature,
                         int top_k, float top_p, float min_p,
@@ -143,6 +157,13 @@ void ds41_session_begin_request(ds41_session* session);
 void ds41_session_prepare_batch_execution(ds41_session* session);
 bool ds41_engine_has_dspark(const ds41_engine* engine);
 bool ds41_engine_exact_prefill(const ds41_engine* engine);
+/* Uploads the MoE gates' image routing bias, [40][384] host floats; NULL
+ * removes it. With it, every position holding DS41_IMAGE_TOKEN is an image
+ * position, as the official image mask: it takes no part in an Engram
+ * n-gram and receives no Engram term, and its experts are selected with the
+ * image bias. Set it before creating sessions. */
+int ds41_engine_set_image_bias(ds41_engine* engine, const float* bias);
+bool ds41_engine_has_image_bias(const ds41_engine* engine);
 int ds41_sessions_dspark_step_batch(const ds41_session_dspark_batch_item* items,
                                     size_t item_count, char* error,
                                     size_t error_capacity);
@@ -215,6 +236,12 @@ int ds41_decoder_eval(ds41_decoder* decoder, const int* tokens, uint32_t n,
 int ds41_decoder_eval_prompt(ds41_decoder* decoder, const int* tokens,
                              uint32_t n, uint32_t prompt_end, float* logits,
                              uint32_t logit_rows);
+/* Image spans whose rows replace the token embeddings of the positions
+ * they cover in later evaluations, until replaced; the device rows must
+ * outlive them. Positions holding DS41_IMAGE_TOKEN outside every span keep
+ * the token's embedding. */
+void ds41_decoder_set_images(ds41_decoder* decoder,
+                             const ds41_image_span* images, size_t n_images);
 /* Rows a speculative batch may hold. */
 #define DS41_DECODER_MAX_SPECULATIVE 16
 /* ds41_decoder_eval of `n` tokens (n <= DS41_DECODER_MAX_SPECULATIVE) with

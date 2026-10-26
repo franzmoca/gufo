@@ -1,6 +1,7 @@
 #ifndef GUFO_MODELS_DEEPSEEK_V41_FLASH_CHAT_TEMPLATE_HPP_
 #define GUFO_MODELS_DEEPSEEK_V41_FLASH_CHAT_TEMPLATE_HPP_
 
+#include <cstddef>
 #include <span>
 #include <string>
 #include <string_view>
@@ -29,7 +30,16 @@ struct ChatMessage {
   std::string reasoning_content;
   std::vector<ToolCall> tool_calls;
   std::string tool_call_id;
+  /// Bytes of `content` before which an image goes, in order; equal offsets
+  /// keep their order. Images render as kImagePlaceholder, joined with the
+  /// text around them by blank lines as the official encoder joins content
+  /// blocks. User and tool messages only.
+  std::vector<std::size_t> image_offsets;
 };
+
+/// One image in a rendered prompt; prepare_vl_inputs expands it into the
+/// image's span.
+inline constexpr std::string_view kImagePlaceholder = "<｜deepseek_image｜>";
 
 struct ChatTool {
   std::string name;
@@ -55,7 +65,9 @@ struct ChatTemplateOptions {
 
 [[nodiscard]] std::string_view GenerationPrompt(bool enable_thinking);
 
-/// Renders the pinned DeepSeek V4.1 Flash 1017 conversation format.
+/// Renders the pinned DeepSeek V4.1 Flash 1017 conversation format. Throws
+/// std::invalid_argument for text containing kImagePlaceholder, which the
+/// official encoder rejects, and for invalid image offsets.
 [[nodiscard]] std::string RenderChat(std::span<const ChatMessage> messages,
                                      const ChatTemplateOptions& options = {});
 [[nodiscard]] std::string RenderChat(std::span<const ChatMessage> messages,

@@ -257,6 +257,49 @@ tokens) that took one draft round more or fewer than before.
 against the build before bounded replay, all 70 request outputs of the
 `long-context`, `conversation` and `cache` suites are byte-identical.
 
+## Vision (M6)
+
+**Encoder against the official forward.** `tools/ds41/vision_reference.py`
+runs the official preprocessing, ViT and aligner on the CPU in the official
+BF16 default dtype (and in FP32 with `--fp32`, as a precision yardstick);
+`ds41_vision_probe` writes the GPU span. Every grid matches the reference
+and the padded pixels are byte-identical to PIL:
+
+| Image | Padded | Tokens | Relative RMS to BF16 reference | Median row cosine | Worst row cosine |
+|---|---|---:|---:|---:|---:|
+| carrots.jpeg (official example) | 1036 × 714 | 444 | 4.26% | 0.99994 | 0.780 |
+| corn.jpeg (official example, enlarged) | 658 × 462 | 189 | 1.81% | 0.99995 | 0.992 |
+| 2000 × 300 synthetic | 2002 × 308 | 394 | 2.92% | 0.99991 | 0.960 |
+| 250 × 1900 synthetic | 252 × 1904 | 324 | 2.60% | 0.99992 | 0.972 |
+| 97 × 61 synthetic (enlarged) | 686 × 434 | 200 | 1.49% | 0.99995 | 0.995 |
+| 4000 × 3000 synthetic (token cap) | 1512 × 1134 | 1,001 | 2.42% | 0.99992 | 0.925 |
+
+The differences are BF16 rounding sensitivity, not an error: on carrots the
+official BF16 forward itself is 5.66% from the FP32 forward (worst row
+0.842), and the GPU span is 5.55% from it (worst row 0.890). The few
+divergent rows are scattered over the image.
+
+**Image routing bias.** No published GGUF carries the gates' `bias_vl`, so
+image positions would otherwise route with the text bias (layer 3: up to 4.9
+apart, correlation −0.22). Eleven greedy questions on the two official
+examples and four synthetic images (text transcription, counting, a bar
+chart, digits; `--reasoning-effort none`): with the image bias, all nine
+questions with a reference answer are right; with the text bias in its place
+(a control sidecar), eight are, and the carrots are counted as 5 instead of
+4. Three of the eleven answers change. One differing answer is too little to
+size the effect.
+
+**Serving.** `tests/functional/run.py` (`deepseek4` preset, 32K context, two
+sessions, `--mmproj`): `discovery` (text and image inputs), `image-inputs`,
+`tool-images`, `image-count` (with cancellation and disk replay) and
+`messages-image-counts` pass. A follow-up turn after an image restores the
+image prefix from the cache (219 of 232 tokens). The text suites
+`conversation`, `tools` and `cache` (RAM, disk and restart) without
+`--mmproj` pass their assertions. The report still fails one measurement
+check: with `--speculative off` the harness expects zero drafts, and two
+`tools` requests verified prompt-lookup copies (16 and 28 copied, 15 and 27
+accepted). The build before M6 reports the same.
+
 ## Batched prefill and M2 kernels
 
 The same 3K positions scored through 2048-token batches (matrix-core

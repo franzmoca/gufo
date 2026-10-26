@@ -94,6 +94,10 @@ public:
   [[nodiscard]] std::uint32_t MaxContext() const noexcept;
   [[nodiscard]] bool HasDspark() const;
   [[nodiscard]] bool ExactPrefill() const;
+  /// The MoE gates' image routing bias, [40][384] (vision::Encoder::
+  /// RoutingBias), for image prompts; set it before creating sessions.
+  [[nodiscard]] bool SetImageRoutingBias(std::span<const float> bias,
+                                         std::string* error_msg = nullptr);
 
 private:
   Model(ds41_engine* engine, ModelOptions options);
@@ -118,10 +122,13 @@ public:
   // Evaluates the prompt from the longest evaluated prefix. `prompt` is the
   // first part of a prompt ending at `prompt_end` (0: its own end), which
   // bounds the decoder layers' replay to its last tokens; a state synced to
-  // a shorter part only continues to that same end.
+  // a shorter part only continues to that same end. `images` hold the input
+  // embeddings of the image spans (the positions holding DS41_IMAGE_TOKEN)
+  // that this part evaluates; they need SetImageRoutingBias.
   [[nodiscard]] bool Sync(std::span<const int> prompt,
                           std::string* error_msg = nullptr,
-                          std::size_t prompt_end = 0);
+                          std::size_t prompt_end = 0,
+                          std::span<const ds41_image_span> images = {});
   [[nodiscard]] int SelectNext(float temperature, std::uint64_t* rng_state,
                                int top_k = 0, float top_p = 1.0F,
                                float min_p = 0.0F) const;

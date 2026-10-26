@@ -37,6 +37,14 @@ SEARCH = {
 }
 
 
+def image(url: str) -> dict:
+    return {"type": "image_url", "image_url": {"url": url}}
+
+
+def text(value: str) -> dict:
+    return {"type": "text", "text": value}
+
+
 def call(call_id: str, name: str, arguments: dict) -> dict:
     return {"id": call_id, "type": "function", "function": {"name": name, "arguments": json.dumps(arguments)}}
 
@@ -86,6 +94,18 @@ CASES = [
         {"role": "assistant", "reasoning_content": "", "content": "",
          "tool_calls": [call("x", "search", {"query": "引用 \"x\"", "filters": {"tags": ["a", "b"], "n": 1.5, "ok": True}})]},
         {"role": "tool", "tool_call_id": "x", "content": "no results"}]},
+    {"name": "image_between_text", "thinking": False, "messages": [
+        {"role": "user", "content": [text("第一张图"), image("a.png"), text("有什么内容？")]}]},
+    {"name": "images_only_then_text", "thinking": True, "messages": [
+        {"role": "user", "content": [image("a.png"), image("b.png")]},
+        {"role": "assistant", "reasoning_content": "Two pictures.", "content": "Two pictures."},
+        {"role": "user", "content": [text("Compare them."), image("c.png")]}]},
+    {"name": "image_tool_result", "thinking": True, "tools": [SEARCH], "messages": [
+        {"role": "user", "content": "Find a photo of Rome."},
+        {"role": "assistant", "reasoning_content": "Search.", "content": "",
+         "tool_calls": [call("s1", "search", {"query": "Rome photo"})]},
+        {"role": "tool", "tool_call_id": "s1", "content": [text("Top result:"), image("rome.jpg")]},
+        {"role": "user", "content": [image("mine.jpg"), text("Is it like mine?")]}]},
 ]
 
 
@@ -113,7 +133,17 @@ def renderer_input(case: dict) -> dict:
     """The case in the compiled renderer's message shape."""
     messages = []
     for message in case["messages"]:
-        out = {"role": message["role"], "content": message.get("content", "")}
+        content = message.get("content", "")
+        out = {"role": message["role"], "content": content}
+        if isinstance(content, list):
+            # The HTTP parsers append text parts and place each image at the
+            # current end of the text.
+            out["content"], out["images"] = "", []
+            for block in content:
+                if block["type"] == "text":
+                    out["content"] += block["text"]
+                else:
+                    out["images"].append(len(out["content"].encode()))
         if "reasoning_content" in message:
             out["reasoning_content"] = message["reasoning_content"]
         if "tool_call_id" in message:

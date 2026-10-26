@@ -4,6 +4,8 @@
 #include <fstream>
 #include <iostream>
 #include <iterator>
+#include <span>
+#include <stdexcept>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -35,6 +37,10 @@ std::vector<ChatMessage> ParseMessages(const gufo::json::Value& messages) {
     out.content = message.member_str("content");
     out.reasoning_content = message.member_str("reasoning_content");
     out.tool_call_id = message.member_str("tool_call_id");
+    if (const auto* images = message.find("images")) {
+      for (const auto& offset : images->items())
+        out.image_offsets.push_back(offset.as_size());
+    }
     if (const auto* calls = message.find("tool_calls")) {
       for (const auto& call : calls->items()) {
         ChatMessage::ToolCall& tool_call = out.tool_calls.emplace_back();
@@ -98,6 +104,21 @@ int main() {
   if (cases == 0) {
     std::cerr << "no golden cases\n";
     return 1;
+  }
+  // The official encoder rejects the placeholder in text (and in reasoning).
+  for (const bool reasoning : {false, true}) {
+    ChatMessage message;
+    message.role = "user";
+    message.content = "hi";
+    (reasoning ? message.reasoning_content : message.content)
+        .append(gufo::models::deepseek_v41_flash::kImagePlaceholder);
+    try {
+      (void)gufo::models::deepseek_v41_flash::RenderChat(std::span(&message, 1),
+                                                         ChatTemplateOptions{});
+      std::cerr << "placeholder text was not rejected\n";
+      ++failures;
+    } catch (const std::invalid_argument&) {
+    }
   }
   std::cout << cases - failures << "/" << cases << " cases match\n";
   return failures == 0 ? 0 : 1;

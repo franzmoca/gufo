@@ -64,6 +64,8 @@ add_library(gufo_deepseek_v41_flash STATIC
   ${DEEPSEEK_V41_FLASH_RUNTIME_DIR}/v41_decode.cpp
   ${DEEPSEEK_V41_FLASH_RUNTIME_DIR}/v41_dspark.cpp
   ${DEEPSEEK_V41_FLASH_RUNTIME_DIR}/v41_session.cpp
+  vision/encoder.hip
+  vision/prompt.cpp
   ${DEEPSEEK_V41_FLASH_ROCM_DIR}/backend.hip.cpp
   ${DEEPSEEK_V41_FLASH_ROCM_DIR}/ds41_v41.hip.cpp
   ${DEEPSEEK_V41_FLASH_ROCM_DIR}/ds41_gemv.hip.cpp
@@ -72,6 +74,7 @@ add_library(gufo_deepseek_v41_flash STATIC
   ${DEEPSEEK_V41_FLASH_ROCM_DIR}/ds41_dense_f16.hip.cpp)
 
 set_source_files_properties(
+  vision/encoder.hip
   ${DEEPSEEK_V41_FLASH_ROCM_DIR}/backend.hip.cpp
   ${DEEPSEEK_V41_FLASH_ROCM_DIR}/ds41_v41.hip.cpp
   ${DEEPSEEK_V41_FLASH_ROCM_DIR}/ds41_gemv.hip.cpp
@@ -97,8 +100,11 @@ target_include_directories(gufo_deepseek_v41_flash SYSTEM PUBLIC
     ${ROCPRIM_INCLUDE_DIR}
     ${ROCWMMA_INCLUDE_DIR})
 
+find_package(OpenSSL REQUIRED COMPONENTS Crypto)
 target_link_libraries(gufo_deepseek_v41_flash PUBLIC
   gufo_deepseek_v41_flash_mmq
+  OpenSSL::Crypto
+  gufo_core
   gufo_cache_hip
   hip::host
   roc::hipblas

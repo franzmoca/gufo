@@ -86,6 +86,7 @@ struct ds41_engine {
   bool rocm_ready;
   uint32_t prefill_batch;  // most tokens per prefill batch
   bool exact_prefill;      // no decoder SWA bounded replay
+  float* image_bias;       // device [layer][expert], or NULL without vision
 };
 
 bool ds41_model_string_array_begin(const ds41_model* model, const char* key,
