@@ -689,8 +689,10 @@ bool attention(ds41_decoder* d, uint32_t il, uint32_t n, const Joint* joint) {
         ds41_fp4_rows comp{};
         if (ratio) comp = {e->layer[e->comp_layer].comp, e->layer[e->comp_layer].comp_scale};
         const uint32_t floor = il >= DS41_FIRST_DECODER_LAYER ? e->window_floor : 0;
+        /* Decode batches keep the split form's single-row arithmetic. */
+        float* partial = m < DS41_V41_ATTN_SPLIT_TOKENS || m <= e->decode_rows ? e->attn_partial : nullptr;
         return ds41_v41_attention(e->q, s.window, e->kvn, DS41_N_SWA, floor, comp, e->topk, DS41_N_INDEXER_TOP_K,
-                                  ratio, f32(e, l->attn_sinks), e->o, e->attn_partial, e->pos, m, DS41_N_HEAD,
+                                  ratio, f32(e, l->attn_sinks), e->o, partial, e->pos, m, DS41_N_HEAD,
                                   kHeadDim, 1.0f / sqrtf((float)kHeadDim), freq, kRot, e->rope) == 0 &&
                (e->spec_eval ? copy_dev(spec_rows(e, e->spec_window, il, 0), e->kvn, (uint64_t)m * kHeadDim)
                              : store_window(s, e->kvn, e->pos, m));
@@ -1075,7 +1077,7 @@ std::shared_ptr<SharedActivations> make_activations(ds41_engine* engine, uint32_
         {&a.engram_in, cap * kEngramIn, kEngram},
         {&a.engram_kv, cap * kEngramOut, kEngram},
         {&a.logits, (uint64_t)kLogitRows * DS41_N_VOCAB},
-        {&a.attn_partial, (uint64_t)(DS41_V41_ATTN_SPLIT_TOKENS - 1) * DS41_N_HEAD * DS41_V41_ATTN_PARTIAL_PER_HEAD},
+        {&a.attn_partial, (uint64_t)DS41_V41_ATTN_SPLIT_MAX_TOKENS * DS41_N_HEAD * DS41_V41_ATTN_PARTIAL_PER_HEAD},
     };
   };
   const auto padded = [](uint64_t n) { return (n + 63) / 64 * 64; };  // 256-byte offsets in the region
@@ -1561,10 +1563,15 @@ int ds41_decoder_eval_prompt(ds41_decoder* d, const int* tokens, uint32_t n, uin
 }
 
 int ds41_decoder_eval_speculative(ds41_decoder* d, const int* tokens, uint32_t n, float* logits) {
+  static_assert(DS41_DECODER_MAX_SPECULATIVE <= DS41_V41_GEMV_MAX_TOKENS &&
+                DS41_DECODER_MAX_SPECULATIVE <= DS41_V41_ATTN_SPLIT_MAX_TOKENS);
   if (!d || d->spec_n || n == 0 || n > DS41_DECODER_MAX_SPECULATIVE) return 1;
   d->spec_pos0 = d->pos;
   d->spec_eval = true;
+  /* Every row keeps single-token arithmetic, as serial decode would. */
+  d->decode_rows = DS41_DECODER_MAX_SPECULATIVE;
   const int rc = ds41_decoder_eval(d, tokens, n, logits, n, nullptr, nullptr);
+  d->decode_rows = kDecodeRows;
   d->spec_eval = false;
   if (rc == 0) d->spec_n = n;
   return rc;
@@ -1573,7 +1580,7 @@ int ds41_decoder_eval_speculative(ds41_decoder* d, const int* tokens, uint32_t n
 int ds41_decoder_eval_joint(ds41_decoder* const* ds, const int* const* tokens, const uint32_t* ns, uint32_t count,
                             float* const* logits) {
   static_assert(DS41_DECODER_MAX_JOINT <= DS41_V41_GEMV_MAX_TOKENS && DS41_DECODER_MAX_JOINT <= kEngramPinnedTokens &&
-                DS41_DECODER_MAX_JOINT <= kLogitRows);
+                DS41_DECODER_MAX_JOINT <= kLogitRows && DS41_DECODER_MAX_JOINT <= DS41_V41_ATTN_SPLIT_MAX_TOKENS);
   if (!ds || !tokens || !ns || !logits || count == 0) return 1;
   ds41_decoder* lead = ds[0];
   uint32_t total = 0;

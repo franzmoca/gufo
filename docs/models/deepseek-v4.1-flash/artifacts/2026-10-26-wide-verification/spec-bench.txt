@@ -1,0 +1,9 @@
+spec-bench n=1 at 1103: median 42.2 ms min 42.1 ms
+spec-bench n=4 at 1103: median 81.0 ms min 76.9 ms
+spec-bench n=6 at 1103: median 104.1 ms min 98.6 ms
+spec-bench n=7 at 1103: median 113.9 ms min 108.6 ms
+spec-bench n=8 at 1103: median 124.7 ms min 118.5 ms
+spec-bench n=10 at 1103: median 156.0 ms min 152.3 ms
+spec-bench n=12 at 1103: median 178.1 ms min 172.0 ms
+spec-bench n=14 at 1103: median 202.5 ms min 194.8 ms
+spec-bench n=16 at 1103: median 223.1 ms min 215.9 ms

@@ -39,8 +39,9 @@ on the device (+2.0% sampled); greedy host verification measured about 1% of
 a cycle and stays on the host. Section 9's logit transfer is 0.07 ms per
 cycle. E14 implements P1d for DSpark cohorts: concurrent sessions' blocks
 evaluate jointly with per-row decode arithmetic up to 16 rows (+40% per user
-at C2, +60% at C4, identical outputs); wider single-session verification
-(P1c) remains open.
+at C2, +60% at C4, identical outputs). E15 implements P1c for prompt
+lookup: single-session verification of up to 16 rows keeps decode numerics
+(+15.6% on a code-edit reply); DSpark blocks keep five drafted rows.
 
 ## Scope and source pins
 

@@ -222,9 +222,12 @@ int ds41_v41_topk(const float* score, uint64_t score_stride, uint32_t* out, uint
  * ds41_v41_rope_tail (rows_per_pos heads, step 1; q may be rotated in place)
  * and out gets ds41_v41_rope_fp8's inverse rotation and FP8 rounding
  * (rope_scratch: n * rope_dim floats).
- * Batches below DS41_V41_ATTN_SPLIT_TOKENS split the rows across blocks and
- * need `partial` with n * heads * DS41_V41_ATTN_PARTIAL_PER_HEAD floats. */
+ * With `partial` (n * heads * DS41_V41_ATTN_PARTIAL_PER_HEAD floats),
+ * batches of up to DS41_V41_ATTN_SPLIT_MAX_TOKENS rows split each row across
+ * its own blocks, with the arithmetic of a single-row launch. Without it,
+ * batches from DS41_V41_ATTN_SPLIT_TOKENS rows take the matrix cores. */
 #define DS41_V41_ATTN_SPLIT_TOKENS 8u
+#define DS41_V41_ATTN_SPLIT_MAX_TOKENS 16u
 #define DS41_V41_ATTN_PARTIAL_PER_HEAD (20u * 516u)
 int ds41_v41_attention(float* q, const float* ring, const float* chunk, uint32_t window, uint32_t floor,
                        ds41_fp4_rows comp, const uint32_t* idx, uint32_t k, uint32_t ratio, const float* sinks,

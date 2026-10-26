@@ -1,0 +1,93 @@
+/* DeepSeek V4.1 Flash DSpark drafter; see v41_dspark.h. */
+#include "v41_dspark.h"
+
+#include <fcntl.h>
+#include <hip/hip_runtime_api.h>
+#include <unistd.h>
+
+#include <algorithm>
+#include <cmath>
+#include <cstdio>
+#include <cstring>
+#include <vector>
+
+#include "ds41_v41.h"
+#include "mmq/ds41_mmq.h"
+#include "native_internal.h"
+#include "tensor_types.h"
+
+namespace {
+
+constexpr uint32_t kHc = DS41_N_HC;
+constexpr uint32_t kDim = DS41_N_EMBD;
+constexpr uint32_t kHeadDim = DS41_N_HEAD_DIM;
+constexpr uint32_t kRot = DS41_N_ROT;
+constexpr uint32_t kQDim = DS41_N_HEAD * DS41_N_HEAD_DIM;
+constexpr uint32_t kGroupDim = kQDim / DS41_N_OUT_GROUP;
+constexpr uint32_t kMixes = 2 * kHc + kHc * kHc;
+constexpr uint32_t kFeatureDim = DS41_DSPARK_TARGET_LAYERS * kDim;
+constexpr uint32_t kRows = DS41_DSPARK_BLOCK;
+constexpr uint32_t kRouted = DS41_DSPARK_EXPERTS_USED;
+constexpr uint64_t kRingFloats = (uint64_t)DS41_N_SWA * kHeadDim;
+constexpr float kSwigluLimit = DS41_SWIGLU_CLAMP_EXP;
+
+float half_to_float(uint16_t h) {
+  const uint32_t sign = (uint32_t)(h & 0x8000u) << 16;
+  const uint32_t exp = (h >> 10) & 0x1fu;
+  uint32_t mant = h & 0x3ffu;
+  uint32_t bits;
+  if (exp == 0) {
+    if (mant == 0) {
+      bits = sign;
+    } else {
+      int e = -1;
+      do {
+        e++;
+        mant <<= 1;
+      } while ((mant & 0x400u) == 0);
+      bits = sign | (uint32_t)(127 - 15 - e) << 23 | (mant & 0x3ffu) << 13;
+    }
+  } else if (exp == 31) {
+    bits = sign | 0x7f800000u | mant << 13;
+  } else {
+    bits = sign | (exp + 127 - 15) << 23 | mant << 13;
+  }
+  float f;
+  memcpy(&f, &bits, sizeof(f));
+  return f;
+}
+
+}  // namespace
+
+/* Draft scratch, shared by the sessions of one engine (evaluations are serialized). */
+struct ds41_dspark_scratch {
+  std::vector<void*> owned;
+  float *h = nullptr, *h2 = nullptr, *xn = nullptr, *mixes = nullptr, *pre[2] = {}, *post = nullptr;
+  float *comb = nullptr, *ffn_post = nullptr, *ffn_comb = nullptr;
+  float *qa = nullptr, *qr = nullptr, *q = nullptr, *kv = nullptr, *kvn = nullptr, *o = nullptr, *oa = nullptr;
+  float *attn_out = nullptr, *router = nullptr, *route_w = nullptr;
+  int32_t* route_ids = nullptr;
+  float *g = nullptr, *u = nullptr, *mid = nullptr, *down = nullptr, *sg = nullptr, *su = nullptr, *sm = nullptr;
+  float *sd = nullptr, *logits = nullptr, *markov_x = nullptr, *bias = nullptr;
+  int32_t *tokens = nullptr, *candidate_ids = nullptr;
+  float* candidate_logits = nullptr;
+  uint32_t* draws = nullptr;
+  float* markov_v = nullptr;
+  float* confidence = nullptr;
+  int32_t* markov_i = nullptr;
+  ds41_v41_proposal* proposals = nullptr;
+  float *main_raw = nullptr, *main_x = nullptr, *main_kv = nullptr, *main_kvn = nullptr;
+  ~ds41_dspark_scratch() {
+    for (void* p : owned) (void)hipFree(p);
+  }
+  template <typename T>
+  bool alloc(T** p, uint64_t count) {
+    void* v = nullptr;
+    if (hipMalloc(&v, count * sizeof(T)) != hipSuccess) return false;
+    owned.push_back(v);
+    *p = static_cast<T*>(v);
+    return true;
+  }
+};
+
+st

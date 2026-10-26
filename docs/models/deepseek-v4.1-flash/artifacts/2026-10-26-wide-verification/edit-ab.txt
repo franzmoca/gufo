@@ -1,0 +1,16 @@
+joint1 rc=0
+[Speculative]: acceptance=0.87234 drafted=47 accepted=41 verification_steps=131 skipped=0 positional_acceptance=0.893617 positional_accepted=42 full_block_rate=0.977099 full_blocks=128 anchors=131 verifier_rows=904 lookup_cycles=121 lookup_copied=726 lookup_accepted=726
+[TokenTrace]: count=900 sha256=c0e64f4775ad696eb910797ab6fda568692fecede3724953d65c14e4c28561c0
+wide1 rc=0
+[Speculative]: acceptance=0.837838 drafted=37 accepted=31 verification_steps=62 skipped=0 positional_acceptance=0.864865 positional_accepted=32 full_block_rate=0.951613 full_blocks=59 anchors=62 verifier_rows=905 lookup_cycles=54 lookup_copied=806 lookup_accepted=806
+[TokenTrace]: count=900 sha256=c0e64f4775ad696eb910797ab6fda568692fecede3724953d65c14e4c28561c0
+joint2 rc=0
+[Speculative]: acceptance=0.87234 drafted=47 accepted=41 verification_steps=131 skipped=0 positional_acceptance=0.87234 positional_accepted=41 full_block_rate=0.977099 full_blocks=128 anchors=131 verifier_rows=904 lookup_cycles=121 lookup_copied=726 lookup_accepted=726
+[TokenTrace]: count=900 sha256=c0e64f4775ad696eb910797ab6fda568692fecede3724953d65c14e4c28561c0
+wide2 rc=0
+[Speculative]: acceptance=0.861111 drafted=36 accepted=31 verification_steps=62 skipped=0 positional_acceptance=0.861111 positional_accepted=31 full_block_rate=0.951613 full_blocks=59 anchors=62 verifier_rows=904 lookup_cycles=54 lookup_copied=806 lookup_accepted=806
+[TokenTrace]: count=900 sha256=c0e64f4775ad696eb910797ab6fda568692fecede3724953d65c14e4c28561c0
+joint1: Generated 900 tokens on ROCm in 15.4003s (58.4405 tok/s)
+wide1: Generated 900 tokens on ROCm in 13.2719s (67.8123 tok/s)
+joint2: Generated 900 tokens on ROCm in 15.352s (58.6243 tok/s)
+wide2: Generated 900 tokens on ROCm in 13.3606s (67.3623 tok/s)

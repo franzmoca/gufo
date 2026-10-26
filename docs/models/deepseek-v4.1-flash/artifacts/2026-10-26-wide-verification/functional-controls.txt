@@ -1,0 +1,18 @@
+fn-wide inconclusive quality/coverage changes: []
+   cache_edit_last_user_initial:0 decode_ms 112.4 -> 175.5
+   cache_edit_last_user_initial:0 decode_ms_per_token 37.5 -> 58.5
+   cache_edit_last_user_initial:0 max_inter_token_ms 113.4 -> 176.5
+   cache_edit_last_user_initial:0 mean_inter_token_ms 56.7 -> 88.3
+fn-wide2 inconclusive quality/coverage changes: []
+   cache_edit_last_user_initial:0 prefill_ms 2910.8 -> 3062.3
+   cache_edit_last_user_initial:0 prefill_ms_per_token 1.0 -> 1.0
+   cache_edit_last_user_initial:0 ttft_ms 2922.3 -> 3069.1
+fn-ctl1 passed quality/coverage changes: []
+fn-ctl2 inconclusive quality/coverage changes: []
+   long_responses_sampled:0 wall_ms 326.4 -> 355.2
+   long_responses_sampled:0 prefill_ms 203.9 -> 232.6
+   long_responses_sampled:0 prefill_ms_per_token 17.0 -> 19.4
+   long_responses_sampled:0 server_duration_ms 325.6 -> 354.2
+   long_responses_sampled:0 ttft_ms 207.5 -> 236.3
+fn-wide3 inconclusive quality/coverage changes: []
+   long_responses_sampled_replay:0 client_ttft_ms 16.6 -> 19.7

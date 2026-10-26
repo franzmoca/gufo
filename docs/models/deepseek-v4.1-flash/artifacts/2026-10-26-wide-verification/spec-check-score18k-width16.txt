@@ -1,0 +1,1 @@
+spec-check: 136 kept rows, 136 bit-identical between passes (max |diff| 0); against single-token decode: argmax matches on 136, logits bit-identical on 136 (max |diff| 0)
