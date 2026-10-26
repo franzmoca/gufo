@@ -46,6 +46,8 @@
 #include "src/models/deepseek_v41_flash/continuation_adapter.hpp"
 #include "src/models/deepseek_v41_flash/dspark_sampler.hpp"
 #include "src/models/deepseek_v41_flash/engine.hpp"
+#include "src/models/deepseek_v41_flash/vision/encoder.hpp"
+#include "src/models/deepseek_v41_flash/vision/prompt.hpp"
 #include "src/models/deepseek_v4_flash/dspark_sampler.hpp"
 #include "src/models/deepseek_v4_flash/engine.hpp"
 #include "src/models/gemma4/chat_template.hpp"
@@ -185,7 +187,7 @@ std::shared_ptr<const models::qwen::vision::Prompt> QwenPrompt(
 // runner claims state capacity and the RAM cache is sized. Otherwise the first
 // image request hashes the whole sidecar in its queue time and uploads the
 // weights in its prefill, after admission and the cache were sized without
-// them. `Encoder` is the Qwen or Gemma 4 vision encoder.
+// them. `Encoder` is the Qwen, Gemma 4 or DeepSeek V4.1 vision encoder.
 template<class Encoder>
 void PrepareVision(const std::shared_ptr<Encoder>& encoder,
                    std::string_view model) {
@@ -275,6 +277,7 @@ struct DeepSeekV4Flash {
       sampling::TextModelPreset::kDeepSeekV4Flash;
   static constexpr bool kComponentCache = false;
   static constexpr bool kPromptLookup = false;
+  static constexpr bool kVision = false;
 
   static std::string_view ChatTemplateId() noexcept {
     return models::deepseek_v4_flash::ChatTemplateId();
@@ -319,6 +322,8 @@ struct DeepSeekV41Flash {
   static constexpr bool kComponentCache = true;
   // Speculative steps verify prompt-lookup copies, also without a drafter.
   static constexpr bool kPromptLookup = true;
+  // Image input with an opt-in --mmproj sidecar.
+  static constexpr bool kVision = true;
 
   static std::string_view ChatTemplateId() noexcept {
     return models::deepseek_v41_flash::ChatTemplateId();
@@ -1735,12 +1740,45 @@ public:
   [[nodiscard]] std::size_t position() const noexcept { return position_; }
   void set_position(std::size_t position) noexcept { position_ = position; }
 
+  /// The current request's images (DeepSeek V4.1); their embeddings are
+  /// encoded on first use.
+  void SetImages(
+      std::shared_ptr<const models::deepseek_v41_flash::vision::Prompt>
+          prompt) {
+    if (prompt != images_) {
+      images_ = std::move(prompt);
+      embeddings_.clear();
+    }
+  }
+  [[nodiscard]] const models::deepseek_v41_flash::vision::Prompt* images()
+      const {
+    return images_.get();
+  }
+  const float* Embedding(models::deepseek_v41_flash::vision::Encoder& encoder,
+                         std::size_t index) {
+    auto& embedding = embeddings_[index];
+    if (!embedding) {
+      const auto& image = images_->images.at(index);
+      embedding = encoder.Encode(*image.pixels, image.grid);
+    }
+    return embedding->data();
+  }
+
 private:
   std::unique_ptr<typename Ds::Session> session_;
   typename Ds::Session* active_{};
   cache::Adapter* adapter_{};
   cache::Slot* slot_{};
   std::size_t position_{0};
+  std::shared_ptr<const models::deepseek_v41_flash::vision::Prompt> images_;
+  std::map<std::size_t,
+           std::shared_ptr<
+               const models::deepseek_v41_flash::vision::Encoder::Embedding>>
+      embeddings_;
+};
+
+struct DeepSeekImageContext final : TextPromptContext {
+  std::shared_ptr<const models::deepseek_v41_flash::vision::Prompt> prompt;
 };
 
 template<class Ds>
@@ -1799,12 +1837,14 @@ public:
   sampling::JsonConstraint::ToolFormat ToolFormat() const override {
     return Ds::kToolFormat;
   }
-  DeepSeekTextRunner(std::shared_ptr<typename Ds::Model> model,
-                     std::uint32_t max_context, bool use_dspark,
-                     std::uint32_t max_draft_tokens,
-                     std::string artifact_fingerprint = {},
-                     std::string support_fingerprint = {})
+  DeepSeekTextRunner(
+      std::shared_ptr<typename Ds::Model> model, std::uint32_t max_context,
+      bool use_dspark, std::uint32_t max_draft_tokens,
+      std::string artifact_fingerprint = {},
+      std::string support_fingerprint = {},
+      std::shared_ptr<models::deepseek_v41_flash::vision::Encoder> vision = {})
       : model_(std::move(model)),
+        vision_(std::move(vision)),
         max_context_(max_context),
         use_dspark_(use_dspark),
         max_draft_tokens_(std::max(max_draft_tokens, 1u)) {
@@ -1966,6 +2006,13 @@ public:
           .tool_calls = {},
           .tool_call_id = message.tool_call_id,
       };
+      if constexpr (Ds::kVision) {
+        // Each image renders as one placeholder token (vision::Expand).
+        for (const auto& image : message.images)
+          converted.image_offsets.push_back(image.offset);
+      } else if (!message.images.empty()) {
+        throw std::invalid_argument("DeepSeek V4 does not support images");
+      }
       converted.tool_calls.reserve(message.tool_calls.size());
       for (const auto& call : message.tool_calls) {
         typename Ds::ChatMessage::ToolCall converted_call{
@@ -2022,6 +2069,8 @@ public:
 
   [[nodiscard]] std::optional<TextPreparedPrompt> PreparePrompt(
       const ChatRequest& request) const override {
+    if (HasImages(request))
+      return PrepareImagePrompt(request);
     auto prepared = TextModelRunner::PreparePrompt(request);
     if (prepared) {
       // DeepSeek joins adjacent user/tool messages into one user block.
@@ -2041,6 +2090,33 @@ public:
       }
     }
     return prepared;
+  }
+
+  [[nodiscard]] std::optional<std::size_t> CountPromptTokens(
+      const ChatRequest& request) const override {
+    if (!HasImages(request))
+      return TextModelRunner::CountPromptTokens(request);
+    // Generation's CPU image preparation, without encoding or a context
+    // limit, so oversized prompts can still be sized.
+    const auto prompt =
+        ExpandImages(request, std::numeric_limits<std::uint32_t>::max());
+    if (!prompt)
+      return std::nullopt;
+    return prompt->tokens.size();
+  }
+
+  void SetPromptContext(
+      TextRunnerState& state,
+      std::shared_ptr<const TextPromptContext> context) const override {
+    std::shared_ptr<const models::deepseek_v41_flash::vision::Prompt> prompt;
+    if (context) {
+      const auto* image =
+          dynamic_cast<const DeepSeekImageContext*>(context.get());
+      if (image == nullptr)
+        throw std::invalid_argument("invalid DeepSeek prompt context");
+      prompt = image->prompt;
+    }
+    RequireDeepSeekState<Ds>(state).SetImages(std::move(prompt));
   }
 
   [[nodiscard]] std::string Decode(
@@ -2093,12 +2169,28 @@ public:
     // The prompt ends at this step's frontier, where the state may be
     // captured; V4.1 runs its decoder layers over the last tokens only.
     bool synced = false;
-    if constexpr (requires {
-                    deepseek.session().Sync(prefix, &error, prompt.size());
-                  })
-      synced = deepseek.session().Sync(prefix, &error, prompt.size());
-    else
+    if constexpr (Ds::kVision) {
+      // The embeddings of the image rows this step evaluates; attention is
+      // causal, so a step may end inside an image.
+      std::vector<ds41_image_span> spans;
+      if (const auto* images = deepseek.images()) {
+        for (std::size_t i = 0; i < images->images.size(); ++i) {
+          const auto& image = images->images[i];
+          const std::size_t end =
+              std::size_t{image.offset} + image.grid.Tokens();
+          if (end <= offset || image.offset >= next_position)
+            continue;
+          if (!vision_)
+            throw std::invalid_argument(
+                "DeepSeek V4.1 image input has no encoder");
+          spans.push_back({image.offset, image.grid.Tokens(),
+                           deepseek.Embedding(*vision_, i)});
+        }
+      }
+      synced = deepseek.session().Sync(prefix, &error, prompt.size(), spans);
+    } else {
       synced = deepseek.session().Sync(prefix, &error);
+    }
     if (!synced) {
       throw std::runtime_error("DeepSeek prefill failed: " + error);
     }
@@ -2484,7 +2576,72 @@ public:
   }
 
 private:
+  static bool HasImages(const ChatRequest& request) {
+    return std::ranges::any_of(request.messages,
+                               [](const auto& m) { return !m.images.empty(); });
+  }
+
+  // The rendered prompt with each image placeholder expanded into its span.
+  [[nodiscard]] std::optional<models::deepseek_v41_flash::vision::Prompt>
+  ExpandImages(const ChatRequest& request, std::uint32_t max_context) const {
+    if constexpr (!Ds::kVision) {
+      throw std::invalid_argument("DeepSeek V4 does not support images");
+    } else {
+      if (!vision_) {
+        throw std::invalid_argument(
+            "image input requires DeepSeek V4.1's --mmproj vision sidecar");
+      }
+      const auto rendered = RenderAndTokenize(request);
+      if (!rendered)
+        return std::nullopt;
+      std::vector<std::shared_ptr<const std::vector<std::uint8_t>>> images;
+      for (const auto& message : request.messages) {
+        for (const auto& image : message.images)
+          images.push_back(image.bytes);
+      }
+      return models::deepseek_v41_flash::vision::Expand(
+          DeepSeekEngineTokens(*rendered), images, vision_->identity(),
+          max_context);
+    }
+  }
+
+  [[nodiscard]] std::optional<TextPreparedPrompt> PrepareImagePrompt(
+      const ChatRequest& request) const {
+    auto expanded = ExpandImages(request, max_context_);
+    if (!expanded)
+      return std::nullopt;
+    auto prompt =
+        std::make_shared<const models::deepseek_v41_flash::vision::Prompt>(
+            std::move(*expanded));
+    // The stable frontier as for text prompts, found among the rendered
+    // tokens and moved past the images expanded before it.
+    std::size_t cache_prefix = 0;
+    auto continuation = request;
+    continuation.messages.emplace_back(tokenization::ChatRole::kUser, "");
+    const auto rendered = RenderAndTokenize(request);
+    const auto continued = RenderAndTokenize(continuation);
+    if (rendered && continued) {
+      cache_prefix = prompt->Expanded(static_cast<std::size_t>(
+          std::mismatch(rendered->begin(), rendered->end(), continued->begin(),
+                        continued->end())
+              .first -
+          rendered->begin()));
+    }
+    auto context = std::make_shared<DeepSeekImageContext>();
+    context->cache_identity = prompt->cache_identity;
+    // A prefix ending at or before an image holds only the earlier images.
+    for (const auto& image : prompt->images) {
+      const auto identity = prompt->IdentityForPrefix(image.offset);
+      context->cache_prefixes.push_back(
+          {image.offset, {identity.begin(), identity.end()}});
+    }
+    context->prompt = prompt;
+    return TextPreparedPrompt{DeepSeekRunnerTokens(prompt->tokens),
+                              std::move(context), cache_prefix};
+  }
+
   std::shared_ptr<typename Ds::Model> model_;
+  std::shared_ptr<models::deepseek_v41_flash::vision::Encoder> vision_;
   std::uint32_t max_context_;
   bool use_dspark_;
   std::uint32_t max_draft_tokens_;
@@ -4159,9 +4316,18 @@ bool InferenceBackend::load(
                 std::move(resolved_disk_cache_config), ram_cache_config);
   }
   if (reader->GetMetadataString("general.architecture") == "deepseek41") {
+    // Vision is opt-in: only an explicit --mmproj loads it (about 0.9 GiB).
+    // The sidecar is validated before the model loads.
+    std::shared_ptr<models::deepseek_v41_flash::vision::Encoder> vision;
     if (!vision_model_path.empty()) {
-      SetError(error, "DeepSeek V4.1 does not support --mmproj");
-      return false;
+      try {
+        vision = std::make_shared<models::deepseek_v41_flash::vision::Encoder>(
+            vision_model_path);
+      } catch (const std::exception& e) {
+        SetError(error,
+                 std::string("Invalid DeepSeek V4.1 --mmproj: ") + e.what());
+        return false;
+      }
     }
     if (speculative_config.backend != TextSpeculativeBackend::kDisabled &&
         speculative_config.backend != TextSpeculativeBackend::kDSpark) {
@@ -4212,7 +4378,8 @@ bool InferenceBackend::load(
     }
     return load(std::move(model), error, max_context, session_count,
                 prefill_policy, scheduler_policy, speculative_config,
-                std::move(resolved_disk_cache_config), ram_cache_config);
+                std::move(resolved_disk_cache_config), ram_cache_config,
+                std::move(vision));
   }
   if (reader->GetMetadataString("general.architecture") == "gemma4") {
     const bool mtp = speculative_config.backend == TextSpeculativeBackend::kMtp;
@@ -4581,11 +4748,12 @@ bool InferenceBackend::load(
     TextPrefillPolicy prefill_policy, TextSchedulerPolicy scheduler_policy,
     TextSpeculativeConfig speculative_config,
     TextDiskCacheConfig disk_cache_config,
-    TextRunnerRamCacheOptions ram_cache_config) {
+    TextRunnerRamCacheOptions ram_cache_config,
+    std::shared_ptr<models::deepseek_v41_flash::vision::Encoder> vision) {
   return LoadDeepSeek<DeepSeekV41Flash>(
       std::move(model), error, max_context, session_count, prefill_policy,
       scheduler_policy, std::move(speculative_config),
-      std::move(disk_cache_config), ram_cache_config);
+      std::move(disk_cache_config), ram_cache_config, std::move(vision));
 }
 
 template<class Ds>
@@ -4595,7 +4763,8 @@ bool InferenceBackend::LoadDeepSeek(
     TextPrefillPolicy prefill_policy, TextSchedulerPolicy scheduler_policy,
     TextSpeculativeConfig speculative_config,
     TextDiskCacheConfig disk_cache_config,
-    TextRunnerRamCacheOptions ram_cache_config) {
+    TextRunnerRamCacheOptions ram_cache_config,
+    std::shared_ptr<models::deepseek_v41_flash::vision::Encoder> vision) {
   if (model == nullptr) {
     SetError(error, "DeepSeek model must not be null");
     return false;
@@ -4644,11 +4813,25 @@ bool InferenceBackend::LoadDeepSeek(
     auto new_state = std::make_shared<Impl::State>();
     new_state->sampling_defaults.model = Ds::kSamplingPreset;
     new_state->sampling_defaults.supplied = {};
+    if constexpr (Ds::kVision) {
+      if (vision) {
+        std::string bias_error;
+        if (!model->SetImageRoutingBias(vision->RoutingBias(), &bias_error)) {
+          SetError(error, bias_error);
+          return false;
+        }
+        PrepareVision(vision, "DeepSeek V4.1");
+      }
+    } else if (vision) {
+      SetError(error, "DeepSeek V4 does not support --mmproj");
+      return false;
+    }
+    new_state->supports_images = vision != nullptr;
     auto runner = std::make_shared<DeepSeekTextRunner<Ds>>(
         std::move(model), max_context, use_dspark,
         speculative_config.max_draft_tokens,
         disk_cache_config.model_artifact_fingerprint,
-        disk_cache_config.draft_model_artifact_fingerprint);
+        disk_cache_config.draft_model_artifact_fingerprint, std::move(vision));
     new_state->model_id = runner->Descriptor().model_id;
     new_state->max_context = max_context;
     std::optional<TextRunnerDiskCacheOptions> runner_disk_cache;

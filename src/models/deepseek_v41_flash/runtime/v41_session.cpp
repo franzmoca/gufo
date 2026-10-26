@@ -167,7 +167,8 @@ int ds41_session_dspark_set_range(ds41_session* s, uint32_t start, uint32_t end)
              : 1;
 }
 
-int ds41_session_sync(ds41_session* s, const ds41_tokens* prompt, int prompt_end, char* error, size_t capacity) {
+int ds41_session_sync(ds41_session* s, const ds41_tokens* prompt, int prompt_end, char* error, size_t capacity,
+                      const ds41_image_span* images, size_t n_images) {
   if (prompt && prompt_end == 0) prompt_end = prompt->len;
   if (!s || !prompt || !prompt->v || prompt->len <= 0 || prompt->len >= s->context || prompt_end < prompt->len ||
       prompt_end >= s->context) {
@@ -195,6 +196,23 @@ int ds41_session_sync(ds41_session* s, const ds41_tokens* prompt, int prompt_end
     s->lookup.Clear();
     if (s->dspark) ds41_dspark_state_reset(s->dspark, 0);
   }
+  /* A span may continue past this part of the prompt. */
+  for (size_t i = 0; i < n_images; i++) {
+    const ds41_image_span& image = images[i];
+    const size_t first = std::min<size_t>(image.pos, n);
+    const size_t end = std::min<size_t>((size_t)image.pos + image.rows, n);
+    if (!image.data || image.rows == 0 || !ds41_engine_has_image_bias(s->engine) ||
+        !std::all_of(prompt->v + first, prompt->v + end, [](int t) { return t == DS41_IMAGE_TOKEN; })) {
+      set_error(error, capacity, "image span does not match the prompt's image positions");
+      return 1;
+    }
+  }
+  /* The spans apply to this prompt's evaluations only. */
+  ds41_decoder_set_images(s->decoder, images, n_images);
+  struct ClearImages {
+    ds41_decoder* decoder;
+    ~ClearImages() { ds41_decoder_set_images(decoder, nullptr, 0); }
+  } clear_images{s->decoder};
   const size_t batch = ds41_decoder_batch_capacity(s->decoder);
   const size_t start = s->tokens.size();
   /* 0 evaluates every decoder row (exact prefill). */

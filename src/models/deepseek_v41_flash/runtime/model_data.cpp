@@ -19,6 +19,8 @@
 #include <time.h>
 #include <unistd.h>
 
+#include <hip/hip_runtime_api.h>
+
 #include <algorithm>
 #include <array>
 #include <memory>
@@ -1791,6 +1793,34 @@ bool ds41_engine_exact_prefill(const ds41_engine* e) {
     return e && e->exact_prefill;
 }
 
+int ds41_engine_set_image_bias(ds41_engine* e, const float* bias) {
+    if (!e || !e->rocm_ready)
+        return 1;
+    if (e->image_bias) {
+        (void)hipFree(e->image_bias);
+        e->image_bias = NULL;
+    }
+    if (!bias)
+        return 0;
+    for (uint64_t i = 0; i < (uint64_t)DS41_N_LAYER * DS41_N_EXPERT; i++)
+        if (!std::isfinite(bias[i]))
+            return 1;
+    const uint64_t bytes = (uint64_t)DS41_N_LAYER * DS41_N_EXPERT * sizeof(float);
+    void* p = NULL;
+    if (hipMalloc(&p, bytes) != hipSuccess)
+        return 1;
+    if (hipMemcpy(p, bias, bytes, hipMemcpyHostToDevice) != hipSuccess) {
+        (void)hipFree(p);
+        return 1;
+    }
+    e->image_bias = (float*)p;
+    return 0;
+}
+
+bool ds41_engine_has_image_bias(const ds41_engine* e) {
+    return e && e->image_bias;
+}
+
 bool ds41_engine_has_dspark(const ds41_engine* e) {
   return e && e->dspark && e->dspark->device;
 }
@@ -1807,6 +1837,8 @@ const char* ds41_engine_model_name(const ds41_engine* e) {
 void ds41_engine_close(ds41_engine* e) {
   if (!e)
     return;
+  if (e->image_bias)
+    (void)hipFree(e->image_bias);
   weights_free(e->weights);
   if (e->dspark) {
     ds41_dspark_free(e->dspark);

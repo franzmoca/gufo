@@ -24,7 +24,10 @@ class Model;
 
 namespace gufo::models::deepseek_v41_flash {
 class Model;
-}
+namespace vision {
+class Encoder;
+}  // namespace vision
+}  // namespace gufo::models::deepseek_v41_flash
 
 namespace gufo::models::gemma4 {
 class Model;
@@ -139,14 +142,17 @@ public:
             TextSpeculativeConfig speculative_config = {},
             TextDiskCacheConfig disk_cache_config = {},
             TextRunnerRamCacheOptions ram_cache_config = {});
-  bool load(std::shared_ptr<models::deepseek_v41_flash::Model> model,
-            std::string* error, std::uint32_t max_context = 0,
-            std::size_t session_count = 1,
-            TextPrefillPolicy prefill_policy = {},
-            TextSchedulerPolicy scheduler_policy = {},
-            TextSpeculativeConfig speculative_config = {},
-            TextDiskCacheConfig disk_cache_config = {},
-            TextRunnerRamCacheOptions ram_cache_config = {});
+  /// `vision` (opt-in) is the --mmproj sidecar's encoder; loading uploads
+  /// it and sets the model's image routing bias.
+  bool load(
+      std::shared_ptr<models::deepseek_v41_flash::Model> model,
+      std::string* error, std::uint32_t max_context = 0,
+      std::size_t session_count = 1, TextPrefillPolicy prefill_policy = {},
+      TextSchedulerPolicy scheduler_policy = {},
+      TextSpeculativeConfig speculative_config = {},
+      TextDiskCacheConfig disk_cache_config = {},
+      TextRunnerRamCacheOptions ram_cache_config = {},
+      std::shared_ptr<models::deepseek_v41_flash::vision::Encoder> vision = {});
 
   /// Installs a previously loaded Qwen3.8-Flash-Next model with
   /// request-owned sessions, the model's tokenizer, and host-memory
@@ -242,13 +248,14 @@ public:
 
 private:
   template<class Ds>
-  bool LoadDeepSeek(std::shared_ptr<typename Ds::Model> model,
-                    std::string* error, std::uint32_t max_context,
-                    std::size_t session_count, TextPrefillPolicy prefill_policy,
-                    TextSchedulerPolicy scheduler_policy,
-                    TextSpeculativeConfig speculative_config,
-                    TextDiskCacheConfig disk_cache_config,
-                    TextRunnerRamCacheOptions ram_cache_config);
+  bool LoadDeepSeek(
+      std::shared_ptr<typename Ds::Model> model, std::string* error,
+      std::uint32_t max_context, std::size_t session_count,
+      TextPrefillPolicy prefill_policy, TextSchedulerPolicy scheduler_policy,
+      TextSpeculativeConfig speculative_config,
+      TextDiskCacheConfig disk_cache_config,
+      TextRunnerRamCacheOptions ram_cache_config,
+      std::shared_ptr<models::deepseek_v41_flash::vision::Encoder> vision = {});
 
   struct Impl;
   std::unique_ptr<Impl> impl_;

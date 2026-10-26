@@ -652,7 +652,8 @@ void PrintServeHelp(std::string_view program_name,
                      "Path to GGUF model file (required)", "Model", &model);
     parser.AddOption("", "--mmproj", "PATH",
                      "BF16 vision sidecar for Qwen3.8 or Gemma 4 "
-                     "(auto-discovered beside model)",
+                     "(auto-discovered beside model), or DeepSeek V4.1 "
+                     "(opt-in; tools/ds41/vision_sidecar.py)",
                      "Model", &vision_model_path);
     parser.AddOption(
         "", "--prefill-weights", "MODE",
@@ -1299,7 +1300,8 @@ int RunServe(std::span<const char* const> args) {
                          "Path to GGUF model file (required)", "Model", &model);
     llm_parser.AddOption("", "--mmproj", "PATH",
                          "BF16 vision sidecar for Qwen3.8 or Gemma 4 "
-                         "(auto-discovered beside model)",
+                         "(auto-discovered beside model), or DeepSeek V4.1 "
+                         "(opt-in; tools/ds41/vision_sidecar.py)",
                          "Model", &vision_model_path);
     llm_parser.AddOption(
         "", "--prefill-weights", "MODE",

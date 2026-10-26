@@ -93,6 +93,22 @@ Host memory freed for the cache: the drafter's F16 Markov tables stay F16
 transfer streams instead of 64 (each HIP stream holds about 9 MiB of host
 memory; 0.38 GiB less resident).
 
+## Vision encoder
+
+`ds41_vision_probe` (gpu-test build, third of three encodes), ViT and aligner
+of one image; the span then prefills like text.
+
+| Image | Patches | Tokens | Encode |
+|---|---:|---:|---:|
+| corn.jpeg | 1,551 | 189 | 83 ms |
+| carrots.jpeg | 3,774 | 444 | 236 ms |
+| 4000 × 3000 (token cap) | 8,748 | 1,001 | 746 ms |
+
+`gufo serve`: carrots (456 prompt tokens) prefilled in 1.6 s including the
+encode, then decoded at 23.6 tok/s; the capped image (1,011 prompt tokens)
+answered in 4.1 s. The sidecar adds 0.90 GiB of device memory; 8.6 GiB of host memory stayed
+available after load.
+
 ## Memory
 
 GTT in use (`ds41_load_probe --upload` and `gufo serve`, native 1M context):

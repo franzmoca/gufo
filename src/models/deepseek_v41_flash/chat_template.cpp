@@ -4,6 +4,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <span>
+#include <stdexcept>
 #include <string>
 #include <string_view>
 #include <unordered_map>
@@ -232,6 +233,45 @@ void AppendToolCalls(std::string& output,
   output.append(DeepSeekToolSyntax::kCallsClose);
 }
 
+/// A message's content blocks: its text parts and image placeholders,
+/// joined by blank lines (process_image_messages, render_message).
+std::string MessageContent(const ChatMessage& message) {
+  for (const std::string* text :
+       {&message.content, &message.reasoning_content}) {
+    if (text->find(kImagePlaceholder) != std::string::npos)
+      throw std::invalid_argument(
+          "DeepSeek V4.1 message text contains the image placeholder; send "
+          "images as image content parts");
+  }
+  if (message.image_offsets.empty())
+    return message.content;
+  if (message.role != "user" && message.role != "tool" &&
+      message.role != "function")
+    throw std::invalid_argument(
+        "DeepSeek V4.1 images belong to user or tool messages");
+  const std::string_view content = message.content;
+  std::string output;
+  bool first = true;
+  const auto part = [&](std::string_view text) {
+    if (!first)
+      output.append("\n\n");
+    output.append(text);
+    first = false;
+  };
+  std::size_t cursor = 0;
+  for (const auto offset : message.image_offsets) {
+    if (offset < cursor || offset > content.size())
+      throw std::invalid_argument("DeepSeek V4.1 image offsets are invalid");
+    if (offset > cursor)
+      part(content.substr(cursor, offset - cursor));
+    part(kImagePlaceholder);
+    cursor = offset;
+  }
+  if (cursor < content.size())
+    part(content.substr(cursor));
+  return output;
+}
+
 }  // namespace
 
 ChatTemplateOptions ResolveDeepSeekChatOptions(
@@ -297,7 +337,7 @@ std::string RenderChat(std::span<const ChatMessage> messages,
     if (is_system(role)) {
       if (!first)
         output.append(kSystem);
-      output.append(message.content);
+      output.append(MessageContent(message));
       if (first && !tools.empty()) {
         output.append("\n\n");
         AppendToolsPrompt(output, tools);
@@ -330,10 +370,10 @@ std::string RenderChat(std::span<const ChatMessage> messages,
         if (part != index)
           output.append("\n\n");
         if (messages[part].role == "user") {
-          output.append(messages[part].content);
+          output.append(MessageContent(messages[part]));
         } else {
           output.append("<tool_result>");
-          output.append(tool_results[result_index++]->content);
+          output.append(MessageContent(*tool_results[result_index++]));
           output.append("</tool_result>");
         }
       }
@@ -354,7 +394,7 @@ std::string RenderChat(std::span<const ChatMessage> messages,
         output.append(message.reasoning_content);
       }
       output.append(kThinkEnd);
-      output.append(message.content);
+      output.append(MessageContent(message));
       AppendToolCalls(output, message.tool_calls);
       output.append(kEos);
     }
