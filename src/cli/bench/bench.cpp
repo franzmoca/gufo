@@ -95,7 +95,7 @@ void RegisterBenchOptions(ArgParser& parser, BenchOptions& opt,
   parser.AddOption(
       "", "--prefill-batch", "N",
       "DeepSeek V4.1 Flash: most prompt tokens per prefill batch, 16 to "
-      "4096; 4096 prefills about 5% faster for about 1.2 GiB more memory "
+      "4096; 4096 prefills 2-3% faster with a larger scratch buffer "
       "(default: 2048)",
       "Model", &opt.prefill_batch);
   parser.AddFlag("", "--exact-prefill",

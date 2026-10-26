@@ -665,8 +665,8 @@ void PrintServeHelp(std::string_view program_name,
     parser.AddOption(
         "", "--prefill-batch", "N",
         "DeepSeek V4.1 Flash: most prompt tokens per prefill batch, 16 to "
-        "4096; 4096 prefills about 5% faster for about 1.2 GiB more memory "
-        "(default: 2048)",
+        "4096; 4096 prefills 2-3% faster, but its larger scratch leaves the "
+        "prompt cache no memory at the native context (default: 2048)",
         "Model", &prefill_batch);
     parser.AddFlag(
         "", "--exact-prefill",
@@ -1313,8 +1313,8 @@ int RunServe(std::span<const char* const> args) {
     llm_parser.AddOption(
         "", "--prefill-batch", "N",
         "DeepSeek V4.1 Flash: most prompt tokens per prefill batch, 16 to "
-        "4096; 4096 prefills about 5% faster for about 1.2 GiB more memory "
-        "(default: 2048)",
+        "4096; 4096 prefills 2-3% faster, but its larger scratch leaves the "
+        "prompt cache no memory at the native context (default: 2048)",
         "Model", &prefill_batch);
     llm_parser.AddFlag(
         "", "--exact-prefill",
