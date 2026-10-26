@@ -270,6 +270,15 @@ struct ds41_v41_proposal {
 };
 /* Top eight plus a q draw, `*draw` in [0, 2^24); writes the token to
  * `*token` (the next Markov row's input) and q to `*proposal`. */
+/* Markov selection fused with its rank-256 FP16 projection: the argmax
+ * (or top-eight proposal, as ds41_v41_propose_top8) of logits + W2 x over n
+ * tokens, lowest token on ties. Scratch: DS41_V41_MARKOV_CANDIDATES each. */
+#define DS41_V41_MARKOV_CANDIDATES (256 * 8)
+int ds41_v41_markov_argmax(const uint16_t* w2, const float* x, const float* logits, uint32_t n, float* cand_v,
+                           int32_t* cand_i, int32_t* tokens, uint32_t index);
+int ds41_v41_markov_propose(const uint16_t* w2, const float* x, const float* logits, uint32_t n, float* cand_v,
+                            int32_t* cand_i, int32_t* ids, float* top_logits, const uint32_t* draw,
+                            float temperature, ds41_v41_proposal* proposal, int32_t* token);
 int ds41_v41_propose_top8(const float* x, const float* bias, uint32_t n, int32_t* ids, float* logits,
                           const uint32_t* draw, float temperature, ds41_v41_proposal* proposal, int32_t* token);
 /* tokens[index] = the first index of the largest finite x[v] + bias[v]

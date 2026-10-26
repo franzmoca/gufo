@@ -231,6 +231,115 @@ void DeviceProposal() {
         static_cast<void*>(dq)})
     (void)hipFree(ptr);
 }
+// Fused Markov selection: argmax/top eight of logits + W2 x against an FP64
+// reference, with exact ties resolved to the lowest token across blocks.
+void MarkovFused() {
+  constexpr uint32_t n = 129280, rank = 256;
+  std::vector<_Float16> w(static_cast<std::size_t>(n) * rank);
+  std::vector<float> x(rank), logits(n);
+  uint64_t state = 12345;
+  const auto next = [&] {
+    state = state * 6364136223846793005ULL + 1442695040888963407ULL;
+    return static_cast<float>((state >> 40) & 0xffffff) / 16777216.F - .5F;
+  };
+  for (auto& v : w)
+    v = static_cast<_Float16>(next());
+  for (auto& v : x)
+    v = next();
+  for (auto& v : logits)
+    v = 4.F * next();
+  logits[3] = NAN;
+  logits[n - 1] = -INFINITY;
+  // Two exact ties far apart (different blocks), above every other value.
+  for (const uint32_t t : {70001U, 9U}) {
+    std::copy_n(w.begin() + 5 * rank, rank,
+                w.begin() + static_cast<std::size_t>(t) * rank);
+    logits[t] = 40.F;
+  }
+  std::vector<double> ref(n);
+  for (uint32_t t = 0; t < n; ++t) {
+    double dot = 0;
+    for (uint32_t i = 0; i < rank; ++i)
+      dot +=
+          static_cast<double>(w[static_cast<std::size_t>(t) * rank + i]) * x[i];
+    ref[t] = logits[t] + dot;
+  }
+  std::vector<int32_t> order;
+  for (uint32_t t = 0; t < n; ++t)
+    if (std::isfinite(ref[t]))
+      order.push_back(static_cast<int32_t>(t));
+  std::stable_sort(order.begin(), order.end(),
+                   [&](int32_t a, int32_t b) { return ref[a] > ref[b]; });
+  Check(order[0] == 9 && order[1] == 70001, "reference ties");
+  _Float16* dw = nullptr;
+  float *dx = nullptr, *dl = nullptr, *cv = nullptr, *tv = nullptr;
+  int32_t *ci = nullptr, *ids = nullptr, *tok = nullptr;
+  uint32_t* dd = nullptr;
+  ds41_v41_proposal* dq = nullptr;
+  Check(hipMalloc(&dw, w.size() * 2) == hipSuccess &&
+            hipMalloc(&dx, rank * 4) == hipSuccess &&
+            hipMalloc(&dl, n * 4) == hipSuccess &&
+            hipMalloc(&cv, DS41_V41_MARKOV_CANDIDATES * 4) == hipSuccess &&
+            hipMalloc(&ci, DS41_V41_MARKOV_CANDIDATES * 4) == hipSuccess &&
+            hipMalloc(&tv, 32) == hipSuccess &&
+            hipMalloc(&ids, 32) == hipSuccess &&
+            hipMalloc(&tok, 16) == hipSuccess &&
+            hipMalloc(&dd, 4) == hipSuccess &&
+            hipMalloc(&dq, sizeof(ds41_v41_proposal)) == hipSuccess,
+        "markov allocation");
+  const uint32_t zero = 0;
+  Check(hipMemcpy(dw, w.data(), w.size() * 2, hipMemcpyHostToDevice) ==
+                hipSuccess &&
+            hipMemcpy(dx, x.data(), rank * 4, hipMemcpyHostToDevice) ==
+                hipSuccess &&
+            hipMemcpy(dl, logits.data(), n * 4, hipMemcpyHostToDevice) ==
+                hipSuccess &&
+            hipMemcpy(dd, &zero, 4, hipMemcpyHostToDevice) == hipSuccess,
+        "markov upload");
+  const auto* w16 = reinterpret_cast<const uint16_t*>(dw);
+  int32_t tokens[4] = {-2, -2, -2, -2};
+  Check(ds41_v41_markov_argmax(w16, dx, dl, n, cv, ci, tok, 2) == 0 &&
+            hipMemcpy(tokens, tok, sizeof(tokens), hipMemcpyDeviceToHost) ==
+                hipSuccess &&
+            tokens[2] == 9,
+        "fused argmax keeps the lowest tied token");
+  // Without the tie: the fused argmax/top eight follow the reference order.
+  logits[9] = logits[70001] = -40.F;
+  Check(
+      hipMemcpy(dl, logits.data(), n * 4, hipMemcpyHostToDevice) == hipSuccess,
+      "markov upload");
+  for (const int32_t t : {9, 70001})
+    ref[t] = logits[t] - 1e9;
+  std::stable_sort(order.begin(), order.end(),
+                   [&](int32_t a, int32_t b) { return ref[a] > ref[b]; });
+  Check(ds41_v41_markov_argmax(w16, dx, dl, n, cv, ci, tok, 1) == 0 &&
+            hipMemcpy(tokens, tok, sizeof(tokens), hipMemcpyDeviceToHost) ==
+                hipSuccess &&
+            tokens[1] == order[0],
+        "fused argmax");
+  ds41_v41_proposal q{};
+  std::array<int32_t, 8> top{};
+  std::array<float, 8> top_v{};
+  Check(
+      ds41_v41_markov_propose(w16, dx, dl, n, cv, ci, ids, tv, dd, 1.F, dq,
+                              tok) == 0 &&
+          hipMemcpy(top.data(), ids, 32, hipMemcpyDeviceToHost) == hipSuccess &&
+          hipMemcpy(top_v.data(), tv, 32, hipMemcpyDeviceToHost) ==
+              hipSuccess &&
+          hipMemcpy(&q, dq, sizeof(q), hipMemcpyDeviceToHost) == hipSuccess,
+      "fused proposal");
+  for (uint32_t j = 0; j < 8; ++j)
+    Check(top[j] == order[j] && std::abs(top_v[j] - ref[order[j]]) < 1e-4,
+          "fused top eight");
+  Check(q.token == top[0] && (q.size == 1 || q.size == 8),
+        "fused proposal draw");
+  for (void* ptr :
+       {static_cast<void*>(dw), static_cast<void*>(dx), static_cast<void*>(dl),
+        static_cast<void*>(cv), static_cast<void*>(ci), static_cast<void*>(tv),
+        static_cast<void*>(ids), static_cast<void*>(tok),
+        static_cast<void*>(dd), static_cast<void*>(dq)})
+    (void)hipFree(ptr);
+}
 }  // namespace
 
 int main() {
@@ -240,7 +349,8 @@ int main() {
   Top8();
   Sampler();
   DeviceProposal();
+  MarkovFused();
   std::puts(
-      "PASS: post-Markov top8, device q, exact sampled correction and seeded "
-      "replay");
+      "PASS: post-Markov top8, fused Markov selection, device q, exact sampled "
+      "correction and seeded replay");
 }

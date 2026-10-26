@@ -1,0 +1,24 @@
+== base -> e2m
+coding   geomean +4.19% n=3
+explain  geomean +3.69% n=3
+prose    geomean +8.22% n=3
+rust     geomean +4.98% n=3
+ALL geomean +5.26%  wins 11/12  sd 4.4%
+base: pooled tok/s 30.10 acceptance 0.661 drafted 2387 accepted/step 1.97
+e2m: pooled tok/s 31.73 acceptance 0.682 drafted 2802 accepted/step 2.07
+== e2q -> e2m
+coding   geomean +1.02% n=3
+explain  geomean +2.56% n=3
+prose    geomean +3.34% n=3
+rust     geomean +1.46% n=3
+ALL geomean +2.09%  wins 11/12  sd 1.2%
+e2q: pooled tok/s 31.02 acceptance 0.682 drafted 2802 accepted/step 2.07
+e2m: pooled tok/s 31.73 acceptance 0.682 drafted 2802 accepted/step 2.07
+== base -> e2q
+coding   geomean +3.14% n=3
+explain  geomean +1.10% n=3
+prose    geomean +4.71% n=3
+rust     geomean +3.47% n=3
+ALL geomean +3.10%  wins 10/12  sd 4.5%
+base: pooled tok/s 30.10 acceptance 0.661 drafted 2387 accepted/step 1.97
+e2q: pooled tok/s 31.02 acceptance 0.682 drafted 2802 accepted/step 2.07
