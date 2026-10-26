@@ -165,3 +165,11 @@ controls are 1108.95 → 1071.44 and 1117.50 → 1118.19 tok/s at 32K. No speedu
 is qualified; E6 is retained for its numerical contract. All phase timings
 remain within the existing 5% / 3 ms slowdown gates in this single pair.
 [Record](artifacts/2026-10-26-verification-scores/summary.json).
+
+
+Post-M6 E7 moves large FP16 route planning to the GPU in 38/40 IQ1_M layers.
+One production C1 pair is effectively flat: pp2048 1205.51 → 1205.80 tok/s,
+tg128 23.99 → 24.01; pp16 71.31 → 72.41 and pp128 362.46 → 362.58. All
+per-phase timings remain within the existing 5% / 3 ms slowdown gates in this
+pair. No throughput gain is qualified; retain this as device-planning
+architecture work. [Record](artifacts/2026-10-26-device-route-plan/summary.json).

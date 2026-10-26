@@ -104,6 +104,12 @@ int ds41_v41_to_half(const float* x, uint16_t* y, uint64_t n);
 uint32_t ds41_v41_routed_plan(const int32_t* ids, uint32_t slots, uint32_t n_experts, int32_t* rows,
                               int32_t* bounds, int32_t* tiles);
 
+/* Device-side stable plan with the same layout. Supports 1..512 experts;
+ * tiles has slots / 64 + n_experts entries, unused entries set to -1. Launch
+ * routed_f16 with that upper bound; unused tiles return before reading weights. */
+int ds41_v41_routed_plan_device(const int32_t* ids, uint32_t slots, uint32_t n_experts, int32_t* rows,
+                                int32_t* bounds, int32_t* tiles);
+
 /* dst[r, 0:cols] = src[r, 0:cols] for `rows` rows with the given strides (floats). */
 int ds41_v41_copy_rows(float* dst, uint64_t dst_stride, const float* src, uint64_t src_stride, uint32_t rows,
                        uint32_t cols);

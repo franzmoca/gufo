@@ -26,7 +26,10 @@ E6 now keeps speculative index scoring on the serial FP32 reduction, with
 six-row/18.5K and seven-row/3K exact-logit checks and a stricter probe. Its
 32K throughput is roughly flat (about 1% lower in one pair); no speedup is
 qualified. Eight-row attention, wider dense verification, actual joint request
-batching and device route planning remain open architectural priorities.
+batching remain open architectural priorities. E7 now builds stable plans on
+device for large batches in the 38/40 fully FP16-routed IQ1_M layers, with
+unchanged numerical controls and flat production throughput. Mixed-MMQ plan
+metadata and actual graph capture remain open.
 
 ## Scope and source pins
 

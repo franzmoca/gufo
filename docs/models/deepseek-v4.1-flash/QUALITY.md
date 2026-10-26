@@ -386,3 +386,13 @@ history, so no existing model bug is demonstrated by these cases. Matched
 production tg128 outputs have identical token hashes at depth zero and 32K.
 No claim extends this qualification to eight-row attention or wider projections.
 [Evidence](artifacts/2026-10-26-verification-scores/summary.json).
+
+
+Post-M6 E7: stable device route plans match every valid row, bound and tile
+entry of the host plan, including skew, invalid IDs, exact allocations and
+partial tiles. All three FP16 expert formats pass the existing routed numeric
+checks with a bounded grid of live/unused tiles. A matched 3K model control
+preserves all 2,999 argmax and NLL records (six-decimal NLL output), perplexity
+6.319756; production tg128 token hashes also match. This is not a new full-logit
+bitwise claim. No quantization, expert accumulation or route weights changed.
+[Evidence](artifacts/2026-10-26-device-route-plan/summary.json).

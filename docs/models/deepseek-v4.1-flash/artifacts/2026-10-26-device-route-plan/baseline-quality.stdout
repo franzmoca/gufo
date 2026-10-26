@@ -1,0 +1,6 @@
+start      MemAvailable 122.48 GiB, GTT used 0.02 GiB, RSS 0.09 GiB (peak 0.09 GiB)
+opened DeepSeek V4.1 Flash in 17.3 s (vocab 129280)
+loaded     MemAvailable 9.54 GiB, GTT used 112.27 GiB, RSS 0.25 GiB (peak 0.62 GiB)
+decoder    MemAvailable 8.30 GiB, GTT used 113.45 GiB, RSS 0.29 GiB (peak 0.62 GiB)
+generated
+closed     MemAvailable 121.85 GiB, GTT used 0.23 GiB, RSS 0.31 GiB (peak 1.49 GiB)

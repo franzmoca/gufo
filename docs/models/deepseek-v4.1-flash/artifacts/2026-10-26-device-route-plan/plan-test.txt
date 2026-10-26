@@ -1,0 +1,25 @@
+device plan slots=63 experts=1 tiles=1/1 PASS
+device plan slots=64 experts=1 tiles=1/2 PASS
+device plan slots=65 experts=1 tiles=2/2 PASS
+device plan slots=12003 experts=1 tiles=188/188 PASS
+device plan slots=63 experts=7 tiles=7/7 PASS
+device plan slots=64 experts=7 tiles=7/8 PASS
+device plan slots=65 experts=7 tiles=7/8 PASS
+device plan slots=12003 experts=7 tiles=190/194 PASS
+device plan slots=63 experts=384 tiles=58/384 PASS
+device plan slots=64 experts=384 tiles=61/385 PASS
+device plan slots=65 experts=384 tiles=61/385 PASS
+device plan slots=12003 experts=384 tiles=384/571 PASS
+device plan slots=63 experts=512 tiles=57/512 PASS
+device plan slots=64 experts=512 tiles=56/513 PASS
+device plan slots=65 experts=512 tiles=64/513 PASS
+device plan slots=12003 experts=512 tiles=512/699 PASS
+device plan slots=12288 experts=384 tiles=192/576 PASS
+device plan slots=12288 experts=384 tiles=0/576 PASS
+routed f16 IQ1_S    M=256 K=1024 tokens=200 experts=384 pair=1 tiles=402 rel_err=7.12e-04 half_out_err=7.42e-04
+routed f16 IQ1_S    M=512 K=2304 tokens=200 experts=384 pair=0 tiles=402 rel_err=4.85e-04 half_out_err=0.00e+00
+routed f16 IQ1_M    M=256 K=1024 tokens=200 experts=384 pair=1 tiles=402 rel_err=7.18e-04 half_out_err=7.48e-04
+routed f16 IQ1_M    M=512 K=2304 tokens=200 experts=384 pair=0 tiles=402 rel_err=4.83e-04 half_out_err=0.00e+00
+routed f16 IQ2_XXS  M=256 K=1024 tokens=200 experts=384 pair=1 tiles=402 rel_err=9.06e-04 half_out_err=9.26e-04
+routed f16 IQ2_XXS  M=512 K=2304 tokens=200 experts=384 pair=0 tiles=402 rel_err=3.55e-04 half_out_err=0.00e+00
+PASS
