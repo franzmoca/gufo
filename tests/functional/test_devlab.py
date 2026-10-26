@@ -102,7 +102,7 @@ class PlanTest(unittest.TestCase):
         args = cluster.command(plan['groups'][0], Path('/gufo'), None, Path('/out'), 'pr', assets)
         self.assertEqual(args[args.index('--speculative')+1], 'off')
         self.assertFalse({'--dspark-model', '--mtp-model', '--dflash-model'} & set(args), args)
-        self.assertEqual(args[args.index('--sampling-preset')+1], 'deepseek4')
+        self.assertEqual(args[args.index('--sampling-preset')+1], 'deepseek41')
 
     def test_tts_evaluator_is_merge_base_and_fixture_is_packaged(self):
         assets = {key: '/weights/' + key for key in self.data['assets']}

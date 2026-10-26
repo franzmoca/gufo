@@ -119,8 +119,9 @@ speed.
   release loads with a warning and renders with the built-in template.
 - Serving: `deepseek41` in `gufo serve` with the V4 Flash runner, a V4.1
   state ABI and cache identity, DSML grammar (`ToolFormat::kDeepSeek41`) and
-  output parsing, and V4 Flash sampling defaults (temperature 1.0, top_p
-  0.95), as in deepseek-recipe. The core GGUF reader now accepts the IQ1_S,
+  output parsing, and official V4.1 sampling defaults (temperature 1.0, top_p
+  1.0). Explicit request settings override these defaults. The core GGUF
+  reader now accepts the IQ1_S,
   IQ1_M, IQ2_XS, IQ2_S, IQ3_XXS and I64 storage types.
 - Results in [QUALITY.md](QUALITY.md): 3K-token perplexity 6.306 against the
   oracle's 6.309; 12/12 template goldens; working chat, thinking and tool

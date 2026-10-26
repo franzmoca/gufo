@@ -331,7 +331,7 @@ def check_sampling_defaults(client, model, checks, preset, overrides, vision=Fal
         # A default server must use the model's recommended thinking mode,
         # including the same effort instructions as an explicit request.
         thinking = server_thinks
-        effort = ("high" if preset == "deepseek4" else "xhigh") if thinking else "none"
+        effort = ("high" if preset in ("deepseek4", "deepseek41") else "xhigh") if thinking else "none"
         request = {
             "model": model, "seed": 73, "max_completion_tokens": 8,
             "messages": [{"role": "user", "content": "What is two plus two?"}],
@@ -348,7 +348,7 @@ def check_sampling_defaults(client, model, checks, preset, overrides, vision=Fal
         assert bool(default["reasoning"]) == thinking, default
         assert signature(default) == signature(explicit), (default, explicit)
         record("default_thinking_effort", default)
-        if preset == "deepseek4" and thinking:
+        if preset in ("deepseek4", "deepseek41") and thinking:
             xhigh = chat_result(client, {**request, "reasoning_effort": "xhigh"})
             assert signature(xhigh) == signature(explicit), (xhigh, explicit)
             record("deepseek_xhigh_maps_high", xhigh)
@@ -357,7 +357,7 @@ def check_sampling_defaults(client, model, checks, preset, overrides, vision=Fal
         qwen_off = preset == "qwen38" and not thinking
         expected = {
             "temperature": .7 if qwen_off else 1.,
-            "top_p": .8 if qwen_off else .95,
+            "top_p": 1. if preset == "deepseek41" else (.8 if qwen_off else .95),
             "presence_penalty": 1.5 if qwen_off else 0.,
             "frequency_penalty": 0.,
             "seed": 73,
@@ -1826,7 +1826,7 @@ def check_tool_edges(client, model, checks, sampling_preset=None):
                            for call in result["tools"])
             assert paths == ["a.txt", "b.txt"], result
             assert "DSML" not in result["text"] and "<tool_call>" not in result["text"], result
-            if sampling_preset == "deepseek4" and "tool" in order:
+            if sampling_preset in ("deepseek4", "deepseek41") and "tool" in order:
                 assert "text" not in order[order.index("tool"):], result
 
     # The newline a model writes between parallel calls is layout, not a reply.
@@ -2808,7 +2808,7 @@ def main():
     parser.add_argument("--vision", action="store_true",
                         help="Add image checks; the server needs its matching --mmproj")
     parser.add_argument("--sampling-preset",
-                        choices=("qwen38", "deepseek4", "gemma4"),
+                        choices=("qwen38", "deepseek4", "deepseek41", "gemma4"),
                         help="Expected text defaults; required for all/sampling-defaults")
     parser.add_argument("--sampling-overrides", type=json.loads, default={},
                         help="JSON object of explicit server sampling CLI values")

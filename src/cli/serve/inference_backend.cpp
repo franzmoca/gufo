@@ -314,10 +314,8 @@ struct DeepSeekV41Flash {
   static constexpr std::uint32_t kPayloadVersion = DS41_SESSION_PAYLOAD_VERSION;
   static constexpr auto kToolFormat =
       sampling::JsonConstraint::ToolFormat::kDeepSeek41;
-  // deepseek-recipe serves V4.1 with the V4 defaults: temperature 1.0 and
-  // top_p 0.95.
   static constexpr auto kSamplingPreset =
-      sampling::TextModelPreset::kDeepSeekV4Flash;
+      sampling::TextModelPreset::kDeepSeekV41Flash;
   // Sessions serve the component cache (ContinuationAdapter).
   static constexpr bool kComponentCache = true;
   // Speculative steps verify prompt-lookup copies, also without a drafter.

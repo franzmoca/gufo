@@ -322,8 +322,9 @@ void ResolvePromptSampling(const core::GgufReader& reader, PromptOptions* opt) {
   sampling::TextModelPreset preset = sampling::TextModelPreset::kUnspecified;
   const auto artifact_architecture =
       reader.GetMetadataString("general.architecture");
-  if (artifact_architecture == "deepseek4" ||
-      artifact_architecture == "deepseek41") {
+  if (artifact_architecture == "deepseek41") {
+    preset = sampling::TextModelPreset::kDeepSeekV41Flash;
+  } else if (artifact_architecture == "deepseek4") {
     preset = sampling::TextModelPreset::kDeepSeekV4Flash;
   } else if (artifact_architecture == "qwen4exp") {
     preset = sampling::TextModelPreset::kQwen38;

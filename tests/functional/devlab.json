@@ -212,7 +212,7 @@
       "asset": "deepseek41",
       "target": "DeepSeek-V4.1-Flash-1017-GSQ-RCO-IQ1_M-00001-of-00004.gguf",
       "mode": "off",
-      "sampling": "deepseek4"
+      "sampling": "deepseek41"
     },
     "embedding-gemma2": {
       "title": "EmbeddingGemma 2",

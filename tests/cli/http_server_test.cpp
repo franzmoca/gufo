@@ -2553,7 +2553,8 @@ void TestResponseSamplingDefaults() {
   RunningServer server;
   using gufo::sampling::TextModelPreset;
   for (const auto model :
-       {TextModelPreset::kQwen38, TextModelPreset::kDeepSeekV4Flash}) {
+       {TextModelPreset::kQwen38, TextModelPreset::kDeepSeekV4Flash,
+        TextModelPreset::kDeepSeekV41Flash}) {
     server.backend->defaults.model = model;
     for (const bool server_thinking : {false, true}) {
       server.backend->reasoning.enabled = server_thinking;
@@ -2567,13 +2568,16 @@ void TestResponseSamplingDefaults() {
                                   ? server_thinking
                                   : std::string_view(effort) != "\"none\"";
         const bool qwen_off = model == TextModelPreset::kQwen38 && !thinking;
+        const float top_p = model == TextModelPreset::kDeepSeekV41Flash
+                                ? 1.0F
+                                : (qwen_off ? 0.8F : 0.95F);
         server.backend->defaults.supplied = {};
         ExpectStatus(server.Post("/v1/responses", body.dump()), 200);
         auto call = server.backend->LastCall();
         assert(call.chat.reasoning.enabled == thinking);
         assert(call.chat.response_format);
         assert(call.sampling.temperature == (qwen_off ? 0.7F : 1.0F));
-        assert(call.sampling.top_p == (qwen_off ? 0.8F : 0.95F));
+        assert(call.sampling.top_p == top_p);
         assert(call.sampling.presence_penalty == (qwen_off ? 1.5F : 0.0F));
         assert(call.sampling.top_k ==
                (model == TextModelPreset::kQwen38 ? 20 : 0));
@@ -2585,7 +2589,7 @@ void TestResponseSamplingDefaults() {
         ExpectStatus(server.Post("/v1/responses", body.dump()), 200);
         call = server.backend->LastCall();
         assert(call.sampling.temperature == 0.25F && call.sampling.top_k == 0);
-        assert(call.sampling.top_p == (qwen_off ? 0.8F : 0.95F));
+        assert(call.sampling.top_p == top_p);
         // Per-request zero overrides both CLI and model values, also streamed.
         body["temperature"] = 0;
         body["presence_penalty"] = 0;
