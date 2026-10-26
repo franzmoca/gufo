@@ -29,7 +29,7 @@ int ds41_v41_matmul_f32(const float* w, const float* x, float* out, uint32_t row
  * reads x + c * x_stride) and writes y + c * y_stride + r. `slices` (1, 2, 4,
  * 8; <= 0 picks the default) waves share a row group. Every token sees the
  * arithmetic of a single-token launch. Returns 1 for other types. */
-#define DS41_V41_GEMV_MAX_TOKENS 8
+#define DS41_V41_GEMV_MAX_TOKENS 16
 int ds41_v41_gemv(int type, const void* w, const float* x, float* y, uint32_t m, uint32_t k, uint32_t rows_per_x,
                   int slices, uint32_t n, uint64_t x_stride, uint32_t y_stride);
 /* Two matrices of one type and width k over the same x in one launch:
@@ -67,8 +67,8 @@ int ds41_v41_gemv_experts_swiglu(int type, const void* gate, const void* up, uin
  * occur more than `cols` (<= DS41_V41_EXPERT_PLAN_COLS) times, which top-k
  * routing of `cols` tokens guarantees. Each slot's result equals the
  * ungrouped launch bit for bit. */
-#define DS41_V41_EXPERT_PLAN_SLOTS 64
-#define DS41_V41_EXPERT_PLAN_COLS 8
+#define DS41_V41_EXPERT_PLAN_SLOTS 128
+#define DS41_V41_EXPERT_PLAN_COLS 16
 #define DS41_V41_EXPERT_PLAN_INTS(slots) (1 + (slots) * (2 + DS41_V41_EXPERT_PLAN_COLS))
 int ds41_v41_expert_plan(const int32_t* ids, uint32_t slots, int32_t* plan);
 int ds41_v41_gemv_experts_grouped(int type, const void* w, const void* w_up, const float* route_w, float limit,

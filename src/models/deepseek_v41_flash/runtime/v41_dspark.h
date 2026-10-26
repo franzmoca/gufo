@@ -93,7 +93,7 @@ bool ds41_dspark_inject(ds41_dspark_state* s, uint32_t pos0, uint32_t rows);
 bool ds41_dspark_draft(ds41_dspark_state* s, int anchor, int32_t* drafts, uint32_t count,
                        const ds41_dspark_sampler* sampler = nullptr, float* top = nullptr,
                        float* confidence = nullptr);
-/* The last sampled draft's device proposals, one per drafted row. */
+/* The session's last sampled draft's device proposals, one per drafted row. */
 const ds41_v41_proposal* ds41_dspark_proposals(const ds41_dspark_state* s);
 /* Whether the drafter has a usable learned acceptance head; without one,
  * ds41_dspark_draft writes -1 confidences. */

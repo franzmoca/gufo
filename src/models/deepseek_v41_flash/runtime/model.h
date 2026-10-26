@@ -265,6 +265,16 @@ void ds41_decoder_set_images(ds41_decoder* decoder,
  * advances by n meanwhile; no other evaluation may run before the commit. */
 int ds41_decoder_eval_speculative(ds41_decoder* decoder, const int* tokens,
                                   uint32_t n, float* logits);
+/* Rows a joint speculative evaluation may hold in total. */
+#define DS41_DECODER_MAX_JOINT 16
+/* ds41_decoder_eval_speculative of tokens[i] (ns[i] rows) on decoders[i],
+ * for `count` distinct decoders of one engine and context, as one batch of
+ * at most DS41_DECODER_MAX_JOINT rows: each decoder's logits and state are
+ * those of its own evaluation. Returns 2, changing nothing, for batches it
+ * does not take (image tokens, other activations, too many rows). */
+int ds41_decoder_eval_joint(ds41_decoder* const* decoders,
+                            const int* const* tokens, const uint32_t* ns,
+                            uint32_t count, float* const* logits);
 /* Keeps the first `keep` (1 to n) tokens of the pending speculative batch,
  * leaving the state of an evaluation of exactly those tokens. */
 int ds41_decoder_commit(ds41_decoder* decoder, uint32_t keep);

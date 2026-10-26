@@ -1,0 +1,4 @@
+joint-check: 4 sessions, 12 cycles, 160 rows (mean 13.3 per joint batch), 160 bit-identical to their own evaluations; joint 199.0 ms, own 291.0 ms per cycle
+joint-check: 3 sessions, 12 cycles, 126 rows (mean 10.5 per joint batch), 126 bit-identical to their own evaluations; joint 167.1 ms, own 222.9 ms per cycle
+joint-check: 2 sessions, 12 cycles, 84 rows (mean 7.0 per joint batch), 84 bit-identical to their own evaluations; joint 122.4 ms, own 150.5 ms per cycle
+joint-check: 4 sessions, 24 cycles, 328 rows (mean 13.7 per joint batch), 328 bit-identical to their own evaluations; joint 201.0 ms, own 292.3 ms per cycle

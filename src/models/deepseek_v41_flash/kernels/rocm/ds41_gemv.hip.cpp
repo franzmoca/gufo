@@ -242,6 +242,8 @@ int dispatch(const void* w, const void* w_up, float limit, const float* x, float
     ok = dispatch_slices<kType, 4>(w, w_up, limit, x, y, m, k, rows_per_x, slices, second, tokens);
   else if (tokens.n <= 8)
     ok = dispatch_slices<kType, 8>(w, w_up, limit, x, y, m, k, rows_per_x, slices, second, tokens);
+  else if (tokens.n <= 16)
+    ok = dispatch_slices<kType, 16>(w, w_up, limit, x, y, m, k, rows_per_x, slices, second, tokens);
   if (!ok) return 1;
   const hipError_t err = hipGetLastError();
   if (err == hipSuccess) return 0;

@@ -37,7 +37,10 @@ drafter GEMV). E11 gates greedy DSpark verification with the drafter's
 learned acceptance head (+13.1% greedy). E12 draws sampled verification rows
 on the device (+2.0% sampled); greedy host verification measured about 1% of
 a cycle and stays on the host. Section 9's logit transfer is 0.07 ms per
-cycle.
+cycle. E14 implements P1d for DSpark cohorts: concurrent sessions' blocks
+evaluate jointly with per-row decode arithmetic up to 16 rows (+40% per user
+at C2, +60% at C4, identical outputs); wider single-session verification
+(P1c) remains open.
 
 ## Scope and source pins
 

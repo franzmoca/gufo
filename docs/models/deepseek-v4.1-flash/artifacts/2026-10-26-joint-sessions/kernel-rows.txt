@@ -1,0 +1,57 @@
+device plan slots=63 experts=1 tiles=1/1 PASS
+device plan slots=64 experts=1 tiles=1/2 PASS
+device plan slots=65 experts=1 tiles=2/2 PASS
+device plan slots=12003 experts=1 tiles=188/188 PASS
+device plan slots=63 experts=7 tiles=7/7 PASS
+device plan slots=64 experts=7 tiles=7/8 PASS
+device plan slots=65 experts=7 tiles=7/8 PASS
+device plan slots=12003 experts=7 tiles=190/194 PASS
+device plan slots=63 experts=384 tiles=58/384 PASS
+device plan slots=64 experts=384 tiles=61/385 PASS
+device plan slots=65 experts=384 tiles=61/385 PASS
+device plan slots=12003 experts=384 tiles=384/571 PASS
+device plan slots=63 experts=512 tiles=57/512 PASS
+device plan slots=64 experts=512 tiles=56/513 PASS
+device plan slots=65 experts=512 tiles=64/513 PASS
+device plan slots=12003 experts=512 tiles=512/699 PASS
+device plan slots=12288 experts=384 tiles=192/576 PASS
+device plan slots=12288 experts=384 tiles=0/576 PASS
+gemv tokens Q4_K     M=300 K=1280 rows_per_x=0 n=12 slices=1 plain=exact pair/swiglu=exact
+gemv tokens Q4_K     M=300 K=1280 rows_per_x=0 n=12 slices=4 plain=exact pair/swiglu=exact
+gemv tokens Q4_K     M=300 K=1280 rows_per_x=0 n=12 slices=8 plain=exact pair/swiglu=exact
+gemv tokens Q4_K     M=300 K=1280 rows_per_x=0 n=16 slices=1 plain=exact pair/swiglu=exact
+gemv tokens Q4_K     M=300 K=1280 rows_per_x=0 n=16 slices=4 plain=exact pair/swiglu=exact
+gemv tokens Q4_K     M=300 K=1280 rows_per_x=0 n=16 slices=8 plain=exact pair/swiglu=exact
+gemv tokens Q8_0     M=300 K=1280 rows_per_x=0 n=12 slices=1 plain=exact pair/swiglu=exact
+gemv tokens Q8_0     M=300 K=1280 rows_per_x=0 n=12 slices=4 plain=exact pair/swiglu=exact
+gemv tokens Q8_0     M=300 K=1280 rows_per_x=0 n=12 slices=8 plain=exact pair/swiglu=exact
+gemv tokens Q8_0     M=256 K=4096 rows_per_x=64 n=12 slices=1 plain=exact pair/swiglu=-
+gemv tokens Q8_0     M=256 K=4096 rows_per_x=64 n=12 slices=4 plain=exact pair/swiglu=-
+gemv tokens Q8_0     M=256 K=4096 rows_per_x=64 n=12 slices=8 plain=exact pair/swiglu=-
+gemv tokens Q8_0     M=300 K=1280 rows_per_x=0 n=16 slices=1 plain=exact pair/swiglu=exact
+gemv tokens Q8_0     M=300 K=1280 rows_per_x=0 n=16 slices=4 plain=exact pair/swiglu=exact
+gemv tokens Q8_0     M=300 K=1280 rows_per_x=0 n=16 slices=8 plain=exact pair/swiglu=exact
+gemv tokens Q8_0     M=256 K=4096 rows_per_x=64 n=16 slices=1 plain=exact pair/swiglu=-
+gemv tokens Q8_0     M=256 K=4096 rows_per_x=64 n=16 slices=4 plain=exact pair/swiglu=-
+gemv tokens Q8_0     M=256 K=4096 rows_per_x=64 n=16 slices=8 plain=exact pair/swiglu=-
+gemv tokens Q5_K     M=300 K=1280 rows_per_x=0 n=12 slices=1 plain=exact pair/swiglu=exact
+gemv tokens Q5_K     M=300 K=1280 rows_per_x=0 n=12 slices=4 plain=exact pair/swiglu=exact
+gemv tokens Q5_K     M=300 K=1280 rows_per_x=0 n=12 slices=8 plain=exact pair/swiglu=exact
+gemv tokens Q5_K     M=256 K=4096 rows_per_x=64 n=12 slices=1 plain=exact pair/swiglu=-
+gemv tokens Q5_K     M=256 K=4096 rows_per_x=64 n=12 slices=4 plain=exact pair/swiglu=-
+gemv tokens Q5_K     M=256 K=4096 rows_per_x=64 n=12 slices=8 plain=exact pair/swiglu=-
+gemv tokens Q5_K     M=300 K=1280 rows_per_x=0 n=16 slices=1 plain=exact pair/swiglu=exact
+gemv tokens Q5_K     M=300 K=1280 rows_per_x=0 n=16 slices=4 plain=exact pair/swiglu=exact
+gemv tokens Q5_K     M=300 K=1280 rows_per_x=0 n=16 slices=8 plain=exact pair/swiglu=exact
+gemv tokens Q5_K     M=256 K=4096 rows_per_x=64 n=16 slices=1 plain=exact pair/swiglu=-
+gemv tokens Q5_K     M=256 K=4096 rows_per_x=64 n=16 slices=4 plain=exact pair/swiglu=-
+gemv tokens Q5_K     M=256 K=4096 rows_per_x=64 n=16 slices=8 plain=exact pair/swiglu=-
+experts tokens IQ1_S    M=512 K=2304 n=12 plain=exact swiglu=exact grouped=exact grouped swiglu=exact grouped per-slot=exact
+experts tokens IQ1_S    M=512 K=2304 n=16 plain=exact swiglu=exact grouped=exact grouped swiglu=exact grouped per-slot=exact
+experts tokens IQ1_M    M=512 K=2304 n=12 plain=exact swiglu=exact grouped=exact grouped swiglu=exact grouped per-slot=exact
+experts tokens IQ1_M    M=512 K=2304 n=16 plain=exact swiglu=exact grouped=exact grouped swiglu=exact grouped per-slot=exact
+experts tokens IQ2_XXS  M=512 K=2304 n=12 plain=exact swiglu=exact grouped=exact grouped swiglu=exact grouped per-slot=exact
+experts tokens IQ2_XXS  M=512 K=2304 n=16 plain=exact swiglu=exact grouped=exact grouped swiglu=exact grouped per-slot=exact
+experts tokens IQ2_S    M=512 K=2304 n=12 plain=exact swiglu=exact grouped=exact grouped swiglu=exact grouped per-slot=exact
+experts tokens IQ2_S    M=512 K=2304 n=16 plain=exact swiglu=exact grouped=exact grouped swiglu=exact grouped per-slot=exact
+PASS

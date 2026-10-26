@@ -95,6 +95,8 @@ struct ds41_dspark_state {
   ds41_decoder* decoder = nullptr;
   float* ring = nullptr;  // [stage][DS41_N_SWA][head_dim], slot pos % DS41_N_SWA
   uint32_t ring_start = 0, ring_end = 0;
+  /* The last sampled draft's proposals, kept past other sessions' drafts. */
+  ds41_v41_proposal* proposals = nullptr;
   std::vector<float> host_rows;
 };
 
@@ -103,7 +105,7 @@ namespace {
 bool lin(const ds41_dspark_tensor& t, const float* x, float* out, uint32_t n) {
   // The drafter's Q4_K rows take the FP32 GEMV (one weight read for every row)
   // rather than Q8_1 MMVQ; the target keeps its own dispatch.
-  if (t.type == DS41_TENSOR_Q4_K && n <= DS41_V41_GEMV_MAX_TOKENS && t.k % 256 == 0)
+  if (t.type == DS41_TENSOR_Q4_K && n <= 8 && t.k % 256 == 0)
     return ds41_v41_gemv((int)t.type, t.p, x, out, (uint32_t)t.rows, t.k, 0,
                          t.k <= 2304 ? 2 : (t.k <= 5120 && t.rows <= 4096 ? 4 : 8), n, t.k, (uint32_t)t.rows) == 0;
   return ds41_v41_linear(t.type, t.p, (uint32_t)t.rows, t.k, x, out, n);
@@ -288,12 +290,15 @@ ds41_dspark_state* ds41_dspark_state_create(ds41_engine* engine, ds41_decoder* d
   auto* s = new ds41_dspark_state();
   s->engine = engine;
   s->decoder = decoder;
-  void* ring = nullptr;
-  if (hipMalloc(&ring, DS41_DSPARK_STAGES * kRingFloats * sizeof(float)) != hipSuccess) {
+  void *ring = nullptr, *proposals = nullptr;
+  if (hipMalloc(&ring, DS41_DSPARK_STAGES * kRingFloats * sizeof(float)) != hipSuccess ||
+      hipMalloc(&proposals, kRows * sizeof(ds41_v41_proposal)) != hipSuccess) {
+    (void)hipFree(ring);
     delete s;
     return nullptr;
   }
   s->ring = static_cast<float*>(ring);
+  s->proposals = static_cast<ds41_v41_proposal*>(proposals);
   s->host_rows.resize((uint64_t)kRows * kDim);
   return s;
 }
@@ -301,6 +306,7 @@ ds41_dspark_state* ds41_dspark_state_create(ds41_engine* engine, ds41_decoder* d
 void ds41_dspark_state_destroy(ds41_dspark_state* s) {
   if (!s) return;
   (void)hipFree(s->ring);
+  (void)hipFree(s->proposals);
   delete s;
 }
 
@@ -311,7 +317,7 @@ void ds41_dspark_state_reset(ds41_dspark_state* s, uint32_t pos) {
 uint32_t ds41_dspark_state_end(const ds41_dspark_state* s) { return s->ring_end; }
 
 const ds41_v41_proposal* ds41_dspark_proposals(const ds41_dspark_state* s) {
-  return s->engine->dspark->scratch->proposals;
+  return s->proposals;
 }
 
 uint64_t ds41_dspark_ring_bytes(void) { return DS41_DSPARK_STAGES * kRingFloats * sizeof(float); }
@@ -444,7 +450,8 @@ bool ds41_dspark_draft(ds41_dspark_state* s, int anchor, int32_t* drafts, uint32
   }
   if (stochastic) {
     ds41_v41_proposal q[kRows];
-    ok = ok && hipMemcpy(q, sc.proposals, count * sizeof(q[0]), hipMemcpyDeviceToHost) == hipSuccess;
+    ok = ok && hipMemcpy(q, sc.proposals, count * sizeof(q[0]), hipMemcpyDeviceToHost) == hipSuccess &&
+         hipMemcpyAsync(s->proposals, sc.proposals, count * sizeof(q[0]), hipMemcpyDeviceToDevice, 0) == hipSuccess;
     for (uint32_t i = 0; i < count && ok; i++) {
       ok = q[i].token >= 0;  // fewer than eight finite candidates
       if (ok) sampler->retain(sampler->ctx, i, q[i].ids, q[i].masses, q[i].size, q[i].token);
