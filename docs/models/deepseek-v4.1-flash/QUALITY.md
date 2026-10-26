@@ -208,6 +208,40 @@ wrap-around plus every block row, with sinks) against an fp64 reference
 (≤ 7e-7 relative), the hc mean exactly and the Markov argmax (first index
 of equal maxima, non-finite values skipped).
 
+## Decoder SWA bounded replay (M5)
+
+Prompts run the decoder layers (20-39) over their last 140 positions only,
+as DeepSeek's DeepInfer does with its V4.1 defaults (`compact` mode, 140
+kept tokens: the 128-row window plus 12 rows of backtracking). Layer 20
+still compresses every position, so the global KV and index keys are
+complete; the replayed rows' windows start at the first replayed position.
+In serve each prefill segment between cache stops is one such prompt, so a
+state is only captured where its windows are complete, and a restored
+prefix continues exactly as the cold request did.
+
+`ds41_load_probe --replay-check 256` prefills the ids but the last 256
+once exactly and once with bounded replay, then scores the last 256
+teacher-forced after each:
+
+| Prompt | NLL exact | NLL replay | Top-1 agreement | Mean KL (max) |
+|---|---:|---:|---:|---:|
+| `docs/KV-CACHE.md`, 8,863 tokens | 1.9495 | 1.9488 | 255 / 256 | 0.00097 (0.0135) |
+| `v41_decode.cpp`, 8,192 tokens | 0.4029 | 0.4106 | 254 / 256 | 0.0023 (0.10) |
+| `v41_decode.cpp`, 23,848 tokens | 0.2147 | 0.2159 | 254 / 256 | 0.00021 (0.0073) |
+
+Top-1 hits on the reference token: 148/148, 229/230 and 240/240.
+`ds41.attention` checks the window floor against the fp64 reference in the
+batched, scalar and split kernels.
+
+Served (32K context) against the previous build, the `long-context`,
+`conversation` and `cache` suites pass every case. The needle is still
+recovered, and its cancelled thinking replay and resume give the same
+answer with shorter reasoning (27 → 17 tokens), still identical to each
+other; three sampled thinking-tool cancellation replies changed text and
+pass their exact-continuation checks. 876 of 878 per-request timings pass,
+two decode max inter-token gaps are inconclusive (42.9 → 46.1 and
+43.9 → 46.9 ms).
+
 ## Batched prefill and M2 kernels
 
 The same 3K positions scored through 2048-token batches (matrix-core

@@ -273,7 +273,8 @@ Session::~Session() {
   }
 }
 
-bool Session::Sync(std::span<const int> prompt, std::string* error_msg) {
+bool Session::Sync(std::span<const int> prompt, std::string* error_msg,
+                   std::size_t prompt_end) {
   if (prompt.empty()) {
     AssignError(error_msg, "DeepSeek V4.1 Flash prompt is empty");
     return false;
@@ -288,6 +289,14 @@ bool Session::Sync(std::span<const int> prompt, std::string* error_msg) {
     AssignError(error_msg, "DeepSeek V4.1 Flash prompt is too large");
     return false;
   }
+  if (prompt_end != 0 &&
+      (prompt_end < prompt.size() ||
+       prompt_end >= static_cast<std::size_t>(ContextSize()))) {
+    AssignError(
+        error_msg,
+        "DeepSeek V4.1 Flash prompt end is outside the session context");
+    return false;
+  }
 
   ds41_tokens tokens{
       .v = const_cast<int*>(prompt.data()),
@@ -296,7 +305,8 @@ bool Session::Sync(std::span<const int> prompt, std::string* error_msg) {
   };
   std::array<char, kErrorCapacity> error{};
   const int result =
-      ds41_session_sync(session_, &tokens, error.data(), error.size());
+      ds41_session_sync(session_, &tokens, static_cast<int>(prompt_end),
+                        error.data(), error.size());
   if (result != 0) {
     AssignError(error_msg, error[0] != '\0'
                                ? error.data()

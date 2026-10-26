@@ -252,6 +252,9 @@ struct ds41_decoder : Activations {
   float* freq_compress = nullptr;
 
   int comp_layer = -1;
+  /* During a bounded-replay prompt evaluation, the decoder layers' first
+   * visible window position; 0 otherwise. */
+  uint32_t window_floor = 0;
   /* A speculative batch of spec_n rows from spec_pos0 holds every layer's
    * window rows and the KV source layers' compressor inputs (kv, score)
    * here until ds41_decoder_commit; spec_n is 0 otherwise. spec_eval marks
@@ -472,6 +475,26 @@ float* spec_rows(const ds41_decoder* d, float* base, uint32_t il, uint32_t part)
   return base + ((uint64_t)il * parts + part) * DS41_DECODER_MAX_SPECULATIVE * kHeadDim;
 }
 
+/* Stores the compressed rows r0 .. r0 + rows - 1 of KV source layer il from
+ * their unrotated latent in d->latent: the index keys (index sources) and
+ * the rotated FP4 KV rows. */
+bool store_compressed(ds41_decoder* d, uint32_t il, uint32_t r0, uint32_t rows, uint32_t ratio) {
+  const ds41_layer_weights* l = &d->engine->weights->layer[il];
+  LayerState& s = d->layer[il];
+  const float* freq = layer_freq(d, il);
+  const float eps = DS41_RMS_EPS;
+  if (ds41_layer_is_index_source(il) &&
+      (!linear(d, l->indexer_attn_k, d->latent, d->ik, rows) ||
+       ds41_v41_rms_norm(d->ik, f32(d, l->indexer_k_norm), d->ikn, rows, DS41_N_INDEXER_HEAD_DIM, eps) ||
+       ds41_v41_rope_tail(d->ikn, rows, DS41_N_INDEXER_HEAD_DIM, kRot, freq, r0 * ratio, 1, ratio, 0) ||
+       ds41_v41_fp4_store(d->ikn, s.index_k + (uint64_t)r0 * kIndexCodeBytes,
+                          s.index_scale + (uint64_t)r0 * kIndexScaleBytes, rows * DS41_N_INDEXER_HEAD_DIM, 32, 0)))
+    return false;
+  return ds41_v41_rope_tail(d->latent, rows, kHeadDim, kRot, freq, r0 * ratio, 1, ratio, 0) == 0 &&
+         ds41_v41_fp4_store(d->latent, s.comp + (uint64_t)r0 * kCompCodeBytes,
+                            s.comp_scale + (uint64_t)r0 * kCompScaleBytes, rows * kHeadDim, 16, 1) == 0;
+}
+
 bool attention(ds41_decoder* d, uint32_t il, uint32_t n) {
   const ds41_layer_weights* l = &d->engine->weights->layer[il];
   LayerState& s = d->layer[il];
@@ -517,18 +540,11 @@ bool attention(ds41_decoder* d, uint32_t il, uint32_t n) {
                  ds41_v41_rms_norm(d->craw, f32(d, l->attn_compressor_norm), d->latent, emitted, kHeadDim, eps)) {
         return false;
       }
+      if (emitted && !store_compressed(d, il, r0, emitted, ratio)) return false;
       d->comp_layer = (int)il;
     }
     const LayerState& source = d->layer[d->comp_layer];
     if (ds41_layer_is_index_source(il)) {
-      if (source_layer && emitted &&
-          (!linear(d, l->indexer_attn_k, d->latent, d->ik, emitted) ||
-           ds41_v41_rms_norm(d->ik, f32(d, l->indexer_k_norm), d->ikn, emitted, DS41_N_INDEXER_HEAD_DIM, eps) ||
-           ds41_v41_rope_tail(d->ikn, emitted, DS41_N_INDEXER_HEAD_DIM, kRot, freq, r0 * ratio, 1, ratio, 0) ||
-           ds41_v41_fp4_store(d->ikn, s.index_k + (uint64_t)r0 * kIndexCodeBytes,
-                              s.index_scale + (uint64_t)r0 * kIndexScaleBytes, emitted * DS41_N_INDEXER_HEAD_DIM, 32,
-                              0)))
-        return false;
       const float w_scale = 1.0f / sqrtf((float)DS41_N_INDEXER_HEAD_DIM) / sqrtf((float)DS41_N_INDEXER_HEAD);
       if (!linear(d, l->indexer_attn_q_b, d->qr, d->iq, n) ||
           ds41_v41_rope_tail(d->iq, n * DS41_N_INDEXER_HEAD, DS41_N_INDEXER_HEAD_DIM, kRot, freq, pos0,
@@ -558,15 +574,11 @@ bool attention(ds41_decoder* d, uint32_t il, uint32_t n) {
           return false;
       }
     }
-    if (source_layer && emitted &&
-        (ds41_v41_rope_tail(d->latent, emitted, kHeadDim, kRot, freq, r0 * ratio, 1, ratio, 0) ||
-         ds41_v41_fp4_store(d->latent, s.comp + (uint64_t)r0 * kCompCodeBytes,
-                            s.comp_scale + (uint64_t)r0 * kCompScaleBytes, emitted * kHeadDim, 16, 1)))
-      return false;
     comp = {source.comp, source.comp_scale};
   }
 
-  if (ds41_v41_attention(d->q, s.window, d->kvn, DS41_N_SWA, comp, d->topk, DS41_N_INDEXER_TOP_K, ratio,
+  const uint32_t floor = il >= DS41_FIRST_DECODER_LAYER ? d->window_floor : 0;
+  if (ds41_v41_attention(d->q, s.window, d->kvn, DS41_N_SWA, floor, comp, d->topk, DS41_N_INDEXER_TOP_K, ratio,
                          f32(d, l->attn_sinks), d->o, d->attn_partial, pos0, n, DS41_N_HEAD, kHeadDim,
                          1.0f / sqrtf((float)kHeadDim), freq, kRot, d->rope) ||
       !(d->spec_eval ? copy_dev(spec_rows(d, d->spec_window, il, 0), d->kvn, (uint64_t)n * kHeadDim)
@@ -1226,11 +1238,53 @@ int ds41_decoder_reset(ds41_decoder* d) {
   return 0;
 }
 
-int ds41_decoder_eval(ds41_decoder* d, const int* tokens, uint32_t n, float* logits, uint32_t logit_rows,
-                      ds41_decoder_layer_fn layer_fn, void* ctx) {
+namespace {
+
+static_assert(DS41_FIRST_DECODER_LAYER == DS41_CANDIDATE_SOURCE_LAYER &&
+                  DS41_KV_SOURCE_LAYERS[DS41_N_KV_SOURCE - 1] == DS41_FIRST_DECODER_LAYER,
+              "bounded replay compresses the first decoder layer's rows");
+static_assert(DS41_ENGRAM_LAYERS[DS41_N_ENGRAM_LAYER - 1] < DS41_FIRST_DECODER_LAYER &&
+                  DS41_DSPARK_TARGET_LAYER[0] >= DS41_FIRST_DECODER_LAYER,
+              "Engram runs every row, DSpark features the replayed ones");
+
+/* The first `skip` rows reach the first decoder layer but no decoder layer
+ * runs them: that layer only compresses them (global KV and index keys).
+ * The remaining rows move to the front of the batch. */
+bool replay_boundary(ds41_decoder* d, uint32_t il, int prev, uint32_t skip, uint32_t n) {
+  const ds41_layer_weights* l = &d->engine->weights->layer[il];
+  const uint64_t hd = (uint64_t)kHc * kDim;
+  const uint32_t kept = n - skip;
+  /* The attention input as block() derives it for this many rows. */
+  const bool collapsed =
+      skip >= kStatePassTokens
+          ? ds41_v41_hc_state_pass(nullptr, nullptr, nullptr, d->h, nullptr, d->pre[prev], f32(d, l->attn_norm),
+                                   d->xn, f32(d, l->hc_attn_fn), d->mixes, kHc, kDim, DS41_RMS_EPS, skip) == 0
+          : ds41_v41_hc_collapse_norm(d->h, d->pre[prev], f32(d, l->attn_norm), d->xn, kHc, kDim, DS41_RMS_EPS,
+                                      skip) == 0;
+  if (!collapsed || !linear(d, l->attn_compressor_kv, d->xn, d->ckv, skip) ||
+      ds41_v41_rms_norm(d->ckv, f32(d, l->attn_compressor_norm), d->latent, skip, kHeadDim, DS41_RMS_EPS) ||
+      !store_compressed(d, il, d->pos, skip, 1))
+    return false;
+  /* h2 and the other pre-mix are free between blocks. */
+  if (!copy_dev(d->h2, d->h + skip * hd, kept * hd) || !copy_dev(d->h, d->h2, kept * hd) ||
+      !copy_dev(d->pre[prev ^ 1], d->pre[prev] + (uint64_t)skip * kHc, (uint64_t)kept * kHc) ||
+      !copy_dev(d->pre[prev], d->pre[prev ^ 1], (uint64_t)kept * kHc))
+    return false;
+  d->pos += skip;
+  return true;
+}
+
+/* Evaluates n tokens; the decoder layers run the positions from keep_from
+ * on (bounded replay; 0 runs every row), whose windows start there. */
+int eval_rows(ds41_decoder* d, const int* tokens, uint32_t n, uint32_t keep_from, float* logits,
+              uint32_t logit_rows, ds41_decoder_layer_fn layer_fn, void* ctx) {
   if (!d || !tokens || n == 0 || n > d->capacity || logit_rows > n || (logit_rows && !logits) ||
       d->pos + n > d->context || d->spec_n)
     return 1;
+  const uint32_t pos0 = d->pos;
+  const uint32_t skip = std::clamp(keep_from, pos0, pos0 + n) - pos0;
+  const uint32_t kept = n - skip;
+  if (logit_rows > kept) return 1;
   for (uint32_t t = 0; t < n; t++)
     if (tokens[t] < 0 || tokens[t] >= (int)DS41_N_VOCAB) return 1;
   const ds41_weights* w = d->engine->weights;
@@ -1281,30 +1335,38 @@ int ds41_decoder_eval(ds41_decoder* d, const int* tokens, uint32_t n, float* log
        hipMemcpy(d->pre[0], one_hot.data(), one_hot.size() * sizeof(float), hipMemcpyHostToDevice) == hipSuccess;
 
   const int prev = 0;
-  const uint32_t feature_rows = std::min(n, DS41_DSPARK_FEATURE_ROWS);
+  const uint32_t feature_rows = std::min(kept, DS41_DSPARK_FEATURE_ROWS);
   d->feature_rows = 0;
+  d->window_floor = keep_from;
+  uint32_t rows = n;  // rows of the current layer
   for (uint32_t il = 0; il < DS41_N_LAYER && ok; il++) {
+    if (il == DS41_FIRST_DECODER_LAYER && skip) {
+      ok = replay_boundary(d, il, prev, skip, n);
+      rows = kept;
+      if (!ok || !kept) break;
+    }
     const int slot = ds41_layer_engram_slot(il);
     if (slot >= 0) ok = engram_reads[slot].get() && engram(d, il, engram_out[slot], n);
     if (d->features) {
       for (uint32_t f = 0; f < DS41_DSPARK_TARGET_LAYERS && ok; f++)
         if (il == DS41_DSPARK_TARGET_LAYER[f])
-          ok = ds41_v41_hc_mean(d->h + (uint64_t)(n - feature_rows) * hd, d->features + (uint64_t)f * kDim,
+          ok = ds41_v41_hc_mean(d->h + (uint64_t)(rows - feature_rows) * hd, d->features + (uint64_t)f * kDim,
                                 (uint64_t)DS41_DSPARK_TARGET_LAYERS * kDim, kHc, kDim, feature_rows) == 0;
     }
     /* block() leaves this layer's FFN pre-mix in pre[prev]. */
-    ok = ok && block(d, il, prev, prev ^ 1, n);
+    ok = ok && block(d, il, prev, prev ^ 1, rows);
     if (ok && layer_fn) {
-      ok = hipMemcpy(d->host_h.data(), d->h + (n - 1) * hd, hd * sizeof(float), hipMemcpyDeviceToHost) ==
+      ok = hipMemcpy(d->host_h.data(), d->h + (rows - 1) * hd, hd * sizeof(float), hipMemcpyDeviceToHost) ==
                hipSuccess &&
-           hipMemcpy(d->host_ids.data(), d->route_ids + (uint64_t)(n - 1) * DS41_N_EXPERT_USED,
+           hipMemcpy(d->host_ids.data(), d->route_ids + (uint64_t)(rows - 1) * DS41_N_EXPERT_USED,
                      d->host_ids.size() * sizeof(int32_t), hipMemcpyDeviceToHost) == hipSuccess;
       if (ok) layer_fn(ctx, il, d->host_h.data(), d->host_ids.data());
     }
   }
+  d->window_floor = 0;
 
   /* Final mix and norm for the requested rows, then the vocabulary projection in passes. */
-  const uint32_t first = n - logit_rows;
+  const uint32_t first = rows - logit_rows;
   if (ok && logit_rows) {
     ok = ds41_v41_hc_collapse_norm(d->h + first * hd, d->pre[prev] + (uint64_t)first * kHc, f32(d, w->output_norm),
                                    d->xn, kHc, kDim, DS41_RMS_EPS, logit_rows) == 0;
@@ -1319,14 +1381,29 @@ int ds41_decoder_eval(ds41_decoder* d, const int* tokens, uint32_t n, float* log
   if (!ok) {
     /* The device state is partial; callers reset or reload before reuse. */
     d->engram_history.resize(history);
+    d->pos = pos0;
     return 1;
   }
   if (d->features) {
-    d->feature_pos0 = d->pos + n - feature_rows;
+    d->feature_pos0 = pos0 + n - feature_rows;
     d->feature_rows = feature_rows;
   }
-  d->pos += n;
+  d->pos = pos0 + n;
   return 0;
+}
+
+}  // namespace
+
+int ds41_decoder_eval(ds41_decoder* d, const int* tokens, uint32_t n, float* logits, uint32_t logit_rows,
+                      ds41_decoder_layer_fn layer_fn, void* ctx) {
+  return eval_rows(d, tokens, n, 0, logits, logit_rows, layer_fn, ctx);
+}
+
+int ds41_decoder_eval_prompt(ds41_decoder* d, const int* tokens, uint32_t n, uint32_t prompt_end, float* logits,
+                             uint32_t logit_rows) {
+  if (!d || prompt_end < d->pos + n) return 1;
+  const uint32_t keep_from = prompt_end > DS41_DECODER_REPLAY_ROWS ? prompt_end - DS41_DECODER_REPLAY_ROWS : 0;
+  return eval_rows(d, tokens, n, keep_from, logits, logit_rows, nullptr, nullptr);
 }
 
 int ds41_decoder_eval_speculative(ds41_decoder* d, const int* tokens, uint32_t n, float* logits) {

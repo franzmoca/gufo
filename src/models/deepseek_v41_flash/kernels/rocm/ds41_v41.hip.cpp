@@ -1218,14 +1218,14 @@ __global__ void apply_mask_kernel(float* score, uint64_t stride, const uint32_t*
 
 /* Block (head, token). Scores for every key are kept in shared memory. */
 __global__ void attention_kernel(const float* q, const float* ring, const float* chunk, uint32_t window,
-                                 ds41_fp4_rows comp, const uint32_t* all_idx, uint32_t k, uint32_t ratio,
-                                 const float* sinks, float* out, uint32_t pos0, uint32_t heads, uint32_t head_dim,
-                                 float scale) {
+                                 uint32_t floor, ds41_fp4_rows comp, const uint32_t* all_idx, uint32_t k,
+                                 uint32_t ratio, const float* sinks, float* out, uint32_t pos0, uint32_t heads,
+                                 uint32_t head_dim, float scale) {
   extern __shared__ float scores[];
   const uint32_t head = blockIdx.x;
   const uint32_t token = blockIdx.y;
   const uint32_t p = pos0 + token;
-  const uint32_t lo = p + 1 > window ? p + 1 - window : 0u;
+  const uint32_t lo = max(p + 1 > window ? p + 1 - window : 0u, min(floor, p));
   const uint32_t n_window = p - lo + 1;
   const uint32_t n_comp = min(k, comp_len(p, ratio));
   const uint32_t* idx = all_idx + (uint64_t)token * k;
@@ -1354,7 +1354,7 @@ __device__ __forceinline__ void lds_barrier() { asm volatile("s_waitcnt lgkmcnt(
  * kernel's code is kept within the instruction cache (a rolled epilogue,
  * DPP reductions, table decoding); larger code ran several times slower. */
 __global__ __launch_bounds__(256) void attention_f16_kernel(const float* q, const float* ring, const float* chunk,
-                                                            uint32_t window, ds41_fp4_rows comp,
+                                                            uint32_t window, uint32_t floor, ds41_fp4_rows comp,
                                                             const uint32_t* all_idx, uint32_t k, uint32_t ratio,
                                                             const float* sinks, float* out, uint32_t pos0,
                                                             uint32_t heads, float scale, const float2* rope) {
@@ -1363,7 +1363,7 @@ __global__ __launch_bounds__(256) void attention_f16_kernel(const float* q, cons
   const uint32_t head0 = blockIdx.y * HEADS;
   const uint32_t tid = threadIdx.x, wave = tid / 32, lane = tid % 32, h = lane / 16, l16 = lane % 16;
   const uint32_t p = pos0 + token;
-  const uint32_t lo = p + 1 > window ? p + 1 - window : 0u;
+  const uint32_t lo = max(p + 1 > window ? p + 1 - window : 0u, min(floor, p));
   const uint32_t n_window = p - lo + 1;
   const uint32_t n_comp = min(k, comp_len(p, ratio));
   const uint32_t n_score = n_window + n_comp;
@@ -1625,7 +1625,7 @@ constexpr uint32_t kAttnSplitHeads = 16;
 constexpr uint32_t kAttnPartial = 512 + 4;
 
 __global__ __launch_bounds__(512) void attention_split_kernel(const float* q, const float* ring, const float* chunk,
-                                                              uint32_t window, ds41_fp4_rows comp,
+                                                              uint32_t window, uint32_t floor, ds41_fp4_rows comp,
                                                               const uint32_t* all_idx, uint32_t k, uint32_t ratio,
                                                               float* partial, uint32_t pos0, uint32_t heads,
                                                               float scale) {
@@ -1636,7 +1636,7 @@ __global__ __launch_bounds__(512) void attention_split_kernel(const float* q, co
   const uint32_t lane = threadIdx.x % 32;
   const uint32_t head = blockIdx.x * kAttnSplitHeads + warp;
   const uint32_t p = pos0 + token;
-  const uint32_t lo = p + 1 > window ? p + 1 - window : 0u;
+  const uint32_t lo = max(p + 1 > window ? p + 1 - window : 0u, min(floor, p));
   const uint32_t n_window = p - lo + 1;
   const uint32_t n_rows = n_window + min(k, comp_len(p, ratio));
   const uint32_t per = (n_rows + kAttnSplits - 1) / kAttnSplits;
@@ -2142,7 +2142,7 @@ extern "C" int ds41_v41_apply_mask(float* score, uint64_t score_stride, const ui
 }
 
 extern "C" int ds41_v41_attention(float* q, const float* ring, const float* chunk, uint32_t window,
-                                  ds41_fp4_rows comp, const uint32_t* idx, uint32_t k, uint32_t ratio,
+                                  uint32_t floor, ds41_fp4_rows comp, const uint32_t* idx, uint32_t k, uint32_t ratio,
                                   const float* sinks, float* out, float* partial, uint32_t pos0, uint32_t n,
                                   uint32_t heads, uint32_t head_dim, float scale, const float* inv_freq,
                                   uint32_t rope_dim, float* rope_scratch) {
@@ -2159,22 +2159,22 @@ extern "C" int ds41_v41_attention(float* q, const float* ring, const float* chun
       rope = reinterpret_cast<float2*>(rope_scratch);
       rope_table_kernel<<<blocks_for((uint64_t)n * rope_dim / 2), kThreads>>>(inv_freq, rope, rope_dim / 2, pos0, n);
     }
-    attention_f16_kernel<<<dim3(n, heads / 32), 256>>>(q, ring, chunk, window, comp, idx, k, ratio, sinks, out, pos0,
-                                                       heads, scale, rope);
+    attention_f16_kernel<<<dim3(n, heads / 32), 256>>>(q, ring, chunk, window, floor, comp, idx, k, ratio, sinks, out,
+                                                       pos0, heads, scale, rope);
     return launch_ok("attention");
   }
   if (inv_freq && ds41_v41_rope_tail(q, n * heads, head_dim, rope_dim, inv_freq, pos0, heads, 1, 0)) return 1;
   if (n < DS41_V41_ATTN_SPLIT_TOKENS && partial && head_dim == 512 && heads % kAttnSplitHeads == 0) {
     attention_split_kernel<<<dim3(heads / kAttnSplitHeads, kAttnSplits, n), 32 * kAttnSplitHeads>>>(
-        q, ring, chunk, window, comp, idx, k, ratio, partial, pos0, heads, scale);
+        q, ring, chunk, window, floor, comp, idx, k, ratio, partial, pos0, heads, scale);
     if (launch_ok("attention split")) return 1;
     attention_combine_kernel<<<dim3(heads, n), 128>>>(partial, sinks, out, heads);
     if (launch_ok("attention combine")) return 1;
   } else {
     const size_t shared = (size_t)(window + (ratio ? k : 0)) * sizeof(float);
     if (shared > 60 * 1024) return 1;
-    attention_kernel<<<dim3(heads, n), kThreads, shared>>>(q, ring, chunk, window, comp, idx, k, ratio, sinks, out,
-                                                           pos0, heads, head_dim, scale);
+    attention_kernel<<<dim3(heads, n), kThreads, shared>>>(q, ring, chunk, window, floor, comp, idx, k, ratio, sinks,
+                                                           out, pos0, heads, head_dim, scale);
     if (launch_ok("attention")) return 1;
   }
   return inv_freq ? ds41_v41_rope_fp8(out, n * heads, head_dim, rope_dim, inv_freq, pos0, heads, 1, 1) : 0;
