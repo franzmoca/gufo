@@ -157,6 +157,41 @@ Flags that remain, from alternating runs:
   and concurrent decodes count up to one step more while the requests end
   sooner (cache-concurrency `identical`: 8,107 against 8,124-8,140 ms).
 
+## Disk prompt cache
+
+Production setup: native 1M context, one session, DSpark Q2_K/Q4_K,
+`--cache-disk` on an NVMe SSD, build `495d7056`
+([artifacts](artifacts/2026-10-26-disk-cache/requests.txt)). An
+11,930-token conversation and a continuation, then the server was stopped
+with SIGTERM, restarted, replayed, killed with SIGKILL and replayed again:
+
+| Request | Reuse | Cached tokens | Restore | TTFT | Reply vs uncached |
+|---|---|---:|---:|---:|---|
+| Cold turn 1 | none | 0 | | 12,059 ms | identical |
+| After SIGTERM, turn 1 | disk | 11,927 | 13.9 ms | 110 ms | identical |
+| After SIGKILL, turn 1 | disk | 11,927 | 12.9 ms | 110 ms | identical |
+| Uncached control (`cache_prompt: false`) | none | 0 | | 11,803 ms | |
+
+Each continuation (turn 2) reuses the live slot, 11,993 tokens, and the
+cold, SIGTERM and SIGKILL runs reply identically to one another. The
+uncached control differs in one word (`"Releasing"` for `**Releasing**`):
+a cold prompt runs the decoder layers over its last 140 rows only, while
+the live slot decoded the 64 reply tokens in full. With `--exact-prefill`
+the continuation and the uncached control are identical, so the difference
+comes from bounded replay, not from the cache.
+
+With the disk cache enabled, 1.68-1.75 GiB of host memory is available at
+ready and at least 1.33 GiB while serving; the transfer staging stays at
+1 MiB. The first start with `--cache-disk` fingerprints the weights:
+49.9 s for the backbone and 2.1 s for the drafter, ready after 70.8 s
+([log](artifacts/2026-10-26-disk-cache/fresh-fingerprint.txt)). Later
+starts reuse the stored hashes and are ready in 19 s.
+
+`tests/functional/run.py --suite cache` with DSpark (32K context, two
+sessions) passes RAM, disk, restart and disk checkpoint spacing; after the
+restart ten requests restore from disk in about 9 ms
+([report](artifacts/2026-10-26-disk-cache/functional-cache-report.json)).
+
 ## DSpark drafter (M5)
 
 `tools/ds41/dspark_reference.py` recomputes a draft on the CPU from the
