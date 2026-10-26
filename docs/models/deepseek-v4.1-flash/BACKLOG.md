@@ -41,6 +41,7 @@ attention 0.36 s, mHC state passes and the routed sum 0.26 s, BF16 matmuls
 | 4 | Dense FP16 kernel barriers | Prefill | Hard | Up to ~0.15 s per 2K batch | Low |
 | 5 | Remaining prefill glue | Prefill | Medium | ~30-60 ms per 2K batch | Medium |
 | 7 | Small-batch evaluation cost | Prefill | Medium | ~15 ms per short follow-up turn | Low |
+| 9 | Stable-boundary prefill pass on every chat request | Serving prefill | Medium | ~65 ms per chat request (~3% of a 2K turn) | Medium |
 
 ### 1. Routed-expert GEMV with wide-load weight tiles
 
@@ -150,14 +151,33 @@ A DSpark cycle at 1.9K context costs 12.5 ms of drafting plus the
 verification batch. `--spec-bench` puts 1-8 rows at 41.8 / 54.9 / 65.9 /
 76.1 / 87.1 / 96.1 / 107.7 / 109.3 ms, so each row beyond the first adds
 about 11 ms. Batches of 2-7 tokens use the decode kernels for identical
-numerics; from 8 tokens attention takes the batched kernel, so prompt-lookup
-copies stop at six per cycle although 99% of them are accepted on a file
-edit. In a 6-row pass the dense Q5_K GEMVs take 34.2 ms (22.4 ms for
+numerics; since E15 split attention keeps them up to 16 rows, so
+prompt-lookup copies reach 15 per cycle. In a 6-row pass the dense Q5_K GEMVs take 34.2 ms (22.4 ms for
 one row) and the routed experts 47.5 ms (10 ms for one row; reading the 21.2
 distinct experts per layer bounds them near 36 ms). The grouped IQ1_S
 kernel is limited by per-column decode and activation work rather than
 weight bandwidth; occupancy, wider rows per lane, column tiling and
 cross-iteration prefetch were all slower (see EXPERIMENTS.md).
+
+### 9. Stable-boundary prefill pass on every chat request
+
+The prompt cache captures a checkpoint only at a prefill pass end. Every
+chat request captures its stable boundary, the end of the last user message
+three tokens before the prompt end (the generation prefix), so a 2,035-token
+prompt runs as 2,032 + 3 rows and a 2,141-token prompt as 2,048 + 90 + 3.
+The 3-row pass costs about 65 ms natively (`gufo bench -p 3`: 64.6 ms);
+a profiled continued request shows no host idle beyond ~60 ms including
+decode, so this pass is the only serving-side prefill overhead found.
+
+The stable checkpoint serves next turns whose rendering diverges right
+after the user message: thinking mode, where the template drops earlier
+reasoning, or a regenerated or edited reply. With thinking off the reply
+renders as generated and the next turn continues the live slot past it
+(cache_n 8,177 > prompt 8,170 in the card sweep). Capture it only when the
+next turn can need it, or snapshot row N−3 from inside the final pass
+(compressor accumulators, SWA windows and bounded-replay rows make this
+invasive). The policy lives in shared code (`src/cache/retention.cpp`), so
+a change must keep other models' reuse.
 
 ## Memory
 

@@ -586,3 +586,15 @@ changes; one first-run decode flag did not recur on two reruns or two
 unchanged-build controls, and the remaining prefill flags match the
 controls' variance and stay inconclusive.
 Runs are in [the E15 record](artifacts/2026-10-26-wide-verification/summary.txt).
+
+### E16: 4096-token prefill batches after bounded replay (rejected as default)
+
+Bounded replay changed what a prefill batch costs, so the 4096-token batch
+was measured again. Natively it gains 2.0–2.2% at depth 0 and 2.8–3.1% at
+32K for prompts of 2,560 to 8,192 tokens (before bounded replay: +3.7%).
+Served in the default resident setup (native 1M context, one session,
+Q2_K/Q4_K drafter), its extra activation memory leaves the prompt cache no
+backing: every capture is refused, and a 2K continued prefill gains nothing
+(970.3 against 968.5 tok/s). 2048 stays the default; 4096 remains an option where
+memory allows a cache beside it (not measured).
+Runs are in [the E16 record](artifacts/2026-10-26-prefill-batch/summary.txt).
