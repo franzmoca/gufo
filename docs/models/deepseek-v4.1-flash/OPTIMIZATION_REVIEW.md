@@ -20,8 +20,9 @@ bounded per-span BPE memoization, and
 [E4](EXPERIMENTS.md#e4-stop-unused-dspark-markov-suffixes-retained) removes
 unrequested Markov proposals without changing the five-row transformer/head.
 E4's aggregate request throughput is roughly flat; its short-width draft stage
-is faster. Stochastic proposals (E2) and shortened head rows (E5) were rejected
-for mixed single-seed request results; neither is active production behavior.
+is faster. Shortened head rows (E5) are retained after a 12-pair re-measurement with
+identical outputs (+0.3%). Stochastic proposals (E2) are not active production
+behavior.
 E6 now keeps speculative index scoring on the serial FP32 reduction, with
 six-row/18.5K and seven-row/3K exact-logit checks and a stricter probe. Its
 32K throughput is roughly flat (about 1% lower in one pair); no speedup is

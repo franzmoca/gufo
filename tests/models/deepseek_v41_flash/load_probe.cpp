@@ -417,6 +417,13 @@ int DsparkDump(ds41_engine* engine, const std::vector<int>& prompt,
     std::fill_n(prefix, DS41_DSPARK_BLOCK, -1);
     if (!ds41_dspark_draft(s, anchor, prefix, width))
       return 1;
+    std::vector<float> prefix_logits(draft_logits.size());
+    if (!ds41_dspark_copy_logits(engine, prefix_logits.data()) ||
+        std::memcmp(prefix_logits.data(), draft_logits.data(),
+                    (std::size_t)width * logits.size() * sizeof(float)) != 0) {
+      std::fprintf(stderr, "draft head logits differ at width %u\n", width);
+      return 1;
+    }
     for (uint32_t i = 0; i < DS41_DSPARK_BLOCK; i++) {
       if (prefix[i] != (i < width ? drafts[i] : -1)) {
         std::fprintf(stderr, "draft prefix mismatch: width %u slot %u\n", width,
@@ -429,7 +436,8 @@ int DsparkDump(ds41_engine* engine, const std::vector<int>& prompt,
       ds41_dspark_draft(s, anchor, drafts, DS41_DSPARK_BLOCK + 1))
     return 1;
   std::printf(
-      "draft prefixes 1..5 identical; output tails untouched; invalid widths "
+      "draft prefixes/logits 1..5 identical; output tails untouched; invalid "
+      "widths "
       "rejected\n");
   ds41_dspark_state_destroy(s);
   ds41_decoder_destroy(d);
