@@ -410,25 +410,24 @@ std::string_view GenerationPrompt(bool enable_thinking) {
 }
 
 bool ValidateGgufTemplate(const core::GgufReader& reader,
-                          std::string* error_msg) {
+                          std::string* error_msg, std::string* warning_msg) {
   if (reader.GetMetadataString("general.architecture") != "deepseek41") {
     AssignError(error_msg,
                 "DeepSeek V4.1 Flash artifact has unexpected architecture");
     return false;
   }
   const auto raw_template = reader.GetMetadataString("tokenizer.chat_template");
+  const std::string built_in = "; rendering prompts with the built-in " +
+                               std::string(ChatTemplateId()) + " template";
   if (!raw_template.has_value() || raw_template->empty()) {
-    AssignError(error_msg,
-                "DeepSeek GGUF is missing tokenizer.chat_template metadata");
-    return false;
-  }
-  const std::string actual_hash = Sha256(*raw_template);
-  if (actual_hash != ArtifactTemplateSha256()) {
-    AssignError(error_msg,
-                "DeepSeek GGUF chat template SHA-256 is not the pinned 1017 "
-                "artifact version: " +
-                    actual_hash);
-    return false;
+    AssignError(warning_msg,
+                "DeepSeek V4.1 GGUF has no tokenizer.chat_template" + built_in);
+  } else if (const std::string actual_hash = Sha256(*raw_template);
+             actual_hash != ArtifactTemplateSha256()) {
+    AssignError(warning_msg,
+                "DeepSeek V4.1 GGUF chat template differs from the 1017 "
+                "release (sha256 " +
+                    actual_hash + ")" + built_in);
   }
   return true;
 }

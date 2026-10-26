@@ -114,8 +114,9 @@ speed.
   sized to the largest tensor so no expert stack is split.
 - Sessions: prefix reuse and snapshots of the full decoder state.
 - Chat template: official V4.1 encoding with numeric reasoning effort,
-  mid-conversation system turns and V4.1 DSML tags, pinned to the GGUF
-  template and the official encoder by SHA-256.
+  mid-conversation system turns and V4.1 DSML tags, pinned to the official
+  encoder by SHA-256. A GGUF whose embedded template differs from the 1017
+  release loads with a warning and renders with the built-in template.
 - Serving: `deepseek41` in `gufo serve` with the V4 Flash runner, a V4.1
   state ABI and cache identity, DSML grammar (`ToolFormat::kDeepSeek41`) and
   output parsing, and V4 Flash sampling defaults (temperature 1.0, top_p

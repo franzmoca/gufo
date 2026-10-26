@@ -74,10 +74,12 @@ struct ChatTemplateOptions {
                                      std::span<const ChatTool> tools,
                                      const ChatTemplateOptions& options = {});
 
-/// Rejects DeepSeek artifacts whose embedded template is not the pinned
-/// converter version implemented by the compiled formatter.
+/// Rejects artifacts of another architecture. Prompts always render with the
+/// compiled formatter, so an embedded template other than the pinned 1017
+/// version (or none) only sets `warning_msg`.
 [[nodiscard]] bool ValidateGgufTemplate(const core::GgufReader& reader,
-                                        std::string* error_msg = nullptr);
+                                        std::string* error_msg = nullptr,
+                                        std::string* warning_msg = nullptr);
 
 [[nodiscard]] constexpr std::string_view ChatTemplateId() noexcept {
   return "deepseek-v4.1-flash-1017-compiled-v1";
