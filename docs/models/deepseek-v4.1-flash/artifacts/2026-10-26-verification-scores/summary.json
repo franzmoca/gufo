@@ -1,0 +1,90 @@
+{
+  "decision": "retained as numerical-contract work, not a speedup",
+  "baseline_revision": "74fec950",
+  "scope": "Only speculative index scoring groups are capped at four rows. Prefill and widths at most four retain their dispatch. Existing FP32 kernels and their reduction are unchanged. Eight-row attention and wider dense numerical modes remain open.",
+  "model": "ISTA GSQ-RCO IQ1_M with IQ4_NL Engram",
+  "drafter": "Lucebox Q2_K/Q4_K for production benchmark; no drafter loaded for direct verification checks",
+  "flake_lock_sha256": "f071dd2d0a8a96e7ff0998844ce3bbea2c8e580c5ac8c08ba762900fd381de5e",
+  "inputs": {
+    "score3k.ids": {
+      "path": "/tmp/ds41-gpu/score3k.ids",
+      "sha256": "12f1b1e33de35183679857a76ba34efd63ea90d576ceed0969ffc72d5fbbdeec",
+      "tokens": 3000
+    },
+    "score18k.ids": {
+      "path": "/tmp/ds41-gpu/score18k.ids",
+      "sha256": "daccb04056496e0fccdcd0ca20c9e6f160940e70f3a3ab582c7efb4d4e08a9d7",
+      "tokens": 18500
+    }
+  },
+  "quality": {
+    "baseline-width6.txt": "spec-check: 21 kept rows, 21 bit-identical between passes (max |diff| 0); against single-token decode: argmax matches on 21, logits bit-identical on 21 (max |diff| 0)",
+    "candidate-width6.txt": "spec-check: 21 kept rows, 21 bit-identical between passes (max |diff| 0); against single-token decode: argmax matches on 21, logits bit-identical on 21 (max |diff| 0)",
+    "candidate-short-width7.txt": "spec-check: 28 kept rows, 28 bit-identical between passes (max |diff| 0); against single-token decode: argmax matches on 28, logits bit-identical on 28 (max |diff| 0)"
+  },
+  "benchmarks": {
+    "baseline": {
+      "pp2048": 1108.95,
+      "tg128": 23.69,
+      "pp2048 @ d32768": 1117.5,
+      "tg128 @ d32768": 54.54
+    },
+    "candidate": {
+      "pp2048": 1071.44,
+      "tg128": 26.12,
+      "pp2048 @ d32768": 1118.19,
+      "tg128 @ d32768": 53.97
+    }
+  },
+  "token_hashes": {
+    "baseline": {
+      "0": "70d5a48a260f87451697c19615b718329d1bbf1806b84f00c9f57699e31b1b15",
+      "32768": "45eabce9e4bf40ce3c2d3b240c34b9545d0209829f0dbfed556c41b7f57f847f"
+    },
+    "candidate": {
+      "0": "70d5a48a260f87451697c19615b718329d1bbf1806b84f00c9f57699e31b1b15",
+      "32768": "45eabce9e4bf40ce3c2d3b240c34b9545d0209829f0dbfed556c41b7f57f847f"
+    }
+  },
+  "qualifications": [
+    "Baseline width-six logits already match serial on the measured 18.5K history; no existing model bug is demonstrated.",
+    "Candidate width-six at 18.5K and width-seven at 3K match serial, including all commit lengths and corrupted rejected suffixes.",
+    "No throughput speedup is qualified; only one matched production benchmark pair.",
+    "The short-context decode difference accompanies adaptive-policy variation and does not qualify a gain.",
+    "FP32 operator formula and selection checks were established in E1; that kernel is unchanged."
+  ],
+  "per_phase_comparison": {
+    "pp2048": {
+      "baseline_tps": 1108.95,
+      "candidate_tps": 1071.44,
+      "baseline_ms_from_rounded_rate": 1846.7920104603454,
+      "candidate_ms_from_rounded_rate": 1911.446277906369,
+      "relative_wall_change": 0.03500895990442765,
+      "exceeds_5pct_and_3ms_slowdown": false
+    },
+    "tg128": {
+      "baseline_tps": 23.69,
+      "candidate_tps": 26.12,
+      "baseline_ms_from_rounded_rate": 5403.123680878008,
+      "candidate_ms_from_rounded_rate": 4900.459418070444,
+      "relative_wall_change": -0.09303215926493102,
+      "exceeds_5pct_and_3ms_slowdown": false
+    },
+    "pp2048 @ d32768": {
+      "baseline_tps": 1117.5,
+      "candidate_tps": 1118.19,
+      "baseline_ms_from_rounded_rate": 1832.662192393736,
+      "candidate_ms_from_rounded_rate": 1831.5313139985153,
+      "relative_wall_change": -0.0006170686555952987,
+      "exceeds_5pct_and_3ms_slowdown": false
+    },
+    "tg128 @ d32768": {
+      "baseline_tps": 54.54,
+      "candidate_tps": 53.97,
+      "baseline_ms_from_rounded_rate": 2346.901356802347,
+      "candidate_ms_from_rounded_rate": 2371.6879748008155,
+      "relative_wall_change": 0.010561423012784843,
+      "exceeds_5pct_and_3ms_slowdown": false
+    }
+  }
+}

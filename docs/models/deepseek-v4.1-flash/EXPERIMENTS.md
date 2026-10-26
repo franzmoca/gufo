@@ -230,3 +230,43 @@ confirmed regression. No broad matrix or additional timing loop was run.
 Production retains E4's full five-row head and shortened Markov tail. The
 prototype source/test patch, all candidate runs and focused checks are in
 [the E5 record](artifacts/2026-10-26-draft-head/summary.json).
+
+
+### E6: explicit FP32 index scoring for verification (retained for numerics)
+
+Use the existing speculative-evaluation purpose flag to group index scoring
+into at most four rows. This keeps the serial FP32 score/reduction at widths
+five through seven and enables E1's compact rescoring there; ordinary prefill
+keeps its WMMA dispatch. No kernel arithmetic or persistent-state format changes.
+The probe now rejects non-finite logits and serial-logit mismatches, rather
+than merely printing the serial comparison while gating only rejected-tail
+independence. Correct the session comment that treated all sub-eight-row
+kernels as inherently scalar-equivalent.
+
+At 18.5K, baseline width six already matches serial on all 21 retained rows:
+the dispatch gap did not demonstrate a model bug on this history. Candidate
+width six also matches all 21 rows, and width seven at 3K matches all 28.
+Each test exercises every commit length and corrupts the rejected suffix;
+maximum logit differences from serial and between clean/corrupt passes are zero.
+E1's independent FP64 scoring/selection evidence applies to the unchanged
+FP32 kernel. Production/probe builds and the format gate pass.
+
+One matched production C1 IQ1_M + Q2_K/Q4_K, greedy pp2048/tg128 pair:
+
+| Phase | Baseline tok/s | Candidate tok/s |
+| --- | ---: | ---: |
+| pp2048 | 1108.95 | 1071.44 |
+| tg128 | 23.69 | 26.12 |
+| pp2048 at 32K | 1117.50 | 1118.19 |
+| tg128 at 32K | 54.54 | 53.97 |
+
+Both depth-zero and 32K generated-token hashes match. The 32K trace exercises
+six-copy lookup plus anchor (seven verification rows), so the changed path
+actually runs. Short decoding has adaptive-policy variation; prefill's code
+is unchanged. No phase exceeds both slowdown gates (5% and 3 ms), but this
+single pair does **not** qualify a speedup: the affected long-context decode
+is about 1% slower. Retained as an explicit numerical contract for verification
+and stronger qualification, not as a throughput win. Eight-row attention and
+wider projection equivalence remain open; no verification limit was widened.
+All checks, rates, hashes, commands and raw benchmark traces are in
+[the E6 record](artifacts/2026-10-26-verification-scores/summary.json).

@@ -43,8 +43,8 @@ struct ds41_session {
    * step's anchor, or evaluated by ds41_session_flush before a plain step. */
   int next = -1;
   /* Rows of a verification: the anchor and up to six copied tokens. Below
-   * DS41_V41_ATTN_SPLIT_TOKENS rows every kernel keeps the single-token
-   * numerics, so verified output matches plain decoding. */
+   * DS41_V41_ATTN_SPLIT_TOKENS rows the attention keeps single-token
+   * numerics; speculative index scoring separately keeps its FP32 path. */
   static constexpr uint32_t kVerifyRows = DS41_V41_ATTN_SPLIT_TOKENS - 1;
   static constexpr float kAcceptPrior = 0.7f;
   /* Plain steps before a one-draft cycle re-measures acceptance: from the

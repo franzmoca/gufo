@@ -117,7 +117,7 @@ ds41_decoder* Prefill(ds41_engine* engine, const std::vector<int>& prompt,
  * most 8) keeping 1, 2, ..., width rows in turn. Pass A drafts the greedy
  * continuation, pass B replaces the rows past the kept prefix with other
  * tokens. Exact rollback leaves both passes with bit-identical logits for every
- * kept row.
+ * kept row, and every kept logit row must also match serial decode exactly.
  * --spec-bench N: times speculative batches of N rows (0: 1 to 8), commit 1. */
 int SpeculativeProbe(ds41_engine* engine, const std::vector<int>& prompt,
                      uint32_t context, int cycles, int bench, int width) {
@@ -207,6 +207,13 @@ int SpeculativeProbe(ds41_engine* engine, const std::vector<int>& prompt,
   for (std::size_t i = 0; i < kept[0].size(); ++i) {
     double diff = 0.0, diff_single = 0.0;
     for (std::size_t v = 0; v < vocab; ++v) {
+      if (!std::isfinite(kept[0][i][v]) || !std::isfinite(kept[1][i][v]) ||
+          !std::isfinite(greedy_logits[i][v])) {
+        std::fprintf(
+            stderr,
+            "non-finite speculative/serial logit at row %zu token %zu\n", i, v);
+        return 1;
+      }
       diff = std::max(diff, (double)std::fabs(kept[0][i][v] - kept[1][i][v]));
       diff_single = std::max(
           diff_single, (double)std::fabs(kept[0][i][v] - greedy_logits[i][v]));
@@ -224,7 +231,7 @@ int SpeculativeProbe(ds41_engine* engine, const std::vector<int>& prompt,
       "%.3g); against single-token decode: argmax matches on %zu, logits "
       "bit-identical on %zu (max |diff| %.3g)\n",
       kept[0].size(), identical, worst, agree, as_single, worst_single);
-  return identical == kept[0].size() ? 0 : 1;
+  return identical == kept[0].size() && as_single == kept[0].size() ? 0 : 1;
 }
 }  // namespace
 
