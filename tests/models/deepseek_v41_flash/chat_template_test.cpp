@@ -1,6 +1,10 @@
 #include "src/models/deepseek_v41_flash/chat_template.hpp"
 
+#include <unistd.h>
+
+#include <cstdint>
 #include <cstdlib>
+#include <filesystem>
 #include <fstream>
 #include <iostream>
 #include <iterator>
@@ -8,8 +12,10 @@
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
+#include "src/core/gguf_reader.hpp"
 #include "src/core/json.hpp"
 
 namespace {
@@ -57,6 +63,69 @@ std::vector<ChatMessage> ParseMessages(const gufo::json::Value& messages) {
     }
   }
   return parsed;
+}
+
+// A tensorless GGUF v3 holding string metadata only.
+std::unique_ptr<gufo::core::GgufReader> MetadataGguf(
+    const std::vector<std::pair<std::string, std::string>>& strings) {
+  std::string bytes = "GGUF";
+  const auto put = [&](std::uint64_t value, int size) {
+    for (int i = 0; i < size; ++i)
+      bytes.push_back(static_cast<char>(value >> (8 * i)));
+  };
+  const auto put_string = [&](const std::string& text) {
+    put(text.size(), 8);
+    bytes += text;
+  };
+  put(3, 4);
+  put(0, 8);
+  put(strings.size(), 8);
+  for (const auto& [key, value] : strings) {
+    put_string(key);
+    put(8, 4);  // string
+    put_string(value);
+  }
+  bytes.resize((bytes.size() + 31) / 32 * 32, '\0');
+  const auto path =
+      std::filesystem::temp_directory_path() /
+      ("ds41_template_test_" + std::to_string(::getpid()) + ".gguf");
+  std::ofstream(path, std::ios::binary).write(bytes.data(), bytes.size());
+  std::string error;
+  auto reader = gufo::core::GgufReader::OpenFile(path, &error);
+  std::filesystem::remove(path);
+  if (!reader)
+    std::cerr << "test GGUF: " << error << '\n';
+  return reader;
+}
+
+// Prompts always render with the compiled formatter: another embedded
+// template only warns, another architecture is rejected.
+int CheckArtifactTemplates() {
+  namespace ds41 = gufo::models::deepseek_v41_flash;
+  int failures = 0;
+  const auto check = [&](const char* name,
+                         std::vector<std::pair<std::string, std::string>> kv,
+                         bool valid, bool warns) {
+    const auto reader = MetadataGguf(kv);
+    std::string error, warning;
+    if (!reader ||
+        ds41::ValidateGgufTemplate(*reader, &error, &warning) != valid ||
+        warning.empty() == warns) {
+      std::cerr << name << ": error '" << error << "' warning '" << warning
+                << "'\n";
+      ++failures;
+    }
+  };
+  check("other template",
+        {{"general.architecture", "deepseek41"},
+         {"tokenizer.chat_template", "{{ messages }}"}},
+        true, true);
+  check("no template", {{"general.architecture", "deepseek41"}}, true, true);
+  check("other architecture",
+        {{"general.architecture", "deepseek4"},
+         {"tokenizer.chat_template", "{{ messages }}"}},
+        false, false);
+  return failures;
 }
 
 }  // namespace
@@ -121,5 +190,6 @@ int main() {
     }
   }
   std::cout << cases - failures << "/" << cases << " cases match\n";
+  failures += CheckArtifactTemplates();
   return failures == 0 ? 0 : 1;
 }

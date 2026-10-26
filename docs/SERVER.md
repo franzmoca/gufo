@@ -279,15 +279,33 @@ With `preserve_thinking=false`, a new user turn removes reasoning from the
 preceding tool cycle. Gufo retains the state before that cycle and processes
 its changed suffix again.
 
-A loaded Qwen or Gemma 4 vision sidecar is prepared while the model loads,
-before the RAM cache is sized and before readiness: Gufo hashes the complete sidecar for image
-cache identities and uploads the encoder weights, so neither happens in the
-first image request and admission's free device memory already excludes them.
+A loaded Qwen, Gemma 4 or DeepSeek V4.1 vision sidecar is prepared while the
+model loads, before the RAM cache is sized and before readiness: Gufo hashes
+the complete sidecar for image cache identities and uploads the encoder
+weights, so neither happens in the first image request and admission's free
+device memory already excludes them.
 The weights stay resident even if no image arrives, including a sidecar
 auto-discovered as `mmproj-BF16.gguf` in the model's directory or its parent.
 The startup line `event=vision_prepared` reports `resident_bytes`,
 `identity_ms` and `upload_ms`. Startup fails if the upload does not fit. Image
 encoding scratch is still allocated per image.
+
+DeepSeek V4.1 Flash loads its vision tower only with an explicit `--mmproj`
+(0.90 GiB; never discovered). The sidecar is unsloth's `mmproj-BF16.gguf`
+extended with each MoE gate's image routing bias, which the ISTA GGUFs and the
+mmproj files lack. `tools/ds41/vision_sidecar.py` reads the bias from the
+official checkpoint (`--checkpoint DIR` for a local copy, otherwise HTTP range
+requests):
+
+```sh
+python3 -I tools/ds41/vision_sidecar.py --mmproj mmproj-BF16.gguf \
+  --out mmproj-ds41-BF16.gguf
+gufo serve llm --model DeepSeek-V4.1-Flash-1017-GSQ-RCO-IQ1_M-00001-of-00004.gguf \
+  --mmproj mmproj-ds41-BF16.gguf
+```
+
+Image input works over HTTP; `gufo prompt` does not take images for this
+model.
 
 `SIGINT` and `SIGTERM` cancel active requests and drain accepted disk writes
 before exiting. `--cache-disk DIR` defaults to 8 GiB retained on disk.

@@ -4343,11 +4343,14 @@ bool InferenceBackend::load(
                "DeepSeek V4.1 DSpark HTTP decoding requires --dspark-model");
       return false;
     }
-    if (!models::deepseek_v41_flash::ValidateGgufTemplate(*reader,
-                                                          &load_error)) {
+    std::string template_warning;
+    if (!models::deepseek_v41_flash::ValidateGgufTemplate(*reader, &load_error,
+                                                          &template_warning)) {
       SetError(error, "Unsupported DeepSeek V4.1 chat template: " + load_error);
       return false;
     }
+    if (!template_warning.empty())
+      Logger::Warn("loader", template_warning);
     auto model = models::deepseek_v41_flash::Model::Load(
         model_path,
         models::deepseek_v41_flash::ModelOptions{

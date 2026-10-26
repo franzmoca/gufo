@@ -368,7 +368,12 @@ struct DeepSeekV41FlashPrompt {
   static constexpr bool kPromptLookup = true;
   static bool ValidateGgufTemplate(const core::GgufReader& reader,
                                    std::string* error) {
-    return models::deepseek_v41_flash::ValidateGgufTemplate(reader, error);
+    std::string warning;
+    const bool valid = models::deepseek_v41_flash::ValidateGgufTemplate(
+        reader, error, &warning);
+    if (!warning.empty())
+      std::cerr << "warning: " << warning << '\n';
+    return valid;
   }
   static auto ResolveChatOptions(const ReasoningOptions& reasoning) {
     return models::deepseek_v41_flash::ResolveDeepSeekChatOptions(reasoning);

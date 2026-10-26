@@ -298,7 +298,8 @@ image prefix from the cache (219 of 232 tokens). The text suites
 `--mmproj` pass their assertions. The report still fails one measurement
 check: with `--speculative off` the harness expects zero drafts, and two
 `tools` requests verified prompt-lookup copies (16 and 28 copied, 15 and 27
-accepted). The build before M6 reports the same.
+accepted). The build before M6 reports the same. Drafter-less prompt lookup
+stays on in `off` mode by choice, so this check does not apply to this model.
 
 ## Batched prefill and M2 kernels
 
