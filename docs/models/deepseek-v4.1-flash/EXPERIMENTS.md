@@ -87,3 +87,58 @@ teacher-forced score against the oracle's perplexity 6.309
 | Larger prefill batches for the routed experts (`ds41_mmq_bench --f16 1 --tokens 4096` on the recorded counts scaled ×2) | Available as `--prefill-batch 4096` (`serve`, `bench`, `prompt`); the default stays 2048. The skewed expert counts leave fewer padded 16-slot tiles at 4096 tokens: routed throughput 26 → 31.5 TOPS. End to end, with the FP16 matrix-core kernels: `gufo bench -p 4096` 694 → 720 tok/s (+3.7%, alternating runs), the first 4096-token prompt in a fresh session 618 → 682 tok/s, 18.5K prefill 31.5 → 29.7 s with perplexity 6.270 (oracle 6.267), agreement 96.2%; activations +1.12-1.21 GiB. 8192-token batches were slower (18.5K prefill 37.2 s, +3.4 GiB), so the option stops at 4096. |
 | The dense FP16 kernel at 256 weight rows per workgroup (16 waves sharing one staged activation tile, which halves the activation reads) and its activations prefetched two stages ahead | Retained. Removing the activation loads (timing only) had taken the output LoRA 6.38 → 3.76 ms, while removing the weight decode or the fragment exchange saved 3-6%. `ds41_mmq_bench --dense` at 2048 tokens: q_b 5.23 → 5.21 ms, output LoRA 6.36 → 5.55 ms, o_b 5.43 → 5.14 ms, shared gate/up 3.27 → 3.11 ms, shared down 1.38 → 1.41 ms. 2K batch 3443-3608 → 3427 ms, 952-token batch 1845 → 1820 ms; batched 3K perplexity 6.294, agreement 96.4% (unchanged). No gain: 512 rows per workgroup (one workgroup per WGP), the stage loop rolled into one body (23 → 8 KB of code, 1-3% slower), a barrier that skips the wait for global loads. Without its two barriers per stage (timing only) the kernel ran the output LoRA in 4.20 ms and o_b in 4.83 ms, but double-buffered activation tiles with one barrier per stage were slower (o_b 5.14 → 6.34 ms with 64-value stages, one workgroup per WGP; 6.49 ms with 32-value stages, two per WGP). |
 | Batched mHC state passes fused (`hc_state_pass_kernel`): the mixes and the collapse with its RMS norm read the state once (the collapse uses the pre-mix that was known before the mix, from the shifted mHC), and before the FFN the attention expand runs in the same pass, so the expanded state is not read back twice. The mix loop is rolled (34 → 7 KB of code) | Retained for 16 tokens and up. `ds41.hc_state_pass`: mixes and normalized rows within 3e-7 of the separate kernels, the state bit-identical. 2K batch 3427 → 3359 ms, 952-token batch 1820 → 1790 ms, 18.5K prefill 33.3 → 31.5 s (with the 256-row dense kernel); 18.5K perplexity 6.273 (oracle 6.267), agreement 96.2%; batched 3K 6.320, 96.0% (rounding drift through the FP8/FP4 fake quantization; earlier rounding-only changes spanned 6.285-6.326). |
+
+
+## Post-M6 resident optimization pass (2026-10-26)
+
+Baseline source: `ee49a0fd` (sampling defaults from `edce52dd`); production
+`release` builds with the same Nix compiler/dependencies. The source review
+is [OPTIMIZATION_REVIEW.md](OPTIMIZATION_REVIEW.md). Each experiment records
+its disposition, including rejected attempts. Raw observations and provenance
+for E1 are in [artifacts/2026-10-26-rescore](artifacts/2026-10-26-rescore/README.md).
+
+| Experiment | Decision / evidence |
+| --- | --- |
+| E1: compact candidate blocks for FP32 indexer rescoring, 1–4 rows after 16K; keep dense score storage and the original final top-k | Retained for the measured AR gain: tg128 at 32K 22.78 → 23.05 tok/s (+1.2%), at 128K 21.10 → 21.89 (+3.7%); depth-zero control 23.97 → 24.03. Selected scores and all 512 output indices retain their original bytes/order; independent FP64 score error ≤2.2e-7 in the correctness cases. Uses the existing block-select scratch, with no extra persistent allocation. Full-history source indexing and WMMA prefill rescoring remain future work. |
+
+E1 compacts layer 20's mask into increasing physical block IDs for each
+reindex call and clears unselected dense scores to −inf. The existing FP32
+score body gathers only those blocks. Keeping the original final selector
+preserves both the selected set and its emitted order, including ties and a
+partial newest block. A separate template specialization leaves unrestricted
+source scoring on its original arithmetic path. The eight-decode 32K trace
+confirms 32 compact calls, 32 unrestricted calls and zero old apply-mask calls;
+GPU time falls 327.27 → 325.91 ms and span 362.24 → 360.86 ms. Each scorer
+specialization uses 248 VGPRs, 128 SGPRs, 51,328 B LDS and no private scratch.
+
+Qualification: `ds41.attention` and `ds41.candidate_mask` pass, including
+varying FP4 scales, tied scores, different query masks, causal partial blocks
+and exact-size allocations. Teacher-forced controls remain at perplexity
+6.320 / 6.273 (3K / 18.5K). At 18.5K, an eight-cycle width-four speculative
+probe retains 20 rows: every full logit vector is bit-identical both to serial
+decode and after changing rejected suffixes. Details are in [QUALITY.md](QUALITY.md).
+
+Long-context API correctness passes with and without the Q2_K/Q4_K drafter,
+at 22,591 prompt tokens: sampled replay, prefix reuse, cancellation/resume
+and output stop handling. AR passes all 124 per-request/phase timing checks.
+DSpark performance is **inconclusive and unqualified**: three alternating
+pairs and an unchanged-baseline control yield 86 passing and 38 inconclusive
+metrics, zero confirmed slowdowns, and no quality/coverage changes. The
+flagged cancellation queues and short replies accompany varying draft widths;
+their observed timing ranges overlap. Every observation is retained at the
+unchanged 5% / 3 ms margins. No DSpark speedup is claimed.
+
+The C2 32K control (one repetition) measures 11.50 → 11.55 tok/s per user,
+with aggregate prefill 1127.04 → 1122.41 tok/s. It is a concurrency control,
+not evidence of a concurrency speedup.
+
+The same C1 runs' prefill controls were 1187.67 → 1219.95 tok/s at depth zero,
+1109.71 → 1123.29 at 32K and 856.10 → 829.19 at 128K. These paths are unchanged
+by E1; their variance is retained, rather than counted as prefill improvements.
+
+P0 profiling refresh: the final pp2048 at 32K, with decoder bounded replay,
+uses 1,773.84 ms GPU time over a 1,805.14 ms span. Stage sums: routed FP16
+606.39 ms, dense FP16 518.14, attention 219.06, mHC 137.38, indexer 82.95 and
+top-k 45.34. Loading and depth preparation are excluded. The older backlog's
+3.30-second prefill breakdown predates bounded replay and is not a current
+end-to-end cost estimate.

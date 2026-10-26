@@ -8,6 +8,7 @@
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
+#include <cstring>
 #include <functional>
 #include <numeric>
 #include <random>
@@ -156,9 +157,142 @@ std::size_t Topk(uint32_t pos0, uint32_t n, uint32_t k, uint32_t levels,
   return bad;
 }
 
+/* Compact scoring against both the original dense/masked kernel and an
+ * independent FP64 dot over the packed E2M1 bytes. Allocations end at the
+ * actual row boundary; different query rows have different candidate masks. */
+std::size_t CandidateScores(uint32_t pos0, uint32_t n, uint32_t kept,
+                            bool bench, std::mt19937& rng) {
+  constexpr uint32_t heads = 32, dim = 128, block = 8;
+  const uint32_t len = pos0 + n, words = ((len + block - 1) / block + 31) / 32;
+  std::vector<float> q((size_t)n * heads * dim), w((size_t)n * heads);
+  std::normal_distribution<float> normal;
+  for (auto* values : {&q, &w})
+    for (auto& v : *values)
+      v = normal(rng);
+  // Tied scores exercise absolute-position ordering after compaction.
+  if (!bench && n >= 3)
+    std::fill_n(q.begin(), heads * dim, 0.0f);
+  std::vector<uint8_t> codes((size_t)len * dim / 2),
+      scales((size_t)len * dim / 32, 127);
+  for (auto& c : codes)
+    c = (uint8_t)rng();
+  for (auto& scale : scales)
+    scale = (uint8_t)(120 + rng() % 12);
+  std::vector<uint32_t> mask((size_t)n * words, 0);
+  for (uint32_t t = 0; t < n; ++t) {
+    const uint32_t blocks = (pos0 + t + block) / block;
+    std::vector<uint32_t> order(blocks - 1);
+    std::iota(order.begin(), order.end(), 0u);
+    std::shuffle(order.begin(), order.end(), rng);
+    order.insert(order.begin(), blocks - 1);  // newest partial block is pinned
+    for (uint32_t i = 0; i < std::min(kept, blocks); ++i)
+      mask[(size_t)t * words + order[i] / 32] |= 1u << (order[i] % 32);
+  }
+  float *dq = Device(q), *dw = Device(w);
+  uint8_t *dc = Device(codes), *ds = Device(scales);
+  uint32_t* dm = Device(mask);
+  float *dense = nullptr, *compact = nullptr;
+  uint32_t *scratch = nullptr, *ids = nullptr;
+  (void)hipMalloc(&dense, (size_t)n * len * sizeof(float));
+  (void)hipMalloc(&compact, (size_t)n * len * sizeof(float));
+  (void)hipMalloc(&scratch, (size_t)n * kept * sizeof(uint32_t));
+  const uint32_t k = std::min(512u, pos0 + 1);
+  (void)hipMalloc(&ids, (size_t)2 * n * k * sizeof(uint32_t));
+  const auto run = [&](bool candidate) -> int {
+    if (candidate)
+      return ds41_v41_indexer_score_candidates(dq, {dc, ds}, dw, 0.0625f,
+                                               compact, len, dm, words, scratch,
+                                               kept, pos0, n, 1);
+    return ds41_v41_indexer_score(dq, {dc, ds}, dw, 0.0625f, dense, len, pos0,
+                                  n, 1, heads, dim) ||
+           ds41_v41_apply_mask(dense, len, dm, words, pos0, n, 1, block);
+  };
+  if (!dq || !dw || !dc || !ds || !dm || !dense || !compact || !scratch ||
+      !ids || run(false) || run(true) ||
+      ds41_v41_topk(dense, len, ids, k, pos0, n, 1, 1) ||
+      ds41_v41_topk(compact, len, ids + (size_t)n * k, k, pos0, n, 1, 1) ||
+      hipDeviceSynchronize() != hipSuccess) {
+    std::fprintf(stderr, "candidate score launch failed\n");
+    return SIZE_MAX;
+  }
+  std::vector<float> a((size_t)n * len), b(a.size());
+  std::vector<uint32_t> selected((size_t)2 * n * k);
+  (void)hipMemcpy(a.data(), dense, a.size() * sizeof(float),
+                  hipMemcpyDeviceToHost);
+  (void)hipMemcpy(b.data(), compact, b.size() * sizeof(float),
+                  hipMemcpyDeviceToHost);
+  (void)hipMemcpy(selected.data(), ids, selected.size() * sizeof(uint32_t),
+                  hipMemcpyDeviceToHost);
+  std::size_t bad = 0;
+  double error = 0, reference = 0;
+  constexpr double table[8] = {0, 0.5, 1, 1.5, 2, 3, 4, 6};
+  for (uint32_t t = 0; t < n; ++t)
+    for (uint32_t j = 0; j <= pos0 + t; ++j) {
+      const size_t at = (size_t)t * len + j;
+      bad += std::memcmp(&a[at], &b[at], sizeof(float)) != 0;
+      if (!((mask[(size_t)t * words + j / block / 32] >> (j / block % 32)) &
+            1u)) {
+        bad += b[at] != -INFINITY;
+        continue;
+      }
+      double want = 0;
+      for (uint32_t h = 0; h < heads; ++h) {
+        double dot = 0;
+        for (uint32_t d = 0; d < dim; ++d) {
+          const size_t index = (size_t)j * dim + d;
+          const uint32_t code = (codes[index / 2] >> (4 * (index % 2))) & 15;
+          const double scale = std::ldexp(1.0, (int)scales[index / 32] - 127);
+          dot += q[((size_t)t * heads + h) * dim + d] * scale *
+                 ((code & 8) ? -table[code & 7] : table[code & 7]);
+        }
+        want += std::max(dot, 0.0) * w[(size_t)t * heads + h] * 0.0625;
+      }
+      error += (b[at] - want) * (b[at] - want);
+      reference += want * want;
+      bad += !std::isfinite(b[at]);
+    }
+  bad += std::memcmp(selected.data(), selected.data() + (size_t)n * k,
+                     (size_t)n * k * sizeof(uint32_t)) != 0;
+  const double relative = std::sqrt(error / std::max(reference, 1e-30));
+  bad += relative > 1e-5;
+  std::printf(
+      "candidate scores pos0=%u n=%u kept=%u: %zu mismatches, FP64 relative "
+      "%.2e\n",
+      pos0, n, kept, bad, relative);
+  if (bench && bad == 0) {
+    hipEvent_t start, stop;
+    (void)hipEventCreate(&start);
+    (void)hipEventCreate(&stop);
+    for (int repeat = 0; repeat < 3; ++repeat)
+      for (const bool candidate : {false, true}) {
+        for (int warm = 0; warm < 3; ++warm)
+          bad += run(candidate) != 0;
+        (void)hipEventRecord(start);
+        for (int i = 0; i < 20; ++i)
+          bad += run(candidate) != 0;
+        (void)hipEventRecord(stop);
+        (void)hipEventSynchronize(stop);
+        float ms = 0;
+        (void)hipEventElapsedTime(&ms, start, stop);
+        std::printf(
+            "candidate scores bench pos0=%u n=%u repeat=%d %s %.4f ms\n", pos0,
+            n, repeat, candidate ? "compact" : "dense", ms / 20);
+      }
+    (void)hipEventDestroy(start);
+    (void)hipEventDestroy(stop);
+  }
+  for (void* p :
+       {static_cast<void*>(dq), static_cast<void*>(dw), static_cast<void*>(dc),
+        static_cast<void*>(ds), static_cast<void*>(dm),
+        static_cast<void*>(dense), static_cast<void*>(compact),
+        static_cast<void*>(scratch), static_cast<void*>(ids)})
+    (void)hipFree(p);
+  return bad;
+}
+
 }  // namespace
 
-int main() {
+int main(int argc, char** argv) {
   int devices = 0;
   if (hipGetDeviceCount(&devices) != hipSuccess || devices == 0) {
     std::fprintf(stderr, "no HIP device\n");
@@ -166,6 +300,16 @@ int main() {
   }
   std::mt19937 rng(41);
   std::size_t bad = 0;
+  if (argc > 1 && !std::strcmp(argv[1], "--score-bench")) {
+    for (const uint32_t depth : {32768u, 131072u})
+      for (const uint32_t rows : {1u, 4u})
+        bad += CandidateScores(depth - 3, rows, 2048, true, rng);
+    return bad ? 1 : 0;
+  }
+  bad += CandidateScores(22, 3, 2, false, rng);
+  bad += CandidateScores(16382, 4, 2048, false, rng);
+  bad += CandidateScores(32765, 1, 2048, false, rng);
+  bad += CandidateScores(32765, 4, 2048, false, rng);
   /* Small shapes: prefill tokens below, at and past the block budget, with
    * partial newest blocks. */
   bad += Case(0, 64, 1, 8, 4, rng);

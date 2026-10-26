@@ -331,3 +331,38 @@ batched path scores 6.300, agreement 96.1%, mean |ΔNLL| 0.081. With a routed ti
 differences in the expert projections) the batched 3K run scores 6.307,
 agreement 95.5%, and the batched 18.5K run 6.277, agreement 95.9% (oracle
 6.267).
+
+
+## Post-M6 E1: compact small-batch candidate rescoring
+
+`ds41.attention` and `ds41.candidate_mask` pass on gfx1151. New compact-score
+cases cover 1/3/4 rows, the 16K candidate boundary, different masks per query,
+a partial newest block, zero-query ties, varying packed FP4 scales and
+allocations ending at the last valid row. Every selected FP32 score and all
+512 selected indices (including order) match the original dense/masked path
+bitwise. Independent FP64 score relative RMS error is at most 2.2e-7 in the
+correctness cases; no tolerances were relaxed.
+
+The candidate's exact-prefill teacher-forced controls retain perplexity
+6.319756 over 2,999 positions and 6.273347 over 18,499. The current independent
+18.5K oracle has SHA-256
+`427ac78c8676624c6eb8c321113b84adb0a05a6cbb5fe9f6eac1cb98deb4e7b0`;
+the complete 18.5K control has 96.23% argmax agreement, mean absolute NLL
+difference 0.07031 and oracle perplexity 6.266872. The archived 3K oracle
+uses an earlier reference revision; the retained artifact also reports a
+comparison to the matching input prefix of the current 18.5K oracle,
+without replacing the archived reference or changing a quality gate.
+
+`ds41_load_probe --spec-check 8 --spec-width 4` on the same 18.5K-token
+history exercises each commit length 1–4 twice. All 20 retained rows have
+bit-identical full logits to serial decode and between clean/corrupted
+rejected-suffix passes (maximum absolute difference zero).
+
+The `long-context` API suite passes at 22,591 actual prompt tokens in AR and
+Q2_K/Q4_K DSpark modes, covering greedy/sample replay, cache reuse,
+cancellation, resume and stop handling. Reply/coverage comparisons find no
+changes. AR timing qualification passes all 124 measurements. DSpark timing
+qualification remains inconclusive after three alternating pairs and an
+unchanged-baseline control (86 passed, 38 inconclusive, zero confirmed
+slowdowns); it is not a performance pass. Loaded mode and actual draft
+execution are recorded for each run. See [E1's retained evidence](artifacts/2026-10-26-rescore/README.md).

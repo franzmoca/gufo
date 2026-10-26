@@ -44,6 +44,27 @@ prefills at 384 tok/s with a prompt-sized context, 386 tok/s in a
 131K-token context (was 245 with 409-token batches) and 381 tok/s in the
 native 1M context (was ~120 with 51-token batches).
 
+## Post-M6 compact rescoring (2026-10-26)
+
+Matched `release` binaries, baseline `ee49a0fd`, same IQ1_M / IQ4_NL artifacts,
+greedy, pp2048/tg128, two repetitions. E1 restricts 1–4-row rescoring to
+layer 20's candidate pool; full source indexing and batched prefill are unchanged.
+
+| Decode | Baseline t/s | E1 t/s | Change |
+| --- | ---: | ---: | ---: |
+| tg128 | 23.97 ± 0.08 | 24.03 ± 0.03 | +0.3% |
+| tg128 @ d32768 | 22.78 ± 0.09 | 23.05 ± 0.04 | +1.2% |
+| tg128 @ d131072 | 21.10 ± 0.03 | 21.89 ± 0.02 | +3.7% |
+
+C2 at 32K (one repetition, per-user decode) measures 11.50 → 11.55 tok/s;
+aggregate prefill 1127.04 → 1122.41 tok/s. No concurrency gain is claimed
+from that single control.
+
+Raw measurements, unchanged-prefill controls and functional timing
+qualification are in [E1's artifacts](artifacts/2026-10-26-rescore/README.md).
+DSpark correctness passes; its per-request timing evidence remains
+inconclusive and unqualified. These are AR gains only.
+
 ## DSpark speculative decoding
 
 `ds41_load_probe --dspark-generate`, greedy, release kernels on the

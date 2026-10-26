@@ -955,26 +955,33 @@ __global__ void indexer_score_kernel(const float* q, ds41_fp4_rows keys, const f
 constexpr uint32_t kScoreHeads = 32;
 constexpr uint32_t kScoreSmallTokens = 4;
 constexpr uint32_t kScoreKeys = 64;
+template <bool Compact>
 __global__ __launch_bounds__(256) void indexer_score_small_kernel(const float* q, ds41_fp4_rows keys, const float* w,
                                                                   float w_scale, float* score, uint64_t score_stride,
-                                                                  uint32_t pos0, uint32_t ratio) {
+                                                                  uint32_t pos0, uint32_t ratio, const uint32_t* candidates,
+                                                                  uint32_t candidate_stride) {
   constexpr uint32_t DIM = 128, D4 = DIM / 4, PITCH4 = D4 + 1, GROUPS = 256 / kScoreKeys,
                      HG = kScoreHeads / GROUPS;
   const uint32_t token = blockIdx.y;
   const uint32_t len = comp_len(pos0 + token, ratio);
   const uint32_t key0 = blockIdx.x * kScoreKeys;
-  if (key0 >= len) return;
+  const uint32_t slots = Compact ? min((len + 7) / 8, candidate_stride) * 8 : len;
+  if (key0 >= slots) return;
+  const auto source_key = [&](uint32_t key) {
+    if constexpr (Compact) return candidates[(uint64_t)token * candidate_stride + key / 8] * 8 + key % 8;
+    return key;
+  };
   __shared__ float4 sk[kScoreKeys * PITCH4];
   __shared__ float4 sq[kScoreHeads * D4];
   __shared__ float sw[kScoreHeads];
   __shared__ float part[GROUPS][kScoreKeys];
   const float4* qt = reinterpret_cast<const float4*>(q + (uint64_t)token * kScoreHeads * DIM);
   for (uint32_t i = threadIdx.x; i < kScoreHeads * D4; i += 256) sq[i] = qt[i];
-  const uint32_t rows = min(kScoreKeys, len - key0);
+  const uint32_t rows = min(kScoreKeys, slots - key0);
   for (uint32_t i = threadIdx.x; i < kScoreKeys * D4; i += 256) {
     const uint32_t r = i / D4;
     sk[r * PITCH4 + i % D4] =
-        r < rows ? ik_load4(keys, key0 + r, (i % D4) * 4, DIM) : make_float4(0.0f, 0.0f, 0.0f, 0.0f);
+        r < rows && source_key(key0 + r) < len ? ik_load4(keys, source_key(key0 + r), (i % D4) * 4, DIM) : make_float4(0.0f, 0.0f, 0.0f, 0.0f);
   }
   if (threadIdx.x < kScoreHeads) sw[threadIdx.x] = w[(uint64_t)token * kScoreHeads + threadIdx.x] * w_scale;
   __syncthreads();
@@ -998,7 +1005,8 @@ __global__ __launch_bounds__(256) void indexer_score_small_kernel(const float* q
   if (group != 0 || key >= rows) return;
 #pragma unroll
   for (uint32_t g = 1; g < GROUPS; g++) acc += part[g][key];
-  score[token * score_stride + key0 + key] = acc;
+  const uint32_t dest = source_key(key0 + key);
+  if (dest < len) score[token * score_stride + dest] = acc;
 }
 
 /* The same scores on the matrix cores, after the V4 engine's
@@ -1214,6 +1222,36 @@ __global__ void apply_mask_kernel(float* score, uint64_t stride, const uint32_t*
   const uint32_t b = i / block;
   if (i < comp_len(pos0 + token, ratio) && !((mask[token * mask_stride + b / 32] >> (b % 32)) & 1u))
     score[token * stride + i] = -INFINITY;
+}
+
+/* Stable block compaction keeps physical key order, including the newest
+ * partial block. Scratch is the source layer's now-dead block-select buffer. */
+__global__ void compact_candidate_blocks_kernel(const uint32_t* mask, uint64_t mask_stride, uint32_t* out,
+                                                uint32_t out_stride, uint32_t pos0, uint32_t ratio) {
+  const uint32_t token = blockIdx.x;
+  const uint32_t blocks = (comp_len(pos0 + token, ratio) + 7) / 8;
+  const uint32_t words = (blocks + 31) / 32;
+  const uint32_t per = (words + blockDim.x - 1) / blockDim.x;
+  const uint32_t begin = min(words, threadIdx.x * per), end = min(words, begin + per);
+  uint32_t count = 0;
+  for (uint32_t i = begin; i < end; i++) count += __popc(mask[(uint64_t)token * mask_stride + i]);
+  uint32_t total = 0;
+  uint32_t at = block_exclusive_scan(count, &total);
+  for (uint32_t i = begin; i < end; i++) {
+    uint32_t bits = mask[(uint64_t)token * mask_stride + i];
+    while (bits) {
+      const uint32_t bit = __ffs(bits) - 1;
+      if (at < out_stride) out[(uint64_t)token * out_stride + at] = i * 32 + bit;
+      ++at;
+      bits &= bits - 1;
+    }
+  }
+}
+
+__global__ void clear_index_scores_kernel(float* score, uint64_t stride, uint32_t pos0, uint32_t ratio) {
+  const uint32_t token = blockIdx.y;
+  const uint32_t key = blockIdx.x * blockDim.x + threadIdx.x;
+  if (key < comp_len(pos0 + token, ratio)) score[(uint64_t)token * stride + key] = -INFINITY;
 }
 
 /* Block (head, token). Scores for every key are kept in shared memory. */
@@ -2093,8 +2131,8 @@ extern "C" int ds41_v41_indexer_score(const float* q, ds41_fp4_rows keys, const 
   const uint32_t len = max_comp_len(pos0, n, ratio);
   if (len == 0) return 0;
   if (head_dim == 128 && heads == kScoreHeads && n <= kScoreSmallTokens) {
-    indexer_score_small_kernel<<<dim3((len + kScoreKeys - 1) / kScoreKeys, n), 256>>>(q, keys, w, w_scale, score, score_stride, pos0,
-                                                                    ratio);
+    indexer_score_small_kernel<false><<<dim3((len + kScoreKeys - 1) / kScoreKeys, n), 256>>>(q, keys, w, w_scale, score, score_stride, pos0,
+                                                                    ratio, nullptr, 0);
     return launch_ok("indexer score");
   }
   if (head_dim == 128) {
@@ -2105,6 +2143,20 @@ extern "C" int ds41_v41_indexer_score(const float* q, ds41_fp4_rows keys, const 
   indexer_score_kernel<<<dim3(blocks_for(len), n), kThreads, heads * head_dim * sizeof(float)>>>(
       q, keys, w, w_scale, score, score_stride, pos0, ratio, heads, head_dim);
   return launch_ok("indexer score");
+}
+
+extern "C" int ds41_v41_indexer_score_candidates(const float* q, ds41_fp4_rows keys, const float* w,
+                                                 float w_scale, float* score, uint64_t score_stride,
+                                                 const uint32_t* mask, uint64_t mask_stride, uint32_t* candidates,
+                                                 uint32_t candidate_stride, uint32_t pos0, uint32_t n,
+                                                 uint32_t ratio) {
+  if (n == 0 || n > kScoreSmallTokens || candidate_stride == 0) return 1;
+  const uint32_t len = max_comp_len(pos0, n, ratio);
+  compact_candidate_blocks_kernel<<<n, 256>>>(mask, mask_stride, candidates, candidate_stride, pos0, ratio);
+  clear_index_scores_kernel<<<dim3(blocks_for(len), n), kThreads>>>(score, score_stride, pos0, ratio);
+  indexer_score_small_kernel<true><<<dim3((min((len + 7) / 8, candidate_stride) * 8 + kScoreKeys - 1) / kScoreKeys, n), 256>>>(
+      q, keys, w, w_scale, score, score_stride, pos0, ratio, candidates, candidate_stride);
+  return launch_ok("candidate indexer score");
 }
 
 extern "C" int ds41_v41_topk(const float* score, uint64_t score_stride, uint32_t* out, uint32_t k, uint32_t pos0,

@@ -1,0 +1,100 @@
+{
+  "base_commit": "ee49a0fd2926bef8f9a1f22e8a25e037357e0561",
+  "baseline_binary_sha256": "6c6e73f9342c934c948f8c78e07dfb8c29e07537e602d88b1ea0753a1777c8bc",
+  "candidate_binary_sha256": "743f39b722d19a122cdc250adcc712f95efc9d8b7deb330af207c791e3ef3671",
+  "host": "franz-m5",
+  "kernel": "7.2.11-200.fc44.x86_64",
+  "flake_lock_sha256": "f071dd2d0a8a96e7ff0998844ce3bbea2c8e580c5ac8c08ba762900fd381de5e",
+  "model": "ISTA-DASLab/DeepSeek-V4.1-Flash-1017-GSQ-RCO-GGUF IQ1_M",
+  "artifact_revision": "cb02422c900df489cea5833e8a92171224059b3c",
+  "engram": "IQ4_NL",
+  "sampling": {
+    "temperature": 0,
+    "top_p": 1,
+    "top_k": 0
+  },
+  "prefill_batch": 2048,
+  "decoder_replay_rows": 140,
+  "environment": {
+    "GPU_MAX_HW_QUEUES": null,
+    "HSA_ENABLE_SDMA": null,
+    "HIP_VISIBLE_DEVICES": null,
+    "ROCR_VISIBLE_DEVICES": null
+  },
+  "cmake_toolchain": {
+    "CMAKE_BUILD_TYPE:STRING": "RelWithDebInfo",
+    "CMAKE_CXX_COMPILER:FILEPATH": "/nix/store/l5qkpzsr4gxvksh45b3nhxbkyr5cviar-gcc-wrapper-15.3.0/bin/g++",
+    "CMAKE_HIP_ARCHITECTURES:STRING": "gfx1151",
+    "CMAKE_HIP_COMPILER:FILEPATH": "/nix/store/dcy8iyr9632m2khx1yxbyrafa7fz6hcy-hipClang/bin/clang++",
+    "CMAKE_HIP_FLAGS:STRING": ""
+  },
+  "experiment": "E1: compact small-batch candidate rescoring (1-4 rows)",
+  "measurements": {
+    "d0": {
+      "base_tg128": 23.97,
+      "candidate_tg128": 24.03,
+      "base_pp2048": 1187.67,
+      "candidate_pp2048": 1219.95
+    },
+    "d32768": {
+      "base_tg128": 22.78,
+      "candidate_tg128": 23.05,
+      "base_pp2048": 1109.71,
+      "candidate_pp2048": 1123.29
+    },
+    "d131072": {
+      "base_tg128": 21.1,
+      "candidate_tg128": 21.89,
+      "base_pp2048": 856.1,
+      "candidate_pp2048": 829.19
+    }
+  },
+  "raw_workspace": "/tmp/gufo-ds41-opt",
+  "candidate_source_patch_sha256": "4dcefa450ec06394d31624de1083f4ae1703f6f93bb7da3a0667f9527d994e58",
+  "profiling_databases": {
+    "baseline": {
+      "path": "/tmp/gufo-ds41-opt/baseline-profile/prof_results.db",
+      "sha256": "238c6a87b482b8acc4a7c0323edfb797899b2b583d8e34917f7cb902c0975486"
+    },
+    "candidate": {
+      "path": "/tmp/gufo-ds41-opt/candidate-profile/prof_results.db",
+      "sha256": "919cf1500344ccedb496e7b9d4974dddb21b34a9b597bbf982b733c62a62d0e6"
+    }
+  },
+  "disposition": "retained: measured AR gain; DSpark timing remains inconclusive and unqualified",
+  "c2": {
+    "depth": 32768,
+    "repetitions": 1,
+    "baseline_tg128_per_user": 11.5,
+    "candidate_tg128_per_user": 11.55,
+    "baseline_pp2048_aggregate": 1127.04,
+    "candidate_pp2048_aggregate": 1122.41
+  },
+  "kernel_resources": {
+    "baseline": [
+      {
+        "symbol": "(anonymous namespace)::indexer_score_small_kernel(float const*, ds41_fp4_rows, float const*, float, float*, unsigned long, unsigned int, unsigned int)",
+        "vgprs": 248,
+        "sgprs": 128,
+        "lds_bytes": 51328,
+        "private_bytes": 0
+      }
+    ],
+    "candidate": [
+      {
+        "symbol": "void (anonymous namespace)::indexer_score_small_kernel<true>(float const*, ds41_fp4_rows, float const*, float, float*, unsigned long, unsigned int, unsigned int, unsigned int const*, unsigned int)",
+        "vgprs": 248,
+        "sgprs": 128,
+        "lds_bytes": 51328,
+        "private_bytes": 0
+      },
+      {
+        "symbol": "void (anonymous namespace)::indexer_score_small_kernel<false>(float const*, ds41_fp4_rows, float const*, float, float*, unsigned long, unsigned int, unsigned int, unsigned int const*, unsigned int)",
+        "vgprs": 248,
+        "sgprs": 128,
+        "lds_bytes": 51328,
+        "private_bytes": 0
+      }
+    ]
+  }
+}

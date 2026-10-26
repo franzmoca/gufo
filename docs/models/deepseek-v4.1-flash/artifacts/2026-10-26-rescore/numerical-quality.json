@@ -1,0 +1,47 @@
+{
+  "teacher_manifest": {
+    "model": "/mnt/data/models/ds41/ista-gsq-rco-gguf/DeepSeek-V4.1-Flash-1017-GSQ-RCO-IQ1_M-00001-of-00004.gguf",
+    "general.name": "DeepSeek-V4.1-Flash-1017 GSQ-RCO IQ1_M",
+    "generated_tokens": [],
+    "device": "cuda",
+    "weight_dtype": "float32",
+    "seconds": [
+      574.1000974178314
+    ],
+    "reference": "official inference/model.py + engram.py, DeepSeek-V4.1-Flash-1017",
+    "oracle_sha256": "427ac78c8676624c6eb8c321113b84adb0a05a6cbb5fe9f6eac1cb98deb4e7b0",
+    "score": {
+      "positions": 18499,
+      "top1": 0.5919779447537705,
+      "mean_nll": 1.8352774381637573,
+      "ppl": 6.266872406005859,
+      "top1_0": 0.494140625,
+      "nll_0": 2.4793152809143066,
+      "top1_512": 0.6640625,
+      "nll_512": 1.4199504852294922,
+      "top1_1024": 0.62890625,
+      "nll_1024": 1.5730257034301758,
+      "top1_2048": 0.590480821834539,
+      "nll_2048": 1.8444833755493164
+    },
+    "generated_text": ""
+  },
+  "controls": {
+    "score3k": {
+      "positions": 2999,
+      "ppl": 6.319756489194665,
+      "oracle_ppl": 6.302513122558594,
+      "argmax_agreement": 0.9599866622207403,
+      "mean_absolute_nll_delta": 0.07721227126031184,
+      "input_ids_sha256": "12f1b1e33de35183679857a76ba34efd63ea90d576ceed0969ffc72d5fbbdeec"
+    },
+    "score18k": {
+      "positions": 18499,
+      "ppl": 6.273346754020587,
+      "oracle_ppl": 6.266872406005859,
+      "argmax_agreement": 0.9622682307151738,
+      "mean_absolute_nll_delta": 0.07030924301805049,
+      "input_ids_sha256": "daccb04056496e0fccdcd0ca20c9e6f160940e70f3a3ab582c7efb4d4e08a9d7"
+    }
+  }
+}
