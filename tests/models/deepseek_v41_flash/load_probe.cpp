@@ -530,6 +530,7 @@ int main(int argc, char** argv) {
   const char* dspark_dump = nullptr;
   bool dspark_sweep = false;
   uint32_t replay_check = 0;
+  bool exact_prefill = false;
   for (int i = 1; i < argc; ++i) {
     if (std::strcmp(argv[i], "--engram") == 0 && i + 1 < argc) {
       engram = argv[++i];
@@ -571,6 +572,8 @@ int main(int argc, char** argv) {
     } else if (std::strcmp(argv[i], "--replay-check") == 0 && i + 1 < argc) {
       replay_check = (uint32_t)std::strtoul(argv[++i], nullptr, 10);
       upload = true;
+    } else if (std::strcmp(argv[i], "--exact-prefill") == 0) {
+      exact_prefill = true;
     } else if (std::strcmp(argv[i], "--rendered") == 0) {
       rendered = true;
     } else if (std::strcmp(argv[i], "--upload") == 0) {
@@ -588,7 +591,7 @@ int main(int argc, char** argv) {
         "usage: %s MODEL-00001-of-N.gguf [--engram FILE] [--upload] "
         "[--tokenize TEXTS [--rendered]] [--decode IDS [--generate N] "
         "[--score] [--batch] [--context N] [--prefill-batch N] "
-        "[--out DIR]] [--replay-check ROWS] "
+        "[--out DIR]] [--replay-check ROWS] [--exact-prefill] "
         "[--spec-check CYCLES [--spec-width W] | --spec-bench N | "
         "--dspark FILE "
         "--dspark-generate N [--dspark-sweep] | --dspark FILE --dspark-dump "
@@ -604,6 +607,7 @@ int main(int argc, char** argv) {
   options.engram_path = engram;
   options.validate_only = !upload;
   options.prefill_batch = prefill_batch;
+  options.exact_prefill = exact_prefill;
   options.dspark_model_path = dspark;
   if (ds41_engine_open(&engine, &options) != 0)
     return 1;
