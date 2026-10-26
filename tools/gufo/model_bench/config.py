@@ -81,8 +81,14 @@ class BenchConfig:
         return list(self.variants) == ["default"]
 
     @property
+    def has_reference(self) -> bool:
+        """False for Gufo-only cards: no `reference` block, so tables and
+        charts carry Gufo columns only."""
+        return "reference" in self.data
+
+    @property
     def reference_name(self) -> str:
-        return self.data["reference"]["name"]
+        return self.data["reference"]["name"] if self.has_reference else "reference"
 
     @property
     def speculative(self) -> dict[str, Any]:
@@ -92,7 +98,7 @@ class BenchConfig:
     def reference_speculative(self) -> list[str] | None:
         """Reference server arguments for the equivalent speculative mode, if any."""
         reference = self.speculative.get("reference")
-        if isinstance(reference, dict) and reference.get("args"):
+        if self.has_reference and isinstance(reference, dict) and reference.get("args"):
             return list(reference["args"])
         return None
 
