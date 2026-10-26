@@ -366,3 +366,11 @@ qualification remains inconclusive after three alternating pairs and an
 unchanged-baseline control (86 passed, 38 inconclusive, zero confirmed
 slowdowns); it is not a performance pass. Loaded mode and actual draft
 execution are recorded for each run. See [E1's retained evidence](artifacts/2026-10-26-rescore/README.md).
+
+
+Post-M6 E4: a 128-row target history produces identical DSpark proposal
+prefixes at every requested width 1–5. Unused caller output slots remain
+untouched; widths 0 and 6 fail. All three production 256-token runs emit
+identical coding hashes and identical prose hashes at temperature/top-p 1.0,
+seed 73. Target arithmetic, verification and rollback are unchanged.
+[Evidence](artifacts/2026-10-26-markov-tail/summary.json).

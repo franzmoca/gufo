@@ -333,7 +333,8 @@ bool ds41_dspark_inject(ds41_dspark_state* s, uint32_t pos0, uint32_t rows) {
   return hipDeviceSynchronize() == hipSuccess;
 }
 
-bool ds41_dspark_draft(ds41_dspark_state* s, int anchor, int32_t* drafts) {
+bool ds41_dspark_draft(ds41_dspark_state* s, int anchor, int32_t* drafts, uint32_t count) {
+  if (count == 0 || count > kRows) return false;
   const ds41_dspark_model* m = s->engine->dspark;
   ds41_dspark_scratch& sc = *m->scratch;
   const uint32_t pos = s->ring_end;  // the anchor's position
@@ -378,12 +379,14 @@ bool ds41_dspark_draft(ds41_dspark_state* s, int anchor, int32_t* drafts) {
   const int format = m->markov_w1.type == DS41_TENSOR_BF16  ? DS41_V41_ROW_BF16
                      : m->markov_w1.type == DS41_TENSOR_F16 ? DS41_V41_ROW_F16
                                                             : DS41_V41_ROW_F32;
-  for (uint32_t i = 0; i < n && ok; i++)
+  // Later Markov rows depend only on earlier proposals; unused suffixes
+  // cannot affect the requested prefix. Keep the five-row body/head intact.
+  for (uint32_t i = 0; i < count && ok; i++)
     ok = ds41_v41_gather_row(m->markov_w1.p, format, sc.tokens, i, sc.markov_x, DS41_DSPARK_MARKOV_RANK) == 0 &&
          lin(m->markov_w2, sc.markov_x, sc.bias, 1) &&
          ds41_v41_argmax_bias(sc.logits + (uint64_t)i * DS41_N_VOCAB, sc.bias, DS41_N_VOCAB, sc.tokens, i + 1) == 0;
-  ok = ok && hipMemcpy(drafts, sc.tokens + 1, n * sizeof(int32_t), hipMemcpyDeviceToHost) == hipSuccess;
-  for (uint32_t i = 0; i < n && ok; i++) ok = drafts[i] >= 0;
+  ok = ok && hipMemcpy(drafts, sc.tokens + 1, count * sizeof(int32_t), hipMemcpyDeviceToHost) == hipSuccess;
+  for (uint32_t i = 0; i < count && ok; i++) ok = drafts[i] >= 0;
   return ok;
 }
 

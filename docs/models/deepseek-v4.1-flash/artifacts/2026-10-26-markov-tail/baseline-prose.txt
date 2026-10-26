@@ -1,0 +1,10 @@
+[Model Load]: 18.9995 s
+[Engine]: DeepSeek V4.1 Flash ROCm (gfx1151)
+Model: DeepSeek V4.1 Flash
+Prompt tokens: 33
+Max tokens: 256
+--- Generation Output ---
+The dust motes danced in the shaft of afternoon light that cut through the library’s east window, illuminating the spine of a battered cookbook that had sat untouched for decades. Its cover was a faded ochre, the cloth worn thin at the corners, and the pages smelled of old glue and dried rosemary. Elias, a librarian with a quiet obsession for forgotten things, pulled it from the shelf and opened it carefully. Between the recipe for a “heritage stew” and a note on preserving root vegetables, a folded map slipped out—not printed on modern paper, but on a stiff, hand-drawn sheet of vellum with ink that had browned to the color of autumn leaves.
+
+The map showed a town that no longer existed on any current chart: winding lanes, a river labeled “Cold Brook,” and a shaded square marked “The Quiet Market.” At the bottom, in cramped script, was a line: “Follow the scent of the stew.” Elias frowned. The cookbook’s recipe called for juniper, wild fennel, and smoked salt—ingredients that could, in theory, be traced across a landscape. He unfolded the map fully and saw a dotted path winding from the library’s own street toward a meadow that was now a parking lot
+Generated 256 tokens on ROCm in 11.0256s (23.2188 tok/s)

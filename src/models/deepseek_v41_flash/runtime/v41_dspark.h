@@ -79,9 +79,9 @@ bool ds41_dspark_state_set_range(ds41_dspark_state* s, uint32_t start, uint32_t 
 /* Appends the main KV rows of the decoder's captured features of positions
  * [pos0, pos0 + rows); rows that do not continue the ring restart it. */
 bool ds41_dspark_inject(ds41_dspark_state* s, uint32_t pos0, uint32_t rows);
-/* Greedy draft of `DS41_DSPARK_BLOCK` tokens after `anchor`, the token at
- * position ds41_dspark_state_end. */
-bool ds41_dspark_draft(ds41_dspark_state* s, int anchor, int32_t* drafts);
+/* Greedy draft of count tokens (1..DS41_DSPARK_BLOCK) after `anchor`, the
+ * token at position ds41_dspark_state_end. Writes exactly count IDs. */
+bool ds41_dspark_draft(ds41_dspark_state* s, int anchor, int32_t* drafts, uint32_t count);
 /* The last draft's target-head logits before the Markov bias, DS41_DSPARK_BLOCK rows (tests). */
 bool ds41_dspark_copy_logits(const ds41_engine* engine, float* out);
 /* Ring bytes, and their copy to/from host memory (with ring_start/end). */

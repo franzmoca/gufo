@@ -147,3 +147,11 @@ prefill peaks 0.3 GiB above the idle session.
 chat prompt prefilled at 307 tok/s in six chunks of up to 2,048 tokens, then
 decoded at 19.8 tok/s; repeating it reused all 9,160 prompt tokens from the
 cache.
+
+
+Post-M6 E4 skips unrequested Markov proposals. C1 sampled 256-token coding
+measures 37.656 tok/s against baseline/control 37.455–37.873; prose 24.188
+against 23.219–24.133 (temperature/top-p 1.0, seed 73, IQ1_M + Q2_K/Q4_K).
+Short-width drafting is faster, but total-request throughput remains roughly
+flat within adaptive-controller variation; no general speedup is qualified.
+See [E4](EXPERIMENTS.md#e4-stop-unused-dspark-markov-suffixes-retained).

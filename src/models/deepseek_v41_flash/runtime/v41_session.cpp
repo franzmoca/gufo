@@ -385,7 +385,7 @@ int dspark_step(const ds41_session_dspark_batch_item& item, char* error, size_t 
     const uint32_t limit = std::min({(uint32_t)DS41_DSPARK_BLOCK, item.max_draft_tokens, room});
     tail = draft_width(s, limit);
     plain = tail == 0;
-    if (tail != 0 && (ds41_dspark_state_end(s->dspark) != first || !ds41_dspark_draft(s->dspark, anchor, block + 1)))
+    if (tail != 0 && (ds41_dspark_state_end(s->dspark) != first || !ds41_dspark_draft(s->dspark, anchor, block + 1, tail)))
       tail = 0;
   }
   const uint32_t m = tail + 1;
