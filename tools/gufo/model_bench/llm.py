@@ -103,7 +103,7 @@ class Session:
 
     @property
     def reference_kind(self) -> str:
-        return self.config.data["reference"].get("kind", "llama.cpp")
+        return self.config.data.get("reference", {}).get("kind", "llama.cpp")
 
     @property
     def request_model(self) -> str:
@@ -640,7 +640,8 @@ def run_multi(session: Session, table: TableSpec, display_table: TableSpec | Non
                             {"recipe": "single-user-d0", "task": task, "prompt": prompt},
                             sort_keys=True).encode()
                         if (prefill_first and users > 1 and session.target == "gufo"
-                                and session.reference_kind == "ds4"):
+                                and (session.reference_kind == "ds4"
+                                     or cfg.data["gufo"].get("prepare_from_checkpoint"))):
                             # Keep prefill arithmetic identical to the C1 control;
                             # simultaneous cold prefills use smaller scheduler chunks.
                             session.request(server.base_url, prompt, 1)
