@@ -242,6 +242,21 @@ pass their exact-continuation checks. 876 of 878 per-request timings pass,
 two decode max inter-token gaps are inconclusive (42.9 → 46.1 and
 43.9 → 46.9 ms).
 
+With the DSpark drafter (Q2_K/Q4_K), whose features now come from the
+replayed rows only, greedy output after the 8,863- and 8,192-token prompts
+stays token-identical to plain decoding (256 tokens each, bounded replay
+and `--exact-prefill`): 50.77 and 42.46 tok/s against 52.72 and 32.75
+with exact prefill, which continues with different text. Served with the
+drafter against the previous build, `long-context` and `cache` pass every
+case with the same output changes as above; over all requests the same 116
+draft rounds accepted 75.7% of drafts (68.3% before) and decode took
+8.22 s (9.02 s). 59 of 602 timings are inconclusive: short replies (5-8
+tokens) that took one draft round more or fewer than before.
+
+`--exact-prefill` (`serve`, `bench`, `prompt`) evaluates every decoder row:
+against the build before bounded replay, all 70 request outputs of the
+`long-context`, `conversation` and `cache` suites are byte-identical.
+
 ## Batched prefill and M2 kernels
 
 The same 3K positions scored through 2048-token batches (matrix-core
