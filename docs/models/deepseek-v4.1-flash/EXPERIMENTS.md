@@ -504,3 +504,21 @@ still costs three launches and a synchronizing copy, so the realized gain is
 below the removed host time. Functional sampling, batch, stop and tool suites
 pass with DSpark. Runs are in
 [the E12 record](artifacts/2026-10-26-device-target-draws/summary.txt).
+
+### E13: one launch set for all verification rows (rejected)
+
+The E12 draw kernels gained a row dimension: every verification row and the
+bonus row drawn in one launch set with one copy, the uniforms drawn up front
+in the host's order with the RNG state after each, and rows handed out in
+order with per-row eligibility rechecks. A five-row batch matches the
+single-row draws exactly and outputs are identical to E12. 12-pair sampled
+protocol against E12: −0.50% geometric mean (3/12 faster, per-pair SD 0.8%).
+Drawing the rows after the first rejection costs about what the saved
+launches and copies gain, so E12's per-row draws remain.
+
+Plain DeepSeek V4.1 decode needs no separate device draw: with prompt lookup
+always on, its plain steps run through the lookup/DSpark step and already take
+E12's bonus draw (31 of 32 tokens in a traced run; the request's first token
+is drawn on the host). A `SampleNext` path for the generic decode loops was
+therefore dropped. Patches and runs are in
+[the E13 record](artifacts/2026-10-26-device-draw-rows/summary.txt).

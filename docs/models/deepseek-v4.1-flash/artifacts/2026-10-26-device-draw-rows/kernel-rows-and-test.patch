@@ -1,0 +1,194 @@
+diff --git a/src/models/deepseek_v41_flash/kernels/rocm/ds41_v41.h b/src/models/deepseek_v41_flash/kernels/rocm/ds41_v41.h
+index 294220a5..b1ee6e49 100644
+--- a/src/models/deepseek_v41_flash/kernels/rocm/ds41_v41.h
++++ b/src/models/deepseek_v41_flash/kernels/rocm/ds41_v41.h
+@@ -289,6 +289,13 @@ struct ds41_v41_sample_result {
+ #define DS41_V41_SAMPLE_SCRATCH_BYTES 4096
+ int ds41_v41_sample_row(const float* logits, uint32_t n, const struct ds41_v41_proposal* q, float temperature,
+                         double u, double u2, void* scratch, struct ds41_v41_sample_result* out);
++/* ds41_v41_sample_row for `rows` consecutive logit rows at once: row r uses
++ * u[r] and u[r + 1] (rows + 1 uniforms) and proposal q[r] for r < q_rows.
++ * Scratch: rows * DS41_V41_SAMPLE_SCRATCH_BYTES; out holds rows results. */
++#define DS41_V41_SAMPLE_MAX_ROWS 8
++int ds41_v41_sample_rows(const float* logits, uint32_t n, uint32_t rows, const struct ds41_v41_proposal* q,
++                         uint32_t q_rows, float temperature, const double* u, void* scratch,
++                         struct ds41_v41_sample_result* out);
+ /* DSpark acceptance probability of draft row `row` into out[row]: the head
+  * collapse of h (4 streams, mix `pre`) before RMSNorm and that row's Markov
+  * W1 input of `rank`, against F32 weights w[dim + rank] and optional bias. */
+diff --git a/src/models/deepseek_v41_flash/kernels/rocm/ds41_v41.hip.cpp b/src/models/deepseek_v41_flash/kernels/rocm/ds41_v41.hip.cpp
+index 811fe844..453b8247 100644
+--- a/src/models/deepseek_v41_flash/kernels/rocm/ds41_v41.hip.cpp
++++ b/src/models/deepseek_v41_flash/kernels/rocm/ds41_v41.hip.cpp
+@@ -9,6 +9,7 @@
+ #include <rocwmma/rocwmma.hpp>
+ 
+ #include <cmath>
++#include <cstddef>
+ #include <cstdio>
+ 
+ namespace {
+@@ -886,9 +887,10 @@ __global__ void __launch_bounds__(kCollapseThreads)
+   if (threadIdx.x == 0) out[row] = 1.0f / (1.0f + expf(-(acc + (bias ? *bias : 0.0f))));
+ }
+ 
+-/* Exact target draws (ds41_v41_sample_row). Blocks own contiguous token
+- * spans: per-span maxima, then per-span FP64 softmax sums, then one block
+- * locates the draw's span and walks it in token order. */
++/* Exact target draws (ds41_v41_sample_rows), grid row y per logit row.
++ * Blocks own contiguous token spans: per-span maxima, then per-span FP64
++ * softmax sums, then one block per row locates the draw's span and walks it
++ * in token order. */
+ constexpr uint32_t kSampleBlocks = 128, kSampleThreads = 256, kSamplePer = 8;
+ /* Softmax terms above this stay nonzero after normalization by any total
+  * of at most 2^17 (the vocabulary); smaller terms may round to zero. */
+@@ -914,7 +916,13 @@ __device__ void sample_span(uint32_t n, uint32_t b, uint32_t* lo, uint32_t* hi)
+   *hi = min(n, *lo + span);
+ }
+ 
++struct SampleUniforms {
++  double u[DS41_V41_SAMPLE_MAX_ROWS + 1];
++};
++
+ __global__ void __launch_bounds__(kSampleThreads) sample_max_kernel(const float* logits, uint32_t n, SampleScratch* s) {
++  logits += (uint64_t)blockIdx.y * n;
++  s += blockIdx.y;
+   __shared__ float sv[kSampleThreads];
+   __shared__ int32_t sa[kSampleThreads];
+   uint32_t lo, hi;
+@@ -948,6 +956,8 @@ __device__ double sample_term(float x, double mx, double t) { return isfinite(x)
+ 
+ __global__ void __launch_bounds__(kSampleThreads)
+     sample_sum_kernel(const float* logits, uint32_t n, float temperature, SampleScratch* s) {
++  logits += (uint64_t)blockIdx.y * n;
++  s += blockIdx.y;
+   __shared__ double ss[kSampleThreads];
+   __shared__ int32_t sb[kSampleThreads];
+   __shared__ float smax;
+@@ -978,8 +988,13 @@ __global__ void __launch_bounds__(kSampleThreads)
+ }
+ 
+ __global__ void __launch_bounds__(kSampleThreads)
+-    sample_pick_kernel(const float* logits, uint32_t n, const ds41_v41_proposal* q, float temperature, double u,
+-                       double u2, SampleScratch* s) {
++    sample_pick_kernel(const float* logits, uint32_t n, const ds41_v41_proposal* proposals, uint32_t q_rows,
++                       float temperature, SampleUniforms uniforms, SampleScratch* s) {
++  const uint32_t row = blockIdx.y;
++  logits += (uint64_t)row * n;
++  s += row;
++  const ds41_v41_proposal* q = row < q_rows ? proposals + row : nullptr;
++  const double u = uniforms.u[row], u2 = uniforms.u[row + 1];
+   __shared__ double scan[kSampleThreads];
+   __shared__ double sh_total, sh_residual, sh_start;
+   __shared__ float sh_max;
+@@ -2547,17 +2562,32 @@ extern "C" int ds41_v41_dspark_confidence(const float* h, const float* pre, cons
+   return launch_ok("dspark confidence");
+ }
+ 
+-extern "C" int ds41_v41_sample_row(const float* logits, uint32_t n, const ds41_v41_proposal* q, float temperature,
+-                                   double u, double u2, void* scratch, ds41_v41_sample_result* out) {
+-  if (!logits || !scratch || !out || n == 0 || (n + kSampleBlocks - 1) / kSampleBlocks > kSampleThreads * kSamplePer ||
+-      !(temperature > 0.0f))
++extern "C" int ds41_v41_sample_rows(const float* logits, uint32_t n, uint32_t rows, const ds41_v41_proposal* q,
++                                    uint32_t q_rows, float temperature, const double* u, void* scratch,
++                                    ds41_v41_sample_result* out) {
++  if (!logits || !scratch || !out || !u || n == 0 || rows == 0 || rows > DS41_V41_SAMPLE_MAX_ROWS ||
++      (n + kSampleBlocks - 1) / kSampleBlocks > kSampleThreads * kSamplePer || !(temperature > 0.0f) ||
++      (q_rows && !q))
+     return 1;
+   auto* s = static_cast<SampleScratch*>(scratch);
+-  sample_max_kernel<<<kSampleBlocks, kSampleThreads>>>(logits, n, s);
+-  sample_sum_kernel<<<kSampleBlocks, kSampleThreads>>>(logits, n, temperature, s);
+-  sample_pick_kernel<<<1, kSampleThreads>>>(logits, n, q, temperature, u, u2, s);
+-  if (launch_ok("sample row") != 0) return 1;
+-  return hipMemcpy(out, &s->result, sizeof(*out), hipMemcpyDeviceToHost) == hipSuccess ? 0 : 1;
++  SampleUniforms uniforms{};
++  for (uint32_t r = 0; r <= rows; r++) uniforms.u[r] = u[r];
++  sample_max_kernel<<<dim3(kSampleBlocks, rows), kSampleThreads>>>(logits, n, s);
++  sample_sum_kernel<<<dim3(kSampleBlocks, rows), kSampleThreads>>>(logits, n, temperature, s);
++  sample_pick_kernel<<<dim3(1, rows), kSampleThreads>>>(logits, n, q, q_rows, temperature, uniforms, s);
++  if (launch_ok("sample rows") != 0) return 1;
++  /* The results lead each row's scratch. */
++  static_assert(offsetof(SampleScratch, result) == 0);
++  return hipMemcpy2D(out, sizeof(*out), s, sizeof(SampleScratch), sizeof(*out), rows, hipMemcpyDeviceToHost) ==
++                 hipSuccess
++             ? 0
++             : 1;
++}
++
++extern "C" int ds41_v41_sample_row(const float* logits, uint32_t n, const ds41_v41_proposal* q, float temperature,
++                                   double u, double u2, void* scratch, ds41_v41_sample_result* out) {
++  const double uniforms[2] = {u, u2};
++  return ds41_v41_sample_rows(logits, n, 1, q, q ? 1 : 0, temperature, uniforms, scratch, out);
+ }
+ 
+ extern "C" int ds41_v41_hc_expand(const float* y, const float* residual, const float* post, const float* comb,
+diff --git a/tests/models/deepseek_v41_flash/draft_sampling_test.cpp b/tests/models/deepseek_v41_flash/draft_sampling_test.cpp
+index 6fd76293..6e93de71 100644
+--- a/tests/models/deepseek_v41_flash/draft_sampling_test.cpp
++++ b/tests/models/deepseek_v41_flash/draft_sampling_test.cpp
+@@ -506,6 +506,64 @@ void DeviceTargetDraw() {
+     plain += !propose;
+   }
+   Check(accepted > 10 && rejected > 10 && plain == 120, "target draw coverage");
++  // Several rows at once: row r with proposal q[r] (r < 3) and uniforms
++  // u[r], u[r + 1] matches its single-row draw.
++  {
++    constexpr uint32_t rows = 5;
++    std::vector<float> block(static_cast<std::size_t>(rows) * n);
++    std::vector<ds41_v41_proposal> qs(3);
++    for (uint32_t r = 0; r < rows; ++r) {
++      float* row = block.data() + static_cast<std::size_t>(r) * n;
++      for (uint32_t i = 0; i < n; ++i)
++        row[i] = 3.F * (next() + next() - 1.F);
++      for (uint32_t k = 0; k < 8; ++k)
++        row[(r * 977 + k * 131) % n] += 9.F;
++      if (r < 3) {
++        uint32_t total = 0;
++        for (uint32_t k = 0; k < 8; ++k) {
++          qs[r].ids[k] = static_cast<int32_t>((r * 977 + k * 131) % n);
++          qs[r].masses[k] = 1 + static_cast<uint32_t>(next() * 1500000.F);
++          total += qs[r].masses[k];
++        }
++        qs[r].masses[0] += (1U << 24) - total;
++        qs[r].size = 8;
++        qs[r].token = qs[r].ids[r];
++      }
++    }
++    float* db = nullptr;
++    ds41_v41_proposal* dqs = nullptr;
++    void* wide = nullptr;
++    Check(hipMalloc(&db, block.size() * 4) == hipSuccess &&
++              hipMalloc(&dqs, qs.size() * sizeof(ds41_v41_proposal)) ==
++                  hipSuccess &&
++              hipMalloc(&wide, rows * DS41_V41_SAMPLE_SCRATCH_BYTES) ==
++                  hipSuccess &&
++              hipMemcpy(db, block.data(), block.size() * 4,
++                        hipMemcpyHostToDevice) == hipSuccess &&
++              hipMemcpy(dqs, qs.data(), qs.size() * sizeof(ds41_v41_proposal),
++                        hipMemcpyHostToDevice) == hipSuccess,
++          "row batch setup");
++    double u[rows + 1];
++    for (auto& v : u)
++      v = next();
++    ds41_v41_sample_result batch[rows] = {};
++    Check(ds41_v41_sample_rows(db, n, rows, dqs, 3, 1.F, u, wide, batch) == 0,
++          "row batch launch");
++    for (uint32_t r = 0; r < rows; ++r) {
++      ds41_v41_sample_result one{};
++      Check(ds41_v41_sample_row(db + static_cast<std::size_t>(r) * n, n,
++                                r < 3 ? dqs + r : nullptr, 1.F, u[r], u[r + 1],
++                                scratch, &one) == 0 &&
++                one.token == batch[r].token &&
++                one.accepted == batch[r].accepted &&
++                one.uniforms == batch[r].uniforms &&
++                one.degenerate == batch[r].degenerate &&
++                one.argmax == batch[r].argmax,
++            "row batch matches single rows");
++    }
++    for (void* ptr : {static_cast<void*>(db), static_cast<void*>(dqs), wide})
++      (void)hipFree(ptr);
++  }
+   // One finite logit far above the rest: the host draws without a uniform.
+   std::fill(logits.begin(), logits.end(), 0.F);
+   logits[77] = 2000.F;

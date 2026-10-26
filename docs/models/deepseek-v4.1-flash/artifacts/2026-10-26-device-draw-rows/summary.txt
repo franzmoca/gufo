@@ -1,0 +1,22 @@
+== 12-pair sampled protocol: all verification rows in one launch set vs E12 (per-row draws)
+coding   seed= 11 rep=0   43.76 ->   43.25 ( -1.2%)  acc 0.86->0.86 same=True
+explain  seed= 11 rep=0   30.65 ->   30.63 ( -0.1%)  acc 0.64->0.64 same=True
+prose    seed= 11 rep=0   25.07 ->   25.01 ( -0.2%)  acc 0.46->0.46 same=True
+rust     seed= 11 rep=0   37.36 ->   37.18 ( -0.5%)  acc 0.73->0.73 same=True
+coding   seed= 29 rep=0   43.81 ->   43.88 ( +0.2%)  acc 0.85->0.85 same=True
+explain  seed= 29 rep=0   30.01 ->   29.94 ( -0.2%)  acc 0.61->0.61 same=True
+prose    seed= 29 rep=0   26.12 ->   26.11 ( -0.0%)  acc 0.55->0.55 same=True
+rust     seed= 29 rep=0   39.32 ->   39.18 ( -0.4%)  acc 0.79->0.79 same=True
+coding   seed= 73 rep=0   41.95 ->   42.07 ( +0.3%)  acc 0.79->0.79 same=True
+explain  seed= 73 rep=0   30.80 ->   29.96 ( -2.7%)  acc 0.62->0.62 same=True
+prose    seed= 73 rep=0   26.53 ->   26.55 ( +0.1%)  acc 0.57->0.57 same=True
+rust     seed= 73 rep=0   41.19 ->   40.72 ( -1.1%)  acc 0.81->0.81 same=True
+coding   geomean -0.24% n=3
+explain  geomean -1.01% n=3
+prose    geomean -0.06% n=3
+rust     geomean -0.66% n=3
+ALL geomean -0.50%  wins 3/12  sd 0.8%
+e12: pooled tok/s 33.31 acceptance 0.693 drafted 2736 accepted/step 2.06
+batch: pooled tok/s 33.15 acceptance 0.693 drafted 2736 accepted/step 2.06
+
+== plain decode (--speculative off, seed 73, 32 tokens) on E12 + trace: 31 of 32 tokens drawn on the device (plain steps of the lookup/DSpark step); the request's first token is the host anchor draw
