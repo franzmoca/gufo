@@ -142,3 +142,26 @@ uses 1,773.84 ms GPU time over a 1,805.14 ms span. Stage sums: routed FP16
 top-k 45.34. Loading and depth preparation are excluded. The older backlog's
 3.30-second prefill breakdown predates bounded replay and is not a current
 end-to-end cost estimate.
+
+
+### E2: stochastic DSpark proposals (rejected)
+
+Connected the existing bounded-q proposal and exact p/q residual callbacks to
+post-Markov top-eight candidates, enabled unfiltered sampled requests, and
+froze sampled cycle costs so wall-time variation could not change seeded
+proposal draws. Each next Markov bias used the actual sampled proposal.
+
+One focused check passed in 0.17 s: biased GPU top-eight with ties/non-finites,
+independent target-frequency correction (including tokens outside q), and
+seeded proposal/residual replay. A real 256-token candidate replay was
+identical with tracing enabled; 20 probabilistic verification rows ran.
+
+Matched IQ1_M + Lucebox Q2_K/Q4_K, temperature/top-p 1.0, seed 73, 256 tokens:
+coding 36.335 → 37.527 tok/s (+3.3%), prose 23.469 → 23.045 (−1.8%). Coding
+acceptance was 73.9 → 76.9%; prose 46.1 → 22.2%, with the candidate mostly
+backing off to plain steps. Proposal draws change the continuation, so these
+single-seed observations are not a general speed qualification. The prototype
+is rejected for insufficient consistent gain; production retains point-mass
+sampling. No broad functional matrix was run. The patch, settings, focused
+check and every measured run are retained in
+[the E2 record](artifacts/2026-10-26-sampled-proposals/summary.json).

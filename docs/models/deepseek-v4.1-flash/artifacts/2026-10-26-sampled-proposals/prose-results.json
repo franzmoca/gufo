@@ -1,0 +1,50 @@
+[
+  {
+    "run": "baseline",
+    "returncode": 0,
+    "tokens": 256,
+    "seconds": 10.9081,
+    "tps": 23.4687,
+    "token_sha256": "ead294cb3cc72ff961222fcb7f6155e26ad15154a61d5f07d14c0bd05e51db13",
+    "speculation": {
+      "acceptance": 0.460526,
+      "drafted": 76.0,
+      "accepted": 35.0,
+      "verification_steps": 39.0,
+      "skipped": 0.0,
+      "positional_acceptance": 0.539474,
+      "positional_accepted": 41.0,
+      "full_block_rate": 0.333333,
+      "full_blocks": 13.0,
+      "anchors": 39.0,
+      "verifier_rows": 115.0,
+      "lookup_cycles": 0.0,
+      "lookup_copied": 0.0,
+      "lookup_accepted": 0.0
+    }
+  },
+  {
+    "run": "candidate",
+    "returncode": 0,
+    "tokens": 256,
+    "seconds": 11.1086,
+    "tps": 23.0452,
+    "token_sha256": "17f5b52ae326863b5535c3a425f5061e392d0003b9a57ad2d8c2bf47e0bcab54",
+    "speculation": {
+      "acceptance": 0.222222,
+      "drafted": 18.0,
+      "accepted": 4.0,
+      "verification_steps": 11.0,
+      "skipped": 0.0,
+      "positional_acceptance": 0.277778,
+      "positional_accepted": 5.0,
+      "full_block_rate": 0.181818,
+      "full_blocks": 2.0,
+      "anchors": 11.0,
+      "verifier_rows": 29.0,
+      "lookup_cycles": 0.0,
+      "lookup_copied": 0.0,
+      "lookup_accepted": 0.0
+    }
+  }
+]

@@ -1,0 +1,35 @@
+{
+  "disposition": "rejected: correct prototype, mixed single-seed performance; insufficient evidence to change the default",
+  "base_commit": "2a57443df83ac96c8784c96aaeb33a81e7a433be",
+  "raw_workspace": "/tmp/gufo-ds41-sampled",
+  "patch_sha256": "460bc8c2d8078f33a9b77ded3f74d87b734456cbce7e76a41b50bad57de9a28b",
+  "coding_prompt": "Implement a small Python LRU cache with get and put. Explain eviction briefly.",
+  "prose_prompt": "Write a 500-word imaginative story about a librarian finding a map in an old cookbook. Use vivid details and end with a surprising choice.",
+  "settings": {
+    "temperature": 1,
+    "top_p": 1,
+    "seed": 73,
+    "max_tokens": 256,
+    "thinking": "off",
+    "draft": "Lucebox Q2_K/Q4_K",
+    "target": "ISTA IQ1_M with IQ4_NL Engram"
+  },
+  "preliminary_baseline_tps": 36.6792,
+  "matched_coding_tps": [
+    36.335,
+    37.5271
+  ],
+  "prose_tps": [
+    23.4687,
+    23.0452
+  ],
+  "notes": [
+    "Only matched baseline/candidate coding runs are the speed comparison; the preliminary baseline overlapped preparation.",
+    "Candidate replay enabled tracing and is a correctness observation, not an independent speed sample.",
+    "Stochastic proposal draws intentionally change the continuation relative to point-mass sampling. Single-seed comparisons do not establish a general speedup.",
+    "The prototype froze sampled cost estimates to preserve seeded replay and included post-Markov top8 plus exact rejection/residual correction."
+  ],
+  "patch_path": "implementation.patch.gz",
+  "patch_encoding": "gzip; patch_sha256 identifies decompressed bytes",
+  "patch_gzip_sha256": "164ba44b1af1bb600cfe919839d810836e3f69ba1ca56e1d7cac520403a0b389"
+}

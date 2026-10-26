@@ -1,0 +1,18 @@
+warning: ignoring untrusted flake configuration setting 'extra-substituters'.
+Pass '--accept-flake-config' to trust it
+warning: ignoring untrusted flake configuration setting 'extra-trusted-public-keys'.
+Pass '--accept-flake-config' to trust it
+Test project /home/franz/projects/gufo/build/gpu-test
+    Start 209: ds41.draft_sampling
+1/1 Test #209: ds41.draft_sampling ..............   Passed    0.17 sec
+
+100% tests passed, 0 tests failed out of 1
+
+Label Time Summary:
+ds41        =   0.17 sec*proc (1 test)
+gfx1151     =   0.17 sec*proc (1 test)
+gpu         =   0.17 sec*proc (1 test)
+hip         =   0.17 sec*proc (1 test)
+sampling    =   0.17 sec*proc (1 test)
+
+Total Test time (real) =   0.18 sec
