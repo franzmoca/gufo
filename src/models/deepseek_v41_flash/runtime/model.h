@@ -30,6 +30,9 @@ struct ds41_engine_options {
    * batches fill the routed expert tiles better for about 0.6 MiB of
    * activations per token. */
   uint32_t prefill_batch;
+  /* Prefill runs every decoder layer over every prompt token instead of the
+   * decoder SWA bounded replay (ds41_decoder_eval_prompt). */
+  bool exact_prefill;
 };
 
 inline constexpr uint32_t DS41_MIN_PREFILL_BATCH = 16;
@@ -122,8 +125,9 @@ void ds41_session_free(ds41_session* session);
 bool ds41_session_dspark_enabled(const ds41_session* session);
 /* Evaluates the prompt from the longest evaluated prefix. The prompt is the
  * first part of a prompt ending at prompt_end (0: prompt->len), which
- * decides the decoder's bounded replay (ds41_decoder_eval_prompt); a state
- * synced to a shorter part is complete only for that same end. */
+ * decides the decoder's bounded replay (ds41_decoder_eval_prompt; none with
+ * the engine's exact_prefill); a state synced to a shorter part is complete
+ * only for that same end. */
 int ds41_session_sync(ds41_session* session, const ds41_tokens* prompt,
                       int prompt_end, char* error, size_t error_capacity);
 int ds41_session_argmax(const ds41_session* session);
@@ -138,6 +142,7 @@ int ds41_sessions_eval_batch(const ds41_session_batch_item* items,
 void ds41_session_begin_request(ds41_session* session);
 void ds41_session_prepare_batch_execution(ds41_session* session);
 bool ds41_engine_has_dspark(const ds41_engine* engine);
+bool ds41_engine_exact_prefill(const ds41_engine* engine);
 int ds41_sessions_dspark_step_batch(const ds41_session_dspark_batch_item* items,
                                     size_t item_count, char* error,
                                     size_t error_capacity);

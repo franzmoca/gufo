@@ -67,6 +67,7 @@ std::shared_ptr<Model> Model::Load(const std::string& model_path,
   ds41_engine_options engine_options{};
   engine_options.model_path = model_path.c_str();
   engine_options.prefill_batch = options.prefill_batch;
+  engine_options.exact_prefill = options.exact_prefill;
   engine_options.dspark_model_path = options.dspark_model_path.empty()
                                          ? nullptr
                                          : options.dspark_model_path.c_str();
@@ -262,6 +263,10 @@ std::uint32_t Model::MaxContext() const noexcept {
 
 bool Model::HasDspark() const {
   return ds41_engine_has_dspark(engine_);
+}
+
+bool Model::ExactPrefill() const {
+  return ds41_engine_exact_prefill(engine_);
 }
 
 Session::Session(std::shared_ptr<Model> model, ds41_session* session)

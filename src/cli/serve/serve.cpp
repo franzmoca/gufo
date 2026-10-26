@@ -600,6 +600,7 @@ void PrintServeHelp(std::string_view program_name,
     std::string dflash_model_path;
     std::string draft_policy;
     std::uint32_t prefill_batch = 0;
+    bool exact_prefill = false;
     std::string dspark_model_path;
     std::string mtp_model_path;
     std::string vision_model_path;
@@ -641,6 +642,12 @@ void PrintServeHelp(std::string_view program_name,
         "4096; 4096 prefills about 5% faster for about 1.2 GiB more memory "
         "(default: 2048)",
         "Model", &prefill_batch);
+    parser.AddFlag(
+        "", "--exact-prefill",
+        "DeepSeek V4.1 Flash: run every decoder layer over every prompt "
+        "token instead of only each prompt's last 140 (decoder SWA bounded "
+        "replay; about twice the prefill time)",
+        "Model", &exact_prefill);
     parser.AddOption("", "--served-model-name", "ID",
                      "Model identifier exposed by the OpenAI API (repeatable; "
                      "the first is primary)",
@@ -1218,6 +1225,7 @@ int RunServe(std::span<const char* const> args) {
     std::string dflash_model_path;
     std::string draft_policy;
     std::uint32_t prefill_batch = 0;
+    bool exact_prefill = false;
     std::string dspark_model_path;
     std::string mtp_model_path;
     std::string vision_model_path;
@@ -1259,6 +1267,12 @@ int RunServe(std::span<const char* const> args) {
         "4096; 4096 prefills about 5% faster for about 1.2 GiB more memory "
         "(default: 2048)",
         "Model", &prefill_batch);
+    llm_parser.AddFlag(
+        "", "--exact-prefill",
+        "DeepSeek V4.1 Flash: run every decoder layer over every prompt "
+        "token instead of only each prompt's last 140 (decoder SWA bounded "
+        "replay; about twice the prefill time)",
+        "Model", &exact_prefill);
     llm_parser.AddCustomOption(
         "", "--served-model-name", "ID",
         "Model identifier exposed by the OpenAI API (repeatable; the first "
@@ -1518,6 +1532,7 @@ int RunServe(std::span<const char* const> args) {
     // so supervisors see a loading server rather than a refused connection.
     server::LoadingResponder loading(host, port);
     backend->set_deepseek_prefill_batch(prefill_batch);
+    backend->set_deepseek_exact_prefill(exact_prefill);
     const bool load_ok = backend->load(
         model, &err, max_context, session_count,
         server::TextPrefillPolicy{

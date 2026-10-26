@@ -21,6 +21,10 @@ struct ModelOptions {
   /// Most prompt tokens per prefill batch (16 to 4096; 0 is the default,
   /// 2048). 4096 prefills about 5% faster for 1.2 GiB more activations.
   std::uint32_t prefill_batch = 0;
+  /// Run every decoder layer over every prompt token instead of the decoder
+  /// SWA bounded replay over each prompt's last 140 tokens (about half the
+  /// prefill time).
+  bool exact_prefill = false;
   /// Optional DSpark support model. Empty leaves speculative decoding off.
   std::string dspark_model_path;
 };
@@ -89,6 +93,7 @@ public:
   [[nodiscard]] std::string ModelName() const;
   [[nodiscard]] std::uint32_t MaxContext() const noexcept;
   [[nodiscard]] bool HasDspark() const;
+  [[nodiscard]] bool ExactPrefill() const;
 
 private:
   Model(ds41_engine* engine, ModelOptions options);

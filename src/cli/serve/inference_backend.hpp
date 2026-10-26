@@ -78,6 +78,10 @@ public:
   InferenceBackend& operator=(InferenceBackend&&) = delete;
 
   /// DeepSeek V4.1 Flash --prefill-batch for the next load (0 is the default).
+  /// DeepSeek V4.1 Flash --exact-prefill for the next load.
+  void set_deepseek_exact_prefill(bool exact) {
+    deepseek_exact_prefill_ = exact;
+  }
   void set_deepseek_prefill_batch(std::uint32_t tokens) {
     deepseek_prefill_batch_ = tokens;
   }
@@ -218,6 +222,7 @@ private:
   struct Impl;
   std::unique_ptr<Impl> impl_;
   std::uint32_t deepseek_prefill_batch_ = 0;
+  bool deepseek_exact_prefill_ = false;
 };
 
 }  // namespace gufo::server
