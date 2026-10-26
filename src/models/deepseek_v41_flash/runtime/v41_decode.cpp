@@ -571,19 +571,30 @@ bool attention(ds41_decoder* d, uint32_t il, uint32_t n) {
         const uint32_t m = std::min(d->score_rows, n - t0);
         const uint32_t p0 = pos0 + t0;
         uint32_t* mask = d->candidates + t0 * d->mask_words;
-        if (ds41_v41_indexer_score(d->iq + (uint64_t)t0 * kIndexQDim, {source.index_k, source.index_scale},
-                                   d->iw + (uint64_t)t0 * DS41_N_INDEXER_HEAD, w_scale, d->scores, d->score_stride,
-                                   p0, m, ratio, DS41_N_INDEXER_HEAD, DS41_N_INDEXER_HEAD_DIM))
-          return false;
-        if (il == DS41_CANDIDATE_SOURCE_LAYER) {
-          if (ds41_v41_candidate_mask(d->scores, d->score_stride, mask, d->mask_words, d->block_scores, d->block_stride,
-                                      d->block_select, p0, m, ratio, DS41_CANDIDATE_BLOCK_SIZE,
-                                      DS41_CANDIDATE_TOPK_BLOCKS))
+        const bool compact = il > DS41_CANDIDATE_SOURCE_LAYER && m <= 4 &&
+                             p0 / ratio >= DS41_CANDIDATE_TOPK_BLOCKS * DS41_CANDIDATE_BLOCK_SIZE;
+        if (compact) {
+          if (ds41_v41_indexer_score_candidates(d->iq + (uint64_t)t0 * kIndexQDim,
+                                                {source.index_k, source.index_scale},
+                                                d->iw + (uint64_t)t0 * DS41_N_INDEXER_HEAD, w_scale,
+                                                d->scores, d->score_stride, mask, d->mask_words, d->block_select,
+                                                DS41_CANDIDATE_TOPK_BLOCKS, p0, m, ratio))
             return false;
-        } else if (il > DS41_CANDIDATE_SOURCE_LAYER &&
-                   ds41_v41_apply_mask(d->scores, d->score_stride, mask, d->mask_words, p0, m, ratio,
-                                       DS41_CANDIDATE_BLOCK_SIZE)) {
-          return false;
+        } else {
+          if (ds41_v41_indexer_score(d->iq + (uint64_t)t0 * kIndexQDim, {source.index_k, source.index_scale},
+                                     d->iw + (uint64_t)t0 * DS41_N_INDEXER_HEAD, w_scale, d->scores, d->score_stride,
+                                     p0, m, ratio, DS41_N_INDEXER_HEAD, DS41_N_INDEXER_HEAD_DIM))
+            return false;
+          if (il == DS41_CANDIDATE_SOURCE_LAYER) {
+            if (ds41_v41_candidate_mask(d->scores, d->score_stride, mask, d->mask_words, d->block_scores, d->block_stride,
+                                        d->block_select, p0, m, ratio, DS41_CANDIDATE_BLOCK_SIZE,
+                                        DS41_CANDIDATE_TOPK_BLOCKS))
+              return false;
+          } else if (il > DS41_CANDIDATE_SOURCE_LAYER &&
+                     ds41_v41_apply_mask(d->scores, d->score_stride, mask, d->mask_words, p0, m, ratio,
+                                         DS41_CANDIDATE_BLOCK_SIZE)) {
+            return false;
+          }
         }
         if (ds41_v41_topk(d->scores, d->score_stride, d->topk + (uint64_t)t0 * DS41_N_INDEXER_TOP_K,
                           DS41_N_INDEXER_TOP_K, p0, m, ratio, 1))

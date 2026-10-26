@@ -182,6 +182,14 @@ int ds41_v41_compress_pool(const float* kv, const float* score, float* state_kv,
 int ds41_v41_indexer_score(const float* q, ds41_fp4_rows keys, const float* w, float w_scale, float* score,
                            uint64_t score_stride, uint32_t pos0, uint32_t n, uint32_t ratio, uint32_t heads,
                            uint32_t head_dim);
+/* Small-batch (1-4 rows), 32-head, D128 scores restricted to 8-row
+ * candidate blocks. The mask must select min(candidate_stride, visible
+ * blocks) blocks. Scratch holds n * candidate_stride uint32 block ids.
+ * Unselected scores become -inf; selected scores keep dense FP32 numerics. */
+int ds41_v41_indexer_score_candidates(const float* q, ds41_fp4_rows keys, const float* w, float w_scale,
+                                      float* score, uint64_t score_stride, const uint32_t* mask,
+                                      uint64_t mask_stride, uint32_t* candidates, uint32_t candidate_stride,
+                                      uint32_t pos0, uint32_t n, uint32_t ratio);
 /* Candidate blocks per token: max over `block`-row blocks, newest block
  * forced in, keep the top `topk_blocks`; writes the keep bit of block b as
  * bit b % 32 of mask[t, b / 32], mask_stride words per token. block_scratch

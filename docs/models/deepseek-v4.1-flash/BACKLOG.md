@@ -3,7 +3,11 @@
 The post-M6 [resident optimization review](OPTIMIZATION_REVIEW.md) compares
 the active implementation with official and external engines, identifies
 additional architecture gaps, and proposes a qualification order. Its
-recommendations are unmeasured; the evidence below predates that review.
+recommendations are unmeasured except where a subsequent experiment records
+results. E1 in [EXPERIMENTS.md](EXPERIMENTS.md#post-m6-resident-optimization-pass-2026-10-26)
+retains compact FP32 rescoring for 1–4 rows; WMMA prefill rescoring and compact
+selection remain open. The older breakdown below predates bounded replay;
+E1 records a fresh profile with loading and depth preparation excluded.
 
 Open performance work for the DeepSeek V4.1 Flash engine (IQ1_M resident),
 as of 2026-10-25 on branch `feat/ds41`. Measured results, including every

@@ -11,6 +11,11 @@ for this artifact. The most useful next pass is compact candidate rescoring,
 sampled speculation, verification kernels and real request batching. Dense
 single-token projections are already close to the measured DRAM ceiling.
 
+Follow-up: [E1](EXPERIMENTS.md#post-m6-resident-optimization-pass-2026-10-26)
+retains compact FP32 rescoring for 1–4 rows, with measured AR gains and exact
+operator/rollback results. WMMA rescoring and compact final selection remain
+open; DSpark per-request timing remains inconclusive and unqualified.
+
 ## Scope and source pins
 
 The production CMake target builds `v41_decode.cpp`, `v41_session.cpp` and

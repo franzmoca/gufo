@@ -1,0 +1,28 @@
+candidate scores pos0=32765 n=1 kept=2048: 0 mismatches, FP64 relative 2.28e-07
+candidate scores bench pos0=32765 n=1 repeat=0 dense 0.1316 ms
+candidate scores bench pos0=32765 n=1 repeat=0 compact 0.0798 ms
+candidate scores bench pos0=32765 n=1 repeat=1 dense 0.1314 ms
+candidate scores bench pos0=32765 n=1 repeat=1 compact 0.0798 ms
+candidate scores bench pos0=32765 n=1 repeat=2 dense 0.1313 ms
+candidate scores bench pos0=32765 n=1 repeat=2 compact 0.0798 ms
+candidate scores pos0=32765 n=4 kept=2048: 0 mismatches, FP64 relative 2.21e-07
+candidate scores bench pos0=32765 n=4 repeat=0 dense 0.4969 ms
+candidate scores bench pos0=32765 n=4 repeat=0 compact 0.2655 ms
+candidate scores bench pos0=32765 n=4 repeat=1 dense 0.4950 ms
+candidate scores bench pos0=32765 n=4 repeat=1 compact 0.2657 ms
+candidate scores bench pos0=32765 n=4 repeat=2 dense 0.4950 ms
+candidate scores bench pos0=32765 n=4 repeat=2 compact 0.2658 ms
+candidate scores pos0=131069 n=1 kept=2048: 0 mismatches, FP64 relative 1.85e-07
+candidate scores bench pos0=131069 n=1 repeat=0 dense 0.4941 ms
+candidate scores bench pos0=131069 n=1 repeat=0 compact 0.0809 ms
+candidate scores bench pos0=131069 n=1 repeat=1 dense 0.4948 ms
+candidate scores bench pos0=131069 n=1 repeat=1 compact 0.0810 ms
+candidate scores bench pos0=131069 n=1 repeat=2 dense 0.4949 ms
+candidate scores bench pos0=131069 n=1 repeat=2 compact 0.0810 ms
+candidate scores pos0=131069 n=4 kept=2048: 0 mismatches, FP64 relative 1.96e-07
+candidate scores bench pos0=131069 n=4 repeat=0 dense 1.9434 ms
+candidate scores bench pos0=131069 n=4 repeat=0 compact 0.2756 ms
+candidate scores bench pos0=131069 n=4 repeat=1 dense 1.9435 ms
+candidate scores bench pos0=131069 n=4 repeat=1 compact 0.2757 ms
+candidate scores bench pos0=131069 n=4 repeat=2 dense 1.9446 ms
+candidate scores bench pos0=131069 n=4 repeat=2 compact 0.2759 ms

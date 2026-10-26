@@ -1,0 +1,168 @@
+{
+  "scope": "Final pp2048 at d32768, post bounded replay, before first decode hc_mix; excludes loading and depth preparation",
+  "dispatches": 1308,
+  "gpu_ms": 1773.84285,
+  "span_ms": 1805.136499,
+  "kernels": {
+    "__amd_rocclr_copyBufferRectAligned": [
+      8,
+      1.7610910000000002
+    ],
+    "hc_state_pass_kernel<false>": [
+      41,
+      29.58061500000001
+    ],
+    "hc_sinkhorn_kernel<4u>": [
+      80,
+      0.27889700000000006
+    ],
+    "void quantize_mmq_q8_1<": [
+      42,
+      9.053713000000002
+    ],
+    "void mul_mat_q<": [
+      86,
+      58.856992000000034
+    ],
+    "q_kv_norm_kernel": [
+      40,
+      2.288757
+    ],
+    "dense_q5k_f16_kernel<true>": [
+      242,
+      506.1005059999998
+    ],
+    "rope_table_kernel": [
+      40,
+      0.067444
+    ],
+    "attention_f16_kernel": [
+      40,
+      219.063977
+    ],
+    "__amd_rocclr_copyBuffer": [
+      133,
+      0.3316170000000001
+    ],
+    "hc_state_pass_kernel<true>": [
+      40,
+      46.549380000000006
+    ],
+    "matmul_bf16_wmma_kernel": [
+      61,
+      56.680994
+    ],
+    "route_kernel": [
+      40,
+      2.1462719999999993
+    ],
+    "to_half_kernel": [
+      40,
+      4.409710000000001
+    ],
+    "routed_f16_kernel<19, true, true>": [
+      26,
+      293.51681900000005
+    ],
+    "routed_f16_kernel<19, false, false>": [
+      27,
+      143.082098
+    ],
+    "swiglu_kernel": [
+      40,
+      4.802851000000002
+    ],
+    "hc_expand_sum_kernel": [
+      40,
+      60.965616000000026
+    ],
+    "engram_gate_kernel": [
+      2,
+      4.962698
+    ],
+    "compress_pool_kernel": [
+      3,
+      5.341597999999999
+    ],
+    "rms_norm_kernel": [
+      10,
+      0.083924
+    ],
+    "rope_tail_kernel": [
+      18,
+      0.6492339999999999
+    ],
+    "fp4_fake_quant_kernel": [
+      18,
+      7.563873999999999
+    ],
+    "matmul_bf16_vec8_kernel": [
+      8,
+      2.1077079999999997
+    ],
+    "indexer_score_wmma_kernel": [
+      11,
+      82.953643
+    ],
+    "topk_kernel": [
+      12,
+      45.33592099999999
+    ],
+    "routed_f16_kernel<19, true, false>": [
+      2,
+      19.454453
+    ],
+    "__amd_rocclr_fillBufferAligned": [
+      4,
+      0.006919999999999999
+    ],
+    "void mm_ids_helper<1>": [
+      2,
+      1.1358590000000002
+    ],
+    "routed_f16_kernel<16, true, true>": [
+      9,
+      84.170266
+    ],
+    "routed_f16_kernel<16, false, false>": [
+      2,
+      12.259238999999999
+    ],
+    "routed_f16_kernel<29, false, false>": [
+      9,
+      43.574431999999995
+    ],
+    "dense_q5k_f16_kernel<false>": [
+      120,
+      12.039751
+    ],
+    "clear_mask_kernel": [
+      1,
+      0.0014
+    ],
+    "block_max_kernel": [
+      1,
+      0.051523
+    ],
+    "fill_mask_kernel": [
+      1,
+      0.013801
+    ],
+    "apply_mask_kernel": [
+      4,
+      0.293455
+    ],
+    "routed_f16_kernel<29, true, true>": [
+      3,
+      10.337259000000001
+    ],
+    "hc_collapse_norm_kernel<4u>": [
+      1,
+      0.00416
+    ],
+    "gemv_kernel<13, 8, false, 1>": [
+      1,
+      1.964383
+    ]
+  }
+}
