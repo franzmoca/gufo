@@ -1,0 +1,80 @@
+[
+  {
+    "run": "baseline-matched",
+    "returncode": 0,
+    "tokens": 256,
+    "seconds": 7.04555,
+    "tps": 36.335,
+    "token_sha256": "d3216f5c1ab06d7d3686c264e7224164fbeaa45e508a20955da5c788cf3c90f5",
+    "pq_trace_rows": 0,
+    "binary_sha256": "743f39b722d19a122cdc250adcc712f95efc9d8b7deb330af207c791e3ef3671",
+    "speculation": {
+      "acceptance": 0.739464,
+      "drafted": 261.0,
+      "accepted": 193.0,
+      "verification_steps": 62.0,
+      "skipped": 0.0,
+      "positional_acceptance": 0.812261,
+      "positional_accepted": 212.0,
+      "full_block_rate": 0.580645,
+      "full_blocks": 36.0,
+      "anchors": 62.0,
+      "verifier_rows": 323.0,
+      "lookup_cycles": 0.0,
+      "lookup_copied": 0.0,
+      "lookup_accepted": 0.0
+    }
+  },
+  {
+    "run": "candidate",
+    "returncode": 0,
+    "tokens": 256,
+    "seconds": 6.82173,
+    "tps": 37.5271,
+    "token_sha256": "0c6b67dca2ccb62eea7cd3864c8038b5ba4063a2e98f8f9a97fbb2c9178040cb",
+    "pq_trace_rows": 0,
+    "binary_sha256": "9bffbf6c65dd54c853f806c59a1afdbff586b5bdd420b1499cf0cf8b522d1da3",
+    "speculation": {
+      "acceptance": 0.768924,
+      "drafted": 251.0,
+      "accepted": 193.0,
+      "verification_steps": 62.0,
+      "skipped": 0.0,
+      "positional_acceptance": 0.860558,
+      "positional_accepted": 216.0,
+      "full_block_rate": 0.629032,
+      "full_blocks": 39.0,
+      "anchors": 62.0,
+      "verifier_rows": 313.0,
+      "lookup_cycles": 0.0,
+      "lookup_copied": 0.0,
+      "lookup_accepted": 0.0
+    }
+  },
+  {
+    "run": "candidate-replay",
+    "returncode": 0,
+    "tokens": 256,
+    "seconds": 6.78257,
+    "tps": 37.7438,
+    "token_sha256": "0c6b67dca2ccb62eea7cd3864c8038b5ba4063a2e98f8f9a97fbb2c9178040cb",
+    "pq_trace_rows": 20,
+    "binary_sha256": "9bffbf6c65dd54c853f806c59a1afdbff586b5bdd420b1499cf0cf8b522d1da3",
+    "speculation": {
+      "acceptance": 0.768924,
+      "drafted": 251.0,
+      "accepted": 193.0,
+      "verification_steps": 62.0,
+      "skipped": 0.0,
+      "positional_acceptance": 0.860558,
+      "positional_accepted": 216.0,
+      "full_block_rate": 0.629032,
+      "full_blocks": 39.0,
+      "anchors": 62.0,
+      "verifier_rows": 313.0,
+      "lookup_cycles": 0.0,
+      "lookup_copied": 0.0,
+      "lookup_accepted": 0.0
+    }
+  }
+]
