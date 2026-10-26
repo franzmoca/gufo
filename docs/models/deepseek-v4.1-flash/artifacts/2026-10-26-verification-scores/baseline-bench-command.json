@@ -1,0 +1,31 @@
+{
+  "cmd": [
+    "/tmp/gufo-ds41-verify/gufo-baseline",
+    "bench",
+    "-m",
+    "/mnt/data/models/ds41/ista-gsq-rco-gguf/DeepSeek-V4.1-Flash-1017-GSQ-RCO-IQ1_M-00001-of-00004.gguf",
+    "--dspark-model",
+    "/mnt/data/models/ds41/dspark-lucebox-q2k/DeepSeek-V4.1-Flash-1017-DSpark-draft-Q2K-Q4K.gguf",
+    "--speculative",
+    "dspark",
+    "--draft-tokens",
+    "5",
+    "--temperature",
+    "0",
+    "--top-p",
+    "1",
+    "--seed",
+    "73",
+    "-p",
+    "2048",
+    "-n",
+    "128",
+    "-d",
+    "0,32768",
+    "-r",
+    "1",
+    "-v"
+  ],
+  "trace": true,
+  "binary_sha256": "f30cee7ce23fd1bde98a1e9bdded6ffe73f0e72bf71290a5ed2ba7242638f3d0"
+}

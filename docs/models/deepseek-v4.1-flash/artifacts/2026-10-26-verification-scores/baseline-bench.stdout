@@ -1,0 +1,7 @@
+[Model Load]: 19.2324 s
+| model                            |       size | backend    |               test |                   t/s |
+| -------------------------------- | ---------- | ---------- | ------------------ | --------------------- |
+| DeepSeek V4.1 Flash              | 112.43 GiB | ROCm (HIP) |             pp2048 |       1108.95 ± 0.00 |
+| DeepSeek V4.1 Flash              | 112.43 GiB | ROCm (HIP) |              tg128 |         23.69 ± 0.00 |
+| DeepSeek V4.1 Flash              | 112.43 GiB | ROCm (HIP) |    pp2048 @ d32768 |       1117.50 ± 0.00 |
+| DeepSeek V4.1 Flash              | 112.43 GiB | ROCm (HIP) |     tg128 @ d32768 |         54.54 ± 0.00 |

@@ -567,8 +567,12 @@ bool attention(ds41_decoder* d, uint32_t il, uint32_t n) {
                              DS41_N_INDEXER_HEAD, 1, 0) ||
           ds41_v41_fp4_fake_quant(d->iq, n * kIndexQDim, 32, 0) || !linear(d, l->indexer_proj, d->xn, d->iw, n))
         return false;
-      for (uint32_t t0 = 0; t0 < n; t0 += d->score_rows) {
-        const uint32_t m = std::min(d->score_rows, n - t0);
+      // Verification retains the FP32 score/reduction used by serial decode.
+      // Prefill may use the wider WMMA scorer; grouping by at most four rows
+      // also keeps compact candidate rescoring active for wider verifications.
+      const uint32_t score_rows = d->spec_eval ? std::min(d->score_rows, 4u) : d->score_rows;
+      for (uint32_t t0 = 0; t0 < n; t0 += score_rows) {
+        const uint32_t m = std::min(score_rows, n - t0);
         const uint32_t p0 = pos0 + t0;
         uint32_t* mask = d->candidates + t0 * d->mask_words;
         const bool compact = il > DS41_CANDIDATE_SOURCE_LAYER && m <= 4 &&

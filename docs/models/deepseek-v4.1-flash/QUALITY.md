@@ -374,3 +374,15 @@ untouched; widths 0 and 6 fail. All three production 256-token runs emit
 identical coding hashes and identical prose hashes at temperature/top-p 1.0,
 seed 73. Target arithmetic, verification and rollback are unchanged.
 [Evidence](artifacts/2026-10-26-markov-tail/summary.json).
+
+
+Post-M6 E6 makes the verification indexer explicitly use the serial FP32
+score/reduction in groups of at most four; prefill retains WMMA. The strict
+probe now fails on non-finite values or serial-logit mismatches. At 18.5K,
+width six matches serial on all 21 retained rows; at 3K, width seven matches
+all 28. Every commit length and corrupted rejected suffix passes, with zero
+maximum logit difference. Baseline width six also passes on the same 18.5K
+history, so no existing model bug is demonstrated by these cases. Matched
+production tg128 outputs have identical token hashes at depth zero and 32K.
+No claim extends this qualification to eight-row attention or wider projections.
+[Evidence](artifacts/2026-10-26-verification-scores/summary.json).

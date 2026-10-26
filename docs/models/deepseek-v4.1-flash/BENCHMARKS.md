@@ -155,3 +155,13 @@ against 23.219–24.133 (temperature/top-p 1.0, seed 73, IQ1_M + Q2_K/Q4_K).
 Short-width drafting is faster, but total-request throughput remains roughly
 flat within adaptive-controller variation; no general speedup is qualified.
 See [E4](EXPERIMENTS.md#e4-stop-unused-dspark-markov-suffixes-retained).
+
+
+Post-M6 E6 explicitly retains FP32 index scoring in speculative evaluation.
+One C1 greedy IQ1_M + Q2_K/Q4_K production pair measures tg128 at 32K
+54.54 → 53.97 tok/s; its six-copy lookup cycles exercise seven-row verification.
+Depth-zero tg128 is 23.69 → 26.12 with adaptive-policy variation. Prefill
+controls are 1108.95 → 1071.44 and 1117.50 → 1118.19 tok/s at 32K. No speedup
+is qualified; E6 is retained for its numerical contract. All phase timings
+remain within the existing 5% / 3 ms slowdown gates in this single pair.
+[Record](artifacts/2026-10-26-verification-scores/summary.json).
