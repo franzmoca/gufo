@@ -1,5 +1,10 @@
 # DeepSeek V4.1 Flash performance backlog
 
+The post-M6 [resident optimization review](OPTIMIZATION_REVIEW.md) compares
+the active implementation with official and external engines, identifies
+additional architecture gaps, and proposes a qualification order. Its
+recommendations are unmeasured; the evidence below predates that review.
+
 Open performance work for the DeepSeek V4.1 Flash engine (IQ1_M resident),
 as of 2026-10-25 on branch `feat/ds41`. Measured results, including every
 rejected attempt, are in [EXPERIMENTS.md](EXPERIMENTS.md); read the matching
