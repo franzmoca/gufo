@@ -1,0 +1,49 @@
+{
+  "docs": {
+    "baseline": {
+      "returncode": 0,
+      "elapsed_ms": 172.5327690000995,
+      "records": 8,
+      "ids_sha256": "e060c7503cdd5e5850baae78d39f6d39d0af88b8bd730de8461e09de87b83e51",
+      "input_sha256": "4f8583890988d6d4dcbb7a51a12b620e18ab0788377ffd5989074890ac907e12",
+      "scope": "eight tokenizations plus metadata-only process setup and ID printing"
+    },
+    "candidate": {
+      "elapsed_ms": 149.1887490010413,
+      "records": 8,
+      "ids_sha256": "e060c7503cdd5e5850baae78d39f6d39d0af88b8bd730de8461e09de87b83e51"
+    },
+    "ids_identical": true,
+    "speedup": 1.1564730594992474
+  },
+  "unique": {
+    "baseline": {
+      "returncode": 0,
+      "elapsed_ms": 113.52610199901392,
+      "records": 8,
+      "ids_sha256": "3578900da6456249707a6c34a02f77185c662b20f3d4ba36e2d835073e911c1f",
+      "input_sha256": "5fa81feb85e2ffc5775104b0a295eea61176d28187c4e469cbaf06696b27f981",
+      "scope": "eight tokenizations plus metadata-only process setup and ID printing"
+    },
+    "candidate": {
+      "elapsed_ms": 108.22176799774752,
+      "records": 8,
+      "ids_sha256": "3578900da6456249707a6c34a02f77185c662b20f3d4ba36e2d835073e911c1f"
+    },
+    "ids_identical": true,
+    "speedup": 1.0490135589115195
+  },
+  "decision": "retained",
+  "baseline_revision": "9d0d5cef",
+  "scope": "Host component measurement only; one run per corpus/build, eight records each. Includes metadata-only setup and token-ID printing. No inference or TTFT gain claimed.",
+  "corpora": {
+    "docs": "README.md, docs/KV-CACHE.md, docs/TESTING.md, runtime/v41_session.cpp; multilingual Unicode, combining characters and a long repeated identifier; repeated eight times",
+    "unique": "12000 distinct eight-letter base-26 identifiers; repeated eight times"
+  },
+  "checks": [
+    "Every emitted token-ID line identical for both corpora",
+    "gpu-test ds41_load_probe built successfully",
+    "release gufo built successfully",
+    "C++ format gate passed (777 files)"
+  ]
+}
