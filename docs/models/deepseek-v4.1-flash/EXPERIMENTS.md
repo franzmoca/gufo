@@ -317,3 +317,26 @@ host round trips and making those layers' route planning device-resident,
 with effectively flat unprofiled throughput. Graph capture and the mixed-MMQ
 plan remain open. All observations and checks are in
 [the E7 record](artifacts/2026-10-26-device-route-plan/summary.json).
+
+
+### E8: 32-slot routed FP16 tiles (rejected)
+
+Template the routed FP16 kernel on its tile width and launch a 32-slot grid
+for device-planned tiles with at most 32 live slots, beside the existing
+64-slot grid. Both consume the same 64-slot plan, so each live tile has one
+owner. The 32-slot body needs 135–146 VGPRs and 15–25 KB LDS, against 169–180
+VGPRs and 24–34 KB for 64 slots.
+
+The first prototype measured pp2048 1210 → 562 tok/s. The cause was code
+generation, not the tile width: its ownership early return lets the compiler
+prove at least three live 16-slot groups in the 64-slot body, which then
+needs 256 VGPRs, 538–671 spills and about 2 KB of private scratch per lane.
+Hiding the count's range after the check restores the original 64-slot
+resources exactly, with no spills in any variant.
+
+Spill-free variant, two alternating production `bench` runs (no drafter),
+against `8d51885a`: pp512 768.3/769.0 → 758.8/772.5 tok/s, pp2048
+1243.8/1247.4 → 1232.9/1244.3, tg16 unchanged. Narrow tiles therefore give
+no measurable prefill gain. Rejected; the 64-slot kernel is unchanged. Both
+patches, per-kernel resource usage and the runs are in
+[the E8 record](artifacts/2026-10-26-routed-32-slot/resource-usage.txt).
