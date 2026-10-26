@@ -2655,9 +2655,12 @@ extern "C" int ds41_v41_attention(float* q, const float* ring, const float* chun
                                   uint32_t rope_dim, float* rope_scratch) {
   static_assert(DS41_V41_ATTN_PARTIAL_PER_HEAD == kAttnSplits * kAttnPartial, "partial layout");
   if (inv_freq && (rope_dim % 32 != 0 || rope_dim > head_dim)) return 1;
+  /* The split form gives each row its own blocks, so every row keeps the
+   * arithmetic of a single-row launch. */
+  const bool split = partial && n <= DS41_V41_ATTN_SPLIT_MAX_TOKENS && head_dim == 512 && heads % kAttnSplitHeads == 0;
   /* The matrix-core form once there are enough blocks to fill the device;
    * it applies the rotations itself. */
-  if (n >= DS41_V41_ATTN_SPLIT_TOKENS && head_dim == 512 && heads % 32 == 0 && window <= 256 &&
+  if (!split && n >= DS41_V41_ATTN_SPLIT_TOKENS && head_dim == 512 && heads % 32 == 0 && window <= 256 &&
       (window & (window - 1)) == 0 &&
       (ratio == 0 || k <= 512) && (!inv_freq || rope_dim == kAttnRope)) {
     float2* rope = nullptr;
@@ -2671,7 +2674,7 @@ extern "C" int ds41_v41_attention(float* q, const float* ring, const float* chun
     return launch_ok("attention");
   }
   if (inv_freq && ds41_v41_rope_tail(q, n * heads, head_dim, rope_dim, inv_freq, pos0, heads, 1, 0)) return 1;
-  if (n < DS41_V41_ATTN_SPLIT_TOKENS && partial && head_dim == 512 && heads % kAttnSplitHeads == 0) {
+  if (split) {
     attention_split_kernel<<<dim3(heads / kAttnSplitHeads, kAttnSplits, n), 32 * kAttnSplitHeads>>>(
         q, ring, chunk, window, floor, comp, idx, k, ratio, partial, pos0, heads, scale);
     if (launch_ok("attention split")) return 1;

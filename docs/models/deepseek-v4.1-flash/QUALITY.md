@@ -181,10 +181,13 @@ a different order and generates more tokens before the cut, so the partial
 reply and its follow-up differ; each passes its exact-continuation check.
 
 Prompt-lookup copies are verified the same way, in batches of at most
-seven rows: from eight rows the batched attention kernel replaces the
-decode one, and `ds41_load_probe --spec-check 16 --spec-width W` keeps
-bit-identical logits against single-token decode for 6 and 7 rows but not
-for 8 (max |diff| 11.6, same argmax). Greedy generation with lookup is
+16 rows. Up to seven rows only did before, as eight rows took the batched
+attention kernel (max |diff| 11.6, same argmax). Speculative evaluations
+now keep the per-row split attention up to 16 rows, and
+`ds41_load_probe --spec-check 16 --spec-width W` keeps bit-identical logits
+against single-token decode for widths 8, 12 and 16, and at width 16 on
+3,000- and 18,500-token histories
+([evidence](artifacts/2026-10-26-wide-verification/summary.txt)). Greedy generation with lookup is
 token-identical to plain decoding on the file-edit, roadmap and chat
 prompts, and the `cache` suite with the drafter passes every case with all
 30 completed replies byte-identical to the run without lookup. The lookup

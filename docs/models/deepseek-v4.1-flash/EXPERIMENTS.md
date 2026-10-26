@@ -557,3 +557,32 @@ speculative statistics identical. Functional sampling, batch, stop and tool
 suites pass with four sessions; their C4 timing rows stay inconclusive, as
 an unchanged-build control flags the same arrival-order-dependent cases.
 Runs are in [the E14 record](artifacts/2026-10-26-joint-sessions/summary.txt).
+
+### E15: 16-row single-session verification (retained)
+
+Prompt-lookup verification stopped at seven rows (the anchor and six
+copies): from eight rows the matrix-core attention replaced the decode
+kernel and changed logits. On a code-edit reply, every lookup cycle copied
+and accepted six tokens, so the cap set the speed. Split attention, which
+evaluates each row on its own, now runs up to 16 rows whenever the caller
+supplies its partial buffer, and a speculative evaluation uses the decode
+switch points up to 16 rows, as E14's joint evaluations do. A session now
+verifies the anchor with up to 15 copies; DSpark blocks are unchanged.
+Ordinary evaluations of exactly eight rows, which already used the per-row
+GEMVs, now also take split attention.
+
+The attention test adds 12- and 16-row split cases against the f32
+reference. `ds41_load_probe --spec-check` keeps every row bit-identical to
+single-token decode at widths 8, 12 and 16 on the 1,096-token prompt, and at
+width 16 on the 3,000- and 18,500-token histories (136 rows each). A
+verification costs 113.9 ms for 7 rows and 223.1 ms for 16, so fully
+accepted lookup commits 71.7 instead of 61.5 tokens per second. Repeating a
+3,000-character source file with one rename (greedy, 900 tokens) rises from
+58.5 to 67.6 tok/s (+15.6%) with 62 instead of 131 verifications, every
+copy accepted and identical output. The four standard prompts, which copy
+nothing, are unchanged and identical in sampled and greedy runs, and so is
+prefill. The `long-context` and `cache-edits` suites pass without quality
+changes; one first-run decode flag did not recur on two reruns or two
+unchanged-build controls, and the remaining prefill flags match the
+controls' variance and stay inconclusive.
+Runs are in [the E15 record](artifacts/2026-10-26-wide-verification/summary.txt).

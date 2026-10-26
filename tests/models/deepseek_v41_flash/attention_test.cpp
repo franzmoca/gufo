@@ -128,7 +128,7 @@ void HostRope(float* row, const std::vector<float>& freq, uint32_t pos,
  * rotated first and the output gets the inverse rotation and the FP8
  * rounding. */
 double Case(uint32_t pos0, uint32_t n, uint32_t ratio, uint32_t comp_rows,
-            bool rope, uint32_t floor, std::mt19937& rng) {
+            bool rope, uint32_t floor, bool split, std::mt19937& rng) {
   std::normal_distribution<float> normal;
   auto fill = [&](std::size_t count, float scale) {
     std::vector<float> v(count);
@@ -174,10 +174,10 @@ double Case(uint32_t pos0, uint32_t n, uint32_t ratio, uint32_t comp_rows,
   (void)hipMalloc(&dout, sizeof(float) * n * kHeads * kDim);
   (void)hipMalloc(&dtable, sizeof(float) * n * kRope);
   const float scale = 1.0f / std::sqrt((float)kDim);
-  const int rc =
-      ds41_v41_attention(dq, dring, dchunk, kWindow, floor, dcomp, didx, kTopK,
-                         ratio, dsinks, dout, dpartial, pos0, n, kHeads, kDim,
-                         scale, rope ? dfreq : nullptr, kRope, dtable);
+  const int rc = ds41_v41_attention(
+      dq, dring, dchunk, kWindow, floor, dcomp, didx, kTopK, ratio, dsinks,
+      dout, n < DS41_V41_ATTN_SPLIT_TOKENS || split ? dpartial : nullptr, pos0,
+      n, kHeads, kDim, scale, rope ? dfreq : nullptr, kRope, dtable);
   std::vector<float> out((std::size_t)n * kHeads * kDim);
   (void)hipDeviceSynchronize();
   (void)hipMemcpy(out.data(), dout, out.size() * sizeof(float),
@@ -662,6 +662,7 @@ int main(int argc, char** argv) {
     double tolerance;  // split decode is fp32; the batched form stages half
                        // operands; the FP8 rounding flips a few steps
     uint32_t floor = 0;
+    bool split = false;  // up to 16 rows in the split decode form
   };
   const Shape shapes[] = {
       {12, 1, 0, 0, false, 1e-5},
@@ -682,12 +683,16 @@ int main(int argc, char** argv) {
       {2000, 40, 1, 2040, true, 2e-2, 1990},
       {1000, 20, 1, 1020, false, 2e-3, 1010},
       {3000, 3, 1, 3003, false, 1e-5, 2950},
+      /* Speculative verification: 12 and 16 rows in the split decode form. */
+      {3000, 12, 1, 3012, false, 1e-5, 0, true},
+      {700, 16, 2, 358, false, 1e-5, 0, true},
+      {3000, 16, 1, 3016, true, 2e-2, 0, true},
   };
   std::mt19937 rng(41);
   bool ok = true;
   for (const Shape& s : shapes) {
     const double e =
-        Case(s.pos0, s.n, s.ratio, s.comp_rows, s.rope, s.floor, rng);
+        Case(s.pos0, s.n, s.ratio, s.comp_rows, s.rope, s.floor, s.split, rng);
     std::printf("pos0=%u n=%u ratio=%u comp=%u rope=%d floor=%u rel_err=%.2e\n",
                 s.pos0, s.n, s.ratio, s.comp_rows, s.rope ? 1 : 0, s.floor, e);
     ok = e < s.tolerance && ok;

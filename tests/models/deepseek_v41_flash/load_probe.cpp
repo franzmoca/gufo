@@ -210,10 +210,11 @@ int JointProbe(ds41_engine* engine, const std::vector<int>& prompt,
 }
 
 /* --spec-check: speculative batches of --spec-width rows (default 4, at
- * most 8) keeping 1, 2, ..., width rows in turn. Pass A drafts the greedy
- * continuation, pass B replaces the rows past the kept prefix with other
- * tokens. Exact rollback leaves both passes with bit-identical logits for every
- * kept row, and every kept logit row must also match serial decode exactly.
+ * most DS41_DECODER_MAX_SPECULATIVE) keeping 1, 2, ..., width rows in turn.
+ * Pass A drafts the greedy continuation, pass B replaces the rows past the kept
+ * prefix with other tokens. Exact rollback leaves both passes with
+ * bit-identical logits for every kept row, and every kept logit row must also
+ * match serial decode exactly.
  * --spec-bench N: times speculative batches of N rows (0: 1 to 8), commit 1. */
 int SpeculativeProbe(ds41_engine* engine, const std::vector<int>& prompt,
                      uint32_t context, int cycles, int bench, int width) {
@@ -699,7 +700,8 @@ int main(int argc, char** argv) {
           std::clamp<uint32_t>((uint32_t)std::strtoul(argv[++i], nullptr, 10),
                                1, DS41_DECODER_MAX_JOINT);
     } else if (std::strcmp(argv[i], "--spec-width") == 0 && i + 1 < argc) {
-      spec_width = std::clamp(std::atoi(argv[++i]), 1, 8);
+      spec_width =
+          std::clamp(std::atoi(argv[++i]), 1, DS41_DECODER_MAX_SPECULATIVE);
     } else if (std::strcmp(argv[i], "--spec-bench") == 0 && i + 1 < argc) {
       spec_bench = std::atoi(argv[++i]);
       upload = true;
