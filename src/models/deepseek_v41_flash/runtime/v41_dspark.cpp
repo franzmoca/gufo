@@ -72,6 +72,8 @@ struct ds41_dspark_scratch {
   int32_t *tokens = nullptr, *candidate_ids = nullptr;
   float* candidate_logits = nullptr;
   uint32_t* draws = nullptr;
+  float* markov_v = nullptr;
+  int32_t* markov_i = nullptr;
   ds41_v41_proposal* proposals = nullptr;
   float *main_raw = nullptr, *main_x = nullptr, *main_kv = nullptr, *main_kvn = nullptr;
   ~ds41_dspark_scratch() {
@@ -124,7 +126,8 @@ bool alloc_scratch(ds41_dspark_scratch& s) {
          s.alloc(&s.logits, r * DS41_N_VOCAB) && s.alloc(&s.markov_x, DS41_DSPARK_MARKOV_RANK) &&
          s.alloc(&s.bias, DS41_N_VOCAB) && s.alloc(&s.tokens, r + 1) && s.alloc(&s.candidate_ids, DS41_DSPARK_CANDIDATES) &&
          s.alloc(&s.candidate_logits, DS41_DSPARK_CANDIDATES) &&
-         s.alloc(&s.draws, r) && s.alloc(&s.proposals, r) && s.alloc(&s.main_raw, f * kDim) &&
+         s.alloc(&s.draws, r) && s.alloc(&s.proposals, r) && s.alloc(&s.markov_v, DS41_V41_MARKOV_CANDIDATES) &&
+         s.alloc(&s.markov_i, DS41_V41_MARKOV_CANDIDATES) && s.alloc(&s.main_raw, f * kDim) &&
          s.alloc(&s.main_x, f * kDim) && s.alloc(&s.main_kv, f * kHeadDim) && s.alloc(&s.main_kvn, f * kHeadDim);
 }
 
@@ -395,13 +398,25 @@ bool ds41_dspark_draft(ds41_dspark_state* s, int anchor, int32_t* drafts, uint32
                                                             : DS41_V41_ROW_F32;
   // Later Markov rows depend only on earlier proposals; unused suffixes
   // cannot affect the requested prefix. The transformer body keeps all five rows.
+  // FP16 W2 rows of the rank fuse the projection into the selection.
+  const bool fused = m->markov_w2.type == DS41_TENSOR_F16 && m->markov_w2.k == DS41_DSPARK_MARKOV_RANK &&
+                     m->markov_w2.rows == DS41_N_VOCAB && (uintptr_t)m->markov_w2.p % 16 == 0;
+  const auto* w2 = static_cast<const uint16_t*>(m->markov_w2.p);
   for (uint32_t i = 0; i < count && ok; i++) {
     const float* row = sc.logits + (uint64_t)i * DS41_N_VOCAB;
-    ok = ds41_v41_gather_row(m->markov_w1.p, format, sc.tokens, i, sc.markov_x, DS41_DSPARK_MARKOV_RANK) == 0 &&
-         lin(m->markov_w2, sc.markov_x, sc.bias, 1) &&
-         (stochastic ? ds41_v41_propose_top8(row, sc.bias, DS41_N_VOCAB, sc.candidate_ids, sc.candidate_logits,
-                                             sc.draws + i, temperature, sc.proposals + i, sc.tokens + i + 1)
-                     : ds41_v41_argmax_bias(row, sc.bias, DS41_N_VOCAB, sc.tokens, i + 1)) == 0;
+    ok = ds41_v41_gather_row(m->markov_w1.p, format, sc.tokens, i, sc.markov_x, DS41_DSPARK_MARKOV_RANK) == 0;
+    if (!ok) break;
+    if (fused)
+      ok = (stochastic ? ds41_v41_markov_propose(w2, sc.markov_x, row, DS41_N_VOCAB, sc.markov_v, sc.markov_i,
+                                                 sc.candidate_ids, sc.candidate_logits, sc.draws + i, temperature,
+                                                 sc.proposals + i, sc.tokens + i + 1)
+                       : ds41_v41_markov_argmax(w2, sc.markov_x, row, DS41_N_VOCAB, sc.markov_v, sc.markov_i,
+                                                sc.tokens, i + 1)) == 0;
+    else
+      ok = lin(m->markov_w2, sc.markov_x, sc.bias, 1) &&
+           (stochastic ? ds41_v41_propose_top8(row, sc.bias, DS41_N_VOCAB, sc.candidate_ids, sc.candidate_logits,
+                                               sc.draws + i, temperature, sc.proposals + i, sc.tokens + i + 1)
+                       : ds41_v41_argmax_bias(row, sc.bias, DS41_N_VOCAB, sc.tokens, i + 1)) == 0;
   }
   if (stochastic) {
     ds41_v41_proposal q[kRows];

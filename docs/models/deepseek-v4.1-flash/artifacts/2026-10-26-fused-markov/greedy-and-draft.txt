@@ -1,0 +1,11 @@
+Greedy (temperature 0), 256 tokens, IQ1_M + Lucebox Q2_K/Q4_K, one run each:
+coding base sha256=fbae66d033e31 38.20 tok/s acceptance 0.7956
+coding e2m  sha256=fbae66d033e31 39.16 tok/s acceptance 0.7956
+prose  base sha256=5535911f2ce64 23.32 tok/s acceptance 0.3026
+prose  e2m  sha256=5535911f2ce64 23.41 tok/s acceptance 0.3026
+
+Median draft (traced, sampled coding seed 73, 56 cycles each):
+e2q 12.6 ms -> e2m 10.0 ms; identical token hash 42039c3276.
+
+Profile before fusion (rocprofv3, 72 Markov rows): matmul_kernel<_Float16>
+686 us/row (66 MB W2, ~96 GB/s), top8_bias_kernel<true> 278 us/row (one workgroup).

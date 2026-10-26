@@ -387,3 +387,33 @@ against `8d51885a`: pp512 768.3/769.0 → 758.8/772.5 tok/s, pp2048
 no measurable prefill gain. Rejected; the 64-slot kernel is unchanged. Both
 patches, per-kernel resource usage and the runs are in
 [the E8 record](artifacts/2026-10-26-routed-32-slot/resource-usage.txt).
+
+
+### E9: fuse the Markov projection into its selection (retained)
+
+After E2, a five-row draft spent 4.25 ms in its Markov tail, more than the
+2.48 ms vocabulary head. Each row ran the rank-256 FP16 W2 projection
+through the generic matmul (686 µs for 66 MB, about 96 GB/s), wrote a
+129K-entry bias, then scanned logits + bias in a single workgroup
+(278 µs for the top eight).
+
+One pass now computes each W2 row (one 16-byte load per lane), adds the
+head logit and keeps the best one or eight per wave. Each of 256 blocks owns
+a contiguous token range, and emits its candidates by descending value then
+lowest token. A one-block merge (argmax, or top eight plus the E2 device q
+draw) therefore keeps the lowest-token tie rule. Other W2 formats keep the
+previous path.
+
+The focused check compares the fused argmax/top eight with an FP64
+reference over the full 129,280-token vocabulary. It covers NaN/−inf rows and
+an exact tie split across blocks, which must resolve to the lower token.
+Greedy outputs and acceptance statistics are identical to `8d51885a` for
+coding and prose (the drafted tokens match); median sampled draft time falls
+12.6 → 10.0 ms with an identical token hash.
+
+12-pair sampled protocol (as E2): +2.09% over E2 (11/12 faster, per-pair SD
+1.2%; the continuations are identical), +5.26% over `8d51885a` (11/12;
+coding +4.2%, explanation +3.7%, prose +8.2%, Rust +5.0%). Pooled
+30.10 → 31.73 tok/s. Runs and checks are in
+[the E9 record](artifacts/2026-10-26-fused-markov/summary.txt).
+

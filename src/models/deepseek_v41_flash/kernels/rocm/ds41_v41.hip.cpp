@@ -1823,7 +1823,8 @@ __global__ void gather_row_kernel(const void* table, int format, const int32_t* 
 
 /* tokens[index] = argmax over finite x[v] + bias[v], the first on ties; -1 when none. One block. */
 __global__ void __launch_bounds__(1024) argmax_bias_kernel(const float* x, const float* bias, uint32_t n,
-                                                           int32_t* tokens, uint32_t index) {
+                                                           int32_t* tokens, uint32_t index,
+                                                           const int32_t* id_map = nullptr) {
   __shared__ float best_v[1024];
   __shared__ int32_t best_i[1024];
   float v = -INFINITY;
@@ -1850,7 +1851,95 @@ __global__ void __launch_bounds__(1024) argmax_bias_kernel(const float* x, const
     }
     __syncthreads();
   }
-  if (threadIdx.x == 0) tokens[index] = best_i[0];
+  if (threadIdx.x == 0) tokens[index] = id_map && best_i[0] >= 0 ? id_map[best_i[0]] : best_i[0];
+}
+
+/* Markov rows fused with their selection: block b owns tokens
+ * [b * span, (b + 1) * span) and emits its kSel best finite values of
+ * logits[t] + W2[t] . x (W2 FP16 rows of 256), descending and then lowest
+ * token. Contiguous ownership makes the candidate index order the token
+ * order, so a merge over candidates keeps the lowest-token tie rule. */
+constexpr uint32_t kMarkovBlocks = 256;
+
+template <uint32_t kSel>
+__global__ void __launch_bounds__(256) markov_select_kernel(const _Float16* w2, const float* x, const float* logits,
+                                                           uint32_t n, float* cand_v, int32_t* cand_i) {
+  const uint32_t lane = threadIdx.x % 32, wave = threadIdx.x / 32;
+  const uint32_t span = (n + gridDim.x - 1) / gridDim.x;
+  const uint32_t begin = blockIdx.x * span, end = min(n, begin + span);
+  float xv[8];
+  {
+    const float4* xp = reinterpret_cast<const float4*>(x) + 2 * lane;
+    const float4 a = xp[0], b = xp[1];
+    xv[0] = a.x, xv[1] = a.y, xv[2] = a.z, xv[3] = a.w, xv[4] = b.x, xv[5] = b.y, xv[6] = b.z, xv[7] = b.w;
+  }
+  float best_v[kSel];
+  int32_t best_i[kSel];
+#pragma unroll
+  for (uint32_t j = 0; j < kSel; ++j) {
+    best_v[j] = -INFINITY;
+    best_i[j] = -1;
+  }
+  constexpr uint32_t kUnroll = 4;
+  for (uint32_t r0 = begin + wave; r0 < end; r0 += 8 * kUnroll) {
+    uint4 packed[kUnroll];
+#pragma unroll
+    for (uint32_t u = 0; u < kUnroll; ++u) {
+      const uint32_t r = r0 + 8 * u;
+      packed[u] = r < end ? reinterpret_cast<const uint4*>(w2 + (uint64_t)r * 256)[lane] : uint4{};
+    }
+#pragma unroll
+    for (uint32_t u = 0; u < kUnroll; ++u) {
+      const uint32_t r = r0 + 8 * u;
+      const _Float16* h = reinterpret_cast<const _Float16*>(&packed[u]);
+      float dot = 0.0f;
+#pragma unroll
+      for (uint32_t e = 0; e < 8; ++e) dot += (float)h[e] * xv[e];
+#pragma unroll
+      for (int o = 16; o > 0; o >>= 1) dot += __shfl_xor(dot, o);
+      if (r >= end) continue;
+      const float v = logits[r] + dot;
+      if (!isfinite(v)) continue;
+      // Rows arrive in increasing token order, so a strict test keeps ties stable.
+      uint32_t at = kSel;
+#pragma unroll
+      for (uint32_t j = 0; j < kSel; ++j)
+        if (at == kSel && (best_i[j] < 0 || v > best_v[j])) at = j;
+#pragma unroll
+      for (uint32_t j = kSel - 1; j > 0; --j)
+        if (j > at) {
+          best_v[j] = best_v[j - 1];
+          best_i[j] = best_i[j - 1];
+        }
+      if (at < kSel) {
+        best_v[at] = v;
+        best_i[at] = (int32_t)r;
+      }
+    }
+  }
+  __shared__ float sv[8][kSel];
+  __shared__ int32_t si[8][kSel];
+  if (lane == 0)
+#pragma unroll
+    for (uint32_t j = 0; j < kSel; ++j) {
+      sv[wave][j] = best_v[j];
+      si[wave][j] = best_i[j];
+    }
+  __syncthreads();
+  if (threadIdx.x != 0) return;
+  uint32_t head[8] = {};
+  for (uint32_t j = 0; j < kSel; ++j) {
+    int w = -1;
+    for (int c = 0; c < 8; ++c) {
+      if (head[c] >= kSel || si[c][head[c]] < 0) continue;
+      const float cv = sv[c][head[c]];
+      const int32_t ci = si[c][head[c]];
+      if (w < 0 || cv > sv[w][head[w]] || (cv == sv[w][head[w]] && ci < si[w][head[w]])) w = c;
+    }
+    cand_v[blockIdx.x * kSel + j] = w < 0 ? -INFINITY : sv[w][head[w]];
+    cand_i[blockIdx.x * kSel + j] = w < 0 ? -1 : si[w][head[w]];
+    if (w >= 0) ++head[w];
+  }
 }
 
 /* Eight best finite biased logits, descending and then lowest token id.
@@ -1859,7 +1948,7 @@ template <bool kPropose>
 __global__ void __launch_bounds__(256) top8_bias_kernel(const float* x, const float* bias, uint32_t n,
                                                        int32_t* ids, float* logits, const uint32_t* draw,
                                                        float temperature, ds41_v41_proposal* proposal,
-                                                       int32_t* token) {
+                                                       int32_t* token, const int32_t* id_map = nullptr) {
   constexpr uint32_t K = 8;
   float local_v[K];
   int32_t local_i[K];
@@ -1907,7 +1996,7 @@ __global__ void __launch_bounds__(256) top8_bias_kernel(const float* x, const fl
     }
     const int32_t winner = best_i[0];
     if (threadIdx.x == 0) {
-      ids[j] = winner;
+      ids[j] = id_map && winner >= 0 ? id_map[winner] : winner;
       logits[j] = best_v[0];
     }
     if (cursor < K && local_i[cursor] == winner) ++cursor;
@@ -2379,6 +2468,23 @@ extern "C" int ds41_v41_gather_row(const void* table, int format, const int32_t*
 extern "C" int ds41_v41_top8_bias(const float* x, const float* bias, uint32_t n, int32_t* ids, float* logits) {
   top8_bias_kernel<false><<<1, 256>>>(x, bias, n, ids, logits, nullptr, 1.0f, nullptr, nullptr);
   return launch_ok("biased top8");
+}
+
+extern "C" int ds41_v41_markov_argmax(const uint16_t* w2, const float* x, const float* logits, uint32_t n,
+                                      float* cand_v, int32_t* cand_i, int32_t* tokens, uint32_t index) {
+  markov_select_kernel<1><<<kMarkovBlocks, 256>>>((const _Float16*)w2, x, logits, n, cand_v, cand_i);
+  argmax_bias_kernel<<<1, 1024>>>(cand_v, nullptr, kMarkovBlocks, tokens, index, cand_i);
+  return launch_ok("markov argmax");
+}
+
+extern "C" int ds41_v41_markov_propose(const uint16_t* w2, const float* x, const float* logits, uint32_t n,
+                                       float* cand_v, int32_t* cand_i, int32_t* ids, float* top_logits,
+                                       const uint32_t* draw, float temperature, ds41_v41_proposal* proposal,
+                                       int32_t* token) {
+  markov_select_kernel<8><<<kMarkovBlocks, 256>>>((const _Float16*)w2, x, logits, n, cand_v, cand_i);
+  top8_bias_kernel<true><<<1, 256>>>(cand_v, nullptr, kMarkovBlocks * 8, ids, top_logits, draw, temperature,
+                                     proposal, token, cand_i);
+  return launch_ok("markov proposal");
 }
 
 extern "C" int ds41_v41_propose_top8(const float* x, const float* bias, uint32_t n, int32_t* ids, float* logits,
