@@ -375,12 +375,12 @@ bool ds41_dspark_draft(ds41_dspark_state* s, int anchor, int32_t* drafts, uint32
   }
   /* Target head, then the Markov path: row i adds W2 W1[token i] and takes the argmax as token i + 1. */
   ok = ok && ds41_v41_hc_collapse_norm(sc.h, sc.pre[0], f32(m->out_norm), sc.xn, kHc, kDim, DS41_RMS_EPS, n) == 0 &&
-       ds41_decoder_output_head(s->decoder, sc.xn, sc.logits, n);
+       ds41_decoder_output_head(s->decoder, sc.xn, sc.logits, count);
   const int format = m->markov_w1.type == DS41_TENSOR_BF16  ? DS41_V41_ROW_BF16
                      : m->markov_w1.type == DS41_TENSOR_F16 ? DS41_V41_ROW_F16
                                                             : DS41_V41_ROW_F32;
   // Later Markov rows depend only on earlier proposals; unused suffixes
-  // cannot affect the requested prefix. Keep the five-row body/head intact.
+  // cannot affect the requested prefix. The transformer body keeps all five rows.
   for (uint32_t i = 0; i < count && ok; i++)
     ok = ds41_v41_gather_row(m->markov_w1.p, format, sc.tokens, i, sc.markov_x, DS41_DSPARK_MARKOV_RANK) == 0 &&
          lin(m->markov_w2, sc.markov_x, sc.bias, 1) &&

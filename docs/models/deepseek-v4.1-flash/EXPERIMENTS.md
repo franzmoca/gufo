@@ -211,7 +211,7 @@ settings, trace distributions and focused checks are in
 [the E4 record](artifacts/2026-10-26-markov-tail/summary.json).
 
 
-### E5: score only requested draft-head rows (rejected)
+### E5: score only requested draft-head rows (retained)
 
 After E4, shortened the shared target vocabulary head to the requested draft
 count, keeping the transformer and collapse normalization at five rows.
@@ -225,11 +225,20 @@ Matched to E4's candidate runs (same binary retained as this baseline), C1,
 tok/s (+1.5%), prose 24.188 → 23.851 (−1.4%). Output-token hashes match for
 both prompts. Short-width drafting is cheaper, but adaptive-controller
 changes prevent a consistent total-request gain in this single-seed trial.
-Rejected for insufficient consistent benefit; this is not evidence of a
-confirmed regression. No broad matrix or additional timing loop was run.
-Production retains E4's full five-row head and shortened Markov tail. The
-prototype source/test patch, all candidate runs and focused checks are in
-[the E5 record](artifacts/2026-10-26-draft-head/summary.json).
+That single pair was first rejected; the trial was too small for a change
+with identical outputs, since adaptive draft widths alone vary a run by
+several percent.
+
+Re-measured against `8d51885a` with the same production toolchain: four
+prompts (coding, prose, explanation, Rust) × seeds 73/11/29, 256 sampled
+tokens, temperature/top-p 1.0, alternating order without tracing. All 12
+pairs emit identical tokens. Candidate throughput is +0.33% geometric mean
+(9/12 pairs faster, per-pair SD 2.4%); pooled 29.78 → 29.87 tok/s. The
+draft-prefix/logit probe passes again on the rebased change. Retained as a
+small measured saving with unchanged output: the head now evaluates only the
+requested rows, and the transformer body keeps all five. The paired runs
+and scripts are in [the re-measurement](artifacts/2026-10-26-draft-head/remeasure-summary.txt);
+the first trial remains in [the E5 record](artifacts/2026-10-26-draft-head/summary.json).
 
 
 ### E6: explicit FP32 index scoring for verification (retained for numerics)
