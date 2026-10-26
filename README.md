@@ -16,6 +16,11 @@ maintained here on the default branch, `feat/gemma`. Upstream
 > **What's new:** the [Gemma changelog](CHANGELOG_GEMMA.md) lists the fork's
 > changes, newest first, with a link to each pull request.
 
+> [!TIP]
+> **DeepSeek V4.1 Flash, resident on one Strix Halo:** the 763B model runs
+> fully in GPU memory with DSpark speculative decoding and image input, for
+> headless dedicated machines. See [README_DEEPSEEK.md](README_DEEPSEEK.md).
+
 ### What it runs
 
 - **Gemma 4 26B-A4B** (mixture of experts): Unsloth UD-Q4_K_XL, UD-Q6_K_XL,
