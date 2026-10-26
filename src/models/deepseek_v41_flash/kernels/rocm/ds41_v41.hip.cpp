@@ -1853,6 +1853,107 @@ __global__ void __launch_bounds__(1024) argmax_bias_kernel(const float* x, const
   if (threadIdx.x == 0) tokens[index] = best_i[0];
 }
 
+/* Eight best finite biased logits, descending and then lowest token id.
+ * Each lane retains its local eight; global rounds merge those sorted lists. */
+template <bool kPropose>
+__global__ void __launch_bounds__(256) top8_bias_kernel(const float* x, const float* bias, uint32_t n,
+                                                       int32_t* ids, float* logits, const uint32_t* draw,
+                                                       float temperature, ds41_v41_proposal* proposal,
+                                                       int32_t* token) {
+  constexpr uint32_t K = 8;
+  float local_v[K];
+  int32_t local_i[K];
+#pragma unroll
+  for (uint32_t j = 0; j < K; ++j) {
+    local_v[j] = -INFINITY;
+    local_i[j] = -1;
+  }
+  for (uint32_t i = threadIdx.x; i < n; i += blockDim.x) {
+    const float v = x[i] + (bias ? bias[i] : 0.0f);
+    if (!isfinite(v)) continue;
+    uint32_t at = K;
+#pragma unroll
+    for (uint32_t j = 0; j < K; ++j)
+      if (at == K && (local_i[j] < 0 || v > local_v[j])) at = j;
+#pragma unroll
+    for (uint32_t j = K - 1; j > 0; --j)
+      if (j > at) {
+        local_v[j] = local_v[j - 1];
+        local_i[j] = local_i[j - 1];
+      }
+    if (at < K) {
+      local_v[at] = v;
+      local_i[at] = (int32_t)i;
+    }
+  }
+  __shared__ float best_v[256];
+  __shared__ int32_t best_i[256];
+  uint32_t cursor = 0;
+  for (uint32_t j = 0; j < K; ++j) {
+    best_v[threadIdx.x] = cursor < K ? local_v[cursor] : -INFINITY;
+    best_i[threadIdx.x] = cursor < K ? local_i[cursor] : -1;
+    __syncthreads();
+    for (uint32_t step = blockDim.x / 2; step; step >>= 1) {
+      if (threadIdx.x < step) {
+        const float ov = best_v[threadIdx.x + step];
+        const int32_t oi = best_i[threadIdx.x + step];
+        if (oi >= 0 && (best_i[threadIdx.x] < 0 || ov > best_v[threadIdx.x] ||
+                        (ov == best_v[threadIdx.x] && oi < best_i[threadIdx.x]))) {
+          best_v[threadIdx.x] = ov;
+          best_i[threadIdx.x] = oi;
+        }
+      }
+      __syncthreads();
+    }
+    const int32_t winner = best_i[0];
+    if (threadIdx.x == 0) {
+      ids[j] = winner;
+      logits[j] = best_v[0];
+    }
+    if (cursor < K && local_i[cursor] == winner) ++cursor;
+    __syncthreads();  // every lane consumes the winner before the next round
+  }
+  if constexpr (kPropose) {
+    if (threadIdx.x != 0) return;
+    /* q: the temperature softmax of the eight candidates in 24-bit units
+     * (the remainder joins the best), or a point mass on a concentrated best;
+     * the draw uses this exact q, which the host retains for verification. */
+    ds41_v41_proposal q{};
+    if (ids[K - 1] < 0) {
+      q.token = -1;
+      *proposal = q;
+      return;
+    }
+    float e[K], total = 0.0f;
+    for (uint32_t j = 0; j < K; ++j) total += e[j] = expf((logits[j] - logits[0]) / temperature);
+    constexpr uint32_t kUnits = 1u << 24;
+    if (e[0] / total >= 0.7f) {
+      q.size = 1;
+      q.ids[0] = q.token = ids[0];
+      q.masses[0] = kUnits;
+    } else {
+      uint32_t sum = 0;
+      for (uint32_t j = 0; j < K; ++j) {
+        q.ids[j] = ids[j];
+        sum += q.masses[j] = (uint32_t)floorf(e[j] / total * (float)kUnits);
+      }
+      q.masses[0] += kUnits - sum;
+      q.size = K;
+            uint32_t cumulative = 0;
+      q.token = ids[K - 1];
+      for (uint32_t j = 0; j < K; ++j) {
+        cumulative += q.masses[j];
+        if (*draw < cumulative) {
+          q.token = ids[j];
+          break;
+        }
+      }
+    }
+    *proposal = q;
+    *token = q.token;
+  }
+}
+
 /* Block per token. */
 __global__ void route_kernel(const float* all_logits, const float* bias, int32_t* all_ids, float* all_weights,
                              uint32_t n_experts, uint32_t k, float route_scale) {
@@ -2273,6 +2374,18 @@ extern "C" int ds41_v41_gather_row(const void* table, int format, const int32_t*
                                    uint32_t rank) {
   gather_row_kernel<<<1, kThreads>>>(table, format, tokens, index, out, rank);
   return launch_ok("gather row");
+}
+
+extern "C" int ds41_v41_top8_bias(const float* x, const float* bias, uint32_t n, int32_t* ids, float* logits) {
+  top8_bias_kernel<false><<<1, 256>>>(x, bias, n, ids, logits, nullptr, 1.0f, nullptr, nullptr);
+  return launch_ok("biased top8");
+}
+
+extern "C" int ds41_v41_propose_top8(const float* x, const float* bias, uint32_t n, int32_t* ids, float* logits,
+                                     const uint32_t* draw, float temperature, ds41_v41_proposal* proposal,
+                                     int32_t* token) {
+  top8_bias_kernel<true><<<1, 256>>>(x, bias, n, ids, logits, draw, temperature, proposal, token);
+  return launch_ok("top8 proposal");
 }
 
 extern "C" int ds41_v41_argmax_bias(const float* x, const float* bias, uint32_t n, int32_t* tokens, uint32_t index) {

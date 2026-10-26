@@ -15,6 +15,12 @@ add_test(NAME ds41.vision_prompt COMMAND ds41_vision_prompt_test)
 set_tests_properties(ds41.vision_prompt PROPERTIES LABELS "cpu;ds41;vision")
 
 if(ENGINE_ENABLE_HIP)
+  add_executable(ds41_draft_sampling_test draft_sampling_test.cpp)
+  target_link_libraries(ds41_draft_sampling_test PRIVATE gufo_deepseek_v41_flash gufo_core)
+  add_test(NAME ds41.draft_sampling COMMAND ds41_draft_sampling_test)
+  set_tests_properties(ds41.draft_sampling PROPERTIES
+    LABELS "gpu;hip;gfx1151;ds41;sampling" SKIP_RETURN_CODE 77)
+
   add_executable(ds41_mmq_typed_test mmq_typed_test.cpp)
   target_link_libraries(ds41_mmq_typed_test PRIVATE gufo_deepseek_v41_flash)
   add_test(NAME ds41.mmq_typed COMMAND ds41_mmq_typed_test)

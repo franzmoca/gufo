@@ -80,6 +80,12 @@ struct ds41_dspark_sampler {
                  const ds41_dspark_candidates* candidates) = nullptr;
   int (*verify)(void* ctx, uint32_t row, const float* logits,
                 uint32_t vocabulary_size, int draft) = nullptr;
+  // Device proposals: `draws` writes count 24-bit uniform draws (in row
+  // order) and returns q's temperature; `retain` stores the q a device draw
+  // used for row (masses in units of 2^-24), as `propose` would.
+  float (*draws)(void* ctx, uint32_t count, uint32_t* out) = nullptr;
+  void (*retain)(void* ctx, uint32_t row, const int32_t* ids,
+                 const uint32_t* masses, uint32_t size, int token) = nullptr;
   // Accept an already-computed target argmax only when it is also the exact
   // request selection. A false result must leave sampler state unchanged.
   bool (*try_accept_argmax)(void* ctx, int token) = nullptr;

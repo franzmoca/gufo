@@ -18,6 +18,7 @@
 
 struct ds41_decoder;
 struct ds41_engine;
+struct ds41_dspark_sampler;
 
 inline constexpr uint32_t DS41_DSPARK_STAGES = 3;
 inline constexpr uint32_t DS41_DSPARK_BLOCK = 5;
@@ -79,9 +80,12 @@ bool ds41_dspark_state_set_range(ds41_dspark_state* s, uint32_t start, uint32_t 
 /* Appends the main KV rows of the decoder's captured features of positions
  * [pos0, pos0 + rows); rows that do not continue the ring restart it. */
 bool ds41_dspark_inject(ds41_dspark_state* s, uint32_t pos0, uint32_t rows);
-/* Greedy draft of count tokens (1..DS41_DSPARK_BLOCK) after `anchor`, the
- * token at position ds41_dspark_state_end. Writes exactly count IDs. */
-bool ds41_dspark_draft(ds41_dspark_state* s, int anchor, int32_t* drafts, uint32_t count);
+/* Draft count tokens (1..DS41_DSPARK_BLOCK) after `anchor`, the token at
+ * position ds41_dspark_state_end. Writes exactly count IDs. An optional
+ * sampler proposes from post-Markov candidates (writing q's top probability
+ * per row to `top`, if given); otherwise each row takes its argmax. */
+bool ds41_dspark_draft(ds41_dspark_state* s, int anchor, int32_t* drafts, uint32_t count,
+                       const ds41_dspark_sampler* sampler = nullptr, float* top = nullptr);
 /* The last draft's target-head logits before the Markov bias, DS41_DSPARK_BLOCK rows (tests). */
 bool ds41_dspark_copy_logits(const ds41_engine* engine, float* out);
 /* Ring bytes, and their copy to/from host memory (with ring_start/end). */

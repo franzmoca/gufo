@@ -21,8 +21,9 @@ bounded per-span BPE memoization, and
 unrequested Markov proposals without changing the five-row transformer/head.
 E4's aggregate request throughput is roughly flat; its short-width draft stage
 is faster. Shortened head rows (E5) are retained after a 12-pair re-measurement with
-identical outputs (+0.3%). Stochastic proposals (E2) are not active production
-behavior.
+identical outputs (+0.3%). Stochastic proposals (E2) are retained after a
+12-pair re-measurement, with device-drawn q and verification cut at the first
+diffuse proposal (+3.9% sampled C1).
 E6 now keeps speculative index scoring on the serial FP32 reduction, with
 six-row/18.5K and seven-row/3K exact-logit checks and a stricter probe. Its
 32K throughput is roughly flat (about 1% lower in one pair); no speedup is

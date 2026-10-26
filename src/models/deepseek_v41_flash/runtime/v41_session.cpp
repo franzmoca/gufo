@@ -47,6 +47,12 @@ struct ds41_session {
    * numerics; speculative index scoring separately keeps its FP32 path. */
   static constexpr uint32_t kVerifyRows = DS41_V41_ATTN_SPLIT_TOKENS - 1;
   static constexpr float kAcceptPrior = 0.7f;
+  /* Sampled cycles draft the request's limit and verify the prefix whose
+   * proposals each had q >= this top probability. Diffuse rows (q's best
+   * below it) are accepted 19-51% of the time, against 85% for the rest, so
+   * verifying them costs more than it emits. The cut depends only on q,
+   * never on timing, so seeded replay is unaffected. */
+  static constexpr float kConfidentDraft = 0.6f;
   /* Plain steps before a one-draft cycle re-measures acceptance: from the
    * first, doubling while the policy keeps returning to plain steps. */
   static constexpr uint32_t kProbeFirst = 4, kProbeMax = 64;
@@ -316,14 +322,14 @@ int draw(const ds41_session* s, const ds41_dspark_sampler* sampler, const float*
  * it from the last kept row: a rejected proposal's own draw, or the bonus
  * after a fully accepted block. It emits the accepted proposals and that
  * token, which stays unevaluated, so a step emits each token after one
- * evaluation as a plain decode does. Proposals depend only on the prefix and
- * every row is drawn by the request's sampler (point mass), so the output
- * distribution is exactly the target's. */
+ * evaluation as a plain decode does. Sampled draft proposals retain their q
+ * for exact rejection/residual correction. Copies and greedy proposals use
+ * the point-mass path, drawing each row from the request's target sampler. */
 int dspark_step(const ds41_session_dspark_batch_item& item, char* error, size_t capacity) {
   ds41_session* s = item.session;
   const ds41_dspark_sampler* sampler = item.sampler;
   if (!s || !s->valid || !item.emitted || item.emitted_cap < 1 || !item.n_emitted ||
-      (sampler && !sampler->sample)) {
+      (sampler && (!sampler->sample || ((sampler->propose == nullptr) != (sampler->verify == nullptr))))) {
     set_error(error, capacity, "invalid DSpark step request");
     return 1;
   }
@@ -333,6 +339,8 @@ int dspark_step(const ds41_session_dspark_batch_item& item, char* error, size_t 
     return 1;
   }
   const uint32_t n_vocab = vocab(s);
+  // Device-drawn proposals retain q for exact p/q verification.
+  const bool stochastic = sampler && sampler->verify && sampler->draws && sampler->retain;
   int* out = item.emitted;
   const auto emit = [&](int token) { out[(*item.n_emitted)++] = token; };
   const auto ends = [&](int token) { return item.stop_at_eos && ds41_token_is_stop(s->engine, token); };
@@ -383,10 +391,17 @@ int dspark_step(const ds41_session_dspark_batch_item& item, char* error, size_t 
   bool plain = false;  // the drafter's policy chose a plain step
   if (copied == 0 && s->dspark) {
     const uint32_t limit = std::min({(uint32_t)DS41_DSPARK_BLOCK, item.max_draft_tokens, room});
-    tail = draft_width(s, limit);
+    tail = stochastic ? limit : draft_width(s, limit);
     plain = tail == 0;
-    if (tail != 0 && (ds41_dspark_state_end(s->dspark) != first || !ds41_dspark_draft(s->dspark, anchor, block + 1, tail)))
+    float top[DS41_DSPARK_BLOCK] = {};
+    if (tail != 0 && (ds41_dspark_state_end(s->dspark) != first ||
+                      !ds41_dspark_draft(s->dspark, anchor, block + 1, tail, sampler, top)))
       tail = 0;
+    if (stochastic) {
+      uint32_t confident = 0;
+      while (confident < tail && top[confident] >= ds41_session::kConfidentDraft) ++confident;
+      tail = confident;
+    }
   }
   const uint32_t m = tail + 1;
   float* rows = s->logits.data();
@@ -412,7 +427,9 @@ int dspark_step(const ds41_session_dspark_batch_item& item, char* error, size_t 
     const float* row = rows + (uint64_t)(i - 1) * n_vocab;
     positional += ds41_sample_argmax(row, n_vocab) == block[i];
     if (next >= 0) continue;
-    const int drawn = draw(s, sampler, row);
+    const int drawn = stochastic && copied == 0
+                          ? sampler->verify(sampler->ctx, i - 1, row, n_vocab, block[i])
+                          : draw(s, sampler, row);
     if (drawn != block[i] || ends(drawn) || block[i] == stop)
       next = drawn;
     else

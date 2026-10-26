@@ -1,0 +1,469 @@
+diff --git a/src/models/deepseek_v41_flash/dspark_sampler.hpp b/src/models/deepseek_v41_flash/dspark_sampler.hpp
+index f63fae8a..3d1eea5b 100644
+--- a/src/models/deepseek_v41_flash/dspark_sampler.hpp
++++ b/src/models/deepseek_v41_flash/dspark_sampler.hpp
+@@ -18,8 +18,8 @@ namespace gufo::models::deepseek_v41_flash {
+ ///
+ /// Sampled proposals use bounded q with exact rejection/residual correction.
+ /// Target filters and penalties always see the complete vocabulary and only
+-/// accepted history. Unfiltered requests and greedy-with-penalties use the
+-/// point-mass path: constructing dense target p costs more than it saves.
++/// accepted history. Greedy requests use point-mass proposals; sampled
++/// requests can draw from bounded q, including unfiltered target sampling.
+ /// A rejected draw becomes the next cycle's anchor. The owner records emitted
+ /// tokens and copies RNG state back after each cycle with `rng_state()`.
+ class DsparkSamplerBridge {
+@@ -31,6 +31,8 @@ public:
+               .accept = &Accept,
+               .propose = UseStochastic(sampler.config()) ? &Propose : nullptr,
+               .verify = UseStochastic(sampler.config()) ? &Verify : nullptr,
++              .draws = UseStochastic(sampler.config()) ? &Draws : nullptr,
++              .retain = UseStochastic(sampler.config()) ? &Retain : nullptr,
+               .try_accept_argmax = sampler.config().temperature == 0.F &&
+                                            !sampler.config().penalties_enabled()
+                                        ? &TryAcceptArgmax
+@@ -44,8 +46,7 @@ public:
+ 
+ private:
+   static bool UseStochastic(const sampling::SamplingConfig& config) {
+-    return config.uses_random_sampling() &&
+-           (config.top_p < 1.F || (config.top_k > 0 && config.top_k <= 256));
++    return config.uses_random_sampling();
+   }
+ 
+   struct Proposal {
+@@ -116,6 +117,33 @@ private:
+     return static_cast<int>(proposal.token);
+   }
+ 
++  static float Draws(void* ctx, uint32_t count, uint32_t* out) {
++    auto& self = *static_cast<DsparkSamplerBridge*>(ctx);
++    for (uint32_t i = 0; i < count; ++i)
++      out[i] = static_cast<std::uint32_t>(self.working_.Uniform() * (1U << 24));
++    return self.working_.config().temperature;
++  }
++
++  static void Retain(void* ctx, uint32_t row, const int32_t* ids,
++                     const uint32_t* masses, uint32_t size, int token) {
++    auto& self = *static_cast<DsparkSamplerBridge*>(ctx);
++    if (row >= self.proposals_.size() || size == 0 ||
++        size > DS41_DSPARK_CANDIDATES)
++      throw std::invalid_argument("invalid DSpark device proposal");
++    auto& proposal = self.proposals_[row];
++    proposal = {};
++    proposal.size = size;
++    proposal.token = static_cast<sampling::TokenId>(token);
++    for (uint32_t i = 0; i < size; ++i) {
++      if (ids[i] < 0)
++        throw std::invalid_argument("invalid DSpark proposal token");
++      proposal.ids[i] = static_cast<sampling::TokenId>(ids[i]);
++      proposal.probabilities[i] = static_cast<float>(masses[i]) / (1U << 24);
++      if (proposal.ids[i] == proposal.token && proposal.probability == 0)
++        proposal.probability = proposal.probabilities[i];
++    }
++  }
++
+   static int Verify(void* ctx, uint32_t row, const float* logits,
+                     uint32_t vocabulary_size, int draft) {
+     auto& self = *static_cast<DsparkSamplerBridge*>(ctx);
+diff --git a/src/models/deepseek_v41_flash/kernels/rocm/ds41_v41.h b/src/models/deepseek_v41_flash/kernels/rocm/ds41_v41.h
+index 769c5200..3bb4fd34 100644
+--- a/src/models/deepseek_v41_flash/kernels/rocm/ds41_v41.h
++++ b/src/models/deepseek_v41_flash/kernels/rocm/ds41_v41.h
+@@ -257,6 +257,21 @@ enum { DS41_V41_ROW_F32, DS41_V41_ROW_BF16, DS41_V41_ROW_F16 };
+ /* out[0:rank] = row tokens[index] of an F32, BF16 or F16 table (DS41_V41_ROW_*). */
+ int ds41_v41_gather_row(const void* table, int format, const int32_t* tokens, uint32_t index, float* out,
+                         uint32_t rank);
++/* Eight largest finite biased logits, descending; lowest token id on ties.
++ * Missing finite candidates have id -1 and logit -inf. */
++int ds41_v41_top8_bias(const float* x, const float* bias, uint32_t n, int32_t* ids, float* logits);
++/* A proposal drawn from the biased top eight: q in units of 2^-24 over
++ * ids[0, size), and the drawn token (-1 with fewer than eight finite). */
++struct ds41_v41_proposal {
++  int32_t ids[8];
++  uint32_t masses[8];
++  uint32_t size;
++  int32_t token;
++};
++/* Top eight plus a q draw, `*draw` in [0, 2^24); writes the token to
++ * `*token` (the next Markov row's input) and q to `*proposal`. */
++int ds41_v41_propose_top8(const float* x, const float* bias, uint32_t n, int32_t* ids, float* logits,
++                          const uint32_t* draw, float temperature, ds41_v41_proposal* proposal, int32_t* token);
+ /* tokens[index] = the first index of the largest finite x[v] + bias[v]
+  * (bias may be NULL), or -1 when none is finite. */
+ int ds41_v41_argmax_bias(const float* x, const float* bias, uint32_t n, int32_t* tokens, uint32_t index);
+diff --git a/src/models/deepseek_v41_flash/kernels/rocm/ds41_v41.hip.cpp b/src/models/deepseek_v41_flash/kernels/rocm/ds41_v41.hip.cpp
+index cb1a9fae..26ad611b 100644
+--- a/src/models/deepseek_v41_flash/kernels/rocm/ds41_v41.hip.cpp
++++ b/src/models/deepseek_v41_flash/kernels/rocm/ds41_v41.hip.cpp
+@@ -1853,6 +1853,107 @@ __global__ void __launch_bounds__(1024) argmax_bias_kernel(const float* x, const
+   if (threadIdx.x == 0) tokens[index] = best_i[0];
+ }
+ 
++/* Eight best finite biased logits, descending and then lowest token id.
++ * Each lane retains its local eight; global rounds merge those sorted lists. */
++template <bool kPropose>
++__global__ void __launch_bounds__(256) top8_bias_kernel(const float* x, const float* bias, uint32_t n,
++                                                       int32_t* ids, float* logits, const uint32_t* draw,
++                                                       float temperature, ds41_v41_proposal* proposal,
++                                                       int32_t* token) {
++  constexpr uint32_t K = 8;
++  float local_v[K];
++  int32_t local_i[K];
++#pragma unroll
++  for (uint32_t j = 0; j < K; ++j) {
++    local_v[j] = -INFINITY;
++    local_i[j] = -1;
++  }
++  for (uint32_t i = threadIdx.x; i < n; i += blockDim.x) {
++    const float v = x[i] + (bias ? bias[i] : 0.0f);
++    if (!isfinite(v)) continue;
++    uint32_t at = K;
++#pragma unroll
++    for (uint32_t j = 0; j < K; ++j)
++      if (at == K && (local_i[j] < 0 || v > local_v[j])) at = j;
++#pragma unroll
++    for (uint32_t j = K - 1; j > 0; --j)
++      if (j > at) {
++        local_v[j] = local_v[j - 1];
++        local_i[j] = local_i[j - 1];
++      }
++    if (at < K) {
++      local_v[at] = v;
++      local_i[at] = (int32_t)i;
++    }
++  }
++  __shared__ float best_v[256];
++  __shared__ int32_t best_i[256];
++  uint32_t cursor = 0;
++  for (uint32_t j = 0; j < K; ++j) {
++    best_v[threadIdx.x] = cursor < K ? local_v[cursor] : -INFINITY;
++    best_i[threadIdx.x] = cursor < K ? local_i[cursor] : -1;
++    __syncthreads();
++    for (uint32_t step = blockDim.x / 2; step; step >>= 1) {
++      if (threadIdx.x < step) {
++        const float ov = best_v[threadIdx.x + step];
++        const int32_t oi = best_i[threadIdx.x + step];
++        if (oi >= 0 && (best_i[threadIdx.x] < 0 || ov > best_v[threadIdx.x] ||
++                        (ov == best_v[threadIdx.x] && oi < best_i[threadIdx.x]))) {
++          best_v[threadIdx.x] = ov;
++          best_i[threadIdx.x] = oi;
++        }
++      }
++      __syncthreads();
++    }
++    const int32_t winner = best_i[0];
++    if (threadIdx.x == 0) {
++      ids[j] = winner;
++      logits[j] = best_v[0];
++    }
++    if (cursor < K && local_i[cursor] == winner) ++cursor;
++    __syncthreads();  // every lane consumes the winner before the next round
++  }
++  if constexpr (kPropose) {
++    if (threadIdx.x != 0) return;
++    /* q: the temperature softmax of the eight candidates in 24-bit units
++     * (the remainder joins the best), or a point mass on a concentrated best;
++     * the draw uses this exact q, which the host retains for verification. */
++    ds41_v41_proposal q{};
++    if (ids[K - 1] < 0) {
++      q.token = -1;
++      *proposal = q;
++      return;
++    }
++    float e[K], total = 0.0f;
++    for (uint32_t j = 0; j < K; ++j) total += e[j] = expf((logits[j] - logits[0]) / temperature);
++    constexpr uint32_t kUnits = 1u << 24;
++    if (e[0] / total >= 0.7f) {
++      q.size = 1;
++      q.ids[0] = q.token = ids[0];
++      q.masses[0] = kUnits;
++    } else {
++      uint32_t sum = 0;
++      for (uint32_t j = 0; j < K; ++j) {
++        q.ids[j] = ids[j];
++        sum += q.masses[j] = (uint32_t)floorf(e[j] / total * (float)kUnits);
++      }
++      q.masses[0] += kUnits - sum;
++      q.size = K;
++            uint32_t cumulative = 0;
++      q.token = ids[K - 1];
++      for (uint32_t j = 0; j < K; ++j) {
++        cumulative += q.masses[j];
++        if (*draw < cumulative) {
++          q.token = ids[j];
++          break;
++        }
++      }
++    }
++    *proposal = q;
++    *token = q.token;
++  }
++}
++
+ /* Block per token. */
+ __global__ void route_kernel(const float* all_logits, const float* bias, int32_t* all_ids, float* all_weights,
+                              uint32_t n_experts, uint32_t k, float route_scale) {
+@@ -2275,6 +2376,18 @@ extern "C" int ds41_v41_gather_row(const void* table, int format, const int32_t*
+   return launch_ok("gather row");
+ }
+ 
++extern "C" int ds41_v41_top8_bias(const float* x, const float* bias, uint32_t n, int32_t* ids, float* logits) {
++  top8_bias_kernel<false><<<1, 256>>>(x, bias, n, ids, logits, nullptr, 1.0f, nullptr, nullptr);
++  return launch_ok("biased top8");
++}
++
++extern "C" int ds41_v41_propose_top8(const float* x, const float* bias, uint32_t n, int32_t* ids, float* logits,
++                                     const uint32_t* draw, float temperature, ds41_v41_proposal* proposal,
++                                     int32_t* token) {
++  top8_bias_kernel<true><<<1, 256>>>(x, bias, n, ids, logits, draw, temperature, proposal, token);
++  return launch_ok("top8 proposal");
++}
++
+ extern "C" int ds41_v41_argmax_bias(const float* x, const float* bias, uint32_t n, int32_t* tokens, uint32_t index) {
+   argmax_bias_kernel<<<1, 1024>>>(x, bias, n, tokens, index);
+   return launch_ok("argmax");
+diff --git a/src/models/deepseek_v41_flash/runtime/model.h b/src/models/deepseek_v41_flash/runtime/model.h
+index d5f037f4..f4054785 100644
+--- a/src/models/deepseek_v41_flash/runtime/model.h
++++ b/src/models/deepseek_v41_flash/runtime/model.h
+@@ -80,6 +80,12 @@ struct ds41_dspark_sampler {
+                  const ds41_dspark_candidates* candidates) = nullptr;
+   int (*verify)(void* ctx, uint32_t row, const float* logits,
+                 uint32_t vocabulary_size, int draft) = nullptr;
++  // Device proposals: `draws` writes count 24-bit uniform draws (in row
++  // order) and returns q's temperature; `retain` stores the q a device draw
++  // used for row (masses in units of 2^-24), as `propose` would.
++  float (*draws)(void* ctx, uint32_t count, uint32_t* out) = nullptr;
++  void (*retain)(void* ctx, uint32_t row, const int32_t* ids,
++                 const uint32_t* masses, uint32_t size, int token) = nullptr;
+   // Accept an already-computed target argmax only when it is also the exact
+   // request selection. A false result must leave sampler state unchanged.
+   bool (*try_accept_argmax)(void* ctx, int token) = nullptr;
+diff --git a/src/models/deepseek_v41_flash/runtime/v41_dspark.cpp b/src/models/deepseek_v41_flash/runtime/v41_dspark.cpp
+index 8313893d..dc2f968a 100644
+--- a/src/models/deepseek_v41_flash/runtime/v41_dspark.cpp
++++ b/src/models/deepseek_v41_flash/runtime/v41_dspark.cpp
+@@ -69,7 +69,10 @@ struct ds41_dspark_scratch {
+   int32_t* route_ids = nullptr;
+   float *g = nullptr, *u = nullptr, *mid = nullptr, *down = nullptr, *sg = nullptr, *su = nullptr, *sm = nullptr;
+   float *sd = nullptr, *logits = nullptr, *markov_x = nullptr, *bias = nullptr;
+-  int32_t* tokens = nullptr;
++  int32_t *tokens = nullptr, *candidate_ids = nullptr;
++  float* candidate_logits = nullptr;
++  uint32_t* draws = nullptr;
++  ds41_v41_proposal* proposals = nullptr;
+   float *main_raw = nullptr, *main_x = nullptr, *main_kv = nullptr, *main_kvn = nullptr;
+   ~ds41_dspark_scratch() {
+     for (void* p : owned) (void)hipFree(p);
+@@ -119,7 +122,9 @@ bool alloc_scratch(ds41_dspark_scratch& s) {
+          s.alloc(&s.down, r * kRouted * kDim) && s.alloc(&s.sg, r * DS41_N_FF_EXP) &&
+          s.alloc(&s.su, r * DS41_N_FF_EXP) && s.alloc(&s.sm, r * DS41_N_FF_EXP) && s.alloc(&s.sd, r * kDim) &&
+          s.alloc(&s.logits, r * DS41_N_VOCAB) && s.alloc(&s.markov_x, DS41_DSPARK_MARKOV_RANK) &&
+-         s.alloc(&s.bias, DS41_N_VOCAB) && s.alloc(&s.tokens, r + 1) && s.alloc(&s.main_raw, f * kDim) &&
++         s.alloc(&s.bias, DS41_N_VOCAB) && s.alloc(&s.tokens, r + 1) && s.alloc(&s.candidate_ids, DS41_DSPARK_CANDIDATES) &&
++         s.alloc(&s.candidate_logits, DS41_DSPARK_CANDIDATES) &&
++         s.alloc(&s.draws, r) && s.alloc(&s.proposals, r) && s.alloc(&s.main_raw, f * kDim) &&
+          s.alloc(&s.main_x, f * kDim) && s.alloc(&s.main_kv, f * kHeadDim) && s.alloc(&s.main_kvn, f * kHeadDim);
+ }
+ 
+@@ -333,7 +338,8 @@ bool ds41_dspark_inject(ds41_dspark_state* s, uint32_t pos0, uint32_t rows) {
+   return hipDeviceSynchronize() == hipSuccess;
+ }
+ 
+-bool ds41_dspark_draft(ds41_dspark_state* s, int anchor, int32_t* drafts, uint32_t count) {
++bool ds41_dspark_draft(ds41_dspark_state* s, int anchor, int32_t* drafts, uint32_t count,
++                       const ds41_dspark_sampler* sampler) {
+   if (count == 0 || count > kRows) return false;
+   const ds41_dspark_model* m = s->engine->dspark;
+   ds41_dspark_scratch& sc = *m->scratch;
+@@ -351,7 +357,15 @@ bool ds41_dspark_draft(ds41_dspark_state* s, int anchor, int32_t* drafts, uint32
+   for (uint32_t t = 1; t < n; t++) tokens[t] = DS41_DSPARK_NOISE_TOKEN;
+   float one_hot[kRows * kHc] = {};
+   for (uint32_t t = 0; t < n; t++) one_hot[t * kHc] = 1.0f;
+-  bool ok = ds41_decoder_embed(s->decoder, tokens, n, s->host_rows.data()) &&
++  /* Sampled requests draw each proposal on the device from the biased top
++   * eight, so the next Markov row reads it without a host round trip; the
++   * request RNG supplies the draws up front and q returns once per cycle. */
++  const bool stochastic = sampler && sampler->draws && sampler->retain;
++  float temperature = 1.0f;
++  uint32_t draws[kRows] = {};
++  if (stochastic) temperature = sampler->draws(sampler->ctx, count, draws);
++  bool ok = (!stochastic || hipMemcpy(sc.draws, draws, count * sizeof(uint32_t), hipMemcpyHostToDevice) == hipSuccess) &&
++            ds41_decoder_embed(s->decoder, tokens, n, s->host_rows.data()) &&
+             hipMemcpy(sc.xn, s->host_rows.data(), (uint64_t)n * kDim * sizeof(float), hipMemcpyHostToDevice) ==
+                 hipSuccess &&
+             hipMemcpy(sc.pre[0], one_hot, sizeof(one_hot), hipMemcpyHostToDevice) == hipSuccess &&
+@@ -381,11 +395,25 @@ bool ds41_dspark_draft(ds41_dspark_state* s, int anchor, int32_t* drafts, uint32
+                                                             : DS41_V41_ROW_F32;
+   // Later Markov rows depend only on earlier proposals; unused suffixes
+   // cannot affect the requested prefix. Keep the five-row body/head intact.
+-  for (uint32_t i = 0; i < count && ok; i++)
++  for (uint32_t i = 0; i < count && ok; i++) {
++    const float* row = sc.logits + (uint64_t)i * DS41_N_VOCAB;
+     ok = ds41_v41_gather_row(m->markov_w1.p, format, sc.tokens, i, sc.markov_x, DS41_DSPARK_MARKOV_RANK) == 0 &&
+          lin(m->markov_w2, sc.markov_x, sc.bias, 1) &&
+-         ds41_v41_argmax_bias(sc.logits + (uint64_t)i * DS41_N_VOCAB, sc.bias, DS41_N_VOCAB, sc.tokens, i + 1) == 0;
+-  ok = ok && hipMemcpy(drafts, sc.tokens + 1, count * sizeof(int32_t), hipMemcpyDeviceToHost) == hipSuccess;
++         (stochastic ? ds41_v41_propose_top8(row, sc.bias, DS41_N_VOCAB, sc.candidate_ids, sc.candidate_logits,
++                                             sc.draws + i, temperature, sc.proposals + i, sc.tokens + i + 1)
++                     : ds41_v41_argmax_bias(row, sc.bias, DS41_N_VOCAB, sc.tokens, i + 1)) == 0;
++  }
++  if (stochastic) {
++    ds41_v41_proposal q[kRows];
++    ok = ok && hipMemcpy(q, sc.proposals, count * sizeof(q[0]), hipMemcpyDeviceToHost) == hipSuccess;
++    for (uint32_t i = 0; i < count && ok; i++) {
++      ok = q[i].token >= 0;  // fewer than eight finite candidates
++      if (ok) sampler->retain(sampler->ctx, i, q[i].ids, q[i].masses, q[i].size, q[i].token);
++      drafts[i] = q[i].token;
++    }
++  } else {
++    ok = ok && hipMemcpy(drafts, sc.tokens + 1, count * sizeof(int32_t), hipMemcpyDeviceToHost) == hipSuccess;
++  }
+   for (uint32_t i = 0; i < count && ok; i++) ok = drafts[i] >= 0;
+   return ok;
+ }
+diff --git a/src/models/deepseek_v41_flash/runtime/v41_dspark.h b/src/models/deepseek_v41_flash/runtime/v41_dspark.h
+index 5ef76f91..f6ba3c47 100644
+--- a/src/models/deepseek_v41_flash/runtime/v41_dspark.h
++++ b/src/models/deepseek_v41_flash/runtime/v41_dspark.h
+@@ -18,6 +18,7 @@
+ 
+ struct ds41_decoder;
+ struct ds41_engine;
++struct ds41_dspark_sampler;
+ 
+ inline constexpr uint32_t DS41_DSPARK_STAGES = 3;
+ inline constexpr uint32_t DS41_DSPARK_BLOCK = 5;
+@@ -79,9 +80,12 @@ bool ds41_dspark_state_set_range(ds41_dspark_state* s, uint32_t start, uint32_t
+ /* Appends the main KV rows of the decoder's captured features of positions
+  * [pos0, pos0 + rows); rows that do not continue the ring restart it. */
+ bool ds41_dspark_inject(ds41_dspark_state* s, uint32_t pos0, uint32_t rows);
+-/* Greedy draft of count tokens (1..DS41_DSPARK_BLOCK) after `anchor`, the
+- * token at position ds41_dspark_state_end. Writes exactly count IDs. */
+-bool ds41_dspark_draft(ds41_dspark_state* s, int anchor, int32_t* drafts, uint32_t count);
++/* Draft count tokens (1..DS41_DSPARK_BLOCK) after `anchor`, the token at
++ * position ds41_dspark_state_end. Writes exactly count IDs. An optional
++ * sampler proposes from post-Markov candidates; otherwise each row takes its
++ * argmax. */
++bool ds41_dspark_draft(ds41_dspark_state* s, int anchor, int32_t* drafts, uint32_t count,
++                       const ds41_dspark_sampler* sampler = nullptr);
+ /* The last draft's target-head logits before the Markov bias, DS41_DSPARK_BLOCK rows (tests). */
+ bool ds41_dspark_copy_logits(const ds41_engine* engine, float* out);
+ /* Ring bytes, and their copy to/from host memory (with ring_start/end). */
+diff --git a/src/models/deepseek_v41_flash/runtime/v41_session.cpp b/src/models/deepseek_v41_flash/runtime/v41_session.cpp
+index 008fea03..17818820 100644
+--- a/src/models/deepseek_v41_flash/runtime/v41_session.cpp
++++ b/src/models/deepseek_v41_flash/runtime/v41_session.cpp
+@@ -9,6 +9,7 @@
+  * evaluated position. Where the context repeats earlier tokens, a step
+  * verifies the tokens that followed them (prompt lookup) instead of a draft. */
+ #include <algorithm>
++#include <array>
+ #include <chrono>
+ #include <cstdio>
+ #include <cstdlib>
+@@ -57,9 +58,11 @@ struct ds41_session {
+    * gfx1151 measurements at 2K context and follow the session; estimates of
+    * positions past the drafted ones relax toward the prior, so longer drafts
+    * are retried. */
++  static constexpr std::array<float, DS41_DSPARK_BLOCK + 1> kCycleMs =
++      {42.4f, 69.6f, 83.6f, 95.5f, 106.1f, 117.2f};
+   struct {
+     float accept[DS41_DSPARK_BLOCK] = {kAcceptPrior, kAcceptPrior, kAcceptPrior, kAcceptPrior, kAcceptPrior};
+-    float cycle_ms[DS41_DSPARK_BLOCK + 1] = {42.4f, 69.6f, 83.6f, 95.5f, 106.1f, 117.2f};
++    std::array<float, DS41_DSPARK_BLOCK + 1> cycle_ms = kCycleMs;
+     uint32_t plain = 0;   // plain steps since the last cycle
+     uint32_t probe = kProbeFirst;  // plain steps before a one-draft cycle re-measures
+   } policy;
+@@ -276,15 +279,18 @@ namespace {
+ 
+ constexpr float kPolicyRate = 0.1f, kPolicyRelax = 0.02f;
+ 
+-uint32_t draft_width(ds41_session* s, uint32_t limit) {
++uint32_t draft_width(ds41_session* s, uint32_t limit, bool stochastic) {
+   auto& p = s->policy;
+   uint32_t best_w = 0;
+-  float best = 1.0f / p.cycle_ms[0], expected = 1.0f, reach = 1.0f;
++  // Proposal draws change RNG consumption: sampled widths use fixed costs,
++  // while deterministic acceptance estimates restart with each request.
++  const auto& costs = p.cycle_ms; (void)stochastic;
++  float best = 1.0f / costs[0], expected = 1.0f, reach = 1.0f;
+   for (uint32_t w = 1; w <= limit; w++) {
+     reach *= p.accept[w - 1];
+     expected += reach;
+-    if (expected / p.cycle_ms[w] > best) {
+-      best = expected / p.cycle_ms[w];
++    if (expected / costs[w] > best) {
++      best = expected / costs[w];
+       best_w = w;
+     }
+   }
+@@ -316,14 +322,14 @@ int draw(const ds41_session* s, const ds41_dspark_sampler* sampler, const float*
+  * it from the last kept row: a rejected proposal's own draw, or the bonus
+  * after a fully accepted block. It emits the accepted proposals and that
+  * token, which stays unevaluated, so a step emits each token after one
+- * evaluation as a plain decode does. Proposals depend only on the prefix and
+- * every row is drawn by the request's sampler (point mass), so the output
+- * distribution is exactly the target's. */
++ * evaluation as a plain decode does. Sampled draft proposals retain their q
++ * for exact rejection/residual correction. Copies and greedy proposals use
++ * the point-mass path, drawing each row from the request's target sampler. */
+ int dspark_step(const ds41_session_dspark_batch_item& item, char* error, size_t capacity) {
+   ds41_session* s = item.session;
+   const ds41_dspark_sampler* sampler = item.sampler;
+   if (!s || !s->valid || !item.emitted || item.emitted_cap < 1 || !item.n_emitted ||
+-      (sampler && !sampler->sample)) {
++      (sampler && (!sampler->sample || ((sampler->propose == nullptr) != (sampler->verify == nullptr))))) {
+     set_error(error, capacity, "invalid DSpark step request");
+     return 1;
+   }
+@@ -333,6 +339,7 @@ int dspark_step(const ds41_session_dspark_batch_item& item, char* error, size_t
+     return 1;
+   }
+   const uint32_t n_vocab = vocab(s);
++  const bool stochastic = sampler && sampler->propose;
+   int* out = item.emitted;
+   const auto emit = [&](int token) { out[(*item.n_emitted)++] = token; };
+   const auto ends = [&](int token) { return item.stop_at_eos && ds41_token_is_stop(s->engine, token); };
+@@ -383,9 +390,10 @@ int dspark_step(const ds41_session_dspark_batch_item& item, char* error, size_t
+   bool plain = false;  // the drafter's policy chose a plain step
+   if (copied == 0 && s->dspark) {
+     const uint32_t limit = std::min({(uint32_t)DS41_DSPARK_BLOCK, item.max_draft_tokens, room});
+-    tail = draft_width(s, limit);
++    tail = draft_width(s, limit, stochastic);
+     plain = tail == 0;
+-    if (tail != 0 && (ds41_dspark_state_end(s->dspark) != first || !ds41_dspark_draft(s->dspark, anchor, block + 1, tail)))
++    if (tail != 0 && (ds41_dspark_state_end(s->dspark) != first ||
++                      !ds41_dspark_draft(s->dspark, anchor, block + 1, tail, sampler)))
+       tail = 0;
+   }
+   const uint32_t m = tail + 1;
+@@ -412,7 +420,9 @@ int dspark_step(const ds41_session_dspark_batch_item& item, char* error, size_t
+     const float* row = rows + (uint64_t)(i - 1) * n_vocab;
+     positional += ds41_sample_argmax(row, n_vocab) == block[i];
+     if (next >= 0) continue;
+-    const int drawn = draw(s, sampler, row);
++    const int drawn = stochastic && copied == 0
++                          ? sampler->verify(sampler->ctx, i - 1, row, n_vocab, block[i])
++                          : draw(s, sampler, row);
+     if (drawn != block[i] || ends(drawn) || block[i] == stop)
+       next = drawn;
+     else
+diff --git a/tests/models/deepseek_v41_flash/CMakeLists.txt b/tests/models/deepseek_v41_flash/CMakeLists.txt
+index 699f6897..99758ae4 100644
+--- a/tests/models/deepseek_v41_flash/CMakeLists.txt
++++ b/tests/models/deepseek_v41_flash/CMakeLists.txt
+@@ -15,6 +15,12 @@ add_test(NAME ds41.vision_prompt COMMAND ds41_vision_prompt_test)
+ set_tests_properties(ds41.vision_prompt PROPERTIES LABELS "cpu;ds41;vision")
+ 
+ if(ENGINE_ENABLE_HIP)
++  add_executable(ds41_draft_sampling_test draft_sampling_test.cpp)
++  target_link_libraries(ds41_draft_sampling_test PRIVATE gufo_deepseek_v41_flash gufo_core)
++  add_test(NAME ds41.draft_sampling COMMAND ds41_draft_sampling_test)
++  set_tests_properties(ds41.draft_sampling PROPERTIES
++    LABELS "gpu;hip;gfx1151;ds41;sampling" SKIP_RETURN_CODE 77)
++
+   add_executable(ds41_mmq_typed_test mmq_typed_test.cpp)
+   target_link_libraries(ds41_mmq_typed_test PRIVATE gufo_deepseek_v41_flash)
+   add_test(NAME ds41.mmq_typed COMMAND ds41_mmq_typed_test)

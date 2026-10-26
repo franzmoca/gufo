@@ -18,8 +18,8 @@ namespace gufo::models::deepseek_v41_flash {
 ///
 /// Sampled proposals use bounded q with exact rejection/residual correction.
 /// Target filters and penalties always see the complete vocabulary and only
-/// accepted history. Unfiltered requests and greedy-with-penalties use the
-/// point-mass path: constructing dense target p costs more than it saves.
+/// accepted history. Greedy requests use point-mass proposals; sampled
+/// requests can draw from bounded q, including unfiltered target sampling.
 /// A rejected draw becomes the next cycle's anchor. The owner records emitted
 /// tokens and copies RNG state back after each cycle with `rng_state()`.
 class DsparkSamplerBridge {
@@ -31,6 +31,8 @@ public:
               .accept = &Accept,
               .propose = UseStochastic(sampler.config()) ? &Propose : nullptr,
               .verify = UseStochastic(sampler.config()) ? &Verify : nullptr,
+              .draws = UseStochastic(sampler.config()) ? &Draws : nullptr,
+              .retain = UseStochastic(sampler.config()) ? &Retain : nullptr,
               .try_accept_argmax = sampler.config().temperature == 0.F &&
                                            !sampler.config().penalties_enabled()
                                        ? &TryAcceptArgmax
@@ -44,8 +46,7 @@ public:
 
 private:
   static bool UseStochastic(const sampling::SamplingConfig& config) {
-    return config.uses_random_sampling() &&
-           (config.top_p < 1.F || (config.top_k > 0 && config.top_k <= 256));
+    return config.uses_random_sampling();
   }
 
   struct Proposal {
@@ -114,6 +115,33 @@ private:
       }
     }
     return static_cast<int>(proposal.token);
+  }
+
+  static float Draws(void* ctx, uint32_t count, uint32_t* out) {
+    auto& self = *static_cast<DsparkSamplerBridge*>(ctx);
+    for (uint32_t i = 0; i < count; ++i)
+      out[i] = static_cast<std::uint32_t>(self.working_.Uniform() * (1U << 24));
+    return self.working_.config().temperature;
+  }
+
+  static void Retain(void* ctx, uint32_t row, const int32_t* ids,
+                     const uint32_t* masses, uint32_t size, int token) {
+    auto& self = *static_cast<DsparkSamplerBridge*>(ctx);
+    if (row >= self.proposals_.size() || size == 0 ||
+        size > DS41_DSPARK_CANDIDATES)
+      throw std::invalid_argument("invalid DSpark device proposal");
+    auto& proposal = self.proposals_[row];
+    proposal = {};
+    proposal.size = size;
+    proposal.token = static_cast<sampling::TokenId>(token);
+    for (uint32_t i = 0; i < size; ++i) {
+      if (ids[i] < 0)
+        throw std::invalid_argument("invalid DSpark proposal token");
+      proposal.ids[i] = static_cast<sampling::TokenId>(ids[i]);
+      proposal.probabilities[i] = static_cast<float>(masses[i]) / (1U << 24);
+      if (proposal.ids[i] == proposal.token && proposal.probability == 0)
+        proposal.probability = proposal.probabilities[i];
+    }
   }
 
   static int Verify(void* ctx, uint32_t row, const float* logits,

@@ -144,7 +144,7 @@ top-k 45.34. Loading and depth preparation are excluded. The older backlog's
 end-to-end cost estimate.
 
 
-### E2: stochastic DSpark proposals (rejected)
+### E2: stochastic DSpark proposals (retained, with confidence-gated verification)
 
 Connected the existing bounded-q proposal and exact p/q residual callbacks to
 post-Markov top-eight candidates, enabled unfiltered sampled requests, and
@@ -165,6 +165,53 @@ is rejected for insufficient consistent gain; production retains point-mass
 sampling. No broad functional matrix was run. The patch, settings, focused
 check and every measured run are retained in
 [the E2 record](artifacts/2026-10-26-sampled-proposals/summary.json).
+
+**Re-measurement.** The single-seed trial was too small: the prose candidate
+drafted 18 tokens in total, so its 22% acceptance is noise. Against
+`8d51885a`, four prompts (coding, prose, explanation, Rust) × seeds
+73/11/29, 256 sampled tokens and temperature/top-p 1.0, the original
+prototype gains +1.8% geometric mean with its fixed costs and +2.5% with
+adaptive costs. Pooled acceptance per drafted token rises from 0.656 to
+0.675/0.686. Moving the draw to the GPU (below) adds nothing on its own
+(+0.7% fixed, +2.4% adaptive). Per-pair SD is 5–10%, because each variant
+samples a different continuation.
+
+Forced five-token drafts (8 runs, 680 cycles) show where the cost goes.
+Proposals with q's best probability ≥ 0.7 (point masses) are accepted 85% of
+the time; diffuse ones only 19–51%, by confidence bin. A verified row costs
+11–13 ms (spec-bench: 41.8 ms for one row, 99.1 ms for six), about 30% of
+a plain step. That is routed-expert traffic: about 73% of the 1 → 4 row
+increase, with `expert_group` near the measured read ceiling. Verifying
+diffuse rows therefore costs more than it emits. An offline replay of the
+traces with the measured costs ranks "draft the limit, verify up to the first
+proposal with q's best < 0.6" above every fixed width (32.1 vs 27.9 tok/s
+simulated over all cycles).
+
+Retained design:
+
+- Sampled requests (any temperature > 0, now including top-p 1.0) draft
+  from the post-Markov top eight. The draw happens on the device: the host
+  draws one 24-bit uniform per row up front from the request RNG, and one
+  kernel per row finds the biased top eight, forms q (the temperature
+  softmax in 2^-24 units, or a point mass when its best is ≥ 0.7) and writes
+  the proposal where the next Markov row reads it. q returns once per cycle,
+  and the bridge verifies against exactly that q with p/q acceptance and
+  residual correction.
+- Sampled cycles draft the request's limit and verify the prefix of
+  proposals whose q best is ≥ 0.6; a cut at zero becomes a plain step.
+  Widths depend only on q, never on timing, so seeded replay is
+  deterministic. Repeated runs and the gated/fused builds give identical
+  hashes. Greedy requests keep the cost-based controller.
+
+Same 12-pair protocol: +3.85% geometric mean against `8d51885a` (9/12
+faster; coding +4.7%, explanation +4.2%, prose +4.6%, Rust +1.9%). Pooled
+29.76 → 30.93 tok/s; accepted per verification 1.80 → 2.07. The focused
+check covers the biased top eight with ties/non-finites, device q (softmax,
+mass sum, draw boundaries and the point-mass rule) and exact recovery of the
+target distribution through Retain/Verify over 30,000 seeds, including
+tokens outside q. Each configuration's runs, the traces, the replay
+simulator and the variant patches are in
+[the re-measurement](artifacts/2026-10-26-sampled-proposals/remeasure/summary.txt).
 
 
 ### E3: request-local BPE piece memoization (retained)
