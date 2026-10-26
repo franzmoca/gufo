@@ -100,12 +100,19 @@ struct ds41_dspark_state {
 namespace {
 
 bool lin(const ds41_dspark_tensor& t, const float* x, float* out, uint32_t n) {
+  // The drafter's Q4_K rows take the FP32 GEMV (one weight read for every row)
+  // rather than Q8_1 MMVQ; the target keeps its own dispatch.
+  if (t.type == DS41_TENSOR_Q4_K && n <= DS41_V41_GEMV_MAX_TOKENS && t.k % 256 == 0)
+    return ds41_v41_gemv((int)t.type, t.p, x, out, (uint32_t)t.rows, t.k, 0,
+                         t.k <= 2304 ? 2 : (t.k <= 5120 && t.rows <= 4096 ? 4 : 8), n, t.k, (uint32_t)t.rows) == 0;
   return ds41_v41_linear(t.type, t.p, (uint32_t)t.rows, t.k, x, out, n);
 }
 
 const float* f32(const ds41_dspark_tensor& t) { return static_cast<const float*>(t.p); }
 
-bool gemv_type(uint32_t type) { return type == DS41_TENSOR_Q5_K || type == DS41_TENSOR_Q8_0; }
+bool gemv_type(uint32_t type) {
+  return type == DS41_TENSOR_Q5_K || type == DS41_TENSOR_Q8_0 || type == DS41_TENSOR_Q4_K;
+}
 
 bool alloc_scratch(ds41_dspark_scratch& s) {
   const uint64_t r = kRows;

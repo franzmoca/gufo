@@ -417,3 +417,25 @@ coding +4.2%, explanation +3.7%, prose +8.2%, Rust +5.0%). Pooled
 30.10 → 31.73 tok/s. Runs and checks are in
 [the E9 record](artifacts/2026-10-26-fused-markov/summary.txt).
 
+
+### E10: FP32-activation GEMV for the drafter's Q4_K projections (retained)
+
+The drafter's dense Q4_K projections (q_a/q_b, KV, output a/b and the shared
+expert, about 87 MiB per stage) ran through Q8_1 MMVQ for five rows. They
+now take the target's K-quant GEMV with a Q4_K format: FP32 activations,
+each weight decoded once for every row. The target model's own dispatch is
+unchanged.
+
+The operator test adds Q4_K against the reference dequantizer: relative error
+≤ 5.2e-7 for 1,280/5,120-wide rows at every slice count. Two to eight
+tokens, pair and fused SwiGLU are bit-identical to single-token passes. Median
+sampled draft time falls 10.0 → 9.3 ms. Draft arithmetic changes, so sampled
+continuations differ; greedy outputs remain identical.
+
+12-pair sampled protocol against E9: +0.41% geometric mean (7/12 faster,
+per-pair SD 7.4%), pooled 31.89 → 32.14 tok/s. Acceptance per draft
+0.682 → 0.693, positional 0.804 → 0.800; no acceptance loss is visible. The
+end-to-end gain is within noise. Retained for the measured draft-stage
+saving. Runs and checks are in
+[the E10 record](artifacts/2026-10-26-draft-q4k-gemv/summary.txt).
+

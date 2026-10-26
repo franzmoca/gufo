@@ -27,6 +27,8 @@ constexpr TypeCase kTypes[] = {
     {"Q8_0", 8, 34, 32},    {"Q5_K", 13, 176, 256},   {"IQ1_S", 19, 50, 256},
     {"IQ1_M", 29, 56, 256}, {"IQ2_XXS", 16, 66, 256}, {"IQ2_S", 22, 82, 256},
 };
+// The DSpark drafter's dense projections: GEMV cases only.
+constexpr TypeCase kQ4K = {"Q4_K", 12, 144, 256};
 
 uint16_t RandomHalf(std::mt19937& rng) {
   // Normal f16 scales in [2^-8, 2^-5) with a random sign.
@@ -57,8 +59,8 @@ std::vector<uint8_t> RandomBlocks(const TypeCase& t, std::size_t blocks,
       }
     } else {
       put(0, RandomHalf(rng));
-      if (t.type == 13)
-        put(2, RandomHalf(rng));  // Q5_K dmin
+      if (t.type == 13 || t.type == 12)
+        put(2, RandomHalf(rng));  // Q4_K/Q5_K dmin
     }
   }
   return data;
@@ -141,6 +143,8 @@ bool GemvCase(const TypeCase& t, int M, int K, int rows_per_x,
   for (int r = 0; r < M; ++r) {
     if (t.type == 13)
       gufo::quant::DequantizeQ5_K(w.data() + r * row_bytes, row.data(), K);
+    else if (t.type == 12)
+      gufo::quant::DequantizeQ4_K(w.data() + r * row_bytes, row.data(), K);
     else
       gufo::quant::DequantizeQ8_0(w.data() + r * row_bytes, row.data(), K);
     const float* xr =
@@ -719,7 +723,7 @@ bool SwigluCase(const TypeCase& t, int M, int K, std::mt19937& rng) {
   constexpr int kExperts = 8;
   constexpr int kSlots = 6;
   constexpr float kLimit = 7.0f;
-  const bool experts = t.type != 8 && t.type != 13;
+  const bool experts = t.type != 8 && t.type != 13 && t.type != 12;
   const int matrices = experts ? kExperts : 1;
   const int slots = experts ? kSlots : 1;
   const std::size_t expert_bytes =
@@ -1006,6 +1010,11 @@ int main(int argc, char** argv) {
     std::printf("%s\n", ok ? "PASS" : "FAIL");
     return ok ? 0 : 1;
   }
+  ok = GemvCase(kQ4K, 300, 1280, 0, rng) && ok;
+  ok = GemvCase(kQ4K, 256, 5120, 0, rng) && ok;
+  for (const int n : {2, 3, 5, 8})
+    ok = GemvTokensCase(kQ4K, 300, 1280, 0, n, rng) && ok;
+  ok = SwigluCase(kQ4K, 2304, 5120, rng) && ok;
   for (const auto& t : kTypes) {
     ok = DenseCase(t, 256, 37, 1024, rng) && ok;
     ok = DenseCase(t, 384, 130, 2304, rng) && ok;

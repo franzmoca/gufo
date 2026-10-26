@@ -1,0 +1,24 @@
+coding   seed= 11 rep=0   35.73 ->   40.82 (+14.3%)  acc 0.72->0.86 same=False
+explain  seed= 11 rep=0   27.97 ->   29.96 ( +7.1%)  acc 0.57->0.64 same=False
+prose    seed= 11 rep=0   26.05 ->   24.36 ( -6.5%)  acc 0.56->0.46 same=False
+rust     seed= 11 rep=0   39.98 ->   36.08 ( -9.8%)  acc 0.82->0.73 same=False
+coding   seed= 29 rep=0   42.70 ->   42.42 ( -0.7%)  acc 0.86->0.85 same=True
+explain  seed= 29 rep=0   28.56 ->   29.23 ( +2.3%)  acc 0.60->0.61 same=False
+prose    seed= 29 rep=0   24.04 ->   25.62 ( +6.6%)  acc 0.48->0.55 same=False
+rust     seed= 29 rep=0   41.37 ->   38.00 ( -8.1%)  acc 0.83->0.79 same=False
+coding   seed= 73 rep=0   41.99 ->   38.98 ( -7.2%)  acc 0.86->0.79 same=False
+explain  seed= 73 rep=0   28.18 ->   29.83 ( +5.9%)  acc 0.58->0.62 same=False
+prose    seed= 73 rep=0   25.41 ->   25.85 ( +1.7%)  acc 0.51->0.57 same=False
+rust     seed= 73 rep=0   37.98 ->   38.81 ( +2.2%)  acc 0.80->0.81 same=False
+coding   geomean +1.77% n=3
+explain  geomean +5.07% n=3
+prose    geomean +0.46% n=3
+rust     geomean -5.39% n=3
+ALL geomean +0.41%  wins 7/12  sd 7.4%
+head: pooled tok/s 31.89 acceptance 0.682 drafted 2802 accepted/step 2.07
+q4k: pooled tok/s 32.14 acceptance 0.693 drafted 2736 accepted/step 2.06
+
+Pooled positional acceptance head 0.8041 -> q4k 0.8001; acceptance 0.682 -> 0.693;
+drafted per verification 3.039 -> 2.974.
+Median traced draft (sampled coding seed 73): 10.0 -> 9.3 ms.
+Greedy single runs (256 tokens): outputs identical (coding fbae66d033e31, prose 5535911f2ce64).

@@ -1,0 +1,21 @@
+gemv  Q4_K     M=300 K=1280 rows_per_x=0 slices=1 rel_err=2.43e-07
+gemv  Q4_K     M=300 K=1280 rows_per_x=0 slices=2 rel_err=1.95e-07
+gemv  Q4_K     M=300 K=1280 rows_per_x=0 slices=4 rel_err=1.37e-07
+gemv  Q4_K     M=300 K=1280 rows_per_x=0 slices=8 rel_err=1.26e-07
+gemv  Q4_K     M=256 K=5120 rows_per_x=0 slices=1 rel_err=5.18e-07
+gemv  Q4_K     M=256 K=5120 rows_per_x=0 slices=2 rel_err=3.72e-07
+gemv  Q4_K     M=256 K=5120 rows_per_x=0 slices=4 rel_err=2.97e-07
+gemv  Q4_K     M=256 K=5120 rows_per_x=0 slices=8 rel_err=2.13e-07
+gemv tokens Q4_K     M=300 K=1280 rows_per_x=0 n=2 slices=1 plain=exact pair/swiglu=exact
+gemv tokens Q4_K     M=300 K=1280 rows_per_x=0 n=2 slices=4 plain=exact pair/swiglu=exact
+gemv tokens Q4_K     M=300 K=1280 rows_per_x=0 n=2 slices=8 plain=exact pair/swiglu=exact
+gemv tokens Q4_K     M=300 K=1280 rows_per_x=0 n=3 slices=1 plain=exact pair/swiglu=exact
+gemv tokens Q4_K     M=300 K=1280 rows_per_x=0 n=3 slices=4 plain=exact pair/swiglu=exact
+gemv tokens Q4_K     M=300 K=1280 rows_per_x=0 n=3 slices=8 plain=exact pair/swiglu=exact
+gemv tokens Q4_K     M=300 K=1280 rows_per_x=0 n=5 slices=1 plain=exact pair/swiglu=exact
+gemv tokens Q4_K     M=300 K=1280 rows_per_x=0 n=5 slices=4 plain=exact pair/swiglu=exact
+gemv tokens Q4_K     M=300 K=1280 rows_per_x=0 n=5 slices=8 plain=exact pair/swiglu=exact
+gemv tokens Q4_K     M=300 K=1280 rows_per_x=0 n=8 slices=1 plain=exact pair/swiglu=exact
+gemv tokens Q4_K     M=300 K=1280 rows_per_x=0 n=8 slices=4 plain=exact pair/swiglu=exact
+gemv tokens Q4_K     M=300 K=1280 rows_per_x=0 n=8 slices=8 plain=exact pair/swiglu=exact
+swiglu Q4_K     M=2304 K=5120 rel_err=5.23e-09
