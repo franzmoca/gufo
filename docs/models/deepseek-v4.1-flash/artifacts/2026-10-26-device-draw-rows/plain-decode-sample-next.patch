@@ -1,0 +1,201 @@
+diff --git a/src/cli/prompt/prompt.cpp b/src/cli/prompt/prompt.cpp
+index c934a8d7..b5c157f6 100644
+--- a/src/cli/prompt/prompt.cpp
++++ b/src/cli/prompt/prompt.cpp
+@@ -532,13 +532,19 @@ int GenerateDeepSeekResponse(const PromptOptions& opt,
+     }
+   } else {
+     for (; generated < opt.max_tokens; ++generated) {
+-      const auto logits = session.CopyLogits(&error);
+-      if (logits.empty()) {
++      int token = -1;
++      if constexpr (requires { session.SampleNext(sampler, &error); }) {
++        token = session.SampleNext(sampler, &error);
++      } else {
++        const auto logits = session.CopyLogits(&error);
++        if (!logits.empty())
++          token = static_cast<int>(sampler.Sample(logits));
++      }
++      if (token < 0) {
+         std::cerr << "\n"
+                   << Ds::kName << " token selection failed: " << error << '\n';
+         return 1;
+       }
+-      const int token = static_cast<int>(sampler.Sample(logits));
+       if (model->IsStopToken(token)) {
+         break;
+       }
+diff --git a/src/cli/serve/inference_backend.cpp b/src/cli/serve/inference_backend.cpp
+index e9d8f2f6..c6f8d35d 100644
+--- a/src/cli/serve/inference_backend.cpp
++++ b/src/cli/serve/inference_backend.cpp
+@@ -2217,11 +2217,20 @@ public:
+     }
+     if (token < 0) {
+       std::string error;
+-      const auto logits = deepseek.session().CopyLogits(&error);
+-      if (logits.empty()) {
+-        throw std::runtime_error("DeepSeek token selection failed: " + error);
++      if constexpr (requires {
++                      deepseek.session().SampleNext(sampler, &error);
++                    }) {
++        // Device draws for plain softmax sampling (DeepSeek V4.1).
++        token = deepseek.session().SampleNext(sampler, &error);
++        if (token < 0)
++          throw std::runtime_error("DeepSeek token selection failed: " + error);
++      } else {
++        const auto logits = deepseek.session().CopyLogits(&error);
++        if (logits.empty()) {
++          throw std::runtime_error("DeepSeek token selection failed: " + error);
++        }
++        token = static_cast<int>(sampler.Sample(logits));
+       }
+-      token = static_cast<int>(sampler.Sample(logits));
+     }
+     if (deepseek.stop_at_eos() && model_->IsStopToken(token)) {
+       return {
+@@ -2255,10 +2264,20 @@ public:
+     if (deepseek.position() >= max_context_)
+       return TextDecodeSelection{.stop = true, .piece = {}};
+     std::string error;
+-    const auto logits = deepseek.session().CopyLogits(&error);
+-    if (logits.empty())
+-      throw std::runtime_error("DeepSeek token preview failed: " + error);
+-    const auto token = sampler.Sample(logits);
++    sampling::TokenId token = 0;
++    if constexpr (requires {
++                    deepseek.session().SampleNext(sampler, &error);
++                  }) {
++      const int drawn = deepseek.session().SampleNext(sampler, &error);
++      if (drawn < 0)
++        throw std::runtime_error("DeepSeek token preview failed: " + error);
++      token = static_cast<sampling::TokenId>(drawn);
++    } else {
++      const auto logits = deepseek.session().CopyLogits(&error);
++      if (logits.empty())
++        throw std::runtime_error("DeepSeek token preview failed: " + error);
++      token = sampler.Sample(logits);
++    }
+     return TextDecodeSelection{
+         .stop = deepseek.stop_at_eos() &&
+                 model_->IsStopToken(static_cast<int>(token)),
+diff --git a/src/models/deepseek_v41_flash/dspark_sampler.hpp b/src/models/deepseek_v41_flash/dspark_sampler.hpp
+index 10c85f3b..8afe24d8 100644
+--- a/src/models/deepseek_v41_flash/dspark_sampler.hpp
++++ b/src/models/deepseek_v41_flash/dspark_sampler.hpp
+@@ -14,6 +14,19 @@
+ 
+ namespace gufo::models::deepseek_v41_flash {
+ 
++/// The temperature while `sampler`'s next selection is plain softmax sampling
++/// over the whole vocabulary: what SamplerState::Sample draws through its
++/// unfiltered linear distribution, with no filter, penalty, grammar, forced
++/// or deferred token. Otherwise 0; such draws stay on the host.
++inline float DeviceSamplingTemperature(const sampling::SamplerState& sampler) {
++  const auto& config = sampler.config();
++  const bool plain =
++      config.temperature > 0.F && config.top_k == 0 && config.top_p == 1.F &&
++      config.min_p <= 0.F && !config.penalties_enabled() &&
++      !sampler.NeedsConstraintMask() && !sampler.SaveDrawState().pending;
++  return plain ? config.temperature : 0.F;
++}
++
+ /// Lends a request sampler to DSpark cycles.
+ ///
+ /// Sampled proposals use bounded q with exact rejection/residual correction.
+@@ -198,16 +211,9 @@ private:
+         static_cast<sampling::TokenId>(token));
+   }
+ 
+-  // Plain softmax sampling: what SamplerState::Sample draws through its
+-  // unfiltered linear distribution, with no state that can change the row.
+   static float DeviceTemperature(void* ctx) {
+-    const auto& working = static_cast<DsparkSamplerBridge*>(ctx)->working_;
+-    const auto& config = working.config();
+-    const bool plain =
+-        config.temperature > 0.F && config.top_k == 0 && config.top_p == 1.F &&
+-        config.min_p <= 0.F && !config.penalties_enabled() &&
+-        !working.NeedsConstraintMask() && !working.SaveDrawState().pending;
+-    return plain ? config.temperature : 0.F;
++    return DeviceSamplingTemperature(
++        static_cast<DsparkSamplerBridge*>(ctx)->working_);
+   }
+ 
+   static double DrawUniform(void* ctx) {
+diff --git a/src/models/deepseek_v41_flash/engine.cpp b/src/models/deepseek_v41_flash/engine.cpp
+index 79ff4de5..e16bd937 100644
+--- a/src/models/deepseek_v41_flash/engine.cpp
++++ b/src/models/deepseek_v41_flash/engine.cpp
+@@ -7,6 +7,7 @@
+ #include <stdexcept>
+ #include <utility>
+ 
++#include "src/models/deepseek_v41_flash/dspark_sampler.hpp"
+ #include "src/models/deepseek_v41_flash/runtime/model_data_internal.h"
+ 
+ namespace gufo::models::deepseek_v41_flash {
+@@ -435,6 +436,21 @@ std::vector<float> Session::CopyLogits(std::string* error_msg) const {
+   return logits;
+ }
+ 
++int Session::SampleNext(sampling::SamplerState& sampler,
++                        std::string* error_msg) const {
++  if (const float temperature = DeviceSamplingTemperature(sampler);
++      temperature > 0.F) {
++    const auto state = sampler.rng_state();
++    const int token =
++        ds41_session_sample_device(session_, temperature, sampler.Uniform());
++    if (token >= 0)
++      return token;
++    sampler.SetRngState(state);
++  }
++  const auto logits = CopyLogits(error_msg);
++  return logits.empty() ? -1 : static_cast<int>(sampler.Sample(logits));
++}
++
+ std::unique_ptr<SessionSnapshot> Session::SaveSnapshot(
+     std::string* error_msg) const {
+   ds41_session_snapshot snapshot{};
+diff --git a/src/models/deepseek_v41_flash/engine.hpp b/src/models/deepseek_v41_flash/engine.hpp
+index 3d106e7c..d8496700 100644
+--- a/src/models/deepseek_v41_flash/engine.hpp
++++ b/src/models/deepseek_v41_flash/engine.hpp
+@@ -14,6 +14,10 @@
+ #include "src/models/deepseek_v41_flash/chat_template.hpp"
+ #include "src/models/deepseek_v41_flash/runtime/model.h"
+ 
++namespace gufo::sampling {
++class SamplerState;
++}  // namespace gufo::sampling
++
+ namespace gufo::models::deepseek_v41_flash {
+ 
+ struct ModelOptions {
+@@ -177,6 +181,11 @@ public:
+     bool operator==(const DsparkStats&) const = default;
+   };
+   [[nodiscard]] DsparkStats DsparkStatistics() const;
++  /// The next token as sampler.Sample(CopyLogits()) draws it, without
++  /// accepting it: on the device for plain softmax sampling of resident
++  /// logits, else on the host. Returns -1 on failure.
++  [[nodiscard]] int SampleNext(sampling::SamplerState& sampler,
++                               std::string* error_msg) const;
+   [[nodiscard]] std::vector<float> CopyLogits(
+       std::string* error_msg = nullptr) const;
+   [[nodiscard]] std::unique_ptr<SessionSnapshot> SaveSnapshot(
+diff --git a/src/models/deepseek_v41_flash/runtime/model.h b/src/models/deepseek_v41_flash/runtime/model.h
+index d0d66a0a..1f8ae7a1 100644
+--- a/src/models/deepseek_v41_flash/runtime/model.h
++++ b/src/models/deepseek_v41_flash/runtime/model.h
+@@ -314,6 +314,11 @@ bool ds41_session_valid(const ds41_session* session);
+ /* The evaluated tokens and the frontier logits (vocabulary floats). */
+ const int* ds41_session_tokens(const ds41_session* session);
+ float* ds41_session_logits(ds41_session* session);
++/* The next token from the session's current logits drawn on the device, as
++ * plain softmax sampling at `temperature` with uniform u draws it on the host
++ * (ds41_v41_sample_rows); -1 when those logits are not resident on the device
++ * or the host would draw without a uniform, leaving the draw to the host. */
++int ds41_session_sample_device(ds41_session* session, float temperature, double u);
+ /* Starts a restore of `n` tokens: invalidates the session and returns its
+  * token buffer, resized to n, for the caller to fill with the logits. */
+ int* ds41_session_begin_restore(ds41_session* session, uint32_t n);
