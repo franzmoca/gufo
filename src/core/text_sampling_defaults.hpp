@@ -8,7 +8,12 @@
 
 namespace gufo::sampling {
 
-enum class TextModelPreset { kUnspecified, kQwen38, kDeepSeekV4Flash };
+enum class TextModelPreset {
+  kUnspecified,
+  kQwen38,
+  kDeepSeekV4Flash,
+  kDeepSeekV41Flash
+};
 
 // Presence is independent of value: an explicit zero must override a preset.
 struct SamplingOverrides {
@@ -29,8 +34,9 @@ struct SamplingOverrides {
 };
 
 inline TextModelPreset TextPreset(const core::ModelConfig& config) {
-  // V4.1 Flash is served with the V4 Flash defaults (deepseek-recipe).
-  if (config.architecture == "deepseek4" || config.architecture == "deepseek41")
+  if (config.architecture == "deepseek41")
+    return TextModelPreset::kDeepSeekV41Flash;
+  if (config.architecture == "deepseek4")
     return TextModelPreset::kDeepSeekV4Flash;
   if (config.architecture == "qwen4exp" ||
       (config.num_layers == 64 && config.hidden_size == 5120 &&
@@ -49,7 +55,7 @@ inline SamplingConfig ResolveTextSampling(TextModelPreset model,
   // Presets change sampling controls, never the caller's output grammar.
   result.constraint = configured.constraint;
   result.temperature = 1.0F;
-  result.top_p = 0.95F;
+  result.top_p = model == TextModelPreset::kDeepSeekV41Flash ? 1.0F : 0.95F;
   if (model == TextModelPreset::kQwen38) {
     result.top_k = 20;
     if (!thinking.value_or(true)) {
