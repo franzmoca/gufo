@@ -1,0 +1,3 @@
+2026-10-26 18:22:12 [INFO] [engine] Fingerprinted DeepSeek V4.1 artifact (gguf-sha256-v1, 1008 tensors) in 49883 ms
+2026-10-26 18:22:14 [INFO] [engine] Fingerprinted DSpark artifact (gguf-sha256-v1, 79 tensors) in 2070 ms
+2026-10-26 18:22:14 [INFO] [loader] event=load_completed kind=text elapsed_ms=70781 model=DeepSeek V4.1 Flash sessions=1 context_tokens=1048576 speculative=dspark draft_limit=model disk_cache=enabled rss_mib=973 host_available_mib=1868 gpu_device_used_mib=125844 gpu_device_total_mib=126976

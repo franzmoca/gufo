@@ -1,0 +1,12 @@
+cold: ready 19.0s MemAvailable 1.75 GiB
+cold-t1       avail 1.39 GiB prompt 11930 cached 0 reuse none restore 0.0 ms ttft 12059 ms drafts 35/50
+cold-t2       avail 1.54 GiB prompt 12008 cached 11993 reuse live restore 0.0 ms ttft 237 ms drafts 6/8
+term: ready 19.0s MemAvailable 1.68 GiB
+term-t1       avail 1.65 GiB prompt 11930 cached 11927 reuse disk restore 13.9 ms ttft 110 ms drafts 35/50
+term-t2       avail 1.57 GiB prompt 12008 cached 11993 reuse live restore 0.0 ms ttft 321 ms drafts 6/8
+kill: ready 19.0s MemAvailable 1.75 GiB
+kill-t1       avail 1.71 GiB prompt 11930 cached 11927 reuse disk restore 12.9 ms ttft 110 ms drafts 35/50
+kill-t2       avail 1.62 GiB prompt 12008 cached 11993 reuse live restore 0.0 ms ttft 330 ms drafts 6/8
+uncached-t1   avail 1.33 GiB prompt 11930 cached 0 reuse none restore 0.0 ms ttft 11803 ms drafts 35/50
+uncached-t2   avail 1.45 GiB prompt 12008 cached 0 reuse none restore 0.0 ms ttft 11269 ms drafts 6/11
+identical replies: False {'cold': [True, False], 'term': [True, False], 'kill': [True, False], 'uncached': [True, True]}

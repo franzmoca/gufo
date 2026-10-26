@@ -22,7 +22,7 @@ only the Engram lookup tables are read from the SSD, one row per token.
   copies of earlier context are verified up to 15 tokens at a time.
   Greedy output is identical to plain decoding.
 - **Image input** through the DeepSeek V4.1 vision tower (opt-in `--mmproj`).
-- Gufo's serving features: every text endpoint, the RAM prompt cache, and
+- Gufo's serving features: every text endpoint, RAM and disk prompt caching, and
   concurrent sessions verified jointly.
 
 Benchmarks: [docs/models/deepseek-v4.1-flash/BENCHMARKS.md](docs/models/deepseek-v4.1-flash/BENCHMARKS.md).
@@ -140,6 +140,10 @@ server exits. Useful options:
   Concurrent DSpark requests are verified in one joint batch.
 - `--think off|on|auto` sets the default reasoning mode for requests that do
   not choose one.
+- `--cache-disk DIR` keeps prompt-cache checkpoints on disk across restarts:
+  a 12K-token conversation restored after a restart in 13 ms (110 ms to the
+  first token instead of 12 s). The first start with it hashes the weights
+  (about 50 s); later starts reuse the hashes.
 
 ## Performance
 
