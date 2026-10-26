@@ -42,6 +42,7 @@ attention 0.36 s, mHC state passes and the routed sum 0.26 s, BF16 matmuls
 | 5 | Remaining prefill glue | Prefill | Medium | ~30-60 ms per 2K batch | Medium |
 | 7 | Small-batch evaluation cost | Prefill | Medium | ~15 ms per short follow-up turn | Low |
 | 9 | Stable-boundary prefill pass on every chat request | Serving prefill | Medium | ~65 ms per chat request (~3% of a 2K turn) | Medium |
+| 10 | Multi-user DSpark draft sizing | Serving decode | Medium | Mixed DSpark at C4-C8 from 51-56 toward or above AR (60-78 tok/s) | Medium |
 
 ### 1. Routed-expert GEMV with wide-load weight tiles
 
@@ -178,6 +179,17 @@ next turn can need it, or snapshot row N−3 from inside the final pass
 (compressor accumulators, SWA windows and bounded-replay rows make this
 invasive). The policy lives in shared code (`src/cache/retention.cpp`), so
 a change must keep other models' reuse.
+
+### 10. Multi-user DSpark draft sizing
+
+Concurrent DSpark sessions verify jointly in batches of up to 16 rows (E14),
+but every session still drafts a full block (anchor + 5 rows). From four
+users a step needs two or more joint evaluations, and mixed text decodes
+slower than plain AR: 51.22 / 52.42 / 55.93 tok/s at C4 / C6 / C8 against
+60.35 / 71.33 / 78.46 for AR (card sweep). Repetitive text still gains
+(71-72 tok/s) because most drafts are accepted. Fit the drafts into one
+16-row pass, about 16 / users − 1 rows per session as Gemma does, and fall
+back to AR rows when that leaves no draft.
 
 ## Memory
 
