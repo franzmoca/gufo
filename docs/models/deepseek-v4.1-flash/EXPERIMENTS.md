@@ -165,3 +165,23 @@ is rejected for insufficient consistent gain; production retains point-mass
 sampling. No broad functional matrix was run. The patch, settings, focused
 check and every measured run are retained in
 [the E2 record](artifacts/2026-10-26-sampled-proposals/summary.json).
+
+
+### E3: request-local BPE piece memoization (retained)
+
+Cache previously tokenized pretokenizer pieces within each immutable text span,
+following the existing Qwen/Gemma memoization approach. The cache holds at most
+512 pieces of 2–64 bytes and activates for spans of at least 1,024 bytes. Borrowed
+keys never outlive the input; cached IDs never cross a call or vocabulary reload.
+Pretokenization, merges, Unicode handling and special-token handling are unchanged.
+
+Every emitted token-ID line matches the baseline for eight copies each of a
+repository documentation/source corpus with multilingual and combining-character
+text, and a corpus of 12,000 unique identifiers. The metadata-only probe workload
+(including process setup and ID printing) takes 172.53 → 149.19 ms for the first
+corpus and 113.53 → 108.22 ms for the second. These are single-run host component
+measurements; no model throughput or TTFT gain is claimed. Production and probe
+builds and the C++ format check pass. No GPU model sweep was needed for unchanged
+token IDs. Settings, corpus descriptions and output hashes are retained in
+[the E3 record](artifacts/2026-10-26-tokenizer-memo/summary.json); raw inputs and
+outputs are under `/tmp/gufo-ds41-tokenizer` on the measurement host.

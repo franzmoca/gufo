@@ -6,6 +6,9 @@
 
 #include <memory>
 #include <stdexcept>
+#include <string_view>
+#include <unordered_map>
+#include <vector>
 
 #include "native_internal.h"
 
@@ -453,6 +456,11 @@ static bool joyai_cjk_at(const char *s, uint64_t len, uint64_t pos) {
 static void bpe_tokenize_text(const ds41_vocab *vocab, const char *text, token_vec *out) {
     const uint64_t len = strlen(text);
     uint64_t pos = 0;
+    // Borrow keys only for this immutable text span. Token IDs depend on the
+    // vocabulary, so the memo never outlives the call or crosses model reloads.
+    std::unordered_map<std::string_view, std::vector<int>> pieces;
+    constexpr size_t kMemoPieces = 512;
+    if (len >= 1024) pieces.reserve(kMemoPieces);
 
     while (pos < len) {
         uint64_t start = pos;
@@ -516,10 +524,19 @@ static void bpe_tokenize_text(const ds41_vocab *vocab, const char *text, token_v
         }
 
         if (pos == start) pos = next_utf8_char(text, len, pos);
-        bpe_emit_piece(
-            vocab,
-            ds41_string_view{text + start, pos - start},
-            out);
+        const std::string_view piece(text + start, pos - start);
+        const bool memoize = len >= 1024 && piece.size() > 1 && piece.size() <= 64;
+        if (memoize) {
+            const auto found = pieces.find(piece);
+            if (found != pieces.end()) {
+                for (int token : found->second) token_vec_push(out, token);
+                continue;
+            }
+        }
+        const int first = out->len;
+        bpe_emit_piece(vocab, ds41_string_view{piece.data(), piece.size()}, out);
+        if (memoize && pieces.size() < kMemoPieces && out->len > first)
+            pieces.emplace(piece, std::vector<int>(out->v + first, out->v + out->len));
     }
 }
 
