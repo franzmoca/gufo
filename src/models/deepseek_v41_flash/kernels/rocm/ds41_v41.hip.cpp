@@ -865,6 +865,27 @@ __global__ void __launch_bounds__(kCollapseThreads)
   }
 }
 
+/* DSpark acceptance head for one row: sigmoid(w . [collapse(h, pre); m] + b),
+ * the collapse before its RMSNorm and m the row's Markov W1 input. */
+__global__ void __launch_bounds__(kCollapseThreads)
+    dspark_confidence_kernel(const float* h, const float* pre, const float* markov_x, const float* w,
+                             const float* bias, uint32_t dim, uint32_t rank, uint32_t row, float* out) {
+  const float* ht = h + (uint64_t)row * 4 * dim;
+  float p[4];
+#pragma unroll
+  for (uint32_t c = 0; c < 4; c++) p[c] = pre[row * 4 + c];
+  float acc = 0.0f;
+  for (uint32_t i = threadIdx.x; i < dim; i += blockDim.x) {
+    float v = 0.0f;
+#pragma unroll
+    for (uint32_t c = 0; c < 4; c++) v += p[c] * ht[(uint64_t)c * dim + i];
+    acc += v * w[i];
+  }
+  for (uint32_t i = threadIdx.x; i < rank; i += blockDim.x) acc += markov_x[i] * w[dim + i];
+  acc = block_sum(acc);
+  if (threadIdx.x == 0) out[row] = 1.0f / (1.0f + expf(-(acc + (bias ? *bias : 0.0f))));
+}
+
 /* hc_expand of y = extra + sum_r x[r]. */
 __global__ void hc_expand_sum_kernel(const float* x, const float* extra, uint32_t rows, const float* residual,
                                      const float* post, const float* comb, float* out, uint32_t hc, uint32_t dim) {
@@ -2293,6 +2314,13 @@ extern "C" int ds41_v41_hc_collapse_norm(const float* h, const float* pre, const
   if (n == 0) return 0;
   hc_collapse_norm_kernel<4><<<n, kCollapseThreads>>>(h, pre, weight, out, dim, eps);
   return launch_ok("hc collapse norm");
+}
+
+extern "C" int ds41_v41_dspark_confidence(const float* h, const float* pre, const float* markov_x, const float* w,
+                                          const float* bias, uint32_t dim, uint32_t rank, uint32_t row,
+                                          float* out) {
+  dspark_confidence_kernel<<<1, kCollapseThreads>>>(h, pre, markov_x, w, bias, dim, rank, row, out);
+  return launch_ok("dspark confidence");
 }
 
 extern "C" int ds41_v41_hc_expand(const float* y, const float* residual, const float* post, const float* comb,

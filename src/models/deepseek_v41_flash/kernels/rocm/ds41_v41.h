@@ -274,6 +274,11 @@ struct ds41_v41_proposal {
  * (or top-eight proposal, as ds41_v41_propose_top8) of logits + W2 x over n
  * tokens, lowest token on ties. Scratch: DS41_V41_MARKOV_CANDIDATES each. */
 #define DS41_V41_MARKOV_CANDIDATES (256 * 8)
+/* DSpark acceptance probability of draft row `row` into out[row]: the head
+ * collapse of h (4 streams, mix `pre`) before RMSNorm and that row's Markov
+ * W1 input of `rank`, against F32 weights w[dim + rank] and optional bias. */
+int ds41_v41_dspark_confidence(const float* h, const float* pre, const float* markov_x, const float* w,
+                               const float* bias, uint32_t dim, uint32_t rank, uint32_t row, float* out);
 int ds41_v41_markov_argmax(const uint16_t* w2, const float* x, const float* logits, uint32_t n, float* cand_v,
                            int32_t* cand_i, int32_t* tokens, uint32_t index);
 int ds41_v41_markov_propose(const uint16_t* w2, const float* x, const float* logits, uint32_t n, float* cand_v,

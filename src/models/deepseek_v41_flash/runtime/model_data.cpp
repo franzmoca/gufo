@@ -1528,6 +1528,15 @@ static void dspark_open(ds41_dspark_model* d, const char* path) {
        DS41_DSPARK_MARKOV_RANK, DS41_N_VOCAB);
   bind(&d->markov_w2, lucebox ? "dflash.dspark.markov.w2" : "markov_w2.weight",
        DS41_DSPARK_MARKOV_RANK, DS41_N_VOCAB);
+  // The acceptance head is optional: hidden then Markov-rank inputs.
+  if (const ds41_tensor* w = model_find_tensor(
+          m, lucebox ? "dflash.dspark.confidence.weight"
+                     : "confidence_head.proj.weight")) {
+    dspark_bind(d, &d->confidence, w, dim + DS41_DSPARK_MARKOV_RANK, 1);
+    if (const ds41_tensor* b =
+            model_find_tensor(m, "dflash.dspark.confidence.bias"))
+      dspark_bind(d, &d->confidence_bias, b, 1, 1);
+  }
 }
 
 /* =========================================================================

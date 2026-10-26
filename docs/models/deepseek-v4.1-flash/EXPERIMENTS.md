@@ -439,3 +439,32 @@ end-to-end gain is within noise. Retained for the measured draft-stage
 saving. Runs and checks are in
 [the E10 record](artifacts/2026-10-26-draft-q4k-gemv/summary.txt).
 
+
+### E11: learned DSpark acceptance head for greedy cycles (retained for greedy)
+
+The drafter GGUF ships a learned acceptance head
+(`dflash.dspark.confidence.weight`, 5,376 F16, zero bias): the sigmoid of
+one dot product over the pre-norm head collapse of each draft row and that
+row's Markov W1 input. It is now bound when present and evaluated per row by a
+one-block kernel after the Markov gather. With the head, greedy cycles draft
+the request's limit and verify the prefix whose rows each predict acceptance
+≥ 0.5, replacing the timing policy's one width per cycle. Sampled cycles keep
+the q-top ≥ 0.6 cut and do not run the head.
+
+Forced width-5 traces (two seeds sampled plus greedy, four prompts) predict
+acceptance far better than q-top: AUC 0.856 vs 0.735 sampled, 0.877 greedy
+(q-top carries no greedy information), and the head is close to calibrated
+(the 0.5 bin is accepted 64%, the 0.9 bin 99%). Simulated with measured verify
+costs, the cut-at-first-row-below-τ policy is flat for τ 0.45–0.55 and matches
+cumulative-survival and expected-rate rules within 1%.
+
+The operator test compares the kernel with an FP64 reference, with and
+without bias. Greedy outputs are identical to E10. Greedy protocol (four
+prompts × three repetitions): +13.07% geometric mean, 12/12 faster
+(coding +9.9%, explanation +22.9%, prose +9.3%, Rust +10.7%); pooled
+29.87 → 33.94 tok/s, acceptance 0.757 → 0.798. The same cut on sampled cycles
+measured −1.0% (3/11 faster, per-pair SD 4.9%): 13% fewer verified rows,
+but accepted tokens per step fell 2.00 → 1.92. It is not used there, and
+sampled outputs remain byte-identical to E10. Functional sampling, batch,
+stop and tool suites pass with DSpark. Runs, traces and the simulator are in
+[the E11 record](artifacts/2026-10-26-learned-confidence/summary.txt).

@@ -73,6 +73,7 @@ struct ds41_dspark_scratch {
   float* candidate_logits = nullptr;
   uint32_t* draws = nullptr;
   float* markov_v = nullptr;
+  float* confidence = nullptr;
   int32_t* markov_i = nullptr;
   ds41_v41_proposal* proposals = nullptr;
   float *main_raw = nullptr, *main_x = nullptr, *main_kv = nullptr, *main_kvn = nullptr;
@@ -134,6 +135,7 @@ bool alloc_scratch(ds41_dspark_scratch& s) {
          s.alloc(&s.bias, DS41_N_VOCAB) && s.alloc(&s.tokens, r + 1) && s.alloc(&s.candidate_ids, DS41_DSPARK_CANDIDATES) &&
          s.alloc(&s.candidate_logits, DS41_DSPARK_CANDIDATES) &&
          s.alloc(&s.draws, r) && s.alloc(&s.proposals, r) && s.alloc(&s.markov_v, DS41_V41_MARKOV_CANDIDATES) &&
+         s.alloc(&s.confidence, r) &&
          s.alloc(&s.markov_i, DS41_V41_MARKOV_CANDIDATES) && s.alloc(&s.main_raw, f * kDim) &&
          s.alloc(&s.main_x, f * kDim) && s.alloc(&s.main_kv, f * kHeadDim) && s.alloc(&s.main_kvn, f * kHeadDim);
 }
@@ -210,6 +212,12 @@ bool hc_mix(const ds41_dspark_tensor& fn, const ds41_dspark_tensor& scale, const
 }
 
 }  // namespace
+
+bool ds41_dspark_has_confidence(const ds41_dspark_model* m) {
+  return m && m->confidence.p && m->confidence.type == DS41_TENSOR_F32 &&
+         m->confidence.k == kDim + DS41_DSPARK_MARKOV_RANK &&
+         (!m->confidence_bias.p || m->confidence_bias.type == DS41_TENSOR_F32);
+}
 
 bool ds41_dspark_upload(ds41_dspark_model* m) {
   /* F16 tensors widen to F32, except the Markov tables, which their gather and matmul read as F16. */
@@ -349,7 +357,7 @@ bool ds41_dspark_inject(ds41_dspark_state* s, uint32_t pos0, uint32_t rows) {
 }
 
 bool ds41_dspark_draft(ds41_dspark_state* s, int anchor, int32_t* drafts, uint32_t count,
-                       const ds41_dspark_sampler* sampler, float* top) {
+                       const ds41_dspark_sampler* sampler, float* top, float* confidence) {
   if (count == 0 || count > kRows) return false;
   const ds41_dspark_model* m = s->engine->dspark;
   ds41_dspark_scratch& sc = *m->scratch;
@@ -405,13 +413,18 @@ bool ds41_dspark_draft(ds41_dspark_state* s, int anchor, int32_t* drafts, uint32
                                                             : DS41_V41_ROW_F32;
   // Later Markov rows depend only on earlier proposals; unused suffixes
   // cannot affect the requested prefix. The transformer body keeps all five rows.
+  // The learned acceptance head reads each row's Markov input.
+  const bool learned = confidence && ds41_dspark_has_confidence(m);
   // FP16 W2 rows of the rank fuse the projection into the selection.
   const bool fused = m->markov_w2.type == DS41_TENSOR_F16 && m->markov_w2.k == DS41_DSPARK_MARKOV_RANK &&
                      m->markov_w2.rows == DS41_N_VOCAB && (uintptr_t)m->markov_w2.p % 16 == 0;
   const auto* w2 = static_cast<const uint16_t*>(m->markov_w2.p);
   for (uint32_t i = 0; i < count && ok; i++) {
     const float* row = sc.logits + (uint64_t)i * DS41_N_VOCAB;
-    ok = ds41_v41_gather_row(m->markov_w1.p, format, sc.tokens, i, sc.markov_x, DS41_DSPARK_MARKOV_RANK) == 0;
+    ok = ds41_v41_gather_row(m->markov_w1.p, format, sc.tokens, i, sc.markov_x, DS41_DSPARK_MARKOV_RANK) == 0 &&
+         (!learned || ds41_v41_dspark_confidence(sc.h, sc.pre[0], sc.markov_x, f32(m->confidence),
+                                                 m->confidence_bias.p ? f32(m->confidence_bias) : nullptr, kDim,
+                                                 DS41_DSPARK_MARKOV_RANK, i, sc.confidence) == 0);
     if (!ok) break;
     if (fused)
       ok = (stochastic ? ds41_v41_markov_propose(w2, sc.markov_x, row, DS41_N_VOCAB, sc.markov_v, sc.markov_i,
@@ -437,6 +450,10 @@ bool ds41_dspark_draft(ds41_dspark_state* s, int anchor, int32_t* drafts, uint32
   } else {
     ok = ok && hipMemcpy(drafts, sc.tokens + 1, count * sizeof(int32_t), hipMemcpyDeviceToHost) == hipSuccess;
   }
+  if (confidence)
+    ok = ok && (learned ? hipMemcpy(confidence, sc.confidence, count * sizeof(float), hipMemcpyDeviceToHost) ==
+                              hipSuccess
+                        : (std::fill_n(confidence, count, -1.0f), true));
   for (uint32_t i = 0; i < count && ok; i++) ok = drafts[i] >= 0;
   return ok;
 }
