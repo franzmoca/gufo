@@ -1,0 +1,248 @@
+{
+  "total_ms": 1621.793334,
+  "busy_ms": 1621.793334,
+  "wall_ms": 1645.07137,
+  "dispatches": 1320,
+  "invalid_dispatches": 0,
+  "kernels": {
+    "mul_mat_q<(ggml_type)8, 80, false, true, false>": {
+      "calls": 80,
+      "ms": 32.930365,
+      "shape": "blocks=20x26x1 wg=128"
+    },
+    "q_kv_norm_kernel": {
+      "calls": 40,
+      "ms": 2.259997,
+      "shape": "blocks=2x2048x1 wg=256"
+    },
+    "dense_q5k_f16_kernel<true>": {
+      "calls": 242,
+      "ms": 496.980262,
+      "shape": "blocks=100x16x1 wg=512"
+    },
+    "rope_table_kernel": {
+      "calls": 40,
+      "ms": 0.069443,
+      "shape": "blocks=256x1x1 wg=256"
+    },
+    "attention_f16_kernel": {
+      "calls": 40,
+      "ms": 180.585052,
+      "shape": "blocks=2048x2x1 wg=256"
+    },
+    "__amd_rocclr_copyBuffer": {
+      "calls": 48,
+      "ms": 0.171048,
+      "shape": "blocks=20x1x1 wg=512"
+    },
+    "hc_state_pass_kernel<true>": {
+      "calls": 40,
+      "ms": 46.647793,
+      "shape": "blocks=1024x1x1 wg=640"
+    },
+    "hc_sinkhorn_kernel<4u>": {
+      "calls": 79,
+      "ms": 0.266297,
+      "shape": "blocks=3x1x1 wg=64"
+    },
+    "matmul_bf16_wmma_kernel": {
+      "calls": 61,
+      "ms": 55.06747,
+      "shape": "blocks=64x32x1 wg=256"
+    },
+    "route_kernel": {
+      "calls": 40,
+      "ms": 2.094909,
+      "shape": "blocks=2048x1x1 wg=256"
+    },
+    "routed_counts_kernel": {
+      "calls": 38,
+      "ms": 0.345454,
+      "shape": "blocks=384x1x1 wg=256"
+    },
+    "routed_bounds_kernel": {
+      "calls": 38,
+      "ms": 0.21553,
+      "shape": "blocks=1x1x1 wg=512"
+    },
+    "routed_rows_kernel": {
+      "calls": 38,
+      "ms": 0.619832,
+      "shape": "blocks=384x1x1 wg=256"
+    },
+    "to_half_kernel": {
+      "calls": 40,
+      "ms": 4.368424,
+      "shape": "blocks=10240x1x1 wg=256"
+    },
+    "routed_f16_kernel<19, true, true>": {
+      "calls": 26,
+      "ms": 308.401676,
+      "shape": "blocks=18x576x1 wg=256"
+    },
+    "routed_f16_kernel<19, false, false>": {
+      "calls": 27,
+      "ms": 148.433738,
+      "shape": "blocks=20x576x1 wg=256"
+    },
+    "swiglu_kernel": {
+      "calls": 40,
+      "ms": 4.869212,
+      "shape": "blocks=18432x1x1 wg=256"
+    },
+    "hc_expand_sum_kernel": {
+      "calls": 40,
+      "ms": 60.81545,
+      "shape": "blocks=20x2048x1 wg=256"
+    },
+    "engram_gate_kernel": {
+      "calls": 2,
+      "ms": 4.968657,
+      "shape": "blocks=4x2048x1 wg=1024"
+    },
+    "hc_state_pass_kernel<false>": {
+      "calls": 40,
+      "ms": 27.839689,
+      "shape": "blocks=1024x1x1 wg=640"
+    },
+    "quantize_mmq_q8_1<(mmq_q8_1_ds_layout)0>": {
+      "calls": 41,
+      "ms": 8.663571,
+      "shape": "blocks=12288x5x1 wg=128"
+    },
+    "compress_pool_kernel": {
+      "calls": 3,
+      "ms": 5.121426,
+      "shape": "blocks=2x1x1 wg=256"
+    },
+    "rms_norm_kernel": {
+      "calls": 10,
+      "ms": 0.079083,
+      "shape": "blocks=1908x1x1 wg=256"
+    },
+    "rope_tail_kernel": {
+      "calls": 18,
+      "ms": 0.654356,
+      "shape": "blocks=8192x1x1 wg=256"
+    },
+    "fp4_fake_quant_kernel": {
+      "calls": 18,
+      "ms": 7.553357,
+      "shape": "blocks=1024x1x1 wg=256"
+    },
+    "matmul_bf16_vec8_kernel": {
+      "calls": 8,
+      "ms": 2.093148,
+      "shape": "blocks=4x256x1 wg=256"
+    },
+    "indexer_score_wmma_kernel": {
+      "calls": 8,
+      "ms": 3.812239,
+      "shape": "blocks=8x128x1 wg=256"
+    },
+    "topk_kernel": {
+      "calls": 9,
+      "ms": 1.053376,
+      "shape": "blocks=2048x1x1 wg=1024"
+    },
+    "routed_f16_kernel<19, true, false>": {
+      "calls": 2,
+      "ms": 20.608475,
+      "shape": "blocks=18x259x1 wg=256"
+    },
+    "__amd_rocclr_fillBufferAligned": {
+      "calls": 4,
+      "ms": 0.0066,
+      "shape": "blocks=12x1x1 wg=256"
+    },
+    "mm_ids_helper<1>": {
+      "calls": 2,
+      "ms": 1.060336,
+      "shape": "blocks=384x1x1 wg=32"
+    },
+    "mul_mat_q<(ggml_type)22, 16, false, true, false>": {
+      "calls": 2,
+      "ms": 5.94139,
+      "shape": "blocks=80x1x384 wg=128"
+    },
+    "mul_mat_q<(ggml_type)22, 32, false, true, false>": {
+      "calls": 2,
+      "ms": 3.47282,
+      "shape": "blocks=80x3x384 wg=128"
+    },
+    "mul_mat_q<(ggml_type)22, 64, false, true, false>": {
+      "calls": 2,
+      "ms": 17.908253,
+      "shape": "blocks=80x18x384 wg=128"
+    },
+    "routed_f16_kernel<16, true, true>": {
+      "calls": 9,
+      "ms": 83.699966,
+      "shape": "blocks=18x576x1 wg=256"
+    },
+    "routed_f16_kernel<16, false, false>": {
+      "calls": 2,
+      "ms": 12.589537,
+      "shape": "blocks=20x576x1 wg=256"
+    },
+    "routed_f16_kernel<29, false, false>": {
+      "calls": 9,
+      "ms": 45.838709,
+      "shape": "blocks=20x576x1 wg=256"
+    },
+    "dense_q5k_f16_kernel<false>": {
+      "calls": 120,
+      "ms": 12.215196,
+      "shape": "blocks=128x1x1 wg=512"
+    },
+    "clear_mask_kernel": {
+      "calls": 1,
+      "ms": 0.00128,
+      "shape": "blocks=1x140x1 wg=256"
+    },
+    "block_max_kernel": {
+      "calls": 1,
+      "ms": 0.002881,
+      "shape": "blocks=1x140x1 wg=256"
+    },
+    "fill_mask_kernel": {
+      "calls": 1,
+      "ms": 0.00592,
+      "shape": "blocks=8x140x1 wg=256"
+    },
+    "apply_mask_kernel": {
+      "calls": 4,
+      "ms": 0.02072,
+      "shape": "blocks=8x140x1 wg=256"
+    },
+    "routed_f16_kernel<29, true, true>": {
+      "calls": 3,
+      "ms": 9.472974,
+      "shape": "blocks=18x397x1 wg=256"
+    },
+    "hc_collapse_norm_kernel<4u>": {
+      "calls": 1,
+      "ms": 0.0046,
+      "shape": "blocks=1x1x1 wg=1024"
+    },
+    "gemv_kernel<13, 8, false, 1>": {
+      "calls": 1,
+      "ms": 1.962823,
+      "shape": "blocks=32320x1x1 wg=256"
+    }
+  },
+  "stages": {
+    "other": {
+      "calls": 1268,
+      "ms": 1621.615686
+    },
+    "runtime: copy": {
+      "calls": 48,
+      "ms": 0.171048
+    },
+    "runtime: fill": {
+      "calls": 4,
+      "ms": 0.0066
+    }
+  }
+}

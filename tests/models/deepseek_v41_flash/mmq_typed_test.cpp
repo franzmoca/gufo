@@ -823,6 +823,59 @@ bool DenseF16Case(const TypeCase& t, int M, int N, int K, int groups,
 /* The FP16 matrix-core routed kernel against the FP32-activation expert
  * GEMV: the gate/up pair with its SwiGLU store (FP16 or FP32) over
  * per-token inputs, and the single projection over per-slot inputs. */
+bool RoutedPlanCase(const std::vector<int32_t>& ids, uint32_t experts) {
+  const uint32_t slots = (uint32_t)ids.size();
+  const uint32_t tile_cap = slots / 64 + experts;
+  std::vector<int32_t> want(slots + experts + 1 + tile_cap, -9);
+  int32_t* bounds = want.data() + slots;
+  int32_t* tiles = bounds + experts + 1;
+  const uint32_t live = ds41_v41_routed_plan(ids.data(), slots, experts,
+                                             want.data(), bounds, tiles);
+  std::fill(tiles + live, tiles + tile_cap, -1);
+  // Independently check stable grouping against a standard-library sort.
+  std::vector<int32_t> sorted;
+  for (uint32_t i = 0; i < slots; i++)
+    if (ids[i] >= 0 && (uint32_t)ids[i] < experts)
+      sorted.push_back((int32_t)i);
+  std::stable_sort(sorted.begin(), sorted.end(),
+                   [&](int32_t a, int32_t b) { return ids[a] < ids[b]; });
+  if (!std::equal(sorted.begin(), sorted.end(), want.begin()))
+    return false;
+  auto* dids = Device(ids);
+  std::vector<int32_t> got(want.size(), -9);
+  auto* dplan = Device(got);
+  bool ok =
+      ds41_v41_routed_plan_device(dids, slots, experts, dplan, dplan + slots,
+                                  dplan + slots + experts + 1) == 0 &&
+      hipMemcpy(got.data(), dplan, got.size() * sizeof(int32_t),
+                hipMemcpyDeviceToHost) == hipSuccess &&
+      got == want;
+  (void)hipFree(dids);
+  (void)hipFree(dplan);
+  std::printf("device plan slots=%u experts=%u tiles=%u/%u %s\n", slots,
+              experts, live, tile_cap, ok ? "PASS" : "FAIL");
+  return ok;
+}
+
+bool RoutedPlanCases(std::mt19937& rng) {
+  bool ok = true;
+  for (uint32_t experts : {1u, 7u, 384u, 512u}) {
+    for (uint32_t slots : {63u, 64u, 65u, 12003u}) {
+      std::vector<int32_t> ids(slots);
+      for (auto& id : ids)
+        id = (int32_t)(rng() % experts);
+      ok = RoutedPlanCase(ids, experts) && ok;
+    }
+  }
+  std::vector<int32_t> ids(12288, 3);
+  ids[0] = -1;
+  ids[31] = 384;
+  ids.back() = -1;
+  ok = RoutedPlanCase(ids, 384) && ok;
+  std::fill(ids.begin(), ids.end(), -1);
+  return RoutedPlanCase(ids, 384) && ok;
+}
+
 bool RoutedF16Case(const TypeCase& t, int M, int K, int n_tokens, int n_experts,
                    int used, bool pair, std::mt19937& rng) {
   constexpr float kLimit = 7.0f;
@@ -848,7 +901,7 @@ bool RoutedF16Case(const TypeCase& t, int M, int K, int n_tokens, int n_experts,
           (token % 3 + s * 7 + static_cast<int>(rng() % 2) * 31) % n_experts;
   std::vector<int32_t> plan(rows + (n_experts + 1) + rows / 64 + n_experts);
   int32_t* bounds = plan.data() + rows;
-  const uint32_t n_tiles = ds41_v41_routed_plan(
+  uint32_t n_tiles = ds41_v41_routed_plan(
       ids.data(), rows, n_experts, plan.data(), bounds, bounds + n_experts + 1);
   /* The reference reads one FP32 input row per slot. */
   std::vector<float> xs(static_cast<std::size_t>(rows) * K);
@@ -872,7 +925,11 @@ bool RoutedF16Case(const TypeCase& t, int M, int K, int n_tokens, int n_experts,
   (void)hipMalloc(&y16, sizeof(uint16_t) * n_out);
   (void)hipMalloc(&x16, sizeof(uint16_t) * x.size());
   const int32_t* dbounds = dplan + rows;
-  bool ok = n_tiles > 0 &&
+  const bool planned =
+      ds41_v41_routed_plan_device(dids, rows, n_experts, dplan, dplan + rows,
+                                  dplan + rows + n_experts + 1) == 0;
+  n_tiles = (uint32_t)rows / 64 + (uint32_t)n_experts;
+  bool ok = planned && n_tiles > 0 &&
             ds41_v41_gemv_experts(t.type, dg, expert_bytes, dids, rows, dxs, K,
                                   1, g, M, K) == 0 &&
             ds41_v41_gemv_experts(t.type, du, expert_bytes, dids, rows, dxs, K,
@@ -928,7 +985,7 @@ bool RoutedF16Case(const TypeCase& t, int M, int K, int n_tokens, int n_experts,
 
 }  // namespace
 
-int main() {
+int main(int argc, char** argv) {
   int devices = 0;
   if (hipGetDeviceCount(&devices) != hipSuccess || devices == 0) {
     std::printf("no HIP device\n");
@@ -937,7 +994,18 @@ int main() {
   if (ds41_mmq_init(0) != 0)
     return 1;
   std::mt19937 rng(41);
-  bool ok = true;
+  bool ok = RoutedPlanCases(rng);
+  if (argc == 2 && std::strcmp(argv[1], "--routed-plan") == 0) {
+    for (const auto& t : kTypes) {
+      if (t.type != 19 && t.type != 29 && t.type != 16)
+        continue;
+      ok = RoutedF16Case(t, 256, 1024, 200, 384, 6, true, rng) && ok;
+      ok = RoutedF16Case(t, 512, 2304, 200, 384, 6, false, rng) && ok;
+    }
+    ds41_mmq_cleanup();
+    std::printf("%s\n", ok ? "PASS" : "FAIL");
+    return ok ? 0 : 1;
+  }
   for (const auto& t : kTypes) {
     ok = DenseCase(t, 256, 37, 1024, rng) && ok;
     ok = DenseCase(t, 384, 130, 2304, rng) && ok;

@@ -228,6 +228,7 @@ __global__ __launch_bounds__(256) void routed_f16_kernel(
   __shared__ __attribute__((aligned(16))) _Float16 act[kSlots * kActPitch];
   __shared__ int32_t slot_of[kSlots];
   const int tile = tiles[blockIdx.y];
+  if (tile < 0) return;  // unused entries in a bounded device-planned grid
   const int expert = tile & 0xffff;
   const int t0 = (tile >> 16) * kSlots;
   const int begin = bounds[expert] + t0;
@@ -416,6 +417,64 @@ extern "C" int ds41_v41_routed_f16(int type, const void* w, const void* w_up, ui
 
 namespace {
 
+// Count expert buckets without allocating or downloading route IDs.
+__global__ void routed_counts_kernel(const int32_t* ids, uint32_t slots, int32_t* bounds) {
+  const int expert = (int)blockIdx.x;
+  const uint32_t tid = threadIdx.x;
+  uint32_t count = 0;
+  for (uint32_t i = tid; i < slots; i += 256) count += ids[i] == expert;
+  for (int offset = 16; offset > 0; offset /= 2) count += __shfl_down(count, offset, 32);
+  __shared__ uint32_t waves[8];
+  if ((tid & 31) == 0) waves[tid / 32] = count;
+  __syncthreads();
+  if (tid == 0) {
+    count = 0;
+    for (int w = 0; w < 8; w++) count += waves[w];
+    bounds[expert + 1] = (int32_t)count;
+  }
+}
+
+// One thread per expert; preserve the host plan's expert/64-slot tile order.
+__global__ void routed_bounds_kernel(int32_t* bounds, int32_t* tiles, uint32_t experts, uint32_t tile_cap) {
+  __shared__ uint32_t counts[512];
+  const uint32_t tid = threadIdx.x;
+  counts[tid] = tid < experts ? (uint32_t)bounds[tid + 1] : 0;
+  for (uint32_t i = tid; i < tile_cap; i += 512) tiles[i] = -1;
+  __syncthreads();
+  if (tid >= experts) return;
+  uint32_t first = 0, tile = 0;
+  for (uint32_t e = 0; e < tid; e++) {
+    first += counts[e];
+    tile += (counts[e] + kSlots - 1) / kSlots;
+  }
+  bounds[tid] = (int32_t)first;
+  if (tid + 1 == experts) bounds[experts] = (int32_t)(first + counts[tid]);
+  for (uint32_t t = 0; t * kSlots < counts[tid]; t++) tiles[tile + t] = (int32_t)(tid | (t << 16));
+}
+
+// Contiguous slot ranges per lane, with a block prefix of their counts,
+// retain ascending slot order within every expert (no unordered atomic append).
+__global__ void routed_rows_kernel(const int32_t* ids, uint32_t slots, const int32_t* bounds, int32_t* rows) {
+  const int expert = (int)blockIdx.x;
+  const uint32_t tid = threadIdx.x, lane = tid & 31, wave = tid / 32;
+  const uint32_t per = (slots + 255) / 256;
+  const uint32_t begin = min(tid * per, slots), end = min(begin + per, slots);
+  uint32_t count = 0;
+  for (uint32_t i = begin; i < end; i++) count += ids[i] == expert;
+  uint32_t prefix = count;
+  for (int offset = 1; offset < 32; offset *= 2) {
+    const uint32_t other = __shfl_up(prefix, offset, 32);
+    if (lane >= (uint32_t)offset) prefix += other;
+  }
+  __shared__ uint32_t waves[8];
+  if (lane == 31) waves[wave] = prefix;
+  __syncthreads();
+  uint32_t cursor = (uint32_t)bounds[expert] + prefix - count;
+  for (uint32_t w = 0; w < wave; w++) cursor += waves[w];
+  for (uint32_t i = begin; i < end; i++)
+    if (ids[i] == expert) rows[cursor++] = (int32_t)i;
+}
+
 __global__ void to_half_kernel(const float* __restrict__ x, _Float16* __restrict__ y, uint64_t n) {
   const uint64_t i = ((uint64_t)blockIdx.x * blockDim.x + threadIdx.x) * 4;
   if (i + 4 <= n) {
@@ -451,4 +510,13 @@ extern "C" uint32_t ds41_v41_routed_plan(const int32_t* ids, uint32_t slots, uin
   for (uint32_t e = n_experts; e > 0; --e) bounds[e] = bounds[e - 1];
   bounds[0] = 0;
   return n_tiles;
+}
+
+extern "C" int ds41_v41_routed_plan_device(const int32_t* ids, uint32_t slots, uint32_t n_experts, int32_t* rows,
+                                           int32_t* bounds, int32_t* tiles) {
+  if (slots == 0 || n_experts == 0 || n_experts > 512) return 1;
+  routed_counts_kernel<<<n_experts, 256>>>(ids, slots, bounds);
+  routed_bounds_kernel<<<1, 512>>>(bounds, tiles, n_experts, slots / kSlots + n_experts);
+  routed_rows_kernel<<<n_experts, 256>>>(ids, slots, bounds, rows);
+  return hipGetLastError() == hipSuccess ? 0 : 1;
 }

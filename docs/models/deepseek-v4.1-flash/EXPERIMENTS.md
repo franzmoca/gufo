@@ -270,3 +270,41 @@ and stronger qualification, not as a throughput win. Eight-row attention and
 wider projection equivalence remain open; no verification limit was widened.
 All checks, rates, hashes, commands and raw benchmark traces are in
 [the E6 record](artifacts/2026-10-26-verification-scores/summary.json).
+
+
+### E7: stable device route plans for FP16 layers (retained groundwork)
+
+Large batches whose gate/up and down both use FP16 now build their expert
+counts, bounds, stable slot lists and 64-slot tiles on the GPU. Reuse the
+existing plan allocation and launch a bounded tile grid: unused entries are
+−1 and return before reading expert metadata or weights. No added model or
+scratch allocation. The IQ1_M artifact takes this path in 38 of 40 layers;
+the two mixed-MMQ layers retain their CPU counts/classes and plans. Small
+batches retain their existing GEMV plans.
+
+The focused planner/operator check passes: exact rows, bounds and tile order
+against the original host plan (with a standard-library stable-sort check),
+63/64/65-slot tails, 1/7/384/512 experts, skewed routes, invalid and all-invalid
+IDs, plus fused gate/up and down for IQ1_S/IQ1_M/IQ2_XXS. The 3K matched model
+check retains all 2,999 argmax/NLL records at the probe's six-decimal NLL
+precision, perplexity 6.319756. Generated-token hashes match. Production and
+probe builds and formatting pass.
+
+One production C1 pair (no drafter):
+
+| Phase | Baseline tok/s | Candidate tok/s |
+| --- | ---: | ---: |
+| pp16 | 71.31 | 72.41 |
+| pp128 | 362.46 | 362.58 |
+| pp2048 | 1205.51 | 1205.80 |
+| tg128 | 23.99 | 24.01 |
+
+No phase exceeds both slowdown gates (5% and 3 ms), but these single pairs
+qualify no throughput gain. A separate pp2048 trace confirms 38 device plans;
+the three planner kernels total 1.18 ms. Excluding load/setup, GPU work is
+1624.49 → 1621.79 ms, GPU span 1651.56 → 1645.07 ms; removing host plan/class
+uploads offsets the new planning kernels. Retained for eliminating the 38
+host round trips and making those layers' route planning device-resident,
+with effectively flat unprofiled throughput. Graph capture and the mixed-MMQ
+plan remain open. All observations and checks are in
+[the E7 record](artifacts/2026-10-26-device-route-plan/summary.json).

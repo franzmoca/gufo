@@ -759,14 +759,21 @@ bool moe(ds41_decoder* d, uint32_t il, uint32_t n) {
   const bool f16_gate = !small && gate_type == up_type && routed_f16_type(gate_type);
   const bool f16_down = !small && routed_f16_type(down_type);
   const int32_t* plan_rows = d->routed_plan;
-  const int32_t* plan_bounds = plan_rows + rows;
-  const int32_t* plan_tiles = plan_bounds + DS41_N_EXPERT + 1;
+  int32_t* plan_bounds = d->routed_plan + rows;
+  int32_t* plan_tiles = plan_bounds + DS41_N_EXPERT + 1;
   uint32_t n_tiles = 0;
   /* FP16 copies of the input and of the SwiGLU rows, in the buffers the
    * MMQ path would use for the gate and up rows. */
   auto* x16 = reinterpret_cast<uint16_t*>(d->g6);
   auto* mid16 = reinterpret_cast<uint16_t*>(d->u6);
-  if (!small) {
+  if (f16_gate && f16_down) {
+    // Both projections consume the device plan; MMQ's host bucket classes
+    // and maximum-row bounds are unused on this path.
+    n_tiles = (uint32_t)rows / 64 + DS41_N_EXPERT;
+    if (ds41_v41_routed_plan_device(d->route_ids, (uint32_t)rows, DS41_N_EXPERT, d->routed_plan,
+                                     plan_bounds, plan_tiles))
+      return false;
+  } else if (!small) {
     std::vector<int32_t> ids((size_t)rows);
     std::vector<unsigned int> counts(DS41_N_EXPERT, 0u);
     if (hipMemcpy(ids.data(), d->route_ids, ids.size() * sizeof(int32_t), hipMemcpyDeviceToHost) != hipSuccess)
