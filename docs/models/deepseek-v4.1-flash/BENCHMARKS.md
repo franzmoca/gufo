@@ -25,7 +25,9 @@ The 131K rows come from a separate `-d 131072 -r 2` run of the same build.
 Prefill runs the decoder layers (20-39) over a prompt's last 140 tokens
 only (decoder SWA bounded replay, [QUALITY.md](QUALITY.md)); before it,
 pp2048 was 703.07, @ d8192 677.76, @ d32768 585.30 and @ d131072 372.21
-with the same decode. `gufo serve` prefilled an 11,327-token
+with the same decode, and `--exact-prefill` (`serve`, `bench`, `prompt`)
+restores that path: pp2048 697.71 against 1144.10 in the same session of
+runs. `gufo serve` prefilled an 11,327-token
 prompt in 9.52 s instead of 16.95 s (1,190 tok/s).
 
 `--prefill-batch 4096` (default 2048) prefills a 4096-token prompt at

@@ -347,7 +347,8 @@ std::pair<std::uint64_t, std::uint64_t> DeepSeekDrafts(const Stats& stats) {
 template<class Ds>
 std::vector<std::uint8_t> DeepSeekCompatibilityIdentity(
     std::string_view artifact_fingerprint, std::string_view support_fingerprint,
-    std::uint32_t max_context, std::uint32_t max_draft_tokens) {
+    std::uint32_t max_context, std::uint32_t max_draft_tokens,
+    std::string_view prefill_policy) {
   if (!IsSha256Hex(artifact_fingerprint)) {
     throw std::invalid_argument(
         "DeepSeek disk cache requires an artifact fingerprint");
@@ -370,6 +371,9 @@ std::vector<std::uint8_t> DeepSeekCompatibilityIdentity(
            << "position_policy=absolute-v1\n"
            << "rope_window_policy=" << Ds::kRopeWindowPolicy << '\n'
            << "adapters=none\n";
+  // Exact and bounded-replay prefills leave different decoder windows.
+  if (!prefill_policy.empty())
+    identity << "prefill_policy=" << prefill_policy << '\n';
   identity << "support_id=" << core::kGgufIdentityScheme << ':'
            << support_fingerprint << '\n'
            << "max_draft_tokens=" << max_draft_tokens << '\n'
@@ -1813,7 +1817,7 @@ public:
           .compatibility_identity = DeepSeekCompatibilityIdentity<Ds>(
               artifact_fingerprint,
               use_dspark_ ? support_fingerprint : std::string{}, max_context_,
-              max_draft_tokens_),
+              max_draft_tokens_, PrefillPolicy()),
           .payload_version = Ds::kPayloadVersion,
       };
       component_identity_ = persistence_->compatibility_identity;
@@ -1823,6 +1827,8 @@ public:
       identity << "schema=gufo-process-text-continuation-v1\n"
                << "model_instance=" << model_.get() << '\n'
                << "context_tokens=" << max_context_ << '\n';
+      if (const auto policy = PrefillPolicy(); !policy.empty())
+        identity << "prefill_policy=" << policy << '\n';
       const auto canonical = identity.str();
       component_identity_.assign(canonical.begin(), canonical.end());
     }
@@ -1830,6 +1836,13 @@ public:
 
   [[nodiscard]] bool UsesComponentCache() const override {
     return Ds::kComponentCache;
+  }
+
+  // V4.1's prompt evaluation: exact, or decoder SWA bounded replay.
+  [[nodiscard]] std::string_view PrefillPolicy() const {
+    if constexpr (requires { model_->ExactPrefill(); })
+      return model_->ExactPrefill() ? "exact" : "decoder-swa-replay-140";
+    return {};
   }
   [[nodiscard]] std::unique_ptr<ComponentCacheResources>
   CreateComponentCacheResources(cache::ResourceLedger& ledger,
@@ -4174,6 +4187,7 @@ bool InferenceBackend::load(
         models::deepseek_v41_flash::ModelOptions{
             .max_context = max_context,
             .prefill_batch = deepseek_prefill_batch_,
+            .exact_prefill = deepseek_exact_prefill_,
             .dspark_model_path =
                 dspark ? speculative_config.draft_model_path : std::string{}},
         &load_error);

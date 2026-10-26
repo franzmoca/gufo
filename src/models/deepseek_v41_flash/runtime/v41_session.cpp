@@ -197,15 +197,17 @@ int ds41_session_sync(ds41_session* s, const ds41_tokens* prompt, int prompt_end
   }
   const size_t batch = ds41_decoder_batch_capacity(s->decoder);
   const size_t start = s->tokens.size();
+  /* 0 evaluates every decoder row (exact prefill). */
+  const uint32_t replay_end = ds41_engine_exact_prefill(s->engine) ? 0 : (uint32_t)prompt_end;
   for (size_t i = start; i < n;) {
     if (cancelled(s)) {
       /* Skipped decoder rows leave windows that only this prompt end completes. */
-      if (start < std::min<size_t>(i, replay_from((uint32_t)prompt_end))) s->valid = false;
+      if (start < std::min<size_t>(i, replay_from(replay_end))) s->valid = false;
       set_error(error, capacity, "prefill cancelled");
       return DS41_SESSION_SYNC_INTERRUPTED;
     }
     const uint32_t count = (uint32_t)std::min(batch, n - i);
-    if (!eval(s, prompt->v + i, count, error, capacity, (uint32_t)prompt_end)) return 1;
+    if (!eval(s, prompt->v + i, count, error, capacity, replay_end)) return 1;
     i += count;
   }
   return 0;

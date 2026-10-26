@@ -85,6 +85,7 @@ struct ds41_engine {
   ds41_rocm_graph* batch_workspace;
   bool rocm_ready;
   uint32_t prefill_batch;  // most tokens per prefill batch
+  bool exact_prefill;      // no decoder SWA bounded replay
 };
 
 bool ds41_model_string_array_begin(const ds41_model* model, const char* key,

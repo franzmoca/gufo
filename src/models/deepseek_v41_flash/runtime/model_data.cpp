@@ -1699,6 +1699,7 @@ int ds41_engine_open(ds41_engine** out, const ds41_engine_options* opt) {
     e->model->fd = -1;
     e->prefill_batch = opt->prefill_batch ? opt->prefill_batch
                                           : DS41_DEFAULT_PREFILL_BATCH;
+    e->exact_prefill = opt->exact_prefill;
     e->weights =
         static_cast<ds41_weights*>(ds41_xcalloc(1, sizeof(ds41_weights)));
 
@@ -1784,6 +1785,10 @@ int ds41_engine_open(ds41_engine** out, const ds41_engine_options* opt) {
       ds41_release_instance_lock();
     return 1;
   }
+}
+
+bool ds41_engine_exact_prefill(const ds41_engine* e) {
+    return e && e->exact_prefill;
 }
 
 bool ds41_engine_has_dspark(const ds41_engine* e) {

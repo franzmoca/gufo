@@ -98,6 +98,11 @@ void RegisterBenchOptions(ArgParser& parser, BenchOptions& opt,
       "4096; 4096 prefills about 5% faster for about 1.2 GiB more memory "
       "(default: 2048)",
       "Model", &opt.prefill_batch);
+  parser.AddFlag("", "--exact-prefill",
+                 "DeepSeek V4.1 Flash: run every decoder layer over every "
+                 "prompt token instead of only the prompt's last 140 (decoder "
+                 "SWA bounded replay; about twice the prefill time)",
+                 "Model", &opt.exact_prefill);
 
   parser.AddCustomOption(
       "-p", "--n-prompt", "n,n,...",
@@ -403,17 +408,21 @@ bool IsDeepSeekV4Flash(const core::GgufReader& reader) {
   return reader.GetMetadataString("general.architecture") == "deepseek4";
 }
 
-/// Model options; the prefill batch applies to DeepSeek V4.1 Flash only.
+/// Model options; the prefill batch and exact prefill apply to DeepSeek V4.1
+/// Flash only.
 template<typename Ds>
 typename Ds::ModelOptions DeepSeekModelOptions(std::uint32_t max_context,
                                                std::string dspark_model_path,
-                                               std::uint32_t prefill_batch) {
+                                               std::uint32_t prefill_batch,
+                                               bool exact_prefill) {
   typename Ds::ModelOptions options{
       .max_context = max_context,
       .dspark_model_path = std::move(dspark_model_path),
   };
-  if constexpr (requires { options.prefill_batch; })
+  if constexpr (requires { options.prefill_batch; }) {
     options.prefill_batch = prefill_batch;
+    options.exact_prefill = exact_prefill;
+  }
   return options;
 }
 
@@ -507,7 +516,7 @@ int RunDeepSeekBenchmark(
       options.model_path,
       DeepSeekModelOptions<Ds>(static_cast<std::uint32_t>(required_context),
                                dspark ? options.dspark_model_path : "",
-                               options.prefill_batch),
+                               options.prefill_batch, options.exact_prefill),
       &error);
   if (model == nullptr) {
     std::cerr << "Error creating " << Ds::kName << " model: " << error << '\n';

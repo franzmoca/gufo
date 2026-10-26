@@ -616,6 +616,7 @@ void PrintServeHelp(std::string_view program_name,
     std::string draft_trace_path;
     std::string prefill_weights;
     std::uint32_t prefill_batch = 0;
+    bool exact_prefill = false;
     std::string dspark_model_path;
     std::string mtp_model_path;
     std::string vision_model_path;
@@ -666,6 +667,12 @@ void PrintServeHelp(std::string_view program_name,
         "4096; 4096 prefills about 5% faster for about 1.2 GiB more memory "
         "(default: 2048)",
         "Model", &prefill_batch);
+    parser.AddFlag(
+        "", "--exact-prefill",
+        "DeepSeek V4.1 Flash: run every decoder layer over every prompt "
+        "token instead of only each prompt's last 140 (decoder SWA bounded "
+        "replay; about twice the prefill time)",
+        "Model", &exact_prefill);
     parser.AddOption("", "--image-tokens", "N",
                      "Gemma 4 soft tokens per image: 70, 140, 280, 560 or "
                      "1120 (default: 280)",
@@ -1255,6 +1262,7 @@ int RunServe(std::span<const char* const> args) {
     std::string draft_trace_path;
     std::string prefill_weights;
     std::uint32_t prefill_batch = 0;
+    bool exact_prefill = false;
     std::string dspark_model_path;
     std::string mtp_model_path;
     std::string vision_model_path;
@@ -1306,6 +1314,12 @@ int RunServe(std::span<const char* const> args) {
         "4096; 4096 prefills about 5% faster for about 1.2 GiB more memory "
         "(default: 2048)",
         "Model", &prefill_batch);
+    llm_parser.AddFlag(
+        "", "--exact-prefill",
+        "DeepSeek V4.1 Flash: run every decoder layer over every prompt "
+        "token instead of only each prompt's last 140 (decoder SWA bounded "
+        "replay; about twice the prefill time)",
+        "Model", &exact_prefill);
     llm_parser.AddOption("", "--image-tokens", "N",
                          "Gemma 4 soft tokens per image: 70, 140, 280, 560 or "
                          "1120 (default: 280)",
@@ -1613,6 +1627,7 @@ int RunServe(std::span<const char* const> args) {
     server::LoadingResponder loading(host, port);
     backend->set_gemma_prefill_weights(prefill_weights);
     backend->set_deepseek_prefill_batch(prefill_batch);
+    backend->set_deepseek_exact_prefill(exact_prefill);
     const bool load_ok = backend->load(
         model, &err, max_context, session_count,
         server::TextPrefillPolicy{

@@ -199,8 +199,9 @@ Open performance items are tracked in [BACKLOG.md](BACKLOG.md).
 - Decoder SWA bounded replay (done): prompts run layers 20-39 over their
   last 140 tokens, as DeepSeek's DeepInfer does for V4.1; layer 20 still
   compresses every token. Prefill 1.7-2.3× faster (pp2048 703 → 1,177
-  tok/s, @ d131072 372 → 855), continuation NLL within 0.008 of exact prefill, functional suites
-  pass.
+  tok/s, @ d131072 372 → 855), continuation NLL within 0.008 of exact
+  prefill, functional suites pass. `--exact-prefill` runs every decoder
+  row, for workflow comparisons.
 
 ### M6 Vision
 
