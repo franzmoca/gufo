@@ -209,3 +209,24 @@ no general speedup is qualified.** Retained for removing measured unused work
 with unchanged proposal prefixes; no larger quality sweep was run. All runs,
 settings, trace distributions and focused checks are in
 [the E4 record](artifacts/2026-10-26-markov-tail/summary.json).
+
+
+### E5: score only requested draft-head rows (rejected)
+
+After E4, shortened the shared target vocabulary head to the requested draft
+count, keeping the transformer and collapse normalization at five rows.
+An extended dump check found every used vocabulary-logit row bit-identical
+at widths 1–5 on a 128-row target history; proposal prefixes, untouched output
+tails and invalid-width handling also passed. Production/probe builds and
+formatting passed.
+
+Matched to E4's candidate runs (same binary retained as this baseline), C1,
+256 sampled tokens, temperature/top-p 1.0 and seed 73: coding 37.656 → 38.214
+tok/s (+1.5%), prose 24.188 → 23.851 (−1.4%). Output-token hashes match for
+both prompts. Short-width drafting is cheaper, but adaptive-controller
+changes prevent a consistent total-request gain in this single-seed trial.
+Rejected for insufficient consistent benefit; this is not evidence of a
+confirmed regression. No broad matrix or additional timing loop was run.
+Production retains E4's full five-row head and shortened Markov tail. The
+prototype source/test patch, all candidate runs and focused checks are in
+[the E5 record](artifacts/2026-10-26-draft-head/summary.json).

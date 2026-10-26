@@ -1,0 +1,5 @@
+start      MemAvailable 121.93 GiB, GTT used 0.02 GiB, RSS 0.09 GiB (peak 0.09 GiB)
+opened DeepSeek V4.1 Flash in 19.1 s (vocab 129280)
+loaded     MemAvailable 5.07 GiB, GTT used 116.87 GiB, RSS 0.25 GiB (peak 0.62 GiB)
+dumped 128 feature rows from 0, anchor 2258, drafts 223 22 344 260 2619
+draft prefixes/logits 1..5 identical; output tails untouched; invalid widths rejected

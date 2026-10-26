@@ -1,0 +1,99 @@
+{
+  "decision": "rejected: mixed aggregate request rates do not establish consistent gain",
+  "baseline_revision": "b07eba17",
+  "baseline_evidence": "../2026-10-26-markov-tail/summary.json (candidate runs)",
+  "sampling": {
+    "temperature": 1,
+    "top_p": 1,
+    "seed": 73,
+    "tokens": 256
+  },
+  "scope": "C1 production CLI decode timer, model/prompt/drafter/settings/cache history matched to E4; same production toolchain; trace enabled. Single-seed experiment; no general performance qualification.",
+  "candidate": [
+    {
+      "run": "candidate-coding",
+      "returncode": 0,
+      "tokens": 256,
+      "seconds": 6.69918,
+      "tps": 38.2136,
+      "token_sha256": "d3216f5c1ab06d7d3686c264e7224164fbeaa45e508a20955da5c788cf3c90f5",
+      "pq_trace_rows": 0,
+      "binary_sha256": "eccb7c6cf9e6ecc790d1583d2e33ece8761eba0991197700f076eb1bdc1b48b3",
+      "speculation": {
+        "acceptance": 0.810811,
+        "drafted": 222.0,
+        "accepted": 180.0,
+        "verification_steps": 74.0,
+        "skipped": 0.0,
+        "positional_acceptance": 0.851351,
+        "positional_accepted": 189.0,
+        "full_block_rate": 0.675676,
+        "full_blocks": 50.0,
+        "anchors": 74.0,
+        "verifier_rows": 296.0,
+        "lookup_cycles": 0.0,
+        "lookup_copied": 0.0,
+        "lookup_accepted": 0.0
+      },
+      "baseline_tps": 37.6556,
+      "relative_tps_change": 0.014818513049851711
+    },
+    {
+      "run": "candidate-prose",
+      "returncode": 0,
+      "tokens": 256,
+      "seconds": 10.7334,
+      "tps": 23.8508,
+      "token_sha256": "ead294cb3cc72ff961222fcb7f6155e26ad15154a61d5f07d14c0bd05e51db13",
+      "pq_trace_rows": 0,
+      "binary_sha256": "eccb7c6cf9e6ecc790d1583d2e33ece8761eba0991197700f076eb1bdc1b48b3",
+      "speculation": {
+        "acceptance": 0.447154,
+        "drafted": 123.0,
+        "accepted": 55.0,
+        "verification_steps": 64.0,
+        "skipped": 0.0,
+        "positional_acceptance": 0.528455,
+        "positional_accepted": 65.0,
+        "full_block_rate": 0.34375,
+        "full_blocks": 22.0,
+        "anchors": 64.0,
+        "verifier_rows": 187.0,
+        "lookup_cycles": 0.0,
+        "lookup_copied": 0.0,
+        "lookup_accepted": 0.0
+      },
+      "baseline_tps": 24.1878,
+      "relative_tps_change": -0.01393264372948344
+    }
+  ],
+  "draft_ms_by_width": {
+    "candidate-coding": {
+      "3": {
+        "calls": 74,
+        "median_ms": 9.9
+      }
+    },
+    "candidate-prose": {
+      "1": {
+        "calls": 9,
+        "median_ms": 8.5
+      },
+      "2": {
+        "calls": 51,
+        "median_ms": 9.2
+      },
+      "3": {
+        "calls": 4,
+        "median_ms": 9.75
+      }
+    }
+  },
+  "checks": [
+    "Used complete vocabulary-logit rows bit-identical at widths 1..5 on a 128-row target history",
+    "Proposal prefixes identical, caller tails untouched, invalid widths rejected",
+    "Coding/prose token hashes identical to baseline",
+    "Production/probe builds and C++ format pass"
+  ],
+  "production": "E4 implementation retained; E5 source and probe prototype removed"
+}
