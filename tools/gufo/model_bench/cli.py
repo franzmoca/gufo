@@ -114,7 +114,9 @@ def cmd_run(config: BenchConfig, args: argparse.Namespace) -> int:
     gufo_binary = args.gufo if args.gufo.is_absolute() else (root / args.gufo)
     if not gufo_binary.exists():
         raise SystemExit(f"Gufo binary not found: {gufo_binary} (run `nix build`)")
-    reference_binary = args.reference_binary or config.data["reference"]["server"]
+    if args.target == "reference" and not config.has_reference:
+        raise SystemExit(f"{config.model} has no reference project configured")
+    reference_binary = args.reference_binary or config.data.get("reference", {}).get("server")
     revision, dirty = source_identity(root)
     fingerprint = load_fingerprint(None, gufo_binary)
     document = config.benchmarks_path.read_text(encoding="utf-8") if config.benchmarks_path.exists() else ""

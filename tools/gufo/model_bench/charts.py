@@ -89,7 +89,18 @@ def _bars(ax: Any, labels: list[str], series: list[tuple[str, list[float], str]]
 
 def chart_for(config: BenchConfig, table: TableSpec, rows: dict[str, dict[str, str]], path: Path) -> bool:
     """Write one SVG for a rendered table; return False when there is nothing to draw."""
-    layout = layout_for(config, table)
+    layout = layout_for(config, table, complete=True)
+
+    def shown(series: list[tuple[str, list[float], str]]) -> list[tuple[str, list[float], str]]:
+        """Gufo-only cards draw only Gufo's series."""
+        return series if config.has_reference else [s for s in series if s[0].startswith("Gufo")]
+
+    def lines(ax: Any, labels: list[str], series: list[tuple[str, list[float], str]], *rest: Any) -> None:
+        _lines(ax, labels, shown(series), *rest)
+
+    def bars(ax: Any, labels: list[str], series: list[tuple[str, list[float], str]], *rest: Any) -> None:
+        _bars(ax, labels, shown(series), *rest)
+
     labels = layout.rows
     ref = config.reference_name
     spec_label = config.speculative["label"]
@@ -112,7 +123,7 @@ def chart_for(config: BenchConfig, table: TableSpec, rows: dict[str, dict[str, s
             return False
         fig, axes = plt.subplots(1, len(panels), figsize=(4 * len(panels), 3.2), squeeze=False)
         for ax, (panel, _, unit), (g, r) in zip(axes[0], panels, series):
-            _lines(ax, labels, [("Gufo", g, COLORS["spec"]),
+            lines(ax, labels, [("Gufo", g, COLORS["spec"]),
                                (ref if matched_mode else f"{ref} AR", r, COLORS["ref_spec"])],
                    unit, _depth_ticks(labels))
             ax.set_title(panel)
@@ -131,8 +142,8 @@ def chart_for(config: BenchConfig, table: TableSpec, rows: dict[str, dict[str, s
         g_color, r_color = (COLORS["spec"], COLORS["ref_spec"]) if table.speculative else (COLORS["gufo"], COLORS["reference"])
         fig, (a1, a2) = plt.subplots(1, 2, figsize=(8, 3.2))
         ticks = _depth_ticks(labels)
-        _lines(a1, labels, [("Gufo", gp, g_color), (reference_name, rp, r_color)], "prefill tok/s", ticks)
-        _lines(a2, labels, [("Gufo", gt, g_color), (reference_name, rt, r_color)], "generation tok/s", ticks)
+        lines(a1, labels, [("Gufo", gp, g_color), (reference_name, rp, r_color)], "prefill tok/s", ticks)
+        lines(a2, labels, [("Gufo", gt, g_color), (reference_name, rt, r_color)], "generation tok/s", ticks)
         a1.set_xlabel("context depth (tokens)")
         a2.set_xlabel("context depth (tokens)")
         a1.legend(loc="lower left")
@@ -144,7 +155,7 @@ def chart_for(config: BenchConfig, table: TableSpec, rows: dict[str, dict[str, s
         for ax, workload in zip(axes[0], workloads):
             label = workload.spec["label"]
             g, r = (_series(rows, labels, f"{engine} {label}") for engine in ("Gufo", ref))
-            _bars(ax, labels, [("Gufo", g, COLORS["spec"]), (ref, r, COLORS["ref_spec"])],
+            bars(ax, labels, [("Gufo", g, COLORS["spec"]), (ref, r, COLORS["ref_spec"])],
                   "sum of request decode tok/s")
             ax.set_title(label.capitalize())
             ax.set_xlabel("concurrent users")
@@ -169,7 +180,7 @@ def chart_for(config: BenchConfig, table: TableSpec, rows: dict[str, dict[str, s
             if config.reference_speculative:
                 series.append((f"{ref} {spec_label}", _series(rows, labels, f"{ref} {spec_label}"), COLORS["ref_spec"]))
         fig, ax = plt.subplots(figsize=(6.5, 3.2))
-        _bars(ax, labels, series, "sum of request decode tok/s")
+        bars(ax, labels, series, "sum of request decode tok/s")
         ax.set_xlabel("concurrent users")
         ax.legend(loc="upper left")
     elif kind in ("loading", "memory", "image-encoder"):
@@ -179,7 +190,7 @@ def chart_for(config: BenchConfig, table: TableSpec, rows: dict[str, dict[str, s
             return False
         unit = {"loading": "seconds to ready", "memory": "GiB", "image-encoder": "encode ms"}[kind]
         fig, ax = plt.subplots(figsize=(max(4, 1.6 * len(labels) + 2), 3.0))
-        _bars(ax, labels, [("Gufo", g, COLORS["gufo"]), (ref, r, COLORS["reference"])], unit)
+        bars(ax, labels, [("Gufo", g, COLORS["gufo"]), (ref, r, COLORS["reference"])], unit)
         ax.legend(loc="upper right")
     else:
         return False

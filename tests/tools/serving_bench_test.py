@@ -798,6 +798,28 @@ with patch("gufo.model_bench.charts.chart_for", return_value=True) as draw:
     check(all(call.args[1].id == "multi-mixed" for call in draw.call_args_list),
           "partial rendering does not redraw unrelated charts")
 
+# A card without a reference project shows Gufo columns and series only.
+with tempfile.TemporaryDirectory() as directory:
+    config = load_config(ROOT, "qwen3.8-27b")
+    config.artifacts_override = Path(directory)
+    del config.data["reference"]
+    for table_id in ("single-ar-q4", "single-dflash2-q4", "multi-ar-q4", "multi-dflash2-q4", "memory-q4"):
+        table = config.table(table_id)
+        headers = [c.header for c in layout_for(config, table).columns[1:]]
+        check(headers and all(h.startswith("Gufo") for h in headers),
+              f"{table_id}: Gufo-only cards drop reference and gain columns")
+        body = render_table(config, table, None)
+        check(all(line.count("|") == len(headers) + 2 for line in body.splitlines()),
+              f"{table_id}: every rendered row matches the Gufo-only header")
+    table = config.table("single-ar-q4")
+    body = render_table(config, table, {"0": {"Gufo pp": "500.00", "Gufo tg": "20.00"}})
+    with patch("gufo.model_bench.charts._lines") as draw:
+        from gufo.model_bench.charts import chart_for
+        chart_for(config, table, parse_table(body), Path(directory) / "chart.svg")
+        check(draw.call_count == 2 and all([s[0] for s in call.args[2]] == ["Gufo"]
+                                             for call in draw.call_args_list),
+              "Gufo-only charts draw no reference series")
+
 # Grouped comparisons retain separate workloads and never rerun AR performance.
 with tempfile.TemporaryDirectory() as directory:
     config = load_config(ROOT, "qwen3.8-27b")
