@@ -113,6 +113,102 @@ ds41_decoder* Prefill(ds41_engine* engine, const std::vector<int>& prompt,
   return d;
 }
 
+/* --joint-check N: N sessions (prefixes of the prompt) run speculative
+ * cycles of 1 to 6 rows each, as one joint evaluation and each on its own
+ * decoder; every row's logits must match bit for bit. The timings compare
+ * the joint evaluation with the sessions' own evaluations. */
+int JointProbe(ds41_engine* engine, const std::vector<int>& prompt,
+               uint32_t context, int sessions, int cycles, uint32_t budget) {
+  const std::size_t vocab = (std::size_t)ds41_engine_vocab_size(engine);
+  context = std::max<uint32_t>(context, (uint32_t)prompt.size() + 4096);
+  std::vector<float> last(vocab);
+  std::vector<ds41_decoder*> joint, solo;
+  std::vector<int> next;
+  for (int s = 0; s < sessions; ++s) {
+    const std::size_t len = std::max<std::size_t>(
+        1, prompt.size() - std::min(prompt.size() - 1, (std::size_t)5 * s));
+    const std::vector<int> head(prompt.begin(),
+                                prompt.begin() + (std::ptrdiff_t)len);
+    joint.push_back(Prefill(engine, head, context, &last));
+    solo.push_back(Prefill(engine, head, context, &last));
+    if (!joint.back() || !solo.back())
+      return 1;
+    next.push_back(Argmax(last.data(), vocab));
+  }
+  std::vector<std::vector<float>> jrows(sessions), srows(sessions);
+  for (int s = 0; s < sessions; ++s) {
+    jrows[s].resize(vocab * DS41_DECODER_MAX_SPECULATIVE);
+    srows[s].resize(vocab * DS41_DECODER_MAX_SPECULATIVE);
+  }
+  std::size_t rows = 0, identical = 0, total_rows = 0;
+  double joint_ms = 0.0, solo_ms = 0.0;
+  for (int c = 0; c < cycles; ++c) {
+    std::vector<uint32_t> ns(sessions);
+    std::vector<std::vector<int>> batch(sessions);
+    std::vector<const int*> tokens(sessions);
+    std::vector<float*> out(sessions);
+    uint32_t used = 0;
+    for (int s = 0; s < sessions; ++s) {
+      const uint32_t room = budget - used - (sessions - s - 1);
+      ns[s] = std::min<uint32_t>(1 + (uint32_t)(c + 2 * s) % 6, room);
+      used += ns[s];
+      batch[s].push_back(next[s]);
+      for (uint32_t i = 1; i < ns[s]; ++i)
+        batch[s].push_back(
+            prompt[(97 * (std::size_t)c + 13 * s + i) % prompt.size()]);
+      tokens[s] = batch[s].data();
+      out[s] = jrows[s].data();
+    }
+    total_rows += used;
+    auto t0 = std::chrono::steady_clock::now();
+    if (ds41_decoder_eval_joint(joint.data(), tokens.data(), ns.data(),
+                                (uint32_t)sessions, out.data())) {
+      std::fprintf(stderr, "joint evaluation failed at cycle %d\n", c);
+      return 1;
+    }
+    auto t1 = std::chrono::steady_clock::now();
+    for (int s = 0; s < sessions; ++s)
+      if (ds41_decoder_eval_speculative(solo[s], tokens[s], ns[s],
+                                        srows[s].data()))
+        return 1;
+    auto t2 = std::chrono::steady_clock::now();
+    if (c > 0) {  // the first cycle warms up
+      joint_ms += std::chrono::duration<double, std::milli>(t1 - t0).count();
+      solo_ms += std::chrono::duration<double, std::milli>(t2 - t1).count();
+    }
+    for (int s = 0; s < sessions; ++s) {
+      for (uint32_t i = 0; i < ns[s]; ++i, ++rows) {
+        const bool same = std::memcmp(jrows[s].data() + i * vocab,
+                                      srows[s].data() + i * vocab,
+                                      vocab * sizeof(float)) == 0;
+        identical += same;
+        if (!same)
+          std::printf(
+              "joint-check: cycle %d (%u rows) session %d row %u "
+              "differs\n",
+              c, used, s, i);
+      }
+      const uint32_t keep = 1 + (uint32_t)(c + s) % ns[s];
+      if (ds41_decoder_commit(joint[s], keep) ||
+          ds41_decoder_commit(solo[s], keep))
+        return 1;
+      next[s] = Argmax(jrows[s].data() + (keep - 1) * vocab, vocab);
+    }
+  }
+  std::printf(
+      "joint-check: %d sessions, %d cycles, %zu rows (mean %.1f per joint "
+      "batch), %zu bit-identical to their own evaluations; joint %.1f ms, own "
+      "%.1f ms per cycle\n",
+      sessions, cycles, rows, (double)total_rows / cycles, identical,
+      cycles > 1 ? joint_ms / (cycles - 1) : 0.0,
+      cycles > 1 ? solo_ms / (cycles - 1) : 0.0);
+  for (int s = 0; s < sessions; ++s) {
+    ds41_decoder_destroy(joint[s]);
+    ds41_decoder_destroy(solo[s]);
+  }
+  return identical == rows ? 0 : 1;
+}
+
 /* --spec-check: speculative batches of --spec-width rows (default 4, at
  * most 8) keeping 1, 2, ..., width rows in turn. Pass A drafts the greedy
  * continuation, pass B replaces the rows past the kept prefix with other
@@ -561,6 +657,9 @@ int main(int argc, char** argv) {
   int spec_check = 0;
   int spec_width = 4;
   int spec_bench = -1;
+  int joint_check = 0;
+  int joint_cycles = 24;
+  uint32_t joint_rows = DS41_DECODER_MAX_JOINT;
   const char* dspark = nullptr;
   int dspark_generate = 0;
   const char* dspark_dump = nullptr;
@@ -590,6 +689,15 @@ int main(int argc, char** argv) {
     } else if (std::strcmp(argv[i], "--spec-check") == 0 && i + 1 < argc) {
       spec_check = std::atoi(argv[++i]);
       upload = true;
+    } else if (std::strcmp(argv[i], "--joint-check") == 0 && i + 1 < argc) {
+      joint_check = std::atoi(argv[++i]);
+      upload = true;
+    } else if (std::strcmp(argv[i], "--joint-cycles") == 0 && i + 1 < argc) {
+      joint_cycles = std::atoi(argv[++i]);
+    } else if (std::strcmp(argv[i], "--joint-rows") == 0 && i + 1 < argc) {
+      joint_rows =
+          std::clamp<uint32_t>((uint32_t)std::strtoul(argv[++i], nullptr, 10),
+                               1, DS41_DECODER_MAX_JOINT);
     } else if (std::strcmp(argv[i], "--spec-width") == 0 && i + 1 < argc) {
       spec_width = std::clamp(std::atoi(argv[++i]), 1, 8);
     } else if (std::strcmp(argv[i], "--spec-bench") == 0 && i + 1 < argc) {
@@ -629,6 +737,7 @@ int main(int argc, char** argv) {
         "[--score] [--batch] [--context N] [--prefill-batch N] "
         "[--out DIR]] [--replay-check ROWS] [--exact-prefill] "
         "[--spec-check CYCLES [--spec-width W] | --spec-bench N | "
+        "--joint-check SESSIONS [--joint-cycles N] [--joint-rows N] | "
         "--dspark FILE "
         "--dspark-generate N [--dspark-sweep] | --dspark FILE --dspark-dump "
         "DIR]\n",
@@ -692,8 +801,8 @@ int main(int argc, char** argv) {
     }
     return ReplayProbe(engine, ids, context, replay_check);
   }
-  if (decode &&
-      (spec_check || spec_bench >= 0 || dspark_generate > 0 || dspark_dump)) {
+  if (decode && (spec_check || spec_bench >= 0 || joint_check > 0 ||
+                 dspark_generate > 0 || dspark_dump)) {
     std::vector<int> prompt;
     for (const char* p = decode; *p;) {
       prompt.push_back(std::atoi(p));
@@ -704,6 +813,9 @@ int main(int argc, char** argv) {
     }
     if (dspark_dump)
       return DsparkDump(engine, prompt, dspark_dump);
+    if (joint_check > 0)
+      return JointProbe(engine, prompt, context, joint_check, joint_cycles,
+                        std::max<uint32_t>(joint_rows, joint_check));
     if (dspark_generate > 0)
       return DsparkProbe(engine, prompt, context, dspark_generate,
                          dspark_sweep);

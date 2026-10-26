@@ -358,6 +358,12 @@ history exercises each commit length 1–4 twice. All 20 retained rows have
 bit-identical full logits to serial decode and between clean/corrupted
 rejected-suffix passes (maximum absolute difference zero).
 
+Concurrent DSpark sessions verify in one joint evaluation of up to 16 rows.
+`ds41_load_probe --joint-check N` runs N sessions (prompt prefixes) through
+speculative cycles of 1–6 rows, jointly and each on its own decoder; all 328
+rows of a four-session run (up to 16 rows per batch) have bit-identical
+logits, and `gufo bench -c 2,4` outputs match the serial sessions exactly.
+
 The `long-context` API suite passes at 22,591 actual prompt tokens in AR and
 Q2_K/Q4_K DSpark modes, covering greedy/sample replay, cache reuse,
 cancellation, resume and stop handling. Reply/coverage comparisons find no

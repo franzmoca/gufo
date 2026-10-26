@@ -1,0 +1,88 @@
+== greedy-base-1
+| DeepSeek V4.1 Flash              | 112.43 GiB | ROCm (HIP) |       tg128 @ d512 |         32.95 ± 0.00 |
+| DeepSeek V4.1 Flash              | 112.43 GiB | ROCm (HIP) |    tg128 @ d512 C2 |         17.37 ± 0.00 |
+| DeepSeek V4.1 Flash              | 112.43 GiB | ROCm (HIP) |    tg128 @ d512 C4 |          8.64 ± 0.00 |
+DeepSeek tg C=1 depth=512 request=0 accepted=40 drafted=52 steps=33 skipped=0 output_sha256=6952d1de3f5e60f1a75d8a041c257a87df7e8208e7b4714bf7161d2d20e2455a
+DeepSeek tg C=2 depth=512 request=0 accepted=40 drafted=52 steps=33 skipped=0 output_sha256=6952d1de3f5e60f1a75d8a041c257a87df7e8208e7b4714bf7161d2d20e2455a
+DeepSeek tg C=2 depth=512 request=1 accepted=40 drafted=52 steps=33 skipped=0 output_sha256=6952d1de3f5e60f1a75d8a041c257a87df7e8208e7b4714bf7161d2d20e2455a
+DeepSeek tg C=4 depth=512 request=0 accepted=40 drafted=52 steps=33 skipped=0 output_sha256=6952d1de3f5e60f1a75d8a041c257a87df7e8208e7b4714bf7161d2d20e2455a
+DeepSeek tg C=4 depth=512 request=1 accepted=40 drafted=52 steps=33 skipped=0 output_sha256=6952d1de3f5e60f1a75d8a041c257a87df7e8208e7b4714bf7161d2d20e2455a
+DeepSeek tg C=4 depth=512 request=2 accepted=40 drafted=52 steps=33 skipped=0 output_sha256=6952d1de3f5e60f1a75d8a041c257a87df7e8208e7b4714bf7161d2d20e2455a
+DeepSeek tg C=4 depth=512 request=3 accepted=40 drafted=52 steps=33 skipped=0 output_sha256=6952d1de3f5e60f1a75d8a041c257a87df7e8208e7b4714bf7161d2d20e2455a
+== greedy-base-2
+| DeepSeek V4.1 Flash              | 112.43 GiB | ROCm (HIP) |       tg128 @ d512 |         34.75 ± 0.00 |
+| DeepSeek V4.1 Flash              | 112.43 GiB | ROCm (HIP) |    tg128 @ d512 C2 |         17.35 ± 0.00 |
+| DeepSeek V4.1 Flash              | 112.43 GiB | ROCm (HIP) |    tg128 @ d512 C4 |          8.63 ± 0.00 |
+DeepSeek tg C=1 depth=512 request=0 accepted=40 drafted=52 steps=33 skipped=0 output_sha256=6952d1de3f5e60f1a75d8a041c257a87df7e8208e7b4714bf7161d2d20e2455a
+DeepSeek tg C=2 depth=512 request=0 accepted=40 drafted=52 steps=33 skipped=0 output_sha256=6952d1de3f5e60f1a75d8a041c257a87df7e8208e7b4714bf7161d2d20e2455a
+DeepSeek tg C=2 depth=512 request=1 accepted=40 drafted=52 steps=33 skipped=0 output_sha256=6952d1de3f5e60f1a75d8a041c257a87df7e8208e7b4714bf7161d2d20e2455a
+DeepSeek tg C=4 depth=512 request=0 accepted=40 drafted=52 steps=33 skipped=0 output_sha256=6952d1de3f5e60f1a75d8a041c257a87df7e8208e7b4714bf7161d2d20e2455a
+DeepSeek tg C=4 depth=512 request=1 accepted=40 drafted=52 steps=33 skipped=0 output_sha256=6952d1de3f5e60f1a75d8a041c257a87df7e8208e7b4714bf7161d2d20e2455a
+DeepSeek tg C=4 depth=512 request=2 accepted=40 drafted=52 steps=33 skipped=0 output_sha256=6952d1de3f5e60f1a75d8a041c257a87df7e8208e7b4714bf7161d2d20e2455a
+DeepSeek tg C=4 depth=512 request=3 accepted=40 drafted=52 steps=33 skipped=0 output_sha256=6952d1de3f5e60f1a75d8a041c257a87df7e8208e7b4714bf7161d2d20e2455a
+== greedy-joint-1
+| DeepSeek V4.1 Flash              | 112.43 GiB | ROCm (HIP) |       tg128 @ d512 |         34.80 ± 0.00 |
+| DeepSeek V4.1 Flash              | 112.43 GiB | ROCm (HIP) |    tg128 @ d512 C2 |         24.28 ± 0.00 |
+| DeepSeek V4.1 Flash              | 112.43 GiB | ROCm (HIP) |    tg128 @ d512 C4 |         13.83 ± 0.00 |
+DeepSeek tg C=1 depth=512 request=0 accepted=40 drafted=52 steps=33 skipped=0 output_sha256=6952d1de3f5e60f1a75d8a041c257a87df7e8208e7b4714bf7161d2d20e2455a
+DeepSeek tg C=2 depth=512 request=0 accepted=40 drafted=52 steps=33 skipped=0 output_sha256=6952d1de3f5e60f1a75d8a041c257a87df7e8208e7b4714bf7161d2d20e2455a
+DeepSeek tg C=2 depth=512 request=1 accepted=40 drafted=52 steps=33 skipped=0 output_sha256=6952d1de3f5e60f1a75d8a041c257a87df7e8208e7b4714bf7161d2d20e2455a
+DeepSeek tg C=4 depth=512 request=0 accepted=40 drafted=52 steps=33 skipped=0 output_sha256=6952d1de3f5e60f1a75d8a041c257a87df7e8208e7b4714bf7161d2d20e2455a
+DeepSeek tg C=4 depth=512 request=1 accepted=40 drafted=52 steps=33 skipped=0 output_sha256=6952d1de3f5e60f1a75d8a041c257a87df7e8208e7b4714bf7161d2d20e2455a
+DeepSeek tg C=4 depth=512 request=2 accepted=40 drafted=52 steps=33 skipped=0 output_sha256=6952d1de3f5e60f1a75d8a041c257a87df7e8208e7b4714bf7161d2d20e2455a
+DeepSeek tg C=4 depth=512 request=3 accepted=40 drafted=52 steps=33 skipped=0 output_sha256=6952d1de3f5e60f1a75d8a041c257a87df7e8208e7b4714bf7161d2d20e2455a
+== greedy-joint-2
+| DeepSeek V4.1 Flash              | 112.43 GiB | ROCm (HIP) |       tg128 @ d512 |         34.77 ± 0.00 |
+| DeepSeek V4.1 Flash              | 112.43 GiB | ROCm (HIP) |    tg128 @ d512 C2 |         24.26 ± 0.00 |
+| DeepSeek V4.1 Flash              | 112.43 GiB | ROCm (HIP) |    tg128 @ d512 C4 |         13.82 ± 0.00 |
+DeepSeek tg C=1 depth=512 request=0 accepted=40 drafted=52 steps=33 skipped=0 output_sha256=6952d1de3f5e60f1a75d8a041c257a87df7e8208e7b4714bf7161d2d20e2455a
+DeepSeek tg C=2 depth=512 request=0 accepted=40 drafted=52 steps=33 skipped=0 output_sha256=6952d1de3f5e60f1a75d8a041c257a87df7e8208e7b4714bf7161d2d20e2455a
+DeepSeek tg C=2 depth=512 request=1 accepted=40 drafted=52 steps=33 skipped=0 output_sha256=6952d1de3f5e60f1a75d8a041c257a87df7e8208e7b4714bf7161d2d20e2455a
+DeepSeek tg C=4 depth=512 request=0 accepted=40 drafted=52 steps=33 skipped=0 output_sha256=6952d1de3f5e60f1a75d8a041c257a87df7e8208e7b4714bf7161d2d20e2455a
+DeepSeek tg C=4 depth=512 request=1 accepted=40 drafted=52 steps=33 skipped=0 output_sha256=6952d1de3f5e60f1a75d8a041c257a87df7e8208e7b4714bf7161d2d20e2455a
+DeepSeek tg C=4 depth=512 request=2 accepted=40 drafted=52 steps=33 skipped=0 output_sha256=6952d1de3f5e60f1a75d8a041c257a87df7e8208e7b4714bf7161d2d20e2455a
+DeepSeek tg C=4 depth=512 request=3 accepted=40 drafted=52 steps=33 skipped=0 output_sha256=6952d1de3f5e60f1a75d8a041c257a87df7e8208e7b4714bf7161d2d20e2455a
+== sampled-base-0
+| DeepSeek V4.1 Flash              | 112.43 GiB | ROCm (HIP) |       tg128 @ d512 |         27.02 ± 0.00 |
+| DeepSeek V4.1 Flash              | 112.43 GiB | ROCm (HIP) |    tg128 @ d512 C2 |         13.64 ± 0.00 |
+| DeepSeek V4.1 Flash              | 112.43 GiB | ROCm (HIP) |    tg128 @ d512 C4 |          6.82 ± 0.00 |
+DeepSeek tg C=1 depth=512 request=0 accepted=52 drafted=90 steps=39 skipped=0 output_sha256=a5d95f64175a822c49ad0b424dccededb683c57a6fa7cebd6ea52e4a81d03b46
+DeepSeek tg C=2 depth=512 request=0 accepted=52 drafted=90 steps=39 skipped=0 output_sha256=a5d95f64175a822c49ad0b424dccededb683c57a6fa7cebd6ea52e4a81d03b46
+DeepSeek tg C=2 depth=512 request=1 accepted=52 drafted=90 steps=39 skipped=0 output_sha256=a5d95f64175a822c49ad0b424dccededb683c57a6fa7cebd6ea52e4a81d03b46
+DeepSeek tg C=4 depth=512 request=0 accepted=52 drafted=90 steps=39 skipped=0 output_sha256=a5d95f64175a822c49ad0b424dccededb683c57a6fa7cebd6ea52e4a81d03b46
+DeepSeek tg C=4 depth=512 request=1 accepted=52 drafted=90 steps=39 skipped=0 output_sha256=a5d95f64175a822c49ad0b424dccededb683c57a6fa7cebd6ea52e4a81d03b46
+DeepSeek tg C=4 depth=512 request=2 accepted=52 drafted=90 steps=39 skipped=0 output_sha256=a5d95f64175a822c49ad0b424dccededb683c57a6fa7cebd6ea52e4a81d03b46
+DeepSeek tg C=4 depth=512 request=3 accepted=52 drafted=90 steps=39 skipped=0 output_sha256=a5d95f64175a822c49ad0b424dccededb683c57a6fa7cebd6ea52e4a81d03b46
+== sampled-base-1
+| DeepSeek V4.1 Flash              | 112.43 GiB | ROCm (HIP) |       tg128 @ d512 |         27.24 ± 0.00 |
+| DeepSeek V4.1 Flash              | 112.43 GiB | ROCm (HIP) |    tg128 @ d512 C2 |         13.63 ± 0.00 |
+| DeepSeek V4.1 Flash              | 112.43 GiB | ROCm (HIP) |    tg128 @ d512 C4 |          6.81 ± 0.00 |
+DeepSeek tg C=1 depth=512 request=0 accepted=52 drafted=90 steps=39 skipped=0 output_sha256=a5d95f64175a822c49ad0b424dccededb683c57a6fa7cebd6ea52e4a81d03b46
+DeepSeek tg C=2 depth=512 request=0 accepted=52 drafted=90 steps=39 skipped=0 output_sha256=a5d95f64175a822c49ad0b424dccededb683c57a6fa7cebd6ea52e4a81d03b46
+DeepSeek tg C=2 depth=512 request=1 accepted=52 drafted=90 steps=39 skipped=0 output_sha256=a5d95f64175a822c49ad0b424dccededb683c57a6fa7cebd6ea52e4a81d03b46
+DeepSeek tg C=4 depth=512 request=0 accepted=52 drafted=90 steps=39 skipped=0 output_sha256=a5d95f64175a822c49ad0b424dccededb683c57a6fa7cebd6ea52e4a81d03b46
+DeepSeek tg C=4 depth=512 request=1 accepted=52 drafted=90 steps=39 skipped=0 output_sha256=a5d95f64175a822c49ad0b424dccededb683c57a6fa7cebd6ea52e4a81d03b46
+DeepSeek tg C=4 depth=512 request=2 accepted=52 drafted=90 steps=39 skipped=0 output_sha256=a5d95f64175a822c49ad0b424dccededb683c57a6fa7cebd6ea52e4a81d03b46
+DeepSeek tg C=4 depth=512 request=3 accepted=52 drafted=90 steps=39 skipped=0 output_sha256=a5d95f64175a822c49ad0b424dccededb683c57a6fa7cebd6ea52e4a81d03b46
+== sampled-joint-0
+| DeepSeek V4.1 Flash              | 112.43 GiB | ROCm (HIP) |       tg128 @ d512 |         27.20 ± 0.00 |
+| DeepSeek V4.1 Flash              | 112.43 GiB | ROCm (HIP) |    tg128 @ d512 C2 |         19.12 ± 0.00 |
+| DeepSeek V4.1 Flash              | 112.43 GiB | ROCm (HIP) |    tg128 @ d512 C4 |         10.99 ± 0.00 |
+DeepSeek tg C=1 depth=512 request=0 accepted=52 drafted=90 steps=39 skipped=0 output_sha256=a5d95f64175a822c49ad0b424dccededb683c57a6fa7cebd6ea52e4a81d03b46
+DeepSeek tg C=2 depth=512 request=0 accepted=52 drafted=90 steps=39 skipped=0 output_sha256=a5d95f64175a822c49ad0b424dccededb683c57a6fa7cebd6ea52e4a81d03b46
+DeepSeek tg C=2 depth=512 request=1 accepted=52 drafted=90 steps=39 skipped=0 output_sha256=a5d95f64175a822c49ad0b424dccededb683c57a6fa7cebd6ea52e4a81d03b46
+DeepSeek tg C=4 depth=512 request=0 accepted=52 drafted=90 steps=39 skipped=0 output_sha256=a5d95f64175a822c49ad0b424dccededb683c57a6fa7cebd6ea52e4a81d03b46
+DeepSeek tg C=4 depth=512 request=1 accepted=52 drafted=90 steps=39 skipped=0 output_sha256=a5d95f64175a822c49ad0b424dccededb683c57a6fa7cebd6ea52e4a81d03b46
+DeepSeek tg C=4 depth=512 request=2 accepted=52 drafted=90 steps=39 skipped=0 output_sha256=a5d95f64175a822c49ad0b424dccededb683c57a6fa7cebd6ea52e4a81d03b46
+DeepSeek tg C=4 depth=512 request=3 accepted=52 drafted=90 steps=39 skipped=0 output_sha256=a5d95f64175a822c49ad0b424dccededb683c57a6fa7cebd6ea52e4a81d03b46
+== sampled-joint-1
+| DeepSeek V4.1 Flash              | 112.43 GiB | ROCm (HIP) |       tg128 @ d512 |         27.25 ± 0.00 |
+| DeepSeek V4.1 Flash              | 112.43 GiB | ROCm (HIP) |    tg128 @ d512 C2 |         19.10 ± 0.00 |
+| DeepSeek V4.1 Flash              | 112.43 GiB | ROCm (HIP) |    tg128 @ d512 C4 |         10.99 ± 0.00 |
+DeepSeek tg C=1 depth=512 request=0 accepted=52 drafted=90 steps=39 skipped=0 output_sha256=a5d95f64175a822c49ad0b424dccededb683c57a6fa7cebd6ea52e4a81d03b46
+DeepSeek tg C=2 depth=512 request=0 accepted=52 drafted=90 steps=39 skipped=0 output_sha256=a5d95f64175a822c49ad0b424dccededb683c57a6fa7cebd6ea52e4a81d03b46
+DeepSeek tg C=2 depth=512 request=1 accepted=52 drafted=90 steps=39 skipped=0 output_sha256=a5d95f64175a822c49ad0b424dccededb683c57a6fa7cebd6ea52e4a81d03b46
+DeepSeek tg C=4 depth=512 request=0 accepted=52 drafted=90 steps=39 skipped=0 output_sha256=a5d95f64175a822c49ad0b424dccededb683c57a6fa7cebd6ea52e4a81d03b46
+DeepSeek tg C=4 depth=512 request=1 accepted=52 drafted=90 steps=39 skipped=0 output_sha256=a5d95f64175a822c49ad0b424dccededb683c57a6fa7cebd6ea52e4a81d03b46
+DeepSeek tg C=4 depth=512 request=2 accepted=52 drafted=90 steps=39 skipped=0 output_sha256=a5d95f64175a822c49ad0b424dccededb683c57a6fa7cebd6ea52e4a81d03b46
+DeepSeek tg C=4 depth=512 request=3 accepted=52 drafted=90 steps=39 skipped=0 output_sha256=a5d95f64175a822c49ad0b424dccededb683c57a6fa7cebd6ea52e4a81d03b46

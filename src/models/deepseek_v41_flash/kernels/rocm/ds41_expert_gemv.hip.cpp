@@ -249,16 +249,17 @@ __global__ void __launch_bounds__(kWave* kWaves)
   }
 }
 
-/* ds41_v41_expert_plan: one 64-thread block groups the slots of `ids` by
- * expert. plan[0] is the group count; group g, at plan + 1 + g * kPlanGroup,
+/* ds41_v41_expert_plan: one block of kPlanSlots threads groups the slots of
+ * `ids` by expert. plan[0] is the group count; group g, at plan + 1 + g * kPlanGroup,
  * holds the expert id, the slot count and the slots in ascending order. */
 constexpr int kPlanCols = DS41_V41_EXPERT_PLAN_COLS;
 constexpr int kPlanGroup = 2 + kPlanCols;
+constexpr int kPlanSlots = DS41_V41_EXPERT_PLAN_SLOTS;
 
 __global__ void expert_plan_kernel(const int32_t* __restrict__ ids, uint32_t slots, int32_t* __restrict__ plan) {
-  __shared__ int32_t sid[64];
-  __shared__ int32_t first_of[64];  // the first slot holding each slot's expert
-  __shared__ int32_t group_of[64];  // the group of each leading slot
+  __shared__ int32_t sid[kPlanSlots];
+  __shared__ int32_t first_of[kPlanSlots];  // the first slot holding each slot's expert
+  __shared__ int32_t group_of[kPlanSlots];  // the group of each leading slot
   const uint32_t s = threadIdx.x;
   if (s < slots) sid[s] = ids[s];
   __syncthreads();
@@ -430,6 +431,9 @@ int dispatch_group(const void* w, const void* w_up, const float* route_w, float 
   if (cols <= 4)
     return launch_group<kType, U, 4>(w, w_up, route_w, limit, expert_bytes, plan, groups, x, x_slot, slots_per_x, y,
                                      m, k);
+  if (cols <= 8)
+    return launch_group<kType, U, 8>(w, w_up, route_w, limit, expert_bytes, plan, groups, x, x_slot, slots_per_x, y,
+                                     m, k);
   return launch_group<kType, U, kPlanCols>(w, w_up, route_w, limit, expert_bytes, plan, groups, x, x_slot,
                                            slots_per_x, y, m, k);
 }
@@ -495,7 +499,7 @@ extern "C" int ds41_v41_gemv_experts_swiglu(int type, const void* gate, const vo
 
 extern "C" int ds41_v41_expert_plan(const int32_t* ids, uint32_t slots, int32_t* plan) {
   if (!ids || !plan || slots == 0 || slots > DS41_V41_EXPERT_PLAN_SLOTS) return 1;
-  expert_plan_kernel<<<1, 64>>>(ids, slots, plan);
+  expert_plan_kernel<<<1, kPlanSlots>>>(ids, slots, plan);
   const hipError_t err = hipGetLastError();
   if (err == hipSuccess) return 0;
   fprintf(stderr, "ds41: expert plan launch failed: %s\n", hipGetErrorString(err));

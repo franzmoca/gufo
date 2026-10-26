@@ -522,3 +522,38 @@ E12's bonus draw (31 of 32 tokens in a traced run; the request's first token
 is drawn on the host). A `SampleNext` path for the generic decode loops was
 therefore dropped. Patches and runs are in
 [the E13 record](artifacts/2026-10-26-device-draw-rows/summary.txt).
+
+### E14: joint evaluation of concurrent DSpark sessions (retained)
+
+Concurrent DSpark requests stepped one session after another, so every
+session's verification read all weights again. A batch step now prepares
+every session's block (anchor, prompt-lookup copy or draft), evaluates the
+blocks of up to 16 rows as one joint speculative evaluation, then verifies,
+commits and emits per session. Projections, routed and shared experts,
+Engram, mixes and the output head run once over all rows; RoPE, the
+compressor, the indexer and attention run per session against its own
+state through activation views that start at its rows. Each drafter state
+keeps its own copy of its device proposals, which the next session's draft
+would otherwise overwrite. Batches with image tokens or another activation
+set fall back to per-session evaluation.
+
+Every row keeps single-token arithmetic. The dense FP32 GEMV and the
+grouped expert GEMV take up to 16 rows (expert plans of 128 slots); a
+decoder's `decode_rows` keeps ordinary decode and prefill on their 8-row
+switch points and lets joint evaluations use 16. Two kernels changed
+arithmetic at exactly 16 rows: BF16 projections switch to WMMA tiles, so
+decode batches issue them in groups of eight; the per-token hc mix kernel
+now covers 16 rows, which previously always took the state pass.
+
+The kernel test matches 12- and 16-row launches against one launch per
+row for every dense and expert type. `ds41_load_probe --joint-check`
+evaluates 2–4 sessions of 1–6 rows each, jointly and each on its own: all
+328 rows of the four-session run are bit-identical, and the joint
+evaluation takes 201 ms against 292 ms for 13.7 rows. In `gufo bench`
+(tg128 at depth 512, alternating builds), per-user decode rises 17.4 →
+24.3 tok/s at C2 (+40%) and 8.6 → 13.8 at C4 (+60%) greedy, 13.6 → 19.1
+and 6.8 → 11.0 sampled, with C1 unchanged and every request's output and
+speculative statistics identical. Functional sampling, batch, stop and tool
+suites pass with four sessions; their C4 timing rows stay inconclusive, as
+an unchanged-build control flags the same arrival-order-dependent cases.
+Runs are in [the E14 record](artifacts/2026-10-26-joint-sessions/summary.txt).

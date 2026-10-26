@@ -354,8 +354,29 @@ bool device_draw(ds41_session* s, const ds41_dspark_sampler* sampler, uint32_t r
  * token, which stays unevaluated, so a step emits each token after one
  * evaluation as a plain decode does. Sampled draft proposals retain their q
  * for exact rejection/residual correction. Copies and greedy proposals use
- * the point-mass path, drawing each row from the request's target sampler. */
-int dspark_step(const ds41_session_dspark_batch_item& item, char* error, size_t capacity) {
+ * the point-mass path, drawing each row from the request's target sampler.
+ *
+ * A cycle runs in three phases, so a batch evaluates every session's block
+ * in one joint evaluation: prepare (anchor and proposals), the evaluation,
+ * and finish (verification, commit and emission). */
+struct Cycle {
+  const ds41_session_dspark_batch_item* item = nullptr;
+  bool stochastic = false;
+  bool done = false;  // finished without an evaluation
+  int block[ds41_session::kVerifyRows] = {};
+  uint32_t first = 0, copied = 0, tail = 0, m = 0;
+  size_t copy_start = 0;
+  bool plain = false;        // the drafter's policy chose a plain step
+  bool speculative = false;  // the block's rows wait in spec_logits for the commit
+  std::chrono::steady_clock::time_point t0, t1;
+};
+
+float ms(std::chrono::steady_clock::time_point a, std::chrono::steady_clock::time_point b) {
+  return (float)std::chrono::duration<double, std::milli>(b - a).count();
+}
+
+int prepare(Cycle& c, char* error, size_t capacity) {
+  const ds41_session_dspark_batch_item& item = *c.item;
   ds41_session* s = item.session;
   const ds41_dspark_sampler* sampler = item.sampler;
   if (!s || !s->valid || !item.emitted || item.emitted_cap < 1 || !item.n_emitted ||
@@ -370,10 +391,10 @@ int dspark_step(const ds41_session_dspark_batch_item& item, char* error, size_t 
   }
   const uint32_t n_vocab = vocab(s);
   // Device-drawn proposals retain q for exact p/q verification.
-  const bool stochastic = sampler && sampler->verify && sampler->draws && sampler->retain;
+  c.stochastic = sampler && sampler->verify && sampler->draws && sampler->retain;
   int* out = item.emitted;
   const auto emit = [&](int token) { out[(*item.n_emitted)++] = token; };
-  const auto ends = [&](int token) { return item.stop_at_eos && ds41_token_is_stop(s->engine, token); };
+  c.done = true;
   if (s->next < 0) {
     const int anchor = draw(s, sampler, s->logits.data());
     if (anchor < 0 || anchor >= (int)n_vocab) {
@@ -382,25 +403,21 @@ int dspark_step(const ds41_session_dspark_batch_item& item, char* error, size_t 
       return 1;
     }
     emit(anchor);
-    if (ends(anchor)) return 0;
+    if (item.stop_at_eos && ds41_token_is_stop(s->engine, anchor)) return 0;
     s->next = anchor;
   }
   const int anchor = s->next;
   /* Room for the proposals and the token after them. */
   const uint32_t budget = (uint32_t)(item.emitted_cap - *item.n_emitted);
   if (budget == 0) return 0;
-  const uint32_t first = (uint32_t)s->tokens.size();
-  const uint32_t room = std::min((uint32_t)(s->context - (int)first - 2), budget - 1);
-  const bool trace = getenv("GUFO_DEEPSEEK41_DSPARK_TRACE") != nullptr;
-  const auto ms = [](auto a, auto b) { return (float)std::chrono::duration<double, std::milli>(b - a).count(); };
-  const auto t0 = std::chrono::steady_clock::now();
-  int block[ds41_session::kVerifyRows];
-  block[0] = anchor;
+  c.done = false;
+  c.first = (uint32_t)s->tokens.size();
+  const uint32_t room = std::min((uint32_t)(s->context - (int)c.first - 2), budget - 1);
+  c.t0 = std::chrono::steady_clock::now();
+  c.block[0] = anchor;
   /* Prompt lookup first: a copy costs no drafting. Sampled requests copy
    * only from their prompt and need the longer match (PromptLookup). */
-  uint32_t copied = 0;
-  size_t copy_start = 0;
-  if (s->lookup.Step(first)) {
+  if (s->lookup.Step(c.first)) {
     using Lookup = gufo::speculative::PromptLookup<int>;
     s->lookup.Extend(s->tokens, sampler != nullptr);
     size_t agreed = 0;
@@ -408,48 +425,95 @@ int dspark_step(const ds41_session_dspark_batch_item& item, char* error, size_t 
                                       sampler ? Lookup::kSampledMinMatch : Lookup::kMinMatch, false, &agreed);
     const uint32_t cap = std::min(ds41_session::kVerifyRows - 1, room);
     if (match.length != 0) {
-      copy_start = match.start;
-      while (copied < std::min<size_t>(cap, agreed)) {
-        const int token = s->tokens[match.start + copied];
-        block[1 + copied++] = token;
+      c.copy_start = match.start;
+      while (c.copied < std::min<size_t>(cap, agreed)) {
+        const int token = s->tokens[match.start + c.copied];
+        c.block[1 + c.copied++] = token;
         if (ds41_token_is_stop(s->engine, token)) break;
       }
     }
   }
   /* Without a copy, the drafter (if any) proposes the block. */
-  uint32_t tail = copied;
-  bool plain = false;  // the drafter's policy chose a plain step
-  if (copied == 0 && s->dspark) {
+  c.tail = c.copied;
+  if (c.copied == 0 && s->dspark) {
     const uint32_t limit = std::min({(uint32_t)DS41_DSPARK_BLOCK, item.max_draft_tokens, room});
-    const bool learned = !stochastic && ds41_dspark_has_confidence(s->engine->dspark);
-    tail = stochastic || learned ? limit : draft_width(s, limit);
-    plain = tail == 0;
+    const bool learned = !c.stochastic && ds41_dspark_has_confidence(s->engine->dspark);
+    c.tail = c.stochastic || learned ? limit : draft_width(s, limit);
+    c.plain = c.tail == 0;
     float top[DS41_DSPARK_BLOCK] = {}, confidence[DS41_DSPARK_BLOCK] = {};
-    if (tail != 0 && (ds41_dspark_state_end(s->dspark) != first ||
-                      !ds41_dspark_draft(s->dspark, anchor, block + 1, tail, sampler, top, learned ? confidence : nullptr)))
-      tail = 0;
-    if (learned || stochastic) {
+    if (c.tail != 0 &&
+        (ds41_dspark_state_end(s->dspark) != c.first ||
+         !ds41_dspark_draft(s->dspark, anchor, c.block + 1, c.tail, sampler, top, learned ? confidence : nullptr)))
+      c.tail = 0;
+    if (learned || c.stochastic) {
       const float* score = learned ? confidence : top;
       const float floor = learned ? ds41_session::kLearnedDraft : ds41_session::kConfidentDraft;
       uint32_t confident = 0;
-      while (confident < tail && score[confident] >= floor) ++confident;
-      tail = confident;
+      while (confident < c.tail && score[confident] >= floor) ++confident;
+      c.tail = confident;
     }
   }
-  const uint32_t m = tail + 1;
-  float* rows = s->logits.data();
-  const auto t1 = std::chrono::steady_clock::now();
-  if (m == 1) {
-    if (!eval(s, &anchor, 1, error, capacity)) return 1;
-  } else {
-    if (s->before_write) s->before_write(s->write_data, first, first + m);
-    rows = s->spec_logits.data();
-    if (ds41_decoder_eval_speculative(s->decoder, block, m, rows) != 0) {
-      set_error(error, capacity, "DSpark verification failed");
-      s->valid = false;
-      return 1;
-    }
+  c.m = c.tail + 1;
+  c.t1 = std::chrono::steady_clock::now();
+  return 0;
+}
+
+/* Evaluates one cycle's block on its own. */
+int evaluate(Cycle& c, char* error, size_t capacity) {
+  ds41_session* s = c.item->session;
+  if (c.m == 1) return eval(s, c.block, 1, error, capacity) ? 0 : 1;
+  if (s->before_write) s->before_write(s->write_data, c.first, c.first + c.m);
+  if (ds41_decoder_eval_speculative(s->decoder, c.block, c.m, s->spec_logits.data()) != 0) {
+    set_error(error, capacity, "DSpark verification failed");
+    s->valid = false;
+    return 1;
   }
+  c.speculative = true;
+  return 0;
+}
+
+/* Evaluates the blocks of cycles[0 .. count) in one joint evaluation; 2 for
+ * batches it does not take, which evaluate on their own. */
+int evaluate_joint(Cycle* const* cycles, uint32_t count, char* error, size_t capacity) {
+  ds41_decoder* decoders[DS41_DECODER_MAX_JOINT];
+  const int* tokens[DS41_DECODER_MAX_JOINT];
+  uint32_t ns[DS41_DECODER_MAX_JOINT];
+  float* logits[DS41_DECODER_MAX_JOINT];
+  for (uint32_t i = 0; i < count; i++) {
+    ds41_session* s = cycles[i]->item->session;
+    if ((int)(s->tokens.size() + cycles[i]->m) >= s->context) return 2;
+    decoders[i] = s->decoder;
+    tokens[i] = cycles[i]->block;
+    ns[i] = cycles[i]->m;
+    logits[i] = s->spec_logits.data();
+  }
+  for (uint32_t i = 0; i < count; i++) {
+    const Cycle& c = *cycles[i];
+    ds41_session* s = c.item->session;
+    if (s->before_write) s->before_write(s->write_data, c.first, c.first + c.m);
+  }
+  const int rc = ds41_decoder_eval_joint(decoders, tokens, ns, count, logits);
+  if (rc == 1) {
+    set_error(error, capacity, "DSpark verification failed");
+    for (uint32_t i = 0; i < count; i++) cycles[i]->item->session->valid = false;
+    return 1;
+  }
+  for (uint32_t i = 0; i < count && rc == 0; i++) cycles[i]->speculative = true;
+  return rc;
+}
+
+int finish(Cycle& c, char* error, size_t capacity) {
+  const ds41_session_dspark_batch_item& item = *c.item;
+  ds41_session* s = item.session;
+  const ds41_dspark_sampler* sampler = item.sampler;
+  const uint32_t n_vocab = vocab(s);
+  const bool trace = getenv("GUFO_DEEPSEEK41_DSPARK_TRACE") != nullptr;
+  int* out = item.emitted;
+  const auto emit = [&](int token) { out[(*item.n_emitted)++] = token; };
+  const auto ends = [&](int token) { return item.stop_at_eos && ds41_token_is_stop(s->engine, token); };
+  const int* block = c.block;
+  const uint32_t m = c.m;
+  const float* rows = c.speculative ? s->spec_logits.data() : s->logits.data();
   /* Row i - 1 verifies block[i]; the first mismatch ends the accepted prefix
    * and its draw is the next token. */
   const int stop = item.stop_at_eos ? ds41_token_eos(s->engine) : -1;
@@ -457,7 +521,7 @@ int dspark_step(const ds41_session_dspark_batch_item& item, char* error, size_t 
   uint32_t positional = 0;
   int next = -1;
   const ds41_v41_proposal* proposals =
-      stochastic && copied == 0 && s->dspark ? ds41_dspark_proposals(s->dspark) : nullptr;
+      c.stochastic && c.copied == 0 && s->dspark ? ds41_dspark_proposals(s->dspark) : nullptr;
   for (uint32_t i = 1; i < m; i++) {
     const float* row = rows + (uint64_t)(i - 1) * n_vocab;
     if (next >= 0) {
@@ -467,8 +531,8 @@ int dspark_step(const ds41_session_dspark_batch_item& item, char* error, size_t 
     int drawn = -1, argmax = -1;
     if (!device_draw(s, sampler, i - 1, proposals ? proposals + (i - 1) : nullptr, &drawn, &argmax)) {
       argmax = ds41_sample_argmax(row, n_vocab);
-      drawn = stochastic && copied == 0 ? sampler->verify(sampler->ctx, i - 1, row, n_vocab, block[i])
-                                        : draw(s, sampler, row);
+      drawn = c.stochastic && c.copied == 0 ? sampler->verify(sampler->ctx, i - 1, row, n_vocab, block[i])
+                                            : draw(s, sampler, row);
     }
     positional += argmax == block[i];
     if (drawn != block[i] || ends(drawn) || block[i] == stop)
@@ -476,15 +540,16 @@ int dspark_step(const ds41_session_dspark_batch_item& item, char* error, size_t 
     else
       accepted++;
   }
-  if (m > 1) {
+  if (c.speculative) {
     if (ds41_decoder_commit(s->decoder, accepted) != 0) {
       set_error(error, capacity, "DSpark commit failed");
       s->valid = false;
       return 1;
     }
     s->tokens.insert(s->tokens.end(), block, block + accepted);
+    s->valid = true;
     memcpy(s->logits.data(), rows + (uint64_t)(accepted - 1) * n_vocab, n_vocab * sizeof(float));
-    if (s->dspark && !ds41_dspark_inject(s->dspark, first, accepted)) {
+    if (s->dspark && !ds41_dspark_inject(s->dspark, c.first, accepted)) {
       set_error(error, capacity, "DSpark feature injection failed");
       s->valid = false;
       return 1;
@@ -505,7 +570,7 @@ int dspark_step(const ds41_session_dspark_batch_item& item, char* error, size_t 
   const auto t2 = std::chrono::steady_clock::now();
   auto& p = s->policy;
   if (m == 1) {
-    if (plain) ema(p.cycle_ms[0], ms(t0, t2));
+    if (c.plain) ema(p.cycle_ms[0], ms(c.t0, t2));
     return 0;
   }
   auto& st = s->stats;
@@ -514,35 +579,58 @@ int dspark_step(const ds41_session_dspark_batch_item& item, char* error, size_t 
   st.anchors++;
   st.full_blocks += accepted == m;
   st.steps++;
-  if (copied != 0) {
-    s->lookup.Observe(copy_start, copied, accepted - 1);
+  if (c.copied != 0) {
+    s->lookup.Observe(c.copy_start, c.copied, accepted - 1);
     st.lookup_cycles++;
-    st.lookup_copied += copied;
+    st.lookup_copied += c.copied;
     st.lookup_accepted += accepted - 1;
     if (trace)
-      fprintf(stderr, "ds41: lookup pos=%u copied=%u accepted=%u verify=%.1fms\n", first, copied, accepted - 1,
-              ms(t1, t2));
+      fprintf(stderr, "ds41: lookup pos=%u copied=%u accepted=%u verify=%.1fms\n", c.first, c.copied, accepted - 1,
+              ms(c.t1, t2));
     return 0;
   }
-  st.support_drafted += tail;
+  st.support_drafted += c.tail;
   st.support_accepted += accepted - 1;
   st.positional += positional;
   /* Drafts after the first rejection say nothing about their acceptance. */
-  for (uint32_t k = 0; k < std::min(accepted, tail); k++) ema(p.accept[k], k + 1 < accepted ? 1.0f : 0.0f);
-  for (uint32_t k = tail; k < DS41_DSPARK_BLOCK; k++) ema(p.accept[k], ds41_session::kAcceptPrior, kPolicyRelax);
-  ema(p.cycle_ms[tail], ms(t0, t2));
+  for (uint32_t k = 0; k < std::min(accepted, c.tail); k++) ema(p.accept[k], k + 1 < accepted ? 1.0f : 0.0f);
+  for (uint32_t k = c.tail; k < DS41_DSPARK_BLOCK; k++) ema(p.accept[k], ds41_session::kAcceptPrior, kPolicyRelax);
+  ema(p.cycle_ms[c.tail], ms(c.t0, t2));
   if (trace)
-    fprintf(stderr, "ds41: DSpark pos=%u drafted=%u accepted=%u draft=%.1fms verify=%.1fms\n", first, tail,
-            accepted - 1, ms(t0, t1), ms(t1, t2));
+    fprintf(stderr, "ds41: DSpark pos=%u drafted=%u accepted=%u draft=%.1fms verify=%.1fms\n", c.first, c.tail,
+            accepted - 1, ms(c.t0, c.t1), ms(c.t1, t2));
   return 0;
 }
 
 }  // namespace
 
+/* Sessions' blocks evaluate jointly, in groups of up to DS41_DECODER_MAX_JOINT
+ * rows: each weight is read once per group instead of once per session. */
 int ds41_sessions_dspark_step_batch(const ds41_session_dspark_batch_item* items, size_t count, char* error,
                                     size_t capacity) {
-  for (size_t i = 0; i < count; i++)
-    if (dspark_step(items[i], error, capacity) != 0) return 1;
+  std::vector<Cycle> cycles(count);
+  for (size_t i = 0; i < count; i++) {
+    cycles[i].item = &items[i];
+    if (prepare(cycles[i], error, capacity) != 0) return 1;
+  }
+  Cycle* group[DS41_DECODER_MAX_JOINT];
+  uint32_t grouped = 0, rows = 0;
+  const auto flush = [&]() {
+    int rc = grouped > 1 ? evaluate_joint(group, grouped, error, capacity) : 2;
+    for (uint32_t i = 0; i < grouped && rc == 2; i++)
+      if (evaluate(*group[i], error, capacity) != 0) return false;
+    grouped = rows = 0;
+    return rc != 1;
+  };
+  for (Cycle& c : cycles) {
+    if (c.done) continue;
+    if (rows + c.m > DS41_DECODER_MAX_JOINT && !flush()) return 1;
+    group[grouped++] = &c;
+    rows += c.m;
+  }
+  if (!flush()) return 1;
+  for (Cycle& c : cycles)
+    if (!c.done && finish(c, error, capacity) != 0) return 1;
   return 0;
 }
 
