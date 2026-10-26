@@ -47,11 +47,14 @@ struct ds41_session {
    * numerics; speculative index scoring separately keeps its FP32 path. */
   static constexpr uint32_t kVerifyRows = DS41_V41_ATTN_SPLIT_TOKENS - 1;
   static constexpr float kAcceptPrior = 0.7f;
-  /* Sampled cycles draft the request's limit and verify the prefix whose
-   * proposals each had q >= this top probability. Diffuse rows (q's best
-   * below it) are accepted 19-51% of the time, against 85% for the rest, so
-   * verifying them costs more than it emits. The cut depends only on q,
-   * never on timing, so seeded replay is unaffected. */
+  /* Greedy cycles with the drafter's learned acceptance head draft the
+   * request's limit and verify the prefix whose rows each predict acceptance
+   * >= kLearnedDraft (+13% greedy over the timing policy). Sampled cycles do
+   * the same with q's top probability >= kConfidentDraft: diffuse rows are
+   * accepted 19-51% of the time, against 85% for the rest; the learned cut
+   * measured no gain there. Either cut depends only on the draft, never on
+   * timing, so seeded replay is unaffected. */
+  static constexpr float kLearnedDraft = 0.5f;
   static constexpr float kConfidentDraft = 0.6f;
   /* Plain steps before a one-draft cycle re-measures acceptance: from the
    * first, doubling while the policy keeps returning to plain steps. */
@@ -391,15 +394,18 @@ int dspark_step(const ds41_session_dspark_batch_item& item, char* error, size_t 
   bool plain = false;  // the drafter's policy chose a plain step
   if (copied == 0 && s->dspark) {
     const uint32_t limit = std::min({(uint32_t)DS41_DSPARK_BLOCK, item.max_draft_tokens, room});
-    tail = stochastic ? limit : draft_width(s, limit);
+    const bool learned = !stochastic && ds41_dspark_has_confidence(s->engine->dspark);
+    tail = stochastic || learned ? limit : draft_width(s, limit);
     plain = tail == 0;
-    float top[DS41_DSPARK_BLOCK] = {};
+    float top[DS41_DSPARK_BLOCK] = {}, confidence[DS41_DSPARK_BLOCK] = {};
     if (tail != 0 && (ds41_dspark_state_end(s->dspark) != first ||
-                      !ds41_dspark_draft(s->dspark, anchor, block + 1, tail, sampler, top)))
+                      !ds41_dspark_draft(s->dspark, anchor, block + 1, tail, sampler, top, learned ? confidence : nullptr)))
       tail = 0;
-    if (stochastic) {
+    if (learned || stochastic) {
+      const float* score = learned ? confidence : top;
+      const float floor = learned ? ds41_session::kLearnedDraft : ds41_session::kConfidentDraft;
       uint32_t confident = 0;
-      while (confident < tail && top[confident] >= ds41_session::kConfidentDraft) ++confident;
+      while (confident < tail && score[confident] >= floor) ++confident;
       tail = confident;
     }
   }

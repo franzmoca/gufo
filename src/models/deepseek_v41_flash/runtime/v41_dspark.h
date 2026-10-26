@@ -58,6 +58,9 @@ struct ds41_dspark_model {
   uint64_t device_bytes = 0;
   ds41_dspark_stage stage[DS41_DSPARK_STAGES];
   ds41_dspark_tensor fc, main_norm, out_norm, markov_w1, markov_w2;
+  /* Optional learned acceptance head: sigmoid(w . [pre-norm hidden; W1 row]
+   * + bias). p is null when the drafter ships none. */
+  ds41_dspark_tensor confidence, confidence_bias;
   struct ds41_dspark_scratch* scratch = nullptr;
 };
 
@@ -85,7 +88,11 @@ bool ds41_dspark_inject(ds41_dspark_state* s, uint32_t pos0, uint32_t rows);
  * sampler proposes from post-Markov candidates (writing q's top probability
  * per row to `top`, if given); otherwise each row takes its argmax. */
 bool ds41_dspark_draft(ds41_dspark_state* s, int anchor, int32_t* drafts, uint32_t count,
-                       const ds41_dspark_sampler* sampler = nullptr, float* top = nullptr);
+                       const ds41_dspark_sampler* sampler = nullptr, float* top = nullptr,
+                       float* confidence = nullptr);
+/* Whether the drafter has a usable learned acceptance head; without one,
+ * ds41_dspark_draft writes -1 confidences. */
+bool ds41_dspark_has_confidence(const ds41_dspark_model* m);
 /* The last draft's target-head logits before the Markov bias, DS41_DSPARK_BLOCK rows (tests). */
 bool ds41_dspark_copy_logits(const ds41_engine* engine, float* out);
 /* Ring bytes, and their copy to/from host memory (with ring_start/end). */

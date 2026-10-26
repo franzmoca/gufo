@@ -340,6 +340,69 @@ void MarkovFused() {
         static_cast<void*>(dd), static_cast<void*>(dq)})
     (void)hipFree(ptr);
 }
+// Learned acceptance head: sigmoid of the pre-norm head collapse and Markov
+// input against an FP64 reference, for a row other than the first.
+void Confidence() {
+  constexpr uint32_t dim = 4096, rank = 256, rows = 3, row = 2;
+  std::vector<float> h(static_cast<std::size_t>(rows) * 4 * dim), pre(rows * 4),
+      x(rank), w(dim + rank);
+  uint64_t state = 777;
+  const auto next = [&] {
+    state = state * 6364136223846793005ULL + 1442695040888963407ULL;
+    return static_cast<float>((state >> 40) & 0xffffff) / 16777216.F - .5F;
+  };
+  for (auto* v : {&h, &pre, &x, &w})
+    for (auto& e : *v)
+      e = next();
+  const float bias = .25F;
+  double dot = bias;
+  for (uint32_t i = 0; i < dim; ++i) {
+    double v = 0;
+    for (uint32_t c = 0; c < 4; ++c)
+      v += static_cast<double>(pre[row * 4 + c]) *
+           h[(static_cast<std::size_t>(row) * 4 + c) * dim + i];
+    dot += v * w[i];
+  }
+  for (uint32_t i = 0; i < rank; ++i)
+    dot += static_cast<double>(x[i]) * w[dim + i];
+  const double ref = 1 / (1 + std::exp(-dot));
+  float *dh = nullptr, *dp = nullptr, *dx = nullptr, *dw = nullptr,
+        *db = nullptr, *out = nullptr;
+  Check(hipMalloc(&dh, h.size() * 4) == hipSuccess &&
+            hipMalloc(&dp, pre.size() * 4) == hipSuccess &&
+            hipMalloc(&dx, rank * 4) == hipSuccess &&
+            hipMalloc(&dw, w.size() * 4) == hipSuccess &&
+            hipMalloc(&db, 4) == hipSuccess &&
+            hipMalloc(&out, rows * 4) == hipSuccess,
+        "confidence allocation");
+  Check(hipMemcpy(dh, h.data(), h.size() * 4, hipMemcpyHostToDevice) ==
+                hipSuccess &&
+            hipMemcpy(dp, pre.data(), pre.size() * 4, hipMemcpyHostToDevice) ==
+                hipSuccess &&
+            hipMemcpy(dx, x.data(), rank * 4, hipMemcpyHostToDevice) ==
+                hipSuccess &&
+            hipMemcpy(dw, w.data(), w.size() * 4, hipMemcpyHostToDevice) ==
+                hipSuccess &&
+            hipMemcpy(db, &bias, 4, hipMemcpyHostToDevice) == hipSuccess,
+        "confidence upload");
+  float got[rows] = {};
+  Check(
+      ds41_v41_dspark_confidence(dh, dp, dx, dw, db, dim, rank, row, out) ==
+              0 &&
+          hipMemcpy(got, out, sizeof(got), hipMemcpyDeviceToHost) == hipSuccess,
+      "confidence launch");
+  Check(std::abs(got[row] - ref) < 1e-5,
+        "confidence matches the FP64 reference");
+  Check(
+      ds41_v41_dspark_confidence(dh, dp, dx, dw, nullptr, dim, rank, row,
+                                 out) == 0 &&
+          hipMemcpy(got, out, sizeof(got), hipMemcpyDeviceToHost) == hipSuccess,
+      "confidence launch without bias");
+  Check(std::abs(got[row] - 1 / (1 + std::exp(-(dot - bias)))) < 1e-5,
+        "confidence without bias");
+  for (float* ptr : {dh, dp, dx, dw, db, out})
+    (void)hipFree(ptr);
+}
 }  // namespace
 
 int main() {
@@ -350,7 +413,9 @@ int main() {
   Sampler();
   DeviceProposal();
   MarkovFused();
+  Confidence();
   std::puts(
-      "PASS: post-Markov top8, fused Markov selection, device q, exact sampled "
+      "PASS: post-Markov top8, fused Markov selection, learned confidence, "
+      "device q, exact sampled "
       "correction and seeded replay");
 }
