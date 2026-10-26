@@ -120,8 +120,12 @@ int ds41_session_create(ds41_session** out, ds41_engine* engine,
                         int context_size, bool use_dspark);
 void ds41_session_free(ds41_session* session);
 bool ds41_session_dspark_enabled(const ds41_session* session);
+/* Evaluates the prompt from the longest evaluated prefix. The prompt is the
+ * first part of a prompt ending at prompt_end (0: prompt->len), which
+ * decides the decoder's bounded replay (ds41_decoder_eval_prompt); a state
+ * synced to a shorter part is complete only for that same end. */
 int ds41_session_sync(ds41_session* session, const ds41_tokens* prompt,
-                      char* error, size_t error_capacity);
+                      int prompt_end, char* error, size_t error_capacity);
 int ds41_session_argmax(const ds41_session* session);
 int ds41_session_sample(const ds41_session* session, float temperature,
                         int top_k, float top_p, float min_p,
@@ -193,6 +197,19 @@ uint32_t ds41_decoder_batch_capacity(const ds41_decoder* decoder);
 int ds41_decoder_eval(ds41_decoder* decoder, const int* tokens, uint32_t n,
                       float* logits, uint32_t logit_rows,
                       ds41_decoder_layer_fn layer_fn, void* ctx);
+/* Decoder SWA bounded replay, as in DeepSeek's DeepInfer: of a prompt ending
+ * at prompt_end, the decoder layers run only the last
+ * DS41_DECODER_REPLAY_ROWS positions (the 128-row window and 12 rows of
+ * backtracking) and their windows start there; the first decoder layer
+ * still compresses every position for the global KV and index keys.
+ * ds41_decoder_eval_prompt evaluates `n` tokens of such a prompt
+ * (pos + n <= prompt_end); its logit rows and DSpark features come from the
+ * replayed positions only, and the window state is complete once the
+ * evaluation reaches prompt_end. */
+#define DS41_DECODER_REPLAY_ROWS 140u
+int ds41_decoder_eval_prompt(ds41_decoder* decoder, const int* tokens,
+                             uint32_t n, uint32_t prompt_end, float* logits,
+                             uint32_t logit_rows);
 /* Rows a speculative batch may hold. */
 #define DS41_DECODER_MAX_SPECULATIVE 16
 /* ds41_decoder_eval of `n` tokens (n <= DS41_DECODER_MAX_SPECULATIVE) with

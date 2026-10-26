@@ -122,12 +122,13 @@ void HostRope(float* row, const std::vector<float>& freq, uint32_t pos,
   }
 }
 
-/* n tokens at pos0 with `comp_rows` compressed rows at the given ratio;
- * returns the worst relative RMS error over tokens. With `rope`, q is
+/* n tokens at pos0 with `comp_rows` compressed rows at the given ratio and
+ * no window rows below `floor`; returns the worst relative RMS error over
+ * tokens. With `rope`, q is
  * rotated first and the output gets the inverse rotation and the FP8
  * rounding. */
 double Case(uint32_t pos0, uint32_t n, uint32_t ratio, uint32_t comp_rows,
-            bool rope, std::mt19937& rng) {
+            bool rope, uint32_t floor, std::mt19937& rng) {
   std::normal_distribution<float> normal;
   auto fill = [&](std::size_t count, float scale) {
     std::vector<float> v(count);
@@ -174,9 +175,9 @@ double Case(uint32_t pos0, uint32_t n, uint32_t ratio, uint32_t comp_rows,
   (void)hipMalloc(&dtable, sizeof(float) * n * kRope);
   const float scale = 1.0f / std::sqrt((float)kDim);
   const int rc =
-      ds41_v41_attention(dq, dring, dchunk, kWindow, dcomp, didx, kTopK, ratio,
-                         dsinks, dout, dpartial, pos0, n, kHeads, kDim, scale,
-                         rope ? dfreq : nullptr, kRope, dtable);
+      ds41_v41_attention(dq, dring, dchunk, kWindow, floor, dcomp, didx, kTopK,
+                         ratio, dsinks, dout, dpartial, pos0, n, kHeads, kDim,
+                         scale, rope ? dfreq : nullptr, kRope, dtable);
   std::vector<float> out((std::size_t)n * kHeads * kDim);
   (void)hipDeviceSynchronize();
   (void)hipMemcpy(out.data(), dout, out.size() * sizeof(float),
@@ -191,7 +192,8 @@ double Case(uint32_t pos0, uint32_t n, uint32_t ratio, uint32_t comp_rows,
   double worst = 0.0;
   for (uint32_t t = 0; t < n; t++) {
     const uint32_t p = pos0 + t;
-    const uint32_t lo = p + 1 > kWindow ? p + 1 - kWindow : 0;
+    const uint32_t lo =
+        std::max(p + 1 > kWindow ? p + 1 - kWindow : 0, std::min(floor, p));
     std::vector<const float*> keys;
     for (uint32_t pos = lo; pos <= p; pos++)
       keys.push_back(pos < pos0 ? &ring[(std::size_t)(pos % kWindow) * kDim]
@@ -446,7 +448,7 @@ double Bench(uint32_t pos0, uint32_t n, uint32_t ratio, bool rope,
   (void)hipMalloc(&dtable, sizeof(float) * n * 64);
   const float scale = 1.0f / std::sqrt((float)kDim);
   auto run = [&] {
-    return ds41_v41_attention(dq, dring, dchunk, kWindow, {dcodes, dscales},
+    return ds41_v41_attention(dq, dring, dchunk, kWindow, 0, {dcodes, dscales},
                               didx, kTopK, ratio, dsinks, dout, nullptr, pos0,
                               n, kHeads, kDim, scale, rope ? dfreq : nullptr,
                               64, dtable);
@@ -659,22 +661,35 @@ int main(int argc, char** argv) {
     bool rope;
     double tolerance;  // split decode is fp32; the batched form stages half
                        // operands; the FP8 rounding flips a few steps
+    uint32_t floor = 0;
   };
   const Shape shapes[] = {
-      {12, 1, 0, 0, false, 1e-5},      {12, 1, 2, 6, false, 1e-5},
-      {700, 1, 2, 350, false, 1e-5},   {2047, 1, 1, 2048, false, 1e-5},
-      {3000, 3, 1, 3003, false, 1e-5}, {0, 37, 2, 18, false, 2e-3},
-      {200, 64, 1, 264, false, 2e-3},  {2048, 40, 1, 2088, false, 2e-3},
-      {300, 9, 0, 0, false, 2e-3},     {700, 1, 2, 350, true, 2e-2},
-      {3000, 3, 1, 3003, true, 2e-2},  {0, 37, 2, 18, true, 2e-2},
+      {12, 1, 0, 0, false, 1e-5},
+      {12, 1, 2, 6, false, 1e-5},
+      {700, 1, 2, 350, false, 1e-5},
+      {2047, 1, 1, 2048, false, 1e-5},
+      {3000, 3, 1, 3003, false, 1e-5},
+      {0, 37, 2, 18, false, 2e-3},
+      {200, 64, 1, 264, false, 2e-3},
+      {2048, 40, 1, 2088, false, 2e-3},
+      {300, 9, 0, 0, false, 2e-3},
+      {700, 1, 2, 350, true, 2e-2},
+      {3000, 3, 1, 3003, true, 2e-2},
+      {0, 37, 2, 18, true, 2e-2},
       {2048, 40, 1, 2088, true, 2e-2},
+      /* Window floors: below the batch (ring rows above it remain), inside
+       * it (earlier rows see only themselves) and in split decode. */
+      {2000, 40, 1, 2040, true, 2e-2, 1990},
+      {1000, 20, 1, 1020, false, 2e-3, 1010},
+      {3000, 3, 1, 3003, false, 1e-5, 2950},
   };
   std::mt19937 rng(41);
   bool ok = true;
   for (const Shape& s : shapes) {
-    const double e = Case(s.pos0, s.n, s.ratio, s.comp_rows, s.rope, rng);
-    std::printf("pos0=%u n=%u ratio=%u comp=%u rope=%d rel_err=%.2e\n", s.pos0,
-                s.n, s.ratio, s.comp_rows, s.rope ? 1 : 0, e);
+    const double e =
+        Case(s.pos0, s.n, s.ratio, s.comp_rows, s.rope, s.floor, rng);
+    std::printf("pos0=%u n=%u ratio=%u comp=%u rope=%d floor=%u rel_err=%.2e\n",
+                s.pos0, s.n, s.ratio, s.comp_rows, s.rope ? 1 : 0, s.floor, e);
     ok = e < s.tolerance && ok;
   }
   /* Indexer scores: fp32 below five tokens, half operands on the matrix

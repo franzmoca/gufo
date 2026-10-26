@@ -46,6 +46,9 @@ inline constexpr uint32_t DS41_N_INDEX_SOURCE = 8;
 inline constexpr uint32_t DS41_INDEX_SOURCE_LAYERS[DS41_N_INDEX_SOURCE] = {
     2, 8, 14, 20, 24, 28, 32, 36};
 inline constexpr uint32_t DS41_CANDIDATE_SOURCE_LAYER = 20;
+/* YoCo: layers from here on (the decoder half) take their compressed KV from
+ * this layer, the first with compression ratio 1. */
+inline constexpr uint32_t DS41_FIRST_DECODER_LAYER = 20;
 inline constexpr uint32_t DS41_CANDIDATE_BLOCK_SIZE = 8;
 inline constexpr uint32_t DS41_CANDIDATE_TOPK_BLOCKS = 2048;
 

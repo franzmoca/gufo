@@ -110,8 +110,13 @@ public:
   Session(Session&&) = delete;
   Session& operator=(Session&&) = delete;
 
+  // Evaluates the prompt from the longest evaluated prefix. `prompt` is the
+  // first part of a prompt ending at `prompt_end` (0: its own end), which
+  // bounds the decoder layers' replay to its last tokens; a state synced to
+  // a shorter part only continues to that same end.
   [[nodiscard]] bool Sync(std::span<const int> prompt,
-                          std::string* error_msg = nullptr);
+                          std::string* error_msg = nullptr,
+                          std::size_t prompt_end = 0);
   [[nodiscard]] int SelectNext(float temperature, std::uint64_t* rng_state,
                                int top_k = 0, float top_p = 1.0F,
                                float min_p = 0.0F) const;

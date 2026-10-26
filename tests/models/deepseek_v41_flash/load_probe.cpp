@@ -249,7 +249,7 @@ int DsparkProbe(ds41_engine* engine, const std::vector<int>& prompt,
   const auto ms = [](auto a, auto b) {
     return std::chrono::duration<double, std::milli>(b - a).count();
   };
-  if (ds41_session_sync(session, &tokens, error, sizeof(error)) != 0) {
+  if (ds41_session_sync(session, &tokens, 0, error, sizeof(error)) != 0) {
     std::fprintf(stderr, "sync failed: %s\n", error);
     return 1;
   }
@@ -265,7 +265,7 @@ int DsparkProbe(ds41_engine* engine, const std::vector<int>& prompt,
   }
   const double plain_ms = ms(t0, now());
   ds41_session_invalidate(session);
-  if (ds41_session_sync(session, &tokens, error, sizeof(error)) != 0) {
+  if (ds41_session_sync(session, &tokens, 0, error, sizeof(error)) != 0) {
     std::fprintf(stderr, "sync failed: %s\n", error);
     return 1;
   }
@@ -273,7 +273,7 @@ int DsparkProbe(ds41_engine* engine, const std::vector<int>& prompt,
   for (int width = 1; width <= widths; width++) {
     if (width > 1) {
       ds41_session_invalidate(session);
-      if (ds41_session_sync(session, &tokens, error, sizeof(error)) != 0)
+      if (ds41_session_sync(session, &tokens, 0, error, sizeof(error)) != 0)
         return 1;
     }
     std::vector<int> spec;
@@ -408,6 +408,107 @@ int DsparkDump(ds41_engine* engine, const std::vector<int>& prompt,
   return 0;
 }
 
+/* Decoder SWA bounded replay against the exact prefill: the ids but the
+ * last `rows` are the prompt, prefilled once in full and once with
+ * ds41_decoder_eval_prompt; the last `rows` are then evaluated as one
+ * batch (teacher forcing) after each. Reports the prefill times, the
+ * reference tokens' NLL under both, top-1 agreement and KL(full || replay)
+ * per continuation position. */
+int ReplayProbe(ds41_engine* engine, const std::vector<int>& ids,
+                uint32_t context, uint32_t rows) {
+  if (rows < 2 || ids.size() <= rows + 1)
+    return 2;
+  const uint32_t prompt = (uint32_t)(ids.size() - rows);
+  ds41_decoder* d = ds41_decoder_create(
+      engine, std::max<uint32_t>(context, (uint32_t)ids.size() + 1));
+  if (!d)
+    return 1;
+  const std::size_t vocab = (std::size_t)ds41_engine_vocab_size(engine);
+  const uint32_t cap = ds41_decoder_batch_capacity(d);
+  std::vector<float> logits[2];
+  double prefill_ms[2] = {};
+  for (int replay = 0; replay < 2; ++replay) {
+    if (ds41_decoder_reset(d) != 0)
+      return 1;
+    std::vector<float> last(vocab);
+    const auto t0 = std::chrono::steady_clock::now();
+    for (uint32_t i = 0; i < prompt;) {
+      const uint32_t n = std::min(cap, prompt - i);
+      const int rc = replay
+                         ? ds41_decoder_eval_prompt(d, ids.data() + i, n,
+                                                    prompt, last.data(), 0)
+                         : ds41_decoder_eval(d, ids.data() + i, n, last.data(),
+                                             0, nullptr, nullptr);
+      if (rc != 0) {
+        std::fprintf(stderr, "prefill failed at %u\n", i);
+        return 1;
+      }
+      i += n;
+    }
+    prefill_ms[replay] = std::chrono::duration<double, std::milli>(
+                             std::chrono::steady_clock::now() - t0)
+                             .count();
+    /* Row r predicts ids[prompt + r]: the batch is the prompt's last token
+     * and the continuation but its last token. */
+    logits[replay].resize((std::size_t)rows * vocab);
+    if (ds41_decoder_reset(d) != 0)
+      return 1;
+    /* Re-run the prompt without its last token, then the scored batch. */
+    for (uint32_t i = 0; i + 1 < prompt;) {
+      const uint32_t n = std::min(cap, prompt - 1 - i);
+      const int rc = replay
+                         ? ds41_decoder_eval_prompt(d, ids.data() + i, n,
+                                                    prompt - 1, last.data(), 0)
+                         : ds41_decoder_eval(d, ids.data() + i, n, last.data(),
+                                             0, nullptr, nullptr);
+      if (rc != 0)
+        return 1;
+      i += n;
+    }
+    if (ds41_decoder_eval(d, ids.data() + prompt - 1, rows,
+                          logits[replay].data(), rows, nullptr, nullptr) != 0)
+      return 1;
+  }
+  double nll[2] = {}, kl_sum = 0.0, kl_max = 0.0;
+  uint32_t agree = 0, ref_hits[2] = {};
+  for (uint32_t r = 0; r < rows; ++r) {
+    const int target = ids[prompt + r];
+    double lse[2];
+    int best[2];
+    for (int k = 0; k < 2; ++k) {
+      const float* row = logits[k].data() + (std::size_t)r * vocab;
+      best[k] = Argmax(row, vocab);
+      double sum = 0.0;
+      for (std::size_t i = 0; i < vocab; ++i)
+        sum += std::exp((double)row[i] - row[best[k]]);
+      lse[k] = row[best[k]] + std::log(sum);
+      nll[k] += lse[k] - row[target];
+      ref_hits[k] += best[k] == target;
+    }
+    agree += best[0] == best[1];
+    const float* p = logits[0].data() + (std::size_t)r * vocab;
+    const float* q = logits[1].data() + (std::size_t)r * vocab;
+    double kl = 0.0;
+    for (std::size_t i = 0; i < vocab; ++i) {
+      const double lp = p[i] - lse[0], lq = q[i] - lse[1];
+      kl += std::exp(lp) * (lp - lq);
+    }
+    kl_sum += kl;
+    kl_max = std::max(kl_max, kl);
+  }
+  std::printf(
+      "replay prompt %u tokens: prefill %.1f ms full, %.1f ms replay "
+      "(%.2fx)\n",
+      prompt, prefill_ms[0], prefill_ms[1], prefill_ms[0] / prefill_ms[1]);
+  std::printf(
+      "replay continuation %u tokens: nll %.4f full, %.4f replay; "
+      "top-1 reference %u / %u; agreement %u; kl mean %.5f max %.4f\n",
+      rows, nll[0] / rows, nll[1] / rows, ref_hits[0], ref_hits[1], agree,
+      kl_sum / rows, kl_max);
+  ds41_decoder_destroy(d);
+  return 0;
+}
+
 int main(int argc, char** argv) {
   const char* model = nullptr;
   const char* engram = nullptr;
@@ -428,6 +529,7 @@ int main(int argc, char** argv) {
   int dspark_generate = 0;
   const char* dspark_dump = nullptr;
   bool dspark_sweep = false;
+  uint32_t replay_check = 0;
   for (int i = 1; i < argc; ++i) {
     if (std::strcmp(argv[i], "--engram") == 0 && i + 1 < argc) {
       engram = argv[++i];
@@ -466,6 +568,9 @@ int main(int argc, char** argv) {
     } else if (std::strcmp(argv[i], "--dspark-dump") == 0 && i + 1 < argc) {
       dspark_dump = argv[++i];
       upload = true;
+    } else if (std::strcmp(argv[i], "--replay-check") == 0 && i + 1 < argc) {
+      replay_check = (uint32_t)std::strtoul(argv[++i], nullptr, 10);
+      upload = true;
     } else if (std::strcmp(argv[i], "--rendered") == 0) {
       rendered = true;
     } else if (std::strcmp(argv[i], "--upload") == 0) {
@@ -483,7 +588,8 @@ int main(int argc, char** argv) {
         "usage: %s MODEL-00001-of-N.gguf [--engram FILE] [--upload] "
         "[--tokenize TEXTS [--rendered]] [--decode IDS [--generate N] "
         "[--score] [--batch] [--context N] [--prefill-batch N] "
-        "[--out DIR]] [--spec-check CYCLES [--spec-width W] | --spec-bench N | "
+        "[--out DIR]] [--replay-check ROWS] "
+        "[--spec-check CYCLES [--spec-width W] | --spec-bench N | "
         "--dspark FILE "
         "--dspark-generate N [--dspark-sweep] | --dspark FILE --dspark-dump "
         "DIR]\n",
@@ -534,6 +640,17 @@ int main(int argc, char** argv) {
       std::printf("\n");
       ds41_tokens_free(&tokens);
     }
+  }
+  if (decode && replay_check) {
+    std::vector<int> ids;
+    for (const char* p = decode; *p;) {
+      ids.push_back(std::atoi(p));
+      while (*p && *p != ',')
+        ++p;
+      if (*p == ',')
+        ++p;
+    }
+    return ReplayProbe(engine, ids, context, replay_check);
   }
   if (decode &&
       (spec_check || spec_bench >= 0 || dspark_generate > 0 || dspark_dump)) {

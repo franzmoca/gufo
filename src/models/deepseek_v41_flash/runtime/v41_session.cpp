@@ -83,23 +83,34 @@ uint32_t vocab(const ds41_session* s) { return (uint32_t)ds41_engine_vocab_size(
 
 bool cancelled(const ds41_session* s) { return s->cancel && s->cancel(s->cancel_data); }
 
-/* Evaluates n tokens; the frontier logits are those of the last one. */
-bool eval(ds41_session* s, const int* tokens, uint32_t n, char* error, size_t capacity) {
+/* Positions of a prompt ending at prompt_end that the decoder layers run. */
+uint32_t replay_from(uint32_t prompt_end) {
+  return prompt_end > DS41_DECODER_REPLAY_ROWS ? prompt_end - DS41_DECODER_REPLAY_ROWS : 0;
+}
+
+/* Evaluates n tokens; the frontier logits are those of the last one. Prompt
+ * tokens (prompt_end > 0) take the decoder's bounded replay; batches before
+ * the replayed positions leave the frontier logits stale. */
+bool eval(ds41_session* s, const int* tokens, uint32_t n, char* error, size_t capacity, uint32_t prompt_end = 0) {
   if ((int)(s->tokens.size() + n) >= s->context) {
     set_error(error, capacity, "context is full");
     return false;
   }
   const uint32_t first = (uint32_t)s->tokens.size();
+  const uint32_t kept = first + n - std::clamp(replay_from(prompt_end), first, first + n);
   if (s->before_write) s->before_write(s->write_data, first, first + n);
-  if (ds41_decoder_eval(s->decoder, tokens, n, s->logits.data(), 1, nullptr, nullptr) != 0) {
+  const int rc = prompt_end
+                     ? ds41_decoder_eval_prompt(s->decoder, tokens, n, prompt_end, s->logits.data(), kept ? 1 : 0)
+                     : ds41_decoder_eval(s->decoder, tokens, n, s->logits.data(), 1, nullptr, nullptr);
+  if (rc != 0) {
     set_error(error, capacity, "ROCm evaluation failed");
     s->valid = false;
     return false;
   }
   s->tokens.insert(s->tokens.end(), tokens, tokens + n);
   s->valid = true;
-  /* The drafter keeps the newest rows' main KV. */
-  const uint32_t rows = std::min(n, DS41_DSPARK_FEATURE_ROWS);
+  /* The drafter keeps the newest rows' main KV, from the replayed rows. */
+  const uint32_t rows = std::min(kept, DS41_DSPARK_FEATURE_ROWS);
   if (s->dspark && !ds41_dspark_inject(s->dspark, first + n - rows, rows)) {
     set_error(error, capacity, "DSpark feature injection failed");
     s->valid = false;
@@ -156,8 +167,10 @@ int ds41_session_dspark_set_range(ds41_session* s, uint32_t start, uint32_t end)
              : 1;
 }
 
-int ds41_session_sync(ds41_session* s, const ds41_tokens* prompt, char* error, size_t capacity) {
-  if (!s || !prompt || !prompt->v || prompt->len <= 0 || prompt->len >= s->context) {
+int ds41_session_sync(ds41_session* s, const ds41_tokens* prompt, int prompt_end, char* error, size_t capacity) {
+  if (prompt && prompt_end == 0) prompt_end = prompt->len;
+  if (!s || !prompt || !prompt->v || prompt->len <= 0 || prompt->len >= s->context || prompt_end < prompt->len ||
+      prompt_end >= s->context) {
     set_error(error, capacity, "prompt exceeds context");
     return 1;
   }
@@ -183,13 +196,16 @@ int ds41_session_sync(ds41_session* s, const ds41_tokens* prompt, char* error, s
     if (s->dspark) ds41_dspark_state_reset(s->dspark, 0);
   }
   const size_t batch = ds41_decoder_batch_capacity(s->decoder);
-  for (size_t i = s->tokens.size(); i < n;) {
+  const size_t start = s->tokens.size();
+  for (size_t i = start; i < n;) {
     if (cancelled(s)) {
+      /* Skipped decoder rows leave windows that only this prompt end completes. */
+      if (start < std::min<size_t>(i, replay_from((uint32_t)prompt_end))) s->valid = false;
       set_error(error, capacity, "prefill cancelled");
       return DS41_SESSION_SYNC_INTERRUPTED;
     }
     const uint32_t count = (uint32_t)std::min(batch, n - i);
-    if (!eval(s, prompt->v + i, count, error, capacity)) return 1;
+    if (!eval(s, prompt->v + i, count, error, capacity, (uint32_t)prompt_end)) return 1;
     i += count;
   }
   return 0;

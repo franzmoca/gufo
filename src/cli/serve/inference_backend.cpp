@@ -2077,7 +2077,16 @@ public:
     const std::size_t next_position = offset + consumed;
     const auto prefix = DeepSeekEngineTokens(prompt.first(next_position));
     std::string error;
-    if (!deepseek.session().Sync(prefix, &error)) {
+    // The prompt ends at this step's frontier, where the state may be
+    // captured; V4.1 runs its decoder layers over the last tokens only.
+    bool synced = false;
+    if constexpr (requires {
+                    deepseek.session().Sync(prefix, &error, prompt.size());
+                  })
+      synced = deepseek.session().Sync(prefix, &error, prompt.size());
+    else
+      synced = deepseek.session().Sync(prefix, &error);
+    if (!synced) {
       throw std::runtime_error("DeepSeek prefill failed: " + error);
     }
     deepseek.set_position(next_position);

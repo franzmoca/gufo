@@ -13,14 +13,20 @@ The 131K rows come from a separate `-d 131072 -r 2` run of the same build.
 
 | Test | t/s |
 |---|---:|
-| pp2048 | 703.07 ± 10.04 |
-| tg64 | 23.88 ± 0.13 |
-| pp2048 @ d8192 | 677.76 ± 1.79 |
-| tg64 @ d8192 | 23.44 ± 0.02 |
-| pp2048 @ d32768 | 585.30 ± 1.84 |
-| tg64 @ d32768 | 22.92 ± 0.01 |
-| pp2048 @ d131072 | 372.21 ± 1.26 |
-| tg64 @ d131072 | 21.03 ± 0.06 |
+| pp2048 | 1176.72 ± 102.49 |
+| tg64 | 23.99 ± 0.14 |
+| pp2048 @ d8192 | 1196.32 ± 4.74 |
+| tg64 @ d8192 | 23.47 ± 0.01 |
+| pp2048 @ d32768 | 1121.00 ± 9.13 |
+| tg64 @ d32768 | 22.95 ± 0.01 |
+| pp2048 @ d131072 | 855.18 ± 0.25 |
+| tg64 @ d131072 | 21.09 ± 0.03 |
+
+Prefill runs the decoder layers (20-39) over a prompt's last 140 tokens
+only (decoder SWA bounded replay, [QUALITY.md](QUALITY.md)); before it,
+pp2048 was 703.07, @ d8192 677.76, @ d32768 585.30 and @ d131072 372.21
+with the same decode. `gufo serve` prefilled an 11,327-token
+prompt in 9.52 s instead of 16.95 s (1,190 tok/s).
 
 `--prefill-batch 4096` (default 2048) prefills a 4096-token prompt at
 720 tok/s instead of 694 (`gufo bench -p 4096 -r 3`) for about 1.2 GiB more

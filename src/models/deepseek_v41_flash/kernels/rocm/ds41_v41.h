@@ -199,8 +199,9 @@ int ds41_v41_topk(const float* score, uint64_t score_stride, uint32_t* out, uint
                   uint32_t ratio, uint32_t div);
 
 /* Sparse attention for n queries. Token t at p = pos0 + t attends the window
- * positions max(0, p - window + 1) .. p, read from `ring` (slot pos % window,
- * positions before pos0) and from `chunk` (row pos - pos0), plus
+ * positions max(0, p - window + 1, min(floor, p)) .. p, read from `ring`
+ * (slot pos % window, positions before pos0) and from `chunk` (row
+ * pos - pos0), plus
  * min(k, (p + 1) / ratio) compressed rows comp[idx[t, j]] (FP4 KV rows; none when ratio
  * is 0). Keys equal values; sinks join the softmax denominator. q/out are
  * [n, heads, head_dim]. With inv_freq, q is first rotated as by
@@ -211,10 +212,10 @@ int ds41_v41_topk(const float* score, uint64_t score_stride, uint32_t* out, uint
  * need `partial` with n * heads * DS41_V41_ATTN_PARTIAL_PER_HEAD floats. */
 #define DS41_V41_ATTN_SPLIT_TOKENS 8u
 #define DS41_V41_ATTN_PARTIAL_PER_HEAD (20u * 516u)
-int ds41_v41_attention(float* q, const float* ring, const float* chunk, uint32_t window, ds41_fp4_rows comp,
-                       const uint32_t* idx, uint32_t k, uint32_t ratio, const float* sinks, float* out,
-                       float* partial, uint32_t pos0, uint32_t n, uint32_t heads, uint32_t head_dim, float scale,
-                       const float* inv_freq, uint32_t rope_dim, float* rope_scratch);
+int ds41_v41_attention(float* q, const float* ring, const float* chunk, uint32_t window, uint32_t floor,
+                       ds41_fp4_rows comp, const uint32_t* idx, uint32_t k, uint32_t ratio, const float* sinks,
+                       float* out, float* partial, uint32_t pos0, uint32_t n, uint32_t heads, uint32_t head_dim,
+                       float scale, const float* inv_freq, uint32_t rope_dim, float* rope_scratch);
 
 /* Routing per token: scores = sqrt(softplus(logits)); top-k of scores + bias;
  * weights normalized and multiplied by route_scale. ids/weights are [n, k]. */

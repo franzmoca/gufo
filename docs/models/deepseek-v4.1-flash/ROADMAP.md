@@ -196,8 +196,11 @@ Open performance items are tracked in [BACKLOG.md](BACKLOG.md).
   with or without a drafter. Its state joins snapshots and the component
   cache metadata. File edit: 23.6 → 54.6 tok/s without a drafter, 43.9 →
   56.4 tok/s with DSpark, identical output.
-- Evaluate decoder SWA bounded replay (layers 20-39 over only the last 128
-  prompt tokens), which roughly halves prefill; adopt only if quality holds.
+- Decoder SWA bounded replay (done): prompts run layers 20-39 over their
+  last 140 tokens, as DeepSeek's DeepInfer does for V4.1; layer 20 still
+  compresses every token. Prefill 1.7-2.3× faster (pp2048 703 → 1,177
+  tok/s, @ d131072 372 → 855), continuation NLL within 0.008 of exact prefill, functional suites
+  pass.
 
 ### M6 Vision
 
