@@ -318,6 +318,33 @@ int draw(const ds41_session* s, const ds41_dspark_sampler* sampler, const float*
   return sampler->sample(sampler->ctx, row, vocab(s));
 }
 
+/* Draws row `row` of the last evaluation on the device when the request's
+ * selection is plain softmax sampling (ds41_v41_sample_row): q's exact p/q
+ * acceptance or residual draw, or a plain draw without q (or for a point
+ * mass). It consumes the uniforms the host sampler would and records the
+ * token. False leaves the request unchanged for the host sampler. */
+bool device_draw(ds41_session* s, const ds41_dspark_sampler* sampler, uint32_t row, const ds41_v41_proposal* q,
+                 int* token, int* argmax) {
+  if (!sampler || !sampler->device_temperature) return false;
+  const float temperature = sampler->device_temperature(sampler->ctx);
+  if (!(temperature > 0.0f)) return false;
+  const uint64_t start = sampler->rng(sampler->ctx);
+  const double u = sampler->uniform(sampler->ctx);
+  const uint64_t one = sampler->rng(sampler->ctx);
+  const double u2 = sampler->uniform(sampler->ctx);
+  ds41_v41_sample_result r{};
+  if (!ds41_decoder_sample(s->decoder, row, q, temperature, u, u2, &r) || r.degenerate || r.token < 0 ||
+      r.token >= (int)vocab(s)) {
+    sampler->set_rng(sampler->ctx, start);
+    return false;
+  }
+  if (r.uniforms == 1) sampler->set_rng(sampler->ctx, one);
+  sampler->accept(sampler->ctx, r.token);
+  *token = r.token;
+  *argmax = r.argmax;
+  return true;
+}
+
 /* One cycle. The anchor is the emitted token the session has not evaluated
  * yet (s->next), drawn here on a request's first cycle. The cycle verifies
  * the anchor with up to kVerifyRows - 1 proposals (prompt-lookup copies or
@@ -429,13 +456,21 @@ int dspark_step(const ds41_session_dspark_batch_item& item, char* error, size_t 
   uint32_t accepted = 1;
   uint32_t positional = 0;
   int next = -1;
+  const ds41_v41_proposal* proposals =
+      stochastic && copied == 0 && s->dspark ? ds41_dspark_proposals(s->dspark) : nullptr;
   for (uint32_t i = 1; i < m; i++) {
     const float* row = rows + (uint64_t)(i - 1) * n_vocab;
-    positional += ds41_sample_argmax(row, n_vocab) == block[i];
-    if (next >= 0) continue;
-    const int drawn = stochastic && copied == 0
-                          ? sampler->verify(sampler->ctx, i - 1, row, n_vocab, block[i])
-                          : draw(s, sampler, row);
+    if (next >= 0) {
+      positional += ds41_sample_argmax(row, n_vocab) == block[i];
+      continue;
+    }
+    int drawn = -1, argmax = -1;
+    if (!device_draw(s, sampler, i - 1, proposals ? proposals + (i - 1) : nullptr, &drawn, &argmax)) {
+      argmax = ds41_sample_argmax(row, n_vocab);
+      drawn = stochastic && copied == 0 ? sampler->verify(sampler->ctx, i - 1, row, n_vocab, block[i])
+                                        : draw(s, sampler, row);
+    }
+    positional += argmax == block[i];
     if (drawn != block[i] || ends(drawn) || block[i] == stop)
       next = drawn;
     else
@@ -455,7 +490,10 @@ int dspark_step(const ds41_session_dspark_batch_item& item, char* error, size_t 
       return 1;
     }
   }
-  if (next < 0) next = draw(s, sampler, s->logits.data());
+  /* The token after a fully accepted block (or a plain step): the last row. */
+  int bonus_argmax = -1;
+  if (next < 0 && !device_draw(s, sampler, m - 1, nullptr, &next, &bonus_argmax))
+    next = draw(s, sampler, s->logits.data());
   if (next < 0 || next >= (int)n_vocab) {
     set_error(error, capacity, "DSpark target logits contain no finite values");
     s->valid = false;

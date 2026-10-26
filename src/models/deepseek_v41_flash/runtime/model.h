@@ -89,6 +89,15 @@ struct ds41_dspark_sampler {
   // Accept an already-computed target argmax only when it is also the exact
   // request selection. A false result must leave sampler state unchanged.
   bool (*try_accept_argmax)(void* ctx, int token) = nullptr;
+  // Device target draws: `device_temperature` returns the temperature while
+  // the request's next selection is plain softmax sampling over the whole
+  // vocabulary (no filters, penalties, grammar, forced or deferred token),
+  // else 0. `uniform` draws the request's next uniform; `rng`/`set_rng` save
+  // and restore its state. Drawn tokens are recorded with `accept`.
+  float (*device_temperature)(void* ctx) = nullptr;
+  double (*uniform)(void* ctx) = nullptr;
+  uint64_t (*rng)(void* ctx) = nullptr;
+  void (*set_rng)(void* ctx, uint64_t state) = nullptr;
 };
 
 struct ds41_session_dspark_batch_item {

@@ -310,6 +310,10 @@ void ds41_dspark_state_reset(ds41_dspark_state* s, uint32_t pos) {
 
 uint32_t ds41_dspark_state_end(const ds41_dspark_state* s) { return s->ring_end; }
 
+const ds41_v41_proposal* ds41_dspark_proposals(const ds41_dspark_state* s) {
+  return s->engine->dspark->scratch->proposals;
+}
+
 uint64_t ds41_dspark_ring_bytes(void) { return DS41_DSPARK_STAGES * kRingFloats * sizeof(float); }
 
 float* ds41_dspark_state_ring(ds41_dspark_state* s, uint64_t* bytes) {
