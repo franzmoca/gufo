@@ -1,0 +1,42 @@
+[Model Load]: 18.2373 s
+[Engine]: DeepSeek V4.1 Flash ROCm (gfx1151)
+Model: DeepSeek V4.1 Flash
+Prompt tokens: 21
+Max tokens: 256
+--- Generation Output ---
+# LRU Cache in Python
+
+```python
+from collections import OrderedDict
+
+class LRUCache:
+    def __init__(self, capacity: int):
+        self.capacity = capacity
+        self.cache = OrderedDict()   # insertion order = recency order
+        # OrderedDict keeps oldest at the front, newest at the back.
+
+    def get(self, key):
+        if key not in self.cache:
+            return None
+        # Move key to the end => it becomes the most recently used
+        self.cache.move_to_end(key)
+        return self.cache[key]
+
+    def put(self, key, value):
+        if key in self.cache:
+            self.cache.move_to_end(key)   # refresh recency
+        self.cache[key] = value
+
+        # Evict the least recently used item if we exceed capacity
+        if len(self.cache) > self.capacity:
+            self.cache.popitem(last=False)  # pops the oldest (front)
+```
+
+### Example
+
+```python
+c = LRUCache(2)
+c.put(1, "a")
+c.put(2, "b")
+print(c.get(1))   # "a"  -> 1 is now most recent
+Generated 256 tokens on ROCm in 6.69918s (38.2136 tok/s)

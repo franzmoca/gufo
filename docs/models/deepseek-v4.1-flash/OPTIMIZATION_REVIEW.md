@@ -15,6 +15,15 @@ Follow-up: [E1](EXPERIMENTS.md#post-m6-resident-optimization-pass-2026-10-26)
 retains compact FP32 rescoring for 1–4 rows, with measured AR gains and exact
 operator/rollback results. WMMA rescoring and compact final selection remain
 open; DSpark per-request timing remains inconclusive and unqualified.
+[E3](EXPERIMENTS.md#e3-request-local-bpe-piece-memoization-retained) retains
+bounded per-span BPE memoization, and
+[E4](EXPERIMENTS.md#e4-stop-unused-dspark-markov-suffixes-retained) removes
+unrequested Markov proposals without changing the five-row transformer/head.
+E4's aggregate request throughput is roughly flat; its short-width draft stage
+is faster. Stochastic proposals (E2) and shortened head rows (E5) were rejected
+for mixed single-seed request results; neither is active production behavior.
+Decode-equivalent verification, actual joint request batching and device route
+planning remain open architectural priorities.
 
 ## Scope and source pins
 
