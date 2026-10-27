@@ -1,467 +1,189 @@
-# DeepSeek V4.1 Flash SSD streaming research
-
-This note records the implementations inspected and the measurements on the
-local Strix Halo machine. Their published rates are workload references, not
-matched comparisons: quantization, hardware, context, prompt history and
-speculative decoding differ.
-
-## Implementations inspected
-
-- [ds4](https://github.com/antirez/ds4) and its [Strix Halo PR](https://github.com/antirez/ds4/pull/1036),
-  inspected at [`815e8fb`](https://github.com/kyuz0/ds4/tree/815e8fb6194ffa3160f1bd5f80df0e55efd190fe):
-  the ROCm path uses aligned direct reads into staging buffers, falls back to
-  buffered reads and can stage whole subsequent layers during prefill. The PR
-  reports 10.18 tok/s after 2K prefill with a 76 GiB cache for its Q2 build;
-  it does not support DSpark with SSD streaming.
-- [Kyojin](https://github.com/Yamz-Labs/kyojin/blob/0c5b91a0686acc8129190f753e032715f0b0dcc2/doc/DS41.md)
-  streams a larger 172 GiB EXL3 pack on 128 GB Strix Halo. It uses direct I/O,
-  12 readers and 4 MiB chunks; prefill issues later-layer reads during current
-  work. Its cache protects frequently used and recent-prompt experts, and its
-  row-blocked 32K prefill reduces repeated scans. It reports roughly 5–11
-  tok/s, with substantial workload and machine-sharing variation.
-- The [Spark recipe](https://github.com/vcruz305/DSV4.1-Flash-1017-EXL3-Spark-recipe/blob/63220db0a7cc62dd8b783f71c9cf28f909c9b09b/README.md)
-  uses a smaller 1.62 bpw EXL3 quant on NVIDIA GB10. Its 31–34 tok/s result
-  uses DSpark; the cold-expert file is read through an NVIDIA ATS mapping,
-  while hot experts stay resident. Its no-draft control is 13.4 tok/s. This
-  is a different memory and kernel path from this AMD GGUF stream.
-- [Project Maya](https://github.com/mw00/project-maya/tree/8b4b39f84e35393833b31b80e82bee92e69bb646)
-  tiers experts across GPU, RAM and SSD, and uses threaded direct reads and
-  CPU expert execution where appropriate. Its multi-GPU/CPU measurements
-  cannot be attributed to a single Strix Halo.
-- [Xolotl](https://github.com/Indras-Mirror/Xolotl/tree/961d390fea6d848431822f7c6e94a6e5c0775133)
-  combines VRAM, pinned host RAM and NVMe, with ranking and layer read-ahead.
-  Its reported 4090 results use different hardware and its own quant; the
-  project also reports loading the ISTA GGUFs. Predicted read-ahead may waste
-  bandwidth, so it is not assumed to help this path.
-
-The prefill read-ahead and larger, row-blocked prefill are promising follow-up
-experiments. They need independent memory, output and end-to-end measurements;
-the current store reads selected experts after the router has chosen them.
-
-## Local storage measurements
-
-October 26, 2026: Samsung 990 PRO, XFS mounted `noatime`, kernel 7.2.11,
-NVMe scheduler `none`, 4096 KiB kernel read-ahead, 1023 requests. No global
-kernel or filesystem setting was changed. `tools/ds41/stream_io_bench.py`
-reads actual IQ2_XXS expert offsets in 40 layer-sized batches of 1, 2 or 6
-missing experts. Each arm reads 1.02 GB of payload, drops only clean pages of
-the model shards first, and compares aligned direct-read payloads with buffered
-reads. Two rounds are run in opposite orders. Device counters are whole-drive
-counters and may include other activity.
-
-| Read mode | Readers | Payload GiB/s, two runs | Median layer ms |
-| --- | ---: | ---: | ---: |
-| buffered | 1 | 3.04, 3.11 | 5.22, 5.14 |
-| buffered | 4 | 5.33, 5.31 | 3.05, 3.08 |
-| buffered, `POSIX_FADV_RANDOM` | 4 | 5.27, 5.41 | 2.97, 3.02 |
-| direct | 4 | 5.68, 5.89 | 2.65, 2.66 |
-| direct | 8 | 5.81, 5.75 | 2.74, 2.73 |
-| direct | 12 | 5.63, 5.68 | 2.69, 2.73 |
-
-On this workload four readers reached the useful queue depth; more did not
-improve layer latency. Random advice was inconclusive. The matched cold
-production run using four direct readers improved prefill from 172.6–172.9 to
-213.8–214.1 tok/s and decode from 6.80–7.16 to 8.97–8.98 tok/s. Each arm
-used pp2048/tg128, identical arguments and targeted page-cache eviction. The
-whole-model gain includes page-cache and staging effects, not just raw NVMe
-throughput. In a separate identical repeated-prompt history, the second prefill
-was 938 tok/s with either mode and the second decode was 13.44 tok/s with
-either mode; the first decode was 7.05 buffered and 8.99 direct.
-
-As a separate sustained raw-read control, Kyojin's
-[`uring_bench.c`](https://github.com/Yamz-Labs/kyojin/blob/0c5b91a0686acc8129190f753e032715f0b0dcc2/tools/tier/uring_bench.c)
-read 3 MiB random direct-I/O requests at queue depth four for two seconds over
-a 16 GiB span of the same shard. Pread threads, `io_uring` and polling
-`io_uring` each reached about 4.9 GB/s; p99 was about 3 ms. The short burst
-test above and this sustained test are different workloads. Replacing the
-reader pool with `io_uring` has no measured benefit here. Changing the global
-scheduler or read-ahead was not tested: those sysfs settings are not writable
-by this user.
-
-A separate `rocprofv3` pp140/tg16 trace with buffered reads showed GPU kernel
-dispatches occupying 1.36 s of the 9.76 s from the first router to the last
-kernel; this excludes model loading and does not count dedicated DMA activity.
-The largest gaps surround streamed expert staging. This is why raw matrix
-kernel throughput alone does not predict streamed decode speed.
-
-## Overlapped staging (2026-10-27)
-
-Three changes removed the host-side serialization around streamed experts;
-none of them touches the arithmetic, and the tg128 token hash of the matched
-bench below is identical to the previous build's:
-
-- **Per-expert weight tables.** Each projection now consumes a device table
-  that maps an expert index to its weights (its cache slot when resident, the
-  stage row a read just filled), so resident experts are read in place. The
-  previous design copied every routed resident expert slot-to-stage before
-  each launch, up to ~57 MB per layer of pure device-to-device traffic per
-  decode token. `ds41_gemv_bench` shows the table indirection at parity with
-  the packed layout (within noise, bit-identical outputs).
-- **Split hit/miss launches.** While the reads for the missing experts
-  stream, the shared expert and the gate+up of the resident experts compute.
-  The miss rows are zeroed by the overlapped launch and completed by a second
-  launch over the read rows once the reads join. Kyojin lists this as a lever
-  but skips it because separate launches change the fp32 sum order; here each
-  row keeps its single-launch arithmetic, so the outputs are bit-identical.
-- **Per-reader upload streams.** The four read workers upload through their
-  own streams and events instead of blocking copies on the legacy stream, so
-  staging no longer queues behind the layers' kernels.
-
-Matched `gufo bench` pp2048/tg128 on the same model, histogram sidecar and
-machine as the October 26 runs (gpu-test binary, seed 19 s, 82.8% route hits):
-
-| Build | Prefill tok/s | Decode tok/s | DSpark decode tok/s |
-| --- | ---: | ---: | ---: |
-| October 26 (stage copies, shared overlap) | 592.1 | 11.65 | 13.50 |
-| October 27 (tables, split overlap, upload streams) | 664.7–669.6 | 14.99–15.08 | 17.92–17.96 |
-| October 27 (retuned expert GEMV) | 521.6–529.6* | 16.57–16.94 | 19.34 |
-
-*Prefill keeps its kernels; the page-cache spread spans 494–669 tok/s across
-these runs. The retuned expert GEMV (see EXPERIMENTS.md) leaves every token
-hash unchanged: 04842be7… on AR and DSpark (71 accepted in both, 110 vs 107
-drafted under the timing-adaptive drafter), resident `IQ1_M` at 70d5a48a…
-(23.86–24.38 vs 23.36–23.55 tok/s).
-
-The DSpark run drafted and accepted the same 110/71 tokens with the same
-output hash. Decode host wait fell from 6.51 to 5.25 ms/token; the remaining
-stall is the per-layer read latency itself, which the next two backlog items
-address from different sides. Resident `IQ1_M` pp2048/tg64 (1070/23.0) stayed
-inside the previous build's own run-to-run spread (945–1129 / 22.5–23.7).
-
-[Raw results and logs](artifacts/m3-streaming/io-bench.json) ·
-[Profile](artifacts/m3-streaming/profile-iq2-stream.log) ·
-[io_uring control](artifacts/m3-streaming/io-uring-bench.log) ·
-[Direct-I/O candidate](artifacts/m3-streaming/bench-iq2-direct-io-candidate1.log) ·
-[Buffered control](artifacts/m3-streaming/bench-iq2-buffered-io-control1.log) ·
-[Overlapped staging](artifacts/m3-streaming/bench-iq2-tables-ar1.log) ·
-[Retuned GEMV pairs](artifacts/m3-streaming/bench-iq2-fast-ctrl2.log)
-
-## Prefill read pipelining with router predictions (2026-10-27)
-
-Backlog item 11. A prefill layer's missing experts are no longer read after
-its router has chosen them: the reads start during the previous layer's
-compute.
-
-- **Background read jobs.** The four read workers also serve one background
-  job between demand phases, and a demand phase always preempts it. The
-  next prepare of the job's layer adopts its un-run tasks — grouped per
-  expert, and only for the experts the batch actually routes, so a wrong
-  prediction costs bandwidth but never phase time. A prepare for the layer
-  after parks the job across its phase; anything overtaken is dropped once
-  its in-flight tasks drain.
-- **Ping-pong stage sets.** A background job writes the stage set of its
-  layer's parity, disjoint from the rows the current layer's compute reads.
-  The second set (~3.6 GiB) is bought lazily after the startup seed, so
-  seeding keeps its memory budget, but the runtime cache then grows to 98.0
-  instead of 101.6 GiB and decode pays for the difference in extra reads;
-  a compact stage set sized to the predicted expert count is the follow-up
-  that recovers it.
-- **Router prediction.** The read overlap of a prefill layer L enqueues
-  layer L+1's router matmul on this layer's FFN input (one layer stale),
-  where the extra matvec hides in the read stall. A store thread submits
-  the read job when the ids land in pinned memory, so layer L+1's reads
-  overlap layer L's compute.
-
-A router-free sweep of the next layer's uncached experts — the original
-item-11 design, as ds4's Strix Halo path does — was measured first and
-rejected on this model: V4.1 Flash routing is skewed enough that a
-2048-token prompt touches only a fraction of each layer's experts, and with
-the ranked seed resident the sweep read 3.6x the demand volume of the first
-pass (22.9 vs 6.4 GiB), dropping pp2048 to 389.61/386.69 tok/s against
-664.03/661.93 for the control. The predicted job reads ~1.6x the demand
-volume, and the overlap absorbs it.
-
-Matched `gufo bench` arms (pp2048/tg128, alternating binaries, targeted
-shard page eviction between runs, two rounds each). The tg128 token hash
-04842be7… and DSpark's 71 accepted of 107 drafted are identical on every
-arm; the streamed pipeline changes only when bytes arrive, never which
-bytes the kernels see.
-
-| Build | AR pp2048 | AR tg128 | DSpark pp2048 | DSpark tg128 |
-| --- | ---: | ---: | ---: | ---: |
-| control (028086ab) | 652.6–663.6 | 16.53–16.59 | 616.7–620.5 | 19.05–19.11 |
-| prefill prediction | 779.3–785.1 | 15.75–15.94 | 737.2–748.0 | 17.78–17.91 |
-
-Prefill gains 19–21% on both paths. Decode keeps its kernels and its host
-wait (4.88–4.93 ms/token on every arm) but loses 4–6% to the smaller cache:
-the second stage set is the price of the pipelining, and the compact-set
-follow-up targets exactly that. Decode-side predictions are the next
-section.
-
-[Router-free sweep, candidate](artifacts/m3-streaming/bench-iq2-routersweep-cand1.log) ·
-[Router-free sweep, control](artifacts/m3-streaming/bench-iq2-routersweep-ctrl1.log) ·
-[Prefill prediction, AR](artifacts/m3-streaming/bench-iq2-prefetch-ar-cand1.log) ·
-[Prefill prediction, AR control](artifacts/m3-streaming/bench-iq2-prefetch-ar-ctrl1.log) ·
-[Prefill prediction, DSpark](artifacts/m3-streaming/bench-iq2-prefetch-ds-cand1.log) ·
-[Prefill prediction, DSpark control](artifacts/m3-streaming/bench-iq2-prefetch-ds-ctrl1.log)
-
-## Streamed decode prefetch (2026-10-27)
-
-Backlog item 12. Single-token steps use the same pipeline: when a layer's
-read overlap actually waited on reads, it enqueues the next layer's router
-on the current FFN input, and the store thread submits the predicted
-experts' reads, which the next layer's prepare adopts for the experts it
-routes. Layers without misses predict nothing — a prediction without a
-read stall to hide its matvec costs more than the read it saves — and
-adoption skips unrouted experts, so wrong predictions cost bandwidth only.
-
-Matched arms against the item-11 build (same protocol, two rounds; the
-token hash 04842be7… and DSpark's 71/107 are identical on every arm):
-
-| Build | AR pp2048 | AR tg128 | DSpark pp2048 | DSpark tg128 |
-| --- | ---: | ---: | ---: | ---: |
-| prefill prediction only | 789.1–792.4 | 15.78–15.79 | 746.7–748.2 | 17.83–17.86 |
-| with decode prediction | 778.7–788.0 | 15.91–15.92 | 748.4–750.2 | 17.84–17.89 |
-
-Decode gains 0.8% on AR (every round separated well outside the ±0.01
-run-to-run spread) and is neutral on DSpark, whose verification batches of
-2–16 rows predict nothing by design. The gain is small because at 82–83%
-route hits only ~5 ms/token of read stall exists and one-layer-stale recall
-covers part of it; the larger decode lever is the cache capacity the second
-stage set consumes, which item 11a targets. Decode reads rise from 11.99 to
-13.2 MiB/token (10.9 vs 4.1 GiB prefetched overall), the price of the
-predictions that miss.
-
-[Decode prediction, AR](artifacts/m3-streaming/bench-iq2-decode-ar-cand1.log) ·
-[Decode prediction, AR control](artifacts/m3-streaming/bench-iq2-decode-ar-ctrl1.log) ·
-[Decode prediction, DSpark](artifacts/m3-streaming/bench-iq2-decode-ds-cand1.log) ·
-[Decode prediction, DSpark control](artifacts/m3-streaming/bench-iq2-decode-ds-ctrl1.log)
-
-## Compact prefetch stage and cache reserve (2026-10-27)
-
-Backlog item 11a. The item-11 decode dip came from the second stage set
-taking ~3.6 GiB of expert-cache headroom; two changes give the memory back.
-
-- **The prefetch stage no longer mirrors the demand stage.** Demand reads
-  were always safe in one whole-layer buffer — the blocking routes copy
-  orders them behind the previous layer's compute — so only the background
-  jobs needed a second buffer, and jobs touch just the predicted experts.
-  The prefetch stage is now a 192-row compact buffer with two 96-row parity
-  halves (~1.5 GiB): a job's experts take rows in its layer's half, a job
-  beyond 96 experts truncates (the excess stays a demand read), and a failed
-  job is simply not adopted. Resolving the job moved ahead of the phase's
-  table build so the table can point adopted experts at their rows.
-- **The cache reserve drops from 8 GiB to 4 GiB.** The resident path runs
-  with a 1 GiB dispatch reserve under the same loads; the streamed reserve
-  now covers the shared batch scratch (1.4 GiB at 1M context), one session's
-  FP4 state and transient peaks. 3 GiB measured one 572 tok/s prefill round
-  riding the reclaim floor; 4 GiB is tight across every round.
-
-Matched arms against the item-12 build (same protocol). The cache reaches
-103.8 GiB (AR) / 99.1 GiB (DSpark, which loads the drafter); hashes and
-DSpark's 71/107 identical on every arm:
-
-| Build | AR pp2048 | AR tg128 | DSpark pp2048 | DSpark tg128 |
-| --- | ---: | ---: | ---: | ---: |
-| item 12 (8 GiB reserve, whole-layer set) | 787.5–788.0 | 15.86–15.92 | 744.5–749.3 | 17.87–17.91 |
-| 11a (4 GiB reserve, compact set) | 739.9–747.9 | 17.34–17.38 | 763.9–765.1 | 19.03–19.07 |
-| original control (028086ab) | 652.6–663.6 | 16.53–16.59 | 616.7–620.5 | 19.05–19.11 |
-
-Decode recovers past the original control (+4.8% AR, parity on DSpark, from
-4–6% below it), and DSpark prefill improves. AR prefill sits 5% under the
-item-12 build while DSpark prefill gains: across the pipelined builds the
-AR prefill rate anti-correlates with the route-hit rate (88.3% hits → 787,
-95.3% → 742 tok/s), so the residual is a residency effect worth a profile,
-not a pipeline cost — reads fall from 13.2 to 9.3 MiB/token on the same
-arms.
-
-[Compact stage, AR](artifacts/m3-streaming/bench-iq2-compact-ar-cand1.log) ·
-[Compact stage, DSpark](artifacts/m3-streaming/bench-iq2-compact-ds-cand1.log)
-
-## Storage read-path profile (2026-10-27)
-
-Where every byte of a streamed run comes from, measured on the r522c8653
-build with `/proc/<pid>/io` sampling around the bench phases plus targeted
-micro-benchmarks (`tools/ds41/engram_row_bench.py`).
-
-| Read path | Pattern | Mechanism | Measured |
-| --- | --- | --- | --- |
-| Expert weights (demand + prefetch jobs) | per layer, three ~1 GiB blocks (gate, down, up), expert-strided within each | O_DIRECT `pread`, 4 workers, ≤32 MiB chunks | 5.7 GiB/s effective; 8.2 GB/s pure-sequential ceiling on the 990 PRO |
-| Engram rows | 144 B at hashed-random offsets, 2 layers × 24 rows per token | buffered `pread`, ≤32 threads, page cache | 278 K rows/s cold (~1.06 GiB/s at 4 KiB granularity) |
-| Resident experts | slots in managed chunks, read by the kernels | device memory | not an I/O path |
-
-A pp2048 batch moves ~4 GiB of expert reads as ~140 large IOs and 98,304
-Engram rows (2048 tokens × 24 × 2 layers) as 4 KiB-granule IOs — the Engram
-is under 10% of the bytes but ~99% of the operations. The profile also
-explains the item-11a oddity where a fuller cache slowed AR prefill:
-`rchar == read_bytes` for entire runs, i.e. the Engram's page cache scores
-zero hits once the expert cache has grown (clean file pages are exactly what
-its chunk growth reclaims), so every prefill batch spends ~0.35 s of device
-time on random Engram reads that steal queue depth from the expert streams.
-The 98 GiB-cache build (fastest prefill) and the DSpark runs (4.7 GiB more
-free memory) fit the same mechanism.
-
-Two-disk experiments on the second NVMe (KIOXIA EXCERIA 1.8T, `/`,
-2.3 GB/s sequential vs the 990 PRO's 8.2), via symlinks so no code changed:
-
-- **Engram + shards 3-4 on the KIOXIA: pp2048 collapsed to 113-449 tok/s.**
-  Shards are layer-major (layers 0-12 in shard 1, …), so moving whole shards
-  makes those layers' sweeps read at the slow disk's pace and gate every
-  phase that touches them.
-- **Engram alone on the KIOXIA: pp2048 724.9-727.3** (vs 739.9-747.9
-  same-disk), decode unchanged — the KIOXIA's random-read latency costs more
-  than the contention it removes. A split only pays with a second fast disk,
-  or after a repack that stripes each layer's experts proportionally across
-  both.
-
-Follow-ups are backlog items 14 and 15: Engram batch dedup/sort with a
-bounded hot-row cache, and a rank-major expert-contiguous repack whose jobs
-become single sequential runs (the 8.2 vs 5.7 GiB/s gap is its headroom).
-
-## Opt-in streaming, IQ1_M and the compact stage stride (2026-10-27)
-
-Streaming is now explicit: `--stream-experts` keeps dense weights resident
-and streams routed experts, `--expert-cache-bytes` bounds the expert cache,
-and without the flag a model that does not fit available memory (free CMA
-excluded) fails to load with what it needs. While streaming, the weight
-placement is decided from the resident tensors only, so the 5.31 GiB of
-dense weights go through the device heap instead of managed memory.
-
-**Compact stage stride.** The 3K teacher-forced score of the streamed
-IQ2_XXS build had fallen from 6.0041 (`4b5ee8ea`) to 35.83 (`10ad16a4`).
-Bisection put it on the compact prefetch stage (`522c8653`): disabling
-prefetch or wide jobs restored 6.0041, and so did a whole-layer stage, also
-with jobs still truncated at 96 experts. The stage is sized by the largest
-expert of any layer, but rows were addressed with the current layer's
-expert size; the build mixes 56-, 66- and 74-byte block types, so a layer
-with large experts ran past the start of the other parity half, and the next
-layer's job overwrote rows the current layer was still reading. Rows now use
-the allocation stride. The streamed score is 6.0041 again, identical to
-`4b5ee8ea` on all 2,999 positions. `ds41.expert_store` gained a mixed-size
-fixture (odd layers half the size) that fails without the fix. `gufo bench`
-token hashes did not catch it: their synthetic prompts score no text.
-
-**IQ1_M streamed.** The IQ1_M build has 17 layers of IQ1_S experts and two
-IQ2_S down projections, which the streamed batched path had never run.
-IQ2_S has no FP16 tile kernel, so those rows go through the table-indexed
-expert GEMV; the store also skips dropped routes (-1) as the resident
-kernels do, instead of failing the batch. Teacher-forced 3K, 2048- and
-952-token exact batches:
-
-| IQ1_M path | Perplexity | Target top-1 | Agreement with resident |
-| --- | ---: | ---: | ---: |
-| Resident | 6.320 | 57.7% | — |
-| Streamed, 32 GiB expert cache | 6.303 | 57.8% | 96.1% |
-
-Single-token decode scores are bit-identical to resident on 256 positions;
-the batched difference is the FP16 tile and GEMV rounding seen between the
-resident batched and decode paths.
-
-`gufo bench` pp2048/tg128 on IQ1_M, with the memory free once `gufo serve`
-is ready at 262,144 tokens (no drafter):
-
-| Expert cache | Free memory | pp2048 | tg128 |
-| --- | ---: | ---: | ---: |
-| Resident | 5.6 GiB | 1,212.3 ± 33.9 | 24.44 ± 0.13 |
-| 64 GiB | 48.6 GiB | 616.2 ± 29.4 | 16.45 ± 3.19 |
-| 32 GiB | 78.8 GiB | 437.2 ± 5.8 | 12.17 ± 2.34 |
-| 16 GiB | 93.3 GiB | 374.4 ± 1.3 | 9.13 ± 1.23 |
-
-Streamed IQ2_XXS against the pre-merge build with the same stride fix,
-alternated twice: tg128 18.81/19.13 against 19.13/18.96 tok/s, no
-measurable change from the heap placement. Prefill was inconclusive
-(pp2048 853/927 against 735/953, each ± 300-460): the startup seed caches
-the 10,240 ranked experts (82 GiB) of 15,360, so the first repetition reads
-the rest (81% route hits) and the second hits on every route.
-
-## Slots per expert size and the full built-in ranking (2026-10-27)
-
-Two changes let a capped cache hold more experts; neither touches the
-arithmetic.
-
-- **One slot size per expert size.** Every slot was sized for the largest
-  expert of any layer, but the builds mix block types: IQ1_M has six expert
-  sizes (6.59-8.26 MiB, mean 7.11) and IQ2_XXS eight (7.38-9.76 MiB, mean
-  8.20), so 14% and 16% of the cache went unused. Slots now come in one
-  class per distinct size, each growing by 128 MiB chunks (512 MiB before,
-  to bound what a class strands in a part-used chunk). Once the cache stops
-  growing, an expert may take the smallest larger free slot or evict from
-  its own or a larger class, never a smaller one.
-- **The built-in ranking orders all 15,360 experts.** The import kept the
-  first 10,240 of the source permutation, so a cache larger than 82 GiB
-  (IQ2_XXS) started part empty and the first request read the rest. The
-  table now keeps the whole ranking; the first 10,240 entries are
-  unchanged. Experts a custom histogram omits follow its ranked ones,
-  interleaved across layers.
-
-`ds41.expert_store` gained cases for both (seven half-size experts in the
-cache of four full-size ones, a large expert that streams rather than take
-a small slot, and the seed past a one-expert histogram); they fail on the
-previous store.
-
-`gufo bench` pp2048/tg128 (`-r 2`), against the opt-in build above:
-
-| Model, expert cache | Experts seeded | pp2048 | tg128 | Route hits |
-| --- | ---: | ---: | ---: | ---: |
-| IQ1_M, 64 GiB | 7,436 → 8,658 | 616.2 → 751.6 ± 98.1 | 16.45 → 17.90 | 70.8% → 85.7% |
-| IQ1_M, 32 GiB | 3,718 → 4,325 | 437.2 → 462.5 ± 1.8 | 12.17 → 12.94 | 45.5% → 48.6% |
-| IQ1_M, 16 GiB | 1,859 → 2,155 | 374.4 → 383.6 ± 2.0 | 9.13 → 9.74 | 30.2% → 32.7% |
-| IQ2_XXS, automatic (105 GiB) | 10,240 → 12,688 | 853/927 → 918.9 ± 403.5 | 18.81/19.13 → 19.96 | 91.4% → 97.0% |
-
-Free memory is unchanged: the cap bounds the allocation either way. The
-seed takes longer in proportion (13.1 → 14.6 s at 64 GiB, 18.7 → 20.2 s
-for IQ2_XXS). The IQ2_XXS prefill spread no longer comes from expert reads
-(1.57 MiB/token in the first repetition, 93.6% hits); the Engram row reads
-of backlog item 14, whose page cache the full expert cache displaces, are
-the likely remainder.
-
-
-## Decode profile and per-layer expert tables (2026-10-27)
-
-A rocprofv3 trace of warm IQ2_XXS decode (119 tokens of tg128 after
-pp512, automatic cache, medians per token) splits the 50.1 ms token into
-40.3 ms of kernels and 9.8 ms of GPU idle:
-
-| Part | ms/token |
-| --- | ---: |
-| Dense Q5_K GEMV (`gemv_kernel<13,…>`) | 22.2 |
-| Routed expert GEMV | 11.5 |
-| Other kernels (attention, hyper-connections, router, …) | 6.6 |
-| Idle: miss reads between the hit and miss launches (~4 per token) | 5.3 |
-| Idle: ~200 small blocking copies | ~3 |
-
-The dense GEMV runs near the measured bandwidth ceiling, so speculative
-verification, which reads it once for several tokens, is the larger decode
-lever. Timers around the Engram futures and the read phases put the Engram
-wait at ~0.1 ms per pp2048 batch and the first prefill's expert read wait at
-0.35 s (0 once warm): the Engram is not what slows a new prompt.
-
-The copies were each layer's three expert tables and two hit/miss row
-arrays, uploaded with blocking `hipMemcpy`. The store now keeps one device
-table per layer and uploads it asynchronously only when one of its entries
-changed; a warm cache almost never changes one. The hit/miss rows are
-uploaded, in one asynchronous copy, only for a batch that both hits and
-misses — the only case whose launches read them. The routes copy that
-starts the next prepare orders every upload before its pinned mirror is
-rewritten. Copies per token fell from ~200 to 23 (the slot fills after
-reads), GPU idle from 9.8 to 8.1 ms and the traced token from 50.1 to
-48.1 ms.
-
-Alternated `gufo bench` (pp2048/tg128, `-r 2`): tg128 20.23/20.40 →
-20.93/20.95 tok/s (+3.2%); pp2048 985.9/1061.2 → 1074.3/1077.2, inside its
-first-repetition spread. Streamed IQ2_XXS decode scores are bit-identical
-on 256 positions with the automatic cache and with a 16 GiB cache (71%
-route hits, so most layers split).
-
-## DSpark on streamed IQ2_XXS (2026-10-27)
-
-`gufo bench` pp512/tg512 with the Lucebox Q2_K/Q4_K drafter: 33.5 tok/s
-against 21.3 plain (+58%). Route hits settle at ~99.3% either way, but
-verification reads are never predicted (0% prefetched), so ~13 MiB/token
-of misses remain. A rocprofv3 trace of the second half of a DSpark tg512
-splits the span into routed experts 44% (36% the 8-row verification
-groups: ~36 distinct experts per layer at ~32 µs each, the single-token
-per-expert cost, so bandwidth-bound), dense GEMV 31% (8-row launches at
-1.4-1.8× the single-token time), other kernels 11%, idle 10% (about half
-of it miss reads) and the drafter 4%.
-
-The multi-token dense GEMV now runs one wave per Q5_K task with scalar
-activation loads and the slices split across workgroups (EXPERIMENTS.md):
-8-row verification steps 129.7 → 118.8 ms on resident IQ1_M, bit-identical
-rows. Streamed DSpark tg512 stayed inside its cache-warming spread
-(33.17-34.14 → 33.15-34.73 tok/s over three alternating pairs).
-
-Left for streamed DSpark: every verification row pays for its own experts
-(~2.5 of 8 rows accepted per step), and verification batches predict no
-next-layer experts.
-
+# DeepSeek V4.1 Flash SSD expert streaming
+
+How the engine runs a backbone whose routed experts do not fit in memory:
+the dense weights stay resident and the routed experts are read from the
+SSD into a bounded cache. The code is `runtime/expert_store.{h,cpp}` and the
+expert paths of `runtime/v41_decode.cpp`. Measured results, including the
+rejected designs, are in [EXPERIMENTS.md](EXPERIMENTS.md#ssd-expert-streaming-m3);
+open work is in [BACKLOG.md](BACKLOG.md).
+
+## Why and when
+
+| Build | Size | Fits resident? |
+| --- | ---: | --- |
+| `IQ1_M` backbone, 4 shards | 112.4 GiB | yes, 112.27 GiB GTT |
+| `IQ2_XXS` backbone, 4 shards | 128.7 GiB | no: 5.31 GiB dense weights resident, experts streamed |
+| `Engram-IQ4_NL.gguf` | 103.0 GiB, 144 B rows | always read from disk |
+
+MemTotal is 124.4 GiB (128 GiB minus the 1 GiB UMA carve-out and about
+2.6 GiB of firmware and kernel reservations); `amdgpu.gttsize=126976`
+already covers it. The model has 40 layers × 384 routed experts (top 6 plus
+one shared expert). Expert sizes differ by layer, because the builds mix
+block types: `IQ1_M` has six sizes (6.59–8.26 MiB, mean 7.11) and `IQ2_XXS`
+eight (7.38–9.76 MiB, mean 8.20). A decode token reads six experts in each of
+40 layers, so streamed decode depends almost entirely on the route-hit rate:
+keeping about 90% of resident speed needs about 99% of routes to hit.
+
+Streaming is opt-in. `--stream-experts` (`serve`, `bench`, `prompt`) keeps
+dense weights resident and streams the routed experts; `--expert-cache-bytes
+N` caps the expert cache (default: available memory minus a 4 GiB reserve)
+and requires `--stream-experts`. Without the flag, a model that does not fit
+the available memory (free CMA excluded) fails to load and states what it
+needs, rather than running slower. While streaming, weight placement counts
+only the resident tensors, so the dense weights go through the device heap.
+`--stream-experts` also runs `IQ1_M` in less memory, more slowly.
+
+## Expert cache
+
+- **Slots by size class.** Each distinct per-layer expert size (gate, up and
+  down together, rounded to 256 B) is a class. A class grows by 128 MiB
+  managed-memory chunks while the cap and the 4 GiB reserve allow. An expert
+  takes a free slot of its own class, or the smallest larger free slot once
+  its class can no longer grow.
+- **Admission and eviction.** Each expert keeps a decayed use score, raised
+  by its route count (at most 4 per call) and by 4 when it is routed in the
+  last 16 rows of the batch. While free capacity remains, every read expert
+  is admitted. Once the cache is full, a large prefill admits only its final
+  16 rows and its unusually frequent experts (count ≥ max(4, tokens / 32)),
+  so a scan does not displace the decode working set. The victim is the
+  lowest-scored slot of the same or a larger class, and only if it scores
+  below the newcomer; a larger expert never takes a smaller slot.
+- **Startup seed.** The cache is filled at load from the built-in ranking of
+  all 15,360 experts (`expert_rank.inc`, imported from Xolotl's calibration
+  trace by `tools/ds41/import_expert_rank.py`), or from
+  `MODEL.gguf.expert-histogram` (`DS41_EXPERT_HISTOGRAM_V1`, built by
+  `tools/ds41/expert_histogram.py` from oracle `routes.npz` files) when that
+  sidecar exists. Experts a histogram omits follow its ranked ones,
+  interleaved across layers. The seed fills 15/16 of min(cap, free memory −
+  reserve), leaving room for session allocations and request-specific
+  experts; seed reads do not count in the statistics.
+
+## A layer's prepare
+
+`ds41_expert_store_prepare` runs once per MoE layer and evaluation (decode,
+prefill batch, DSpark verification or a joint evaluation):
+
+1. Count the routes, update the scores and find the misses.
+2. Resolve the background job (below): adopt it if it targets this layer,
+   otherwise drop or park it.
+3. Point each expert at its weights through **per-layer device tables**
+   (gate, up, down; 40 × 384 pointers each): its cache slot when resident,
+   else its row in the demand stage or the adopted job's stage. The kernels
+   index the table, so resident experts are read in place with no staging
+   copy. A host mirror records the entries; a layer's table is uploaded
+   asynchronously only when an entry changed, which a warm cache rarely
+   does.
+4. For batches of up to 96 route rows (16 tokens: decode, verification and
+   joint rows) that both hit and miss, upload **hit and miss row arrays**.
+   Each keeps the route positions with −1 for the other's experts, so the
+   launches are split: while the reads stream, an overlap callback computes
+   the shared expert and the resident experts' gate+up; after the reads
+   join, a second launch completes the read rows. Every row keeps its
+   single-launch arithmetic, so outputs are bit-identical to one launch.
+   Other batches launch once over all routes.
+5. Run the phase's reads, then copy each admitted expert from its stage row
+   into a slot.
+
+The routes copy that starts the next prepare orders every upload before
+its pinned mirror is rewritten.
+
+## Reads
+
+- **ReadPool.** Four worker threads read with `O_DIRECT` into their own
+  pinned buffers (falling back to buffered reads when direct I/O is not
+  available; the last read may end at an unaligned EOF) and upload through
+  their own non-blocking streams, so staging does not queue behind the
+  layer's kernels. Each upload is awaited before its buffer is reused.
+- **Tasks.** Missing experts of one projection that are adjacent in the file
+  merge into reads of at most 32 MiB, ordered by shard and offset. The GGUF
+  stores each layer's experts as three projection-major blocks, so one
+  expert is three reads about 1 GiB apart.
+- **Demand stage.** A whole-layer buffer indexed by expert. One buffer
+  suffices: the routes copy orders a layer's demand reads behind the
+  previous layer's compute.
+- **Prefetch stage.** A compact 192-row buffer in two 96-row parity halves,
+  allocated when prefetch first runs, so it never shrinks the seed. A job's
+  experts take rows in its layer's half, addressed with the allocation
+  stride (the stride of the largest expert). A job beyond 96 experts
+  truncates; the excess stays a demand read.
+
+## Prefetch from router predictions
+
+During a layer's read overlap the decoder enqueues the **next** layer's
+router on this layer's FFN input (one layer stale), copies the ids to pinned
+memory and records an event. A store thread waits for the event and
+submits a background read job for the predicted uncached experts. The
+workers run it whenever no demand phase is active; a demand phase always
+preempts it.
+
+- Prefill batches of at least 1,024 tokens predict every layer; their jobs
+  are "wide" and only a batch of that size adopts them.
+- Single tokens predict only when the current layer waited on reads: misses
+  cluster in neighbouring layers, and a prediction without a read stall to
+  hide its matvec costs more than the read it saves.
+- Verification and joint batches (2–16 rows) predict nothing.
+- The next prepare of the job's layer adopts only the experts it routes,
+  including their not yet started tasks; a wrong prediction costs bandwidth,
+  never phase time. A prepare for the layer after parks the job; any other
+  drops it once its in-flight tasks drain.
+
+A router-free sweep of the next layer's uncached experts was rejected: this
+model's routing is skewed enough that it read 3.6× the demand volume.
+
+## Engram reads
+
+The Engram layers (1 and 14) read 24 rows of 144 B per token from the
+103 GiB table file with buffered `pread` on up to 32 threads, started with
+the evaluation so they overlap the layers before them. The rows are random,
+so a pp2048 batch issues about 98,000 of them: under 10% of the batch's
+bytes but about 99% of its read operations. Once the expert cache has grown
+the page cache keeps none of them. The measured wait stays small (about
+0.1 ms per pp2048 batch when warm).
+
+## Storage background
+
+Measured on the Samsung 990 PRO (XFS, `noatime`, scheduler `none`):
+
+- Expert reads reach about 5.7 GiB/s effective, against 8.2 GB/s for purely
+  sequential reads; per-layer bursts reached 5.7–5.9 GiB/s with four direct
+  readers, and eight or twelve readers did not help.
+- `io_uring` and polling `io_uring` matched `pread` threads (about 4.9 GB/s
+  sustained at queue depth four).
+- A second, slower NVMe (KIOXIA EXCERIA, 2.3 GB/s sequential) did not help:
+  moving whole shards made their layers read at its pace, and moving the
+  Engram alone cost more in latency than the contention it removed.
+
+The runs are in [EXPERIMENTS.md](EXPERIMENTS.md#storage-reads).
+
+## Statistics
+
+The engine logs route hits, MiB read per evaluated token (and the share
+prefetched), host wait per token and the allocated cache, per interval of at
+least 64 tokens and cumulatively. `gufo diagnose` does not report them yet.
+
+## Other implementations
+
+Published rates are workload references, not matched comparisons:
+quantization, hardware, context and speculative decoding differ.
+
+- [ds4](https://github.com/antirez/ds4) and its
+  [Strix Halo PR](https://github.com/antirez/ds4/pull/1036) (inspected at
+  [`815e8fb`](https://github.com/kyuz0/ds4/tree/815e8fb6194ffa3160f1bd5f80df0e55efd190fe)):
+  aligned direct reads into staging buffers with a buffered fallback, and
+  whole-layer staging ahead during prefill; 10.18 tok/s after 2K prefill
+  with a 76 GiB cache on its Q2 build, without DSpark.
+- [Kyojin](https://github.com/Yamz-Labs/kyojin/blob/0c5b91a0686acc8129190f753e032715f0b0dcc2/doc/DS41.md):
+  a 172 GiB EXL3 pack on 128 GB Strix Halo with direct I/O, 12 readers and
+  4 MiB chunks, later-layer reads during prefill, a cache that protects
+  frequent and recent-prompt experts, and row-blocked 32K prefill; roughly
+  5–11 tok/s.
+- [Spark recipe](https://github.com/vcruz305/DSV4.1-Flash-1017-EXL3-Spark-recipe/blob/63220db0a7cc62dd8b783f71c9cf28f909c9b09b/README.md):
+  a 1.62 bpw EXL3 quant on NVIDIA GB10 with cold experts read through an ATS
+  mapping; 31–34 tok/s with DSpark, 13.4 without.
+- [Project Maya](https://github.com/mw00/project-maya/tree/8b4b39f84e35393833b31b80e82bee92e69bb646):
+  GPU, RAM and SSD tiers with threaded direct reads and CPU expert
+  execution, measured on multi-GPU/CPU machines.
+- [Xolotl](https://github.com/Indras-Mirror/Xolotl/tree/961d390fea6d848431822f7c6e94a6e5c0775133):
+  VRAM, pinned RAM and NVMe tiers with ranking and layer read-ahead (62–70%
+  one-layer router recall); the source of the built-in expert ranking. Its
+  optional route bias toward resident experts is in the backlog.

@@ -286,15 +286,37 @@ text); full tables and charts are on the
 - Greedy DSpark and concurrent outputs are identical to single-session plain
   decoding.
 
+## Model notes
+
+V4.1 Flash against the V4 Flash engine it was forked from:
+
+| Area | V4 Flash | V4.1 Flash |
+|---|---|---|
+| Shape | 43 layers, 4096 hidden, 256 experts, ffn 2048, q_lora 1024, 64 indexer heads | 40 layers (+3 DSpark layers not in the ISTA builds), 5120 hidden, 384 experts top-6 + 1 shared, ffn 2304, q_lora 1280, 32 indexer heads, RMS eps 1e-20 |
+| Routing | 3 hash layers | none; sqrtsoftplus + bias top-6, normalized, ×1.5 |
+| Layout | uniform | YoCo: layers 0-19 encoder, 20-39 decoder |
+| Compression | ratio 4 (overlapping) / 128 | ratio 0 = SWA only (0-1); 2 = softmax-gated pool (2-19); 1 = RMSNorm(wkv(x)) (20-39). RoPE base 160000 + YaRN on ratio >= 1 |
+| KV/index sharing | per layer | CSA2: layers 2, 8, 14, 20 own compressor and index K; 24, 28, 32, 36 rescore layer 20's index K with their own Q; all others reuse the latest top-512. Index K is projected from the main latent (512 -> 128) |
+| Candidate blocks | none | layer 20 takes the block max over 8-row blocks, keeps the top 2048 blocks (newest pinned) and masks the rescoring layers; a no-op up to 16K context |
+| mHC | mixes used on the same layer | shifted: attention uses the previous FFN's `pre`; layer 0 uses a one-hot `pre`; no `output_hc` |
+| Engram | none | layers 1 and 14, before the block: 24 rows per token (2- to 4-grams × 8 heads over 99,092 compressed ids), `wkv` 6144 -> 5 × 5120, per-copy sigmoid gate, `h_c += gate_c * v` |
+| Template | `<｜DSML｜tool_calls>` | DSML tags with a leading space, `Reasoning Effort: N` (1-100; high = 75 default), mid-conversation `<｜System｜>` turns |
+
+State is small: about 890 B per token of compressed KV and index K plus a
+fixed 128-row SWA ring per layer; stored as FP4 codes and scales it is about
+0.9 GiB at 1M tokens. GGUF types: experts are IQ1_S/IQ1_M/IQ2_XXS/IQ2_XS/IQ2_S
+per layer (gate and up share a type; down may differ); dense projections
+Q8_0/Q5_K; router, compressor, indexer and Engram q/k BF16; hc and norms F32;
+`token_embd` and `output` Q5_K; Engram index tensors I32/I64. An independent
+CPU/torch oracle that ports the official `inference/model.py` and
+`inference/engram.py` is in `tools/ds41/`.
+
 ## Status
 
 Production target is Strix Halo `gfx1151` on Linux, like the rest of Gufo.
-`IQ2_XXS` expert streaming is qualified for evaluation: with the built-in
-expert ranking it prefills at 666-670 tok/s and decodes at 16.6-16.9 tok/s
-(19.3 with DSpark) on `gufo bench` pp2048/tg128, with outputs bit-identical
-to the staged build and the serving suites passing. The remaining streaming
-work (prefetch sweeps, router-predicted decode prefetch) is in the
-[backlog](docs/models/deepseek-v4.1-flash/BACKLOG.md). Development history
-and every measured experiment, including rejected ones, are in
-[EXPERIMENTS.md](docs/models/deepseek-v4.1-flash/EXPERIMENTS.md) and the
-[roadmap](docs/models/deepseek-v4.1-flash/ROADMAP.md).
+`IQ2_XXS` expert streaming is qualified for evaluation, with outputs
+bit-identical to the staged build and the serving suites passing. How it works is in
+[STREAMING.md](docs/models/deepseek-v4.1-flash/STREAMING.md); open work is in
+the [backlog](docs/models/deepseek-v4.1-flash/BACKLOG.md), and every measured
+experiment, including rejected ones, is in
+[EXPERIMENTS.md](docs/models/deepseek-v4.1-flash/EXPERIMENTS.md).

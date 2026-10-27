@@ -30,8 +30,9 @@ warm. Each range contains the two retained matched runs.
 For a repeated identical prompt and generation in the same process, the
 second prefill reached 937 tok/s and the second decode 13.44 tok/s with both
 buffered and direct reads. Real sessions, cache history and speculative
-acceptance can give different rates. The raw comparisons, filesystem controls
-and other engines' configurations are in [streaming research](STREAMING.md).
+acceptance can give different rates. The raw comparisons and filesystem
+controls are in [EXPERIMENTS.md](EXPERIMENTS.md#storage-reads); the design and
+other engines' configurations are in [STREAMING.md](STREAMING.md).
 
 With the built-in ranking preloading 10,240 experts at startup and the
 overlapped staging of October 27 (per-expert weight tables, split hit/miss

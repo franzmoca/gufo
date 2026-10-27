@@ -1,0 +1,40 @@
+diff --git a/src/models/deepseek_v41_flash/runtime/v41_session.cpp b/src/models/deepseek_v41_flash/runtime/v41_session.cpp
+index b22e8095..2569a620 100644
+--- a/src/models/deepseek_v41_flash/runtime/v41_session.cpp
++++ b/src/models/deepseek_v41_flash/runtime/v41_session.cpp
+@@ -367,6 +367,7 @@ struct Cycle {
+   size_t copy_start = 0;
+   bool plain = false;        // the drafter's policy chose a plain step
+   bool speculative = false;  // the block's rows wait in spec_logits for the commit
++  float conf[DS41_DSPARK_BLOCK] = {}; uint32_t drafted_all = 0;  // TRACE-TMP
+   std::chrono::steady_clock::time_point t0, t1;
+ };
+ 
+@@ -446,6 +447,7 @@ int prepare(Cycle& c, char* error, size_t capacity) {
+       c.tail = 0;
+     if (learned || c.stochastic) {
+       const float* score = learned ? confidence : top;
++      c.drafted_all = c.tail; for (uint32_t k = 0; k < c.tail; k++) c.conf[k] = score[k];  // TRACE-TMP
+       const float floor = learned ? ds41_session::kLearnedDraft : ds41_session::kConfidentDraft;
+       uint32_t confident = 0;
+       while (confident < c.tail && score[confident] >= floor) ++confident;
+@@ -569,6 +571,7 @@ int finish(Cycle& c, char* error, size_t capacity) {
+   const auto t2 = std::chrono::steady_clock::now();
+   auto& p = s->policy;
+   if (m == 1) {
++    if (trace) fprintf(stderr, "ds41: plain pos=%u tok=%d next=%d ms=%.1f\n", c.first, c.block[0], next, ms(c.t0, t2));  // TRACE-TMP
+     if (c.plain) ema(p.cycle_ms[0], ms(c.t0, t2));
+     return 0;
+   }
+@@ -596,8 +599,9 @@ int finish(Cycle& c, char* error, size_t capacity) {
+   for (uint32_t k = c.tail; k < DS41_DSPARK_BLOCK; k++) ema(p.accept[k], ds41_session::kAcceptPrior, kPolicyRelax);
+   ema(p.cycle_ms[c.tail], ms(c.t0, t2));
+   if (trace)
+-    fprintf(stderr, "ds41: DSpark pos=%u drafted=%u accepted=%u draft=%.1fms verify=%.1fms\n", c.first, c.tail,
+-            accepted - 1, ms(c.t0, c.t1), ms(c.t1, t2));
++    fprintf(stderr, "ds41: DSpark pos=%u drafted=%u accepted=%u draft=%.1fms verify=%.1fms all=%u conf=%.3f,%.3f,%.3f,%.3f,%.3f tok=%d,%d,%d,%d,%d,%d next=%d\n", c.first, c.tail,
++            accepted - 1, ms(c.t0, c.t1), ms(c.t1, t2), c.drafted_all, c.conf[0], c.conf[1], c.conf[2], c.conf[3], c.conf[4],
++            c.block[0], c.block[1], c.block[2], c.block[3], c.block[4], c.block[5], next);
+   return 0;
+ }
+ 

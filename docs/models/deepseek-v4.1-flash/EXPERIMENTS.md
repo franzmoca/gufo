@@ -1,5 +1,54 @@
 # DeepSeek V4.1 Flash experiments
 
+Everything measured on the DeepSeek V4.1 Flash engine, retained or rejected,
+with its evidence. Open work is in [BACKLOG.md](BACKLOG.md); the streaming
+design is in [STREAMING.md](STREAMING.md); quality checks are in
+[QUALITY.md](QUALITY.md) and the benchmark card in
+[BENCHMARKS.md](BENCHMARKS.md).
+
+Target: DeepSeek-V4.1-Flash-1017 with the
+[ISTA-DASLab GSQ-RCO GGUFs](https://huggingface.co/ISTA-DASLab/DeepSeek-V4.1-Flash-1017-GSQ-RCO-GGUF)
+on one Strix Halo (gfx1151, 124 GiB GTT). The engine is
+`src/models/deepseek_v41_flash/`, a fork of the V4 Flash engine (unchanged);
+`tools/ds41/` holds an independent CPU/torch oracle that ports the official
+`inference/model.py` and `inference/engram.py` and reads the same GGUF.
+
+## Milestones
+
+| Milestone | Result |
+| --- | --- |
+| M0 Oracle and loader | `tools/ds41/reference.py` (official KV quantization: FP8 SWA, FP4 compressed and indexer; chunked sparse attention with sinks, candidate blocks and Engram; dumps logits, routes and per-layer states; `verify-engram` matches the GGUF's hashing tables exactly) and `tools/ds41/quants.py` (IQ1_S, IQ1_M, IQ2_XXS, IQ2_S and IQ4_NL dequant, bit-exact with llama.cpp). Oracle on IQ1_M: 3K-token teacher-forced perplexity 6.31, top-1 58%. The loader maps the split GGUF as one range and validates all `deepseek41.*` metadata and 1,008 tensors; the tokenizer matches the official `tokenizer.json` on ~19k tokens. |
+| M1 Correct AR decode on IQ1_M | Single-token decoder over plain kernels with typed MMVQ entries for every expert and dense type; sessions with prefix reuse and snapshots; the official V4.1 chat template pinned by SHA-256 (a GGUF with another template loads with a warning); `deepseek41` in `gufo serve` with DSML tools and the official sampling defaults (temperature 1.0, top-p 1.0). 3K perplexity 6.306 against the oracle's 6.309, 12/12 template goldens, decode 12–14 tok/s. |
+| M2 Resident performance | `gufo prompt`/`bench` support, candidate-block parity beyond 16K, batched layer-major prefill on the FP16 matrix cores, overlapped Engram reads (0.04 ms wait per prefill batch, 0.33 ms per decode token): pp2048 703 and tg64 23.9 tok/s at depth 0, 372 and 21.0 at 131K. Steps in [the resident engine table](#resident-engine-m1m5). |
+| M4 Component cache and serving | Compressed KV and index K as append rows (ratio-2 layers add a row every 2 tokens); SWA rings, compressor frontiers and logits as private state; the Engram n-gram history rebuilt from the tokens on restore. Disk cache and prefix reuse as for Gemma 4. |
+| M5 DSpark, prompt lookup, bounded replay | `--dspark-model` loads the unsloth (`dflash`) or Lucebox (`deepseek41-dflash-draft`) layouts; drafts of up to 5 tokens verified with decode numerics, so output is unchanged: greedy +21% on a document prompt, +61–67% on a coding request. Prompt lookup copies up to six (later 15) tokens: file edit 23.6 → 54.6 tok/s without a drafter, 43.9 → 56.4 with DSpark. Decoder SWA bounded replay: pp2048 703 → 1,177 tok/s, 372 → 855 at 131K, continuation NLL within 0.008 of exact prefill (`--exact-prefill` keeps every row). Not used: unsloth BF16 (7.92 GiB), Lucebox `-MXFP4-Q8.gguf` (7.42 GiB), the peasantsmith `.bin` drafters (not GGUF). |
+| M6 Vision | Opt-in `--mmproj` (0.90 GiB); the sidecar adds each MoE gate's image routing bias (`bias_vl`) from the official checkpoint (`tools/ds41/vision_sidecar.py`). Official preprocessing (padded pixels byte-identical to PIL), the 32-layer ViT and 3 × 3 aligner in the official BF16 rounding (`tools/ds41/vision_reference.py` is the CPU teacher); image positions take no Engram term and route with the image bias. [Quality](QUALITY.md#vision-m6), [speed](BENCHMARKS.md#vision-encoder). |
+| M3 SSD expert streaming | `IQ2_XXS` streaming qualified for evaluation; [below](#ssd-expert-streaming-m3). |
+| M7 Higher-precision Engram tables | Open ([backlog](BACKLOG.md)). |
+
+The inherited V4 `runtime/session.cpp`, `runtime/rocm_graph.cpp`,
+`dspark_internal.h` and `dspark_policy.h`, which the V4.1 target never
+built, were removed on 2026-10-27; the active V4.1 runtime is
+`v41_decode.cpp`, `v41_session.cpp` and `v41_dspark.cpp`.
+
+## Measured limits
+
+- Measured DRAM read peak (`tools/bench/gfx1151_peak.hip`): 235 GB/s. The
+  dense decode projections run at 207-221 GB/s on the large shapes; decode
+  spends 42.6 ms of GPU time per token at 2K (47.2 ms wall).
+- Routed expert matvecs: a plain read of the same six DRAM-cold 2.3 MB
+  experts streams at 230-238 GB/s (58 µs); the pre-October-27 expert GEMV
+  reached 160-175 GB/s on IQ1 and 121-134 GB/s on IQ2, and mmvq 145-170
+  GB/s, bound by the texture addresser (`TA_BUSY` ~92% of active cycles):
+  every 32-value sub-block cost four 2-byte weight loads and eight
+  activation loads per lane. The retuned kernels
+  ([expert GEMV decode retune](#expert-gemv-decode-retune-2026-10-27))
+  decode at 162-205 GB/s, the dense GEMV's level for these shapes.
+- Streamed `IQ2_XXS` expert reads: 5.7 GiB/s effective, 8.2 GB/s for purely
+  sequential reads on the 990 PRO ([storage reads](#storage-reads)).
+
+## Resident engine (M1–M5)
+
 IQ1_M resident on one Strix Halo (gfx1151). Speeds come from
 `ds41_load_probe --batch` on the `gpu-test` build; prefill is a 2K-3K token
 prompt, decode is greedy at 2K context. Quality gates: the 13-token smoke
@@ -66,20 +115,6 @@ teacher-forced score against the oracle's perplexity 6.309
 | Vision encoder linears: hipBLAS `GemmEx` (BF16, small-tile kernels), Flash-Next's dense BF16 WMMA GEMM, hipBLASLt | hipBLASLt retained. Carrots encode: hipBLAS 1,460 ms, WMMA GEMM 1,030 ms; with the fused attention, WMMA GEMM 302 ms and hipBLASLt 249 ms. 4000 × 3000 with the fused attention: WMMA GEMM 1,252 ms, hipBLASLt 853 ms. Linears at 29 TFLOPS on the capped image. Spans within BF16 noise of the official forward. |
 | Vision attention fused (online softmax, BF16 WMMA, 16 queries per wave) instead of tiled score GEMMs, softmax and value GEMMs | Retained. Carrots 1,030 → 302 ms. |
 | Fused vision attention computing S^T = K Q^T and O^T = V^T P^T, so each lane keeps one query's softmax state and the half-waves swap probabilities (`permlanex16`) instead of shuffles and an LDS round trip; branchless BF16 packing; K/V tiles staged in LDS for eight waves | Retained. 4000 × 3000: 853 → 742 ms; carrots 249 → 236 ms. Bit-identical between the transposed variants. Variants: the hardware exponential (same output, 2%, within noise); LDS staging before the transposition (slower, the kernel was ALU-bound with 256 VGPRs); 16 waves (783 ms); register prefetch of the next tile (763 ms). |
-
-
-## Measured limits
-
-- Measured DRAM read peak (`tools/bench/gfx1151_peak.hip`): 235 GB/s. The
-  dense decode projections run at 207-221 GB/s on the large shapes; decode
-  spends 42.6 ms of GPU time per token at 2K (47.2 ms wall).
-- Routed expert matvecs: a plain read of the same six DRAM-cold 2.3 MB
-  experts streams at 230-238 GB/s (58 µs); the pre-October-27 expert GEMV
-  reached 160-175 GB/s on IQ1 and 121-134 GB/s on IQ2, and mmvq 145-170
-  GB/s, bound by the texture addresser (`TA_BUSY` ~92% of active cycles):
-  every 32-value sub-block cost four 2-byte weight loads and eight
-  activation loads per lane. The retuned kernels below decode at 162-205
-  GB/s, the dense GEMV's level for these shapes.
 | Batched IQ1_S routed experts on the FP16 matrix cores (`ds41_routed_f16.hip.cpp`): FP16 activations (one conversion per layer; the gate/up pass stores the SwiGLU rows in FP16 for an IQ1_S down pass), each weight decoded to FP16 with its sub-block scale folded in from an LDS table of the codebook's FP16 high bytes, host-built 64-slot tiles per expert, weight rows as the B operand. Each half-wave decodes one of the two 8-value groups of a K16 step and takes the other with `permlanex16`; half 1 holds the step with its groups swapped and reads its activation fragment swapped to match (each half of the wave uses its own operand copy) | Retained. `ds41_mmq_bench --type 19` on recorded 2K-prefill expert counts: gate/up+SwiGLU 37.5 → 22.8 ms, down 21.4 → 12.2 ms per layer (MMQ). Max error against the FP32-activation expert GEMV 0.18% of the largest SwiGLU row value and 0.05% for down, against 3.5% and 1.2% for MMQ's Q8_1 inputs. 2K batch 5220 → 4680 ms, 952-token batch 2714 → 2348 ms; batched 3K perplexity 6.326 → 6.311 (oracle 6.309), agreement 95.1 → 95.9%. Steps that measured: ordinary instead of nontemporal weight loads 30.5 → 23.8 ms (nontemporal loads refetched the partly used lines; L2 misses 39 → 31 M); FP16 instead of FP32 activation staging 32.2 → 30.5 ms; the group split 23.8 → 22.8 ms. No gain: 16-byte instead of 4-byte weight loads, weights two blocks ahead (32.7 → 32.2 ms), occupancy hints. The 4-byte nibble codebook with the 1024-magic decode instead of the FP16 byte table: 23.8 → 25.7 ms. |
 | The FP16 routed kernel for IQ1_M and IQ2_XXS too (a format trait per type: IQ1_M takes its 3-bit scale per 16 values and its delta per group, from the block's spread f16 scale; IQ2_XXS reads each codebook entry as eight FP16 magnitudes and each sign index as eight FP16 sign bits from LDS, then one XOR and one multiply per pair) | Retained. `ds41_mmq_bench` against MMQ, gate/up+SwiGLU and down per layer: IQ1_M 49.8 → 24.2 and 28.0 → 12.7 ms, IQ2_XXS 39.3 → 27.2 and 22.8 → 14.1 ms (IQ2_S stays on MMQ). 2K batch 4680 → 4337 ms (472 tok/s), 952-token batch 2348 → 2154 ms; batched 3K perplexity 6.316, agreement 96.2%; 18.5K prefill 48.5 → 39.6 s, perplexity 6.279 (unchanged, oracle 6.267), agreement 95.8 → 96.0%. |
 | Batched dense Q5_K projections (q_b, the grouped output LoRA, o_b, shared expert) on the FP16 matrix cores (`ds41_dense_f16.hip.cpp`): 128 rows x 128 tokens per workgroup, 16 rows per wave against eight 16-token tiles, each lane loading only the half-blocks its half-wave decodes (no LDS for weights), FP32 activations prefetched in registers one 64-value stage ahead and rounded to FP16 into LDS, each half-wave reading eight values of an activation fragment and taking the other eight with `permlanex16` | Retained; replaces MMQ and its Q8_1 passes for 9 tokens and up. `ds41_mmq_bench --dense` at 2048 tokens, MMQ (with its quantization) → FP16: q_b 3.52 → 2.51 ms, output LoRA (8 groups) 4.04 → 3.90 ms, o_b 6.95 → 5.30 ms, shared gate 2.26 → 1.84 ms, shared down 2.00 → 1.44 ms; faster from 16 tokens up. Relative error 3.5e-4 against the FP32-activation GEMV. 2K batch 4337 → 3977 ms (515 tok/s), 952-token batch 2154 → 2102 ms, 18.5K prefill 39.6 → 37.2 s; batched 3K perplexity 6.285 (oracle 6.309), agreement 95.9%; 18.5K 6.269 (oracle 6.267), 96.0%. Steps: FP16 activations from a separate conversion pass were slower than staging FP32 in the kernel; staging loads issued one at a time (no register prefetch) and a branch-free full-tile variant (the compiler hoisted it into 256 VGPRs and 760 spills) both lost; the fragment exchange instead of two 16-byte LDS reads per lane took o_b 7.01 → 6.29 ms (it measured slower in the routed kernel, whose fragments feed two products). |
@@ -90,88 +125,15 @@ teacher-forced score against the oracle's perplexity 6.309
 | The dense FP16 kernel at 256 weight rows per workgroup (16 waves sharing one staged activation tile, which halves the activation reads) and its activations prefetched two stages ahead | Retained. Removing the activation loads (timing only) had taken the output LoRA 6.38 → 3.76 ms, while removing the weight decode or the fragment exchange saved 3-6%. `ds41_mmq_bench --dense` at 2048 tokens: q_b 5.23 → 5.21 ms, output LoRA 6.36 → 5.55 ms, o_b 5.43 → 5.14 ms, shared gate/up 3.27 → 3.11 ms, shared down 1.38 → 1.41 ms. 2K batch 3443-3608 → 3427 ms, 952-token batch 1845 → 1820 ms; batched 3K perplexity 6.294, agreement 96.4% (unchanged). No gain: 512 rows per workgroup (one workgroup per WGP), the stage loop rolled into one body (23 → 8 KB of code, 1-3% slower), a barrier that skips the wait for global loads. Without its two barriers per stage (timing only) the kernel ran the output LoRA in 4.20 ms and o_b in 4.83 ms, but double-buffered activation tiles with one barrier per stage were slower (o_b 5.14 → 6.34 ms with 64-value stages, one workgroup per WGP; 6.49 ms with 32-value stages, two per WGP). |
 | Batched mHC state passes fused (`hc_state_pass_kernel`): the mixes and the collapse with its RMS norm read the state once (the collapse uses the pre-mix that was known before the mix, from the shifted mHC), and before the FFN the attention expand runs in the same pass, so the expanded state is not read back twice. The mix loop is rolled (34 → 7 KB of code) | Retained for 16 tokens and up. `ds41.hc_state_pass`: mixes and normalized rows within 3e-7 of the separate kernels, the state bit-identical. 2K batch 3427 → 3359 ms, 952-token batch 1820 → 1790 ms, 18.5K prefill 33.3 → 31.5 s (with the 256-row dense kernel); 18.5K perplexity 6.273 (oracle 6.267), agreement 96.2%; batched 3K 6.320, 96.0% (rounding drift through the FP8/FP4 fake quantization; earlier rounding-only changes spanned 6.285-6.326). |
 
-
-## Streamed expert staging overlap (2026-10-27)
-
-Baseline: the October 26 M3 working tree (four direct readers, stage copies
-of resident experts, shared-expert overlap); candidate adds per-expert weight
-tables, split hit/miss gate+up launches and per-reader upload streams. Same
-machine, model, histogram sidecar and `gpu-test` binary family; the previous
-build's own logs are the control. `ds41_gemv_bench` shows the table
-indirection at parity with the packed layout, bit-identical.
-
-| Experiment | Decision / evidence |
-| --- | --- |
-| E2: read resident experts through per-expert pointer tables instead of staging copies | Retained: removes up to ~57 MB/layer of D2D staging per decode token; part of the combined +29% AR / +33% DSpark decode gain below. `ds41.expert_store` verifies table contents, eviction and admission on synthetic shards. |
-| E3: split gate+up launches so resident experts compute while misses stream | Retained: the overlapped launch zeroes the read rows, the post-read launch (zero_dropped=0) completes them; every row keeps its single-launch arithmetic, so tg128 outputs hash `04842be7…40254` on both builds, AR and DSpark (110 drafted / 71 accepted in both). |
-| E4: per-reader upload streams instead of blocking legacy-stream copies | Retained: uploads overlap the layers' kernels; no visible downside. GPU_MAX_HW_QUEUES side-stream serialization, if it occurs, degrades to the old behavior. |
-| E5: second wave of decode overlap (router-predicted prefetch) | Not attempted here; measured as BACKLOG item 12 with Xolotl's 62-70% one-layer router recall and ~6-slots/layer cap as the design reference. |
-| E6: runtime table-pointer choice inside the expert GEMV kernels | Rejected: rescheduled the IQ2 loops with 249 inserted `s_delay_alu` dependency delays (914 -> 1141 instructions for the IQ2_XXS kernel), a consistent -4.2% resident tg128 (24.06 -> 23.06 over six alternating matched pairs against `feat/ds41`). Specializing the indirection at compile time (`kTable`) restores the resident layout's original address arithmetic: every `ds41_gemv_bench` case matches the `feat/ds41` binary (81.1/85.7/88.0/93.7/151.0/146.3/156.2 us) and alternating release pairs return to 23.9-24.1 tok/s on both builds, with the streamed model unchanged (same token hash, AR 15.08). |
-
-Combined matched `gufo bench` pp2048/tg128: prefill 592.1 → 666.1-669.6
-tok/s, AR decode 11.65 → 14.99-15.00 tok/s, DSpark decode 13.50 → 17.92-17.94
-tok/s at identical acceptance and output hash (DSpark prefill spread 494-628
-tok/s across the two runs, so the AR prefill pair is the retained number). Decode host wait 6.51 →
-5.25 ms/token; route hits unchanged (82.8%), so the gain is overlap, not
-cache policy. Resident IQ1_M pp2048/tg64 (1070/23.0 on release) stayed
-within the previous build's own 945-1129 / 22.5-23.7 spread. Kernel-level
-IQ2_XS checks: routed_f16 22.7 TOPS at pp2048 shapes (98% of IQ2_XXS's
-23.1), MMQ 11.6 (fallback path, unused when the F16 path covers the type),
-decode GEMV 112-116 GB/s with the table mode bit-identical at parity speed.
-
-Qualification: `ds41.expert_store`, `ds41.mmq_typed` and the shared format
-check pass; the native-context probe peaks at 106.4 GiB RSS with 8.7 GiB
-available at 1M context; the tools, conversation, sampling-defaults and
-batch HTTP suites pass against `gufo serve` with the Lucebox drafter.
-[Logs](artifacts/m3-streaming/bench-iq2-tables-ar1.log).
-
-## Expert GEMV decode retune (2026-10-27)
-
-The IQ2 expert decode kernels ran at 121-134 GB/s, half the dense GEMV's
-207-221. Two limiters, found with `tools/prof/isa_mix.py`: the IQ2 decode
-cast each `uint64_t` grid entry's extracted byte straight to float, which
-lowered to a quarter-rate `v_ldexp_f32` (129 per loop) plus 64-bit shifts,
-and the sign ternary emitted a compare/select pair per element; the loads
-were also fragmented (five 2-byte weight loads and 16 activation loads per
-32-value task in the SwiGLU pass). External references agree on the failure
-mode: the sanssushi and MBufo Gufo forks measure 102-118 GB/s on their
-per-lane grid-LUT IQ2 decode against a 214 GB/s Q2_0 kernel at the same
-216 GB/s peak.
-
-| Experiment | Decision / evidence |
-| --- | --- |
-| Retuned all five formats in `ds41_expert_gemv.hip.cpp`: task payloads as whole-word loads (memcpy from the 2-byte-aligned blocks), IQ2 grids and signs staged in LDS as u32 word pairs, the IQ2 decode on the entry's u32 halves with signs applied by flipping the float sign bit, and the fused gate/up pass loading x once per block into registers (AccR); U=2 for IQ1_S and the IQ2 formats | Retained, bit-exact by construction and by measurement. Standalone `tools/bench/ds41_expert_gemv_tune.hip` (production TU included, rotating DRAM-cold experts): IQ2_XXS gate/up 143.0 -> 194.9 GB/s, down 123.9 -> 189.4; IQ2_XS 148.9 -> 205.1 / 133.5 -> 189.9; IQ2_S down 143.5 -> 200.7; IQ1_M gate/up 171.5 -> 194.5; IQ1_S down 153.3 -> 162.1 (its gate/up already streamed at 200.3). `ds41_gemv_bench`: fp32 162-201 GB/s, table mode bit-identical; `ds41.mmq_typed` and `ds41.expert_store` pass; 0 VGPR spills (grouped kCols=16 peaks at 218 VGPRs). |
-| Fast-math contraction context in the IQ1_M tail | A pragma-free re-expression of `acc + fmaf(s1, d01, s2*(d23))` reproduces the production bits; freezing it with `#pragma clang fp reassociate(off)` does not (production's own emission reassociates). The port keeps the source expression verbatim; the tune bench's replica variant guards it. |
-| Alternating matched `gufo bench` pairs (gpu-test binaries, seed 19, two controls and two candidates interleaved) | Streamed IQ2_XXS AR tg128 15.90/16.06 -> 16.57/16.94 tok/s and DSpark 18.54 -> 19.34 (71 accepted and token hash 04842be7… unchanged; 110 -> 107 drafted under the timing-adaptive drafter); decode host wait 5.4-6.5 -> 5.2-5.6 ms/token; resident IQ1_M tg128 23.55/23.36 -> 23.86/24.38 (hash 70d5a48a… unchanged). Prefill untouched (routed_f16 path). |
-
-## Post-retune kernel survey (2026-10-27)
-
-After the expert GEMV retune, a rocprof pass over a streamed DSpark
-pp2048/tg64 run (4.15 s GPU busy) ranked every remaining kernel family and
-the survey measured each candidate's headroom. The model tensor mixes were
-read with llama.cpp's gguf-py: the streamed build's routed experts are
-gate/up IQ1_M x16, IQ2_XXS x17, IQ2_XS x7 and down IQ1_M x28, IQ2_XXS x8,
-IQ2_XS x4; the resident build gate/up IQ1_S x28, IQ2_XXS x9, IQ1_M x3 and
-down IQ1_S x27, IQ1_M x9, IQ2_XXS x2, IQ2_S x2; the Lucebox drafter's
-experts are Q4_K x3 and Q2_K x3 of six layers.
-
-| Candidate | Decision / evidence |
-| --- | --- |
-| Dense Q5_K FP16 prefill (`ds41_dense_f16.hip.cpp`, 493 ms / 11.9% of the run) | Kept. 32.2-33.5 TFLOP/s across q_b/o_b/sh_gate/wo_a (`tools/bench/ds41_dense_f16_tune.hip`), WMMA-issue bound (128 WMMAs against ~2.1k VALU per body, 615 s_delay_alu); the iterative-ILP scheduler flag measured 32.1-33.4 with identical hashes (rejected), and the tile/stage knobs are the ones the Gemma 4 audit already exhausted on the same kernel class at 37-40 TFLOP/s. The remaining ~15% is scheduling overlap, not instructions. |
-| LDS-staged activations for the IQ1 down GEMV (162-167 GB/s, the weakest decode kernels; 28 of 40 streamed down layers are IQ1_M) | Rejected: the per-lane 128-byte activation stride makes every read an 8-way LDS bank conflict -- 43-49 GB/s, 4x slower than the global path. The down launches also show a fixed per-launch floor (85-96 us across 13.8-22.7 MB and all five formats), so activation traffic is not what holds them at ~165 GB/s. |
-| DSpark drafter expert projections through the vendored mmvq (`mul_mat_vec_q_moe<10>` 49.8 ms + Q4_K paths ~12 ms + q8_1/fp4 passes ~19 ms of the run) | Not attempted: ~80 ms of a 4.15 s run. The drafter is not the DSpark bottleneck; the target's verification and head dominate. |
-| Dense Q5_K FP16 prefill: double-buffered activation LDS (`ds41_dense_f16.hip.cpp`) -- stage g stores into buffer g&1 while stage g-1 still reads the other, one `lds_barrier` per K stage instead of two | Retained, bit-exact (output hashes equal at n=2048 and the ragged n=1904 tail, `tools/bench/ds41_dense_f16_variants.hip.cpp`). `ds41_mmq_bench --dense`: q_b 32.9 -> 33.6, o_b 33.5 -> 33.9, sh_gate 27.5 -> 28.1, wo_a 32.4 -> 32.5 TFLOP/s. A 64-token tile was 2.4x slower (matching the Gemma audit's tile sweep) and the iterative-ILP scheduler flag measured 32.1-33.4 with identical hashes (rejected). |
-| DSpark drafter routed experts through the FP32 expert GEMV: new Q4_K and Q2_K traits in `ds41_expert_gemv.hip.cpp` (one 16-byte header + one 16-byte payload load per Q4_K task; Q2_K reads its 16 scale bytes at 0, the 32 bit-planed payload bytes of its plane group, and d/dmin at 80/82), and `moe()` fused into one gate/up/SwiGLU plus one down launch | Retained. Kernel level: Q4_K 216-217 GB/s, Q2_K 204-212 GB/s against the FP64 host reference (rel 3e-7, `ds41_expert_gemv_tune`), vs the mmvq path's ~100-150; two launches and the Q8_1 quantization passes drop. E2E (alternating matched pairs): streamed DSpark tg128 19.08/19.15 vs 19.08 (one control pair was cold-cache at 12.3), resident 26.26-26.43 vs 26.34-26.38, AR regression 16.74 vs 16.83 -- parity within noise, as the drafter is ~1.5% of the run. Outputs bit-identical (04842be7... / 70d5a48a...), acceptance identical (71/51); sampled sessions will draw slightly different drafts (FP32 vs Q8_1 activations), which verification keeps correct. |
-| Q2_K trait first cut | Rejected and fixed: it assumed {d, dmin, scales, qs} with consecutive payload packing; the real block is scales at 0, bit-planed qs at 16 (value v's bits in byte 16 + v%32 + 32*(v/128), plane 2*((v/32)&3)), d/dmin at 80/82 (`block_q2_K`). The standalone "FP64 verification" had passed because the harness reference repeated the same wrong layout and the synthetic generator wrote headers to match it -- an external review (codex/gpt-6.1-terra) caught both the layout and an out-of-bounds write in the debug probe that had produced misleading first-launch-zero evidence and a dead stream-ordering theory. Lesson recorded: independent means independent (cross-check against the vendored struct or gguf-py, not a transcription of the same assumption). |
-| Persistent row-tiles / wider workgroups for the IQ1 down GEMV | Rejected / not ported: row-tiles (2 or 4 per workgroup) serialize work behind one table fill and lose 8-12% to reduced parallelism; 512-thread workgroups gain only the IQ1 downs 1.3-3.5% (the measured empty-launch floor is ~3 ns/block, 17.8 us for the 5760-block down launch). An LDS-staged activation variant was 4x slower: the per-lane 128-byte stride is an 8-way LDS bank conflict. |
-| Output head and dense decode GEMV, attention prefill/decode, routed F16 prefill | Kept. The head streams 227-237 GB/s (near the 239.7 measured peak); the routed F16 decodes through LDS FP16-packed codebooks with XOR signs at fork-grade (22.8-26.5 TOPS, no slow-opcode pathologies in isa_mix); attention carries its own retained tuning history. |
-
 ## Post-M6 resident optimization pass (2026-10-26)
 
 Baseline source: `ee49a0fd` (sampling defaults from `edce52dd`); production
-`release` builds with the same Nix compiler/dependencies. The source review
-is [OPTIMIZATION_REVIEW.md](OPTIMIZATION_REVIEW.md). Each experiment records
-its disposition, including rejected attempts. Raw observations and provenance
+`release` builds with the same Nix compiler/dependencies. The pass followed a
+source review against DeepInfer (`5537415`, ROCm PR #201 `45ccedf`),
+deepseek-recipe, ds4 and its Strix Halo PR, Kyojin, the Spark EXL3 recipe,
+Project Maya, Xolotl and Gufo's Qwen/Gemma paths; its proposals that remain
+open are in the backlog. Each experiment records its disposition, including
+rejected attempts. Raw observations and provenance
 for E1 are in [artifacts/2026-10-26-rescore](artifacts/2026-10-26-rescore/README.md).
 
 | Experiment | Decision / evidence |
@@ -219,7 +181,6 @@ uses 1,773.84 ms GPU time over a 1,805.14 ms span. Stage sums: routed FP16
 top-k 45.34. Loading and depth preparation are excluded. The older backlog's
 3.30-second prefill breakdown predates bounded replay and is not a current
 end-to-end cost estimate.
-
 
 ### E2: stochastic DSpark proposals (retained, with confidence-gated verification)
 
@@ -290,7 +251,6 @@ tokens outside q. Each configuration's runs, the traces, the replay
 simulator and the variant patches are in
 [the re-measurement](artifacts/2026-10-26-sampled-proposals/remeasure/summary.txt).
 
-
 ### E3: request-local BPE piece memoization (retained)
 
 Cache previously tokenized pretokenizer pieces within each immutable text span,
@@ -309,7 +269,6 @@ builds and the C++ format check pass. No GPU model sweep was needed for unchange
 token IDs. Settings, corpus descriptions and output hashes are retained in
 [the E3 record](artifacts/2026-10-26-tokenizer-memo/summary.json); raw inputs and
 outputs are under `/tmp/gufo-ds41-tokenizer` on the measurement host.
-
 
 ### E4: stop unused DSpark Markov suffixes (retained)
 
@@ -333,7 +292,6 @@ no general speedup is qualified.** Retained for removing measured unused work
 with unchanged proposal prefixes; no larger quality sweep was run. All runs,
 settings, trace distributions and focused checks are in
 [the E4 record](artifacts/2026-10-26-markov-tail/summary.json).
-
 
 ### E5: score only requested draft-head rows (retained)
 
@@ -363,7 +321,6 @@ small measured saving with unchanged output: the head now evaluates only the
 requested rows, and the transformer body keeps all five. The paired runs
 and scripts are in [the re-measurement](artifacts/2026-10-26-draft-head/remeasure-summary.txt);
 the first trial remains in [the E5 record](artifacts/2026-10-26-draft-head/summary.json).
-
 
 ### E6: explicit FP32 index scoring for verification (retained for numerics)
 
@@ -404,7 +361,6 @@ wider projection equivalence remain open; no verification limit was widened.
 All checks, rates, hashes, commands and raw benchmark traces are in
 [the E6 record](artifacts/2026-10-26-verification-scores/summary.json).
 
-
 ### E7: stable device route plans for FP16 layers (retained groundwork)
 
 Large batches whose gate/up and down both use FP16 now build their expert
@@ -442,7 +398,6 @@ with effectively flat unprofiled throughput. Graph capture and the mixed-MMQ
 plan remain open. All observations and checks are in
 [the E7 record](artifacts/2026-10-26-device-route-plan/summary.json).
 
-
 ### E8: 32-slot routed FP16 tiles (rejected)
 
 Template the routed FP16 kernel on its tile width and launch a 32-slot grid
@@ -464,7 +419,6 @@ against `8d51885a`: pp512 768.3/769.0 → 758.8/772.5 tok/s, pp2048
 no measurable prefill gain. Rejected; the 64-slot kernel is unchanged. Both
 patches, per-kernel resource usage and the runs are in
 [the E8 record](artifacts/2026-10-26-routed-32-slot/resource-usage.txt).
-
 
 ### E9: fuse the Markov projection into its selection (retained)
 
@@ -494,7 +448,6 @@ coding +4.2%, explanation +3.7%, prose +8.2%, Rust +5.0%). Pooled
 30.10 → 31.73 tok/s. Runs and checks are in
 [the E9 record](artifacts/2026-10-26-fused-markov/summary.txt).
 
-
 ### E10: FP32-activation GEMV for the drafter's Q4_K projections (retained)
 
 The drafter's dense Q4_K projections (q_a/q_b, KV, output a/b and the shared
@@ -516,8 +469,10 @@ end-to-end gain is within noise. Retained for the measured draft-stage
 saving. Runs and checks are in
 [the E10 record](artifacts/2026-10-26-draft-q4k-gemv/summary.txt).
 
-
 ### E11: learned DSpark acceptance head for greedy cycles (retained for greedy)
+
+The head is retained; its fixed ≥ 0.5 cut was replaced by the cost-aware
+prefix of [E18](#e18-cost-aware-draft-prefix-retained).
 
 The drafter GGUF ships a learned acceptance head
 (`dflash.dspark.confidence.weight`, 5,376 F16, zero bias): the sigmoid of
@@ -676,6 +631,13 @@ backing: every capture is refused, and a 2K continued prefill gains nothing
 memory allows a cache beside it (not measured).
 Runs are in [the E16 record](artifacts/2026-10-26-prefill-batch/summary.txt).
 
+## SSD expert streaming (M3)
+
+All on the 128.75 GiB `IQ2_XXS` build with a Samsung 990 PRO unless stated;
+`gufo bench` pp2048/tg128 with synthetic tokens, alternating binaries and
+targeted page-cache eviction of the model shards between runs. The design
+as it stands is in [STREAMING.md](STREAMING.md).
+
 ### E17: streamed IQ2_XXS reader and mixed-quant kernels
 
 The first streaming path serialized expert reads and staged all selected
@@ -697,5 +659,444 @@ tok/s and decode from 8.84 to 9.02 tok/s. Both overlap controls have identical
 generated-token hashes; a 16-row full-logit and route comparison is byte-exact.
 The prior generic and FP16 prompt paths have different rounding, so their
 score files are compared to the oracle rather than claimed byte-identical.
-[Storage, research and all raw runs](STREAMING.md) ·
+[Storage reads](#storage-reads) ·
 [quality](QUALITY.md#streamed-iq2_xxs-m3-preliminary).
+
+### Storage reads
+
+October 26, 2026: Samsung 990 PRO, XFS mounted `noatime`, kernel 7.2.11,
+NVMe scheduler `none`, 4096 KiB read-ahead; no global kernel or filesystem
+setting changed. `tools/ds41/stream_io_bench.py` reads actual IQ2_XXS expert
+offsets in 40 layer-sized batches of 1, 2 or 6 missing experts, 1.02 GB of
+payload per arm after dropping the shards' clean pages, two rounds in
+opposite orders:
+
+| Read mode | Readers | Payload GiB/s, two runs | Median layer ms |
+| --- | ---: | ---: | ---: |
+| buffered | 1 | 3.04, 3.11 | 5.22, 5.14 |
+| buffered | 4 | 5.33, 5.31 | 3.05, 3.08 |
+| buffered, `POSIX_FADV_RANDOM` | 4 | 5.27, 5.41 | 2.97, 3.02 |
+| direct | 4 | 5.68, 5.89 | 2.65, 2.66 |
+| direct | 8 | 5.81, 5.75 | 2.74, 2.73 |
+| direct | 12 | 5.63, 5.68 | 2.69, 2.73 |
+
+Four readers reach the useful queue depth; random advice was inconclusive.
+The end-to-end effect of direct reads is in E17 above; on a repeated
+identical prompt the second prefill (938 tok/s) and decode (13.44 tok/s)
+were the same with either mode. Kyojin's
+[`uring_bench.c`](https://github.com/Yamz-Labs/kyojin/blob/0c5b91a0686acc8129190f753e032715f0b0dcc2/tools/tier/uring_bench.c)
+(3 MiB random direct reads, queue depth four, 16 GiB of one shard, two
+seconds) reached about 4.9 GB/s with `pread` threads, `io_uring` and polling
+`io_uring` alike (p99 about 3 ms), so `io_uring` was not adopted. The
+global scheduler and read-ahead were not tested (not writable by this user).
+A `rocprofv3` pp140/tg16 trace with buffered reads showed kernels occupying
+1.36 s of the 9.76 s from the first router to the last kernel, the largest
+gaps around expert staging: kernel throughput alone does not predict
+streamed speed.
+
+**Read-path profile (2026-10-27,** `522c8653`**).** `/proc/<pid>/io` sampling
+around the bench phases plus `tools/ds41/engram_row_bench.py`:
+
+| Read path | Pattern | Mechanism | Measured |
+| --- | --- | --- | --- |
+| Expert weights (demand + prefetch jobs) | per layer, three ~1 GiB blocks (gate, down, up), expert-strided within each | O_DIRECT `pread`, 4 workers, ≤32 MiB chunks | 5.7 GiB/s effective; 8.2 GB/s pure-sequential ceiling |
+| Engram rows | 144 B at hashed-random offsets, 2 layers × 24 rows per token | buffered `pread`, ≤32 threads, page cache | 278 K rows/s cold (~1.06 GiB/s at 4 KiB granularity) |
+
+A pp2048 batch moves ~4 GiB of expert reads as ~140 large IOs and 98,304
+Engram rows as 4 KiB IOs: the Engram is under 10% of the bytes but ~99% of
+the operations. `rchar == read_bytes` for whole runs: once the expert cache
+has grown (its chunk growth reclaims exactly the clean file pages), the
+Engram's page cache scores no hits, so every prefill batch spends ~0.35 s of
+device time on random Engram reads that take queue depth from the expert
+reads. This fits the fuller-cache-slower-prefill pattern of the compact
+stage arms below, the 98 GiB-cache build's faster prefill and the DSpark
+runs (4.7 GiB more free memory).
+
+Two disks, via symlinks to the second NVMe (KIOXIA EXCERIA 1.8T, 2.3 GB/s
+sequential against the 990 PRO's 8.2):
+
+- **Engram and shards 3–4 on the KIOXIA: pp2048 113–449 tok/s.** Shards are
+  layer-major, so those layers read at the slow disk's pace and gate every
+  phase that touches them.
+- **Engram alone on the KIOXIA: pp2048 724.9–727.3** (739.9–747.9 on one
+  disk), decode unchanged: its random-read latency costs more than the
+  contention it removes.
+
+[I/O bench](artifacts/m3-streaming/io-bench.json) ·
+[profile](artifacts/m3-streaming/profile-iq2-stream.log) ·
+[io_uring control](artifacts/m3-streaming/io-uring-bench.log) ·
+[direct-I/O candidate](artifacts/m3-streaming/bench-iq2-direct-io-candidate1.log) ·
+[buffered control](artifacts/m3-streaming/bench-iq2-buffered-io-control1.log)
+
+### Overlapped staging (2026-10-27)
+
+Against the October 26 tree (four direct readers, stage copies of resident
+experts, shared-expert overlap), same machine, model, histogram sidecar and
+`gpu-test` binary family:
+
+| Change | Decision / evidence |
+| --- | --- |
+| Read resident experts through per-expert pointer tables instead of staging copies | Retained: removes up to ~57 MB/layer of device-to-device copies per decode token. `ds41_gemv_bench` puts the table indirection at parity with the packed layout, bit-identical; `ds41.expert_store` checks table contents, eviction and admission on synthetic shards. |
+| Split gate+up launches so resident experts compute while misses stream | Retained: the overlapped launch zeroes the read rows and the post-read launch completes them; each row keeps its single-launch arithmetic (Kyojin skips this lever because its separate launches change the FP32 sum order), so tg128 hashes `04842be7…` on both builds, AR and DSpark (110 drafted / 71 accepted in both). |
+| Per-reader upload streams instead of blocking legacy-stream copies | Retained: uploads overlap the layers' kernels. |
+| Runtime table-pointer choice inside the expert GEMV kernels | Rejected: rescheduled the IQ2 loops with 249 inserted `s_delay_alu` (914 → 1,141 instructions for IQ2_XXS), −4.2% resident tg128 (24.06 → 23.06 over six alternating pairs). Specializing the indirection at compile time (`kTable`) restores the resident address arithmetic: every `ds41_gemv_bench` case matches (81.1/85.7/88.0/93.7/151.0/146.3/156.2 µs) and resident pairs return to 23.9–24.1 tok/s. |
+
+Matched `gufo bench` (seed 19 s, 82.8% route hits):
+
+| Build | Prefill tok/s | Decode tok/s | DSpark decode tok/s |
+| --- | ---: | ---: | ---: |
+| October 26 (stage copies, shared overlap) | 592.1 | 11.65 | 13.50 |
+| Tables, split overlap, upload streams | 664.7–669.6 | 14.99–15.08 | 17.92–17.96 |
+
+Decode host wait 6.51 → 5.25 ms/token at unchanged route hits, so the gain
+is overlap, not cache policy. Resident `IQ1_M` pp2048/tg64 (1070/23.0)
+stayed inside the previous build's spread (945–1129 / 22.5–23.7). IQ2_XS
+kernel checks: routed FP16 22.7 TOPS at pp2048 shapes (98% of IQ2_XXS),
+decode GEMV 112–116 GB/s with the table mode bit-identical. Qualification:
+`ds41.expert_store`, `ds41.mmq_typed`, the format check, the native-context
+probe (106.4 GiB RSS peak, 8.7 GiB available at 1M context) and the tools,
+conversation, sampling-defaults and batch HTTP suites with the Lucebox
+drafter. [Logs](artifacts/m3-streaming/bench-iq2-tables-ar1.log)
+
+### Expert GEMV decode retune (2026-10-27)
+
+The IQ2 expert decode kernels ran at 121-134 GB/s, half the dense GEMV's
+207-221. Two limiters, found with `tools/prof/isa_mix.py`: the IQ2 decode
+cast each `uint64_t` grid entry's extracted byte straight to float, which
+lowered to a quarter-rate `v_ldexp_f32` (129 per loop) plus 64-bit shifts,
+and the sign ternary emitted a compare/select pair per element; the loads
+were also fragmented (five 2-byte weight loads and 16 activation loads per
+32-value task in the SwiGLU pass). External references agree on the failure
+mode: the sanssushi and MBufo Gufo forks measure 102-118 GB/s on their
+per-lane grid-LUT IQ2 decode against a 214 GB/s Q2_0 kernel at the same
+216 GB/s peak.
+
+| Experiment | Decision / evidence |
+| --- | --- |
+| Retuned all five formats in `ds41_expert_gemv.hip.cpp`: task payloads as whole-word loads (memcpy from the 2-byte-aligned blocks), IQ2 grids and signs staged in LDS as u32 word pairs, the IQ2 decode on the entry's u32 halves with signs applied by flipping the float sign bit, and the fused gate/up pass loading x once per block into registers (AccR); U=2 for IQ1_S and the IQ2 formats | Retained, bit-exact by construction and by measurement. Standalone `tools/bench/ds41_expert_gemv_tune.hip` (production TU included, rotating DRAM-cold experts): IQ2_XXS gate/up 143.0 -> 194.9 GB/s, down 123.9 -> 189.4; IQ2_XS 148.9 -> 205.1 / 133.5 -> 189.9; IQ2_S down 143.5 -> 200.7; IQ1_M gate/up 171.5 -> 194.5; IQ1_S down 153.3 -> 162.1 (its gate/up already streamed at 200.3). `ds41_gemv_bench`: fp32 162-201 GB/s, table mode bit-identical; `ds41.mmq_typed` and `ds41.expert_store` pass; 0 VGPR spills (grouped kCols=16 peaks at 218 VGPRs). |
+| Fast-math contraction context in the IQ1_M tail | A pragma-free re-expression of `acc + fmaf(s1, d01, s2*(d23))` reproduces the production bits; freezing it with `#pragma clang fp reassociate(off)` does not (production's own emission reassociates). The port keeps the source expression verbatim; the tune bench's replica variant guards it. |
+| Alternating matched `gufo bench` pairs (gpu-test binaries, seed 19, two controls and two candidates interleaved) | Streamed IQ2_XXS AR tg128 15.90/16.06 -> 16.57/16.94 tok/s and DSpark 18.54 -> 19.34 (71 accepted and token hash 04842be7… unchanged; 110 -> 107 drafted under the timing-adaptive drafter); decode host wait 5.4-6.5 -> 5.2-5.6 ms/token; resident IQ1_M tg128 23.55/23.36 -> 23.86/24.38 (hash 70d5a48a… unchanged). Prefill untouched (routed_f16 path). |
+
+### Post-retune kernel survey (2026-10-27)
+
+After the expert GEMV retune, a rocprof pass over a streamed DSpark
+pp2048/tg64 run (4.15 s GPU busy) ranked every remaining kernel family and
+the survey measured each candidate's headroom. The model tensor mixes were
+read with llama.cpp's gguf-py: the streamed build's routed experts are
+gate/up IQ1_M x16, IQ2_XXS x17, IQ2_XS x7 and down IQ1_M x28, IQ2_XXS x8,
+IQ2_XS x4; the resident build gate/up IQ1_S x28, IQ2_XXS x9, IQ1_M x3 and
+down IQ1_S x27, IQ1_M x9, IQ2_XXS x2, IQ2_S x2; the Lucebox drafter's
+experts are Q4_K x3 and Q2_K x3 of six layers.
+
+| Candidate | Decision / evidence |
+| --- | --- |
+| Dense Q5_K FP16 prefill (`ds41_dense_f16.hip.cpp`, 493 ms / 11.9% of the run) | Kept. 32.2-33.5 TFLOP/s across q_b/o_b/sh_gate/wo_a (`tools/bench/ds41_dense_f16_tune.hip`), WMMA-issue bound (128 WMMAs against ~2.1k VALU per body, 615 s_delay_alu); the iterative-ILP scheduler flag measured 32.1-33.4 with identical hashes (rejected), and the tile/stage knobs are the ones the Gemma 4 audit already exhausted on the same kernel class at 37-40 TFLOP/s. The remaining ~15% is scheduling overlap, not instructions. |
+| LDS-staged activations for the IQ1 down GEMV (162-167 GB/s, the weakest decode kernels; 28 of 40 streamed down layers are IQ1_M) | Rejected: the per-lane 128-byte activation stride makes every read an 8-way LDS bank conflict -- 43-49 GB/s, 4x slower than the global path. The down launches also show a fixed per-launch floor (85-96 us across 13.8-22.7 MB and all five formats), so activation traffic is not what holds them at ~165 GB/s. |
+| DSpark drafter expert projections through the vendored mmvq (`mul_mat_vec_q_moe<10>` 49.8 ms + Q4_K paths ~12 ms + q8_1/fp4 passes ~19 ms of the run) | Not attempted: ~80 ms of a 4.15 s run. The drafter is not the DSpark bottleneck; the target's verification and head dominate. |
+| Dense Q5_K FP16 prefill: double-buffered activation LDS (`ds41_dense_f16.hip.cpp`) -- stage g stores into buffer g&1 while stage g-1 still reads the other, one `lds_barrier` per K stage instead of two | Retained, bit-exact (output hashes equal at n=2048 and the ragged n=1904 tail, `tools/bench/ds41_dense_f16_variants.hip.cpp`). `ds41_mmq_bench --dense`: q_b 32.9 -> 33.6, o_b 33.5 -> 33.9, sh_gate 27.5 -> 28.1, wo_a 32.4 -> 32.5 TFLOP/s. A 64-token tile was 2.4x slower (matching the Gemma audit's tile sweep) and the iterative-ILP scheduler flag measured 32.1-33.4 with identical hashes (rejected). |
+| DSpark drafter routed experts through the FP32 expert GEMV: new Q4_K and Q2_K traits in `ds41_expert_gemv.hip.cpp` (one 16-byte header + one 16-byte payload load per Q4_K task; Q2_K reads its 16 scale bytes at 0, the 32 bit-planed payload bytes of its plane group, and d/dmin at 80/82), and `moe()` fused into one gate/up/SwiGLU plus one down launch | Retained. Kernel level: Q4_K 216-217 GB/s, Q2_K 204-212 GB/s against the FP64 host reference (rel 3e-7, `ds41_expert_gemv_tune`), vs the mmvq path's ~100-150; two launches and the Q8_1 quantization passes drop. E2E (alternating matched pairs): streamed DSpark tg128 19.08/19.15 vs 19.08 (one control pair was cold-cache at 12.3), resident 26.26-26.43 vs 26.34-26.38, AR regression 16.74 vs 16.83 -- parity within noise, as the drafter is ~1.5% of the run. Outputs bit-identical (04842be7... / 70d5a48a...), acceptance identical (71/51); sampled sessions will draw slightly different drafts (FP32 vs Q8_1 activations), which verification keeps correct. |
+| Q2_K trait first cut | Rejected and fixed: it assumed {d, dmin, scales, qs} with consecutive payload packing; the real block (`block_q2_K`) has the scales at 0, bit-planed qs at 16 (value v's bits in byte 16 + v%32 + 32*(v/128), plane 2*((v/32)&3)) and d/dmin at 80/82. The standalone FP64 check had passed because its reference and synthetic generator repeated the same wrong layout; kernel references are now checked against the vendored struct or gguf-py. |
+| Persistent row-tiles / wider workgroups for the IQ1 down GEMV | Rejected / not ported: row-tiles (2 or 4 per workgroup) serialize work behind one table fill and lose 8-12% to reduced parallelism; 512-thread workgroups gain only the IQ1 downs 1.3-3.5% (the measured empty-launch floor is ~3 ns/block, 17.8 us for the 5760-block down launch). An LDS-staged activation variant was 4x slower: the per-lane 128-byte stride is an 8-way LDS bank conflict. |
+| Output head and dense decode GEMV, attention prefill/decode, routed F16 prefill | Kept. The head streams 227-237 GB/s (near the 239.7 measured peak); the routed F16 decodes through LDS FP16-packed codebooks with XOR signs at fork-grade (22.8-26.5 TOPS, no slow-opcode pathologies in isa_mix); attention carries its own retained tuning history. |
+
+### Prefill read pipelining with router predictions (2026-10-27)
+
+Reads of a prefill layer's missing experts start during the previous
+layer's compute: the previous layer's read overlap runs this layer's router
+on its own FFN input (one layer stale), and the predicted experts' reads run
+as a background job that the layer's prepare adopts for the experts it
+routes ([design](STREAMING.md#prefetch-from-router-predictions)). This first
+version gave background jobs a second whole-layer stage set in layer parity
+(~3.6 GiB, bought after the seed), so the runtime cache grew to 98.0 instead
+of 101.6 GiB.
+
+A router-free sweep of the next layer's uncached experts, as ds4's Strix
+Halo path does, was measured first and rejected on this model: V4.1 Flash routing is skewed enough that a
+2048-token prompt touches only a fraction of each layer's experts, and with
+the ranked seed resident the sweep read 3.6x the demand volume of the first
+pass (22.9 vs 6.4 GiB), dropping pp2048 to 389.61/386.69 tok/s against
+664.03/661.93 for the control. The predicted job reads ~1.6x the demand
+volume, and the overlap absorbs it.
+
+Matched `gufo bench` arms (pp2048/tg128, alternating binaries, targeted
+shard page eviction between runs, two rounds each). The tg128 token hash
+04842be7… and DSpark's 71 accepted of 107 drafted are identical on every
+arm; the streamed pipeline changes only when bytes arrive, never which
+bytes the kernels see.
+
+| Build | AR pp2048 | AR tg128 | DSpark pp2048 | DSpark tg128 |
+| --- | ---: | ---: | ---: | ---: |
+| control (028086ab) | 652.6–663.6 | 16.53–16.59 | 616.7–620.5 | 19.05–19.11 |
+| prefill prediction | 779.3–785.1 | 15.75–15.94 | 737.2–748.0 | 17.78–17.91 |
+
+Prefill gains 19–21% on both paths. Decode keeps its kernels and its host
+wait (4.88–4.93 ms/token on every arm) but loses 4–6% to the smaller cache:
+the second stage set is the price of the pipelining, which the compact
+stage below recovers.
+
+[Router-free sweep, candidate](artifacts/m3-streaming/bench-iq2-routersweep-cand1.log) ·
+[Router-free sweep, control](artifacts/m3-streaming/bench-iq2-routersweep-ctrl1.log) ·
+[Prefill prediction, AR](artifacts/m3-streaming/bench-iq2-prefetch-ar-cand1.log) ·
+[Prefill prediction, AR control](artifacts/m3-streaming/bench-iq2-prefetch-ar-ctrl1.log) ·
+[Prefill prediction, DSpark](artifacts/m3-streaming/bench-iq2-prefetch-ds-cand1.log) ·
+[Prefill prediction, DSpark control](artifacts/m3-streaming/bench-iq2-prefetch-ds-ctrl1.log)
+
+### Streamed decode prefetch (2026-10-27)
+
+Single-token steps use the same pipeline: when a layer's
+read overlap actually waited on reads, it enqueues the next layer's router
+on the current FFN input, and the store thread submits the predicted
+experts' reads, which the next layer's prepare adopts for the experts it
+routes. Layers without misses predict nothing — a prediction without a
+read stall to hide its matvec costs more than the read it saves — and
+adoption skips unrouted experts, so wrong predictions cost bandwidth only.
+
+Matched arms against the prefill-pipelining build (same protocol, two rounds; the
+token hash 04842be7… and DSpark's 71/107 are identical on every arm):
+
+| Build | AR pp2048 | AR tg128 | DSpark pp2048 | DSpark tg128 |
+| --- | ---: | ---: | ---: | ---: |
+| prefill prediction only | 789.1–792.4 | 15.78–15.79 | 746.7–748.2 | 17.83–17.86 |
+| with decode prediction | 778.7–788.0 | 15.91–15.92 | 748.4–750.2 | 17.84–17.89 |
+
+Decode gains 0.8% on AR (every round separated well outside the ±0.01
+run-to-run spread) and is neutral on DSpark, whose verification batches of
+2–16 rows predict nothing by design. The gain is small because at 82–83%
+route hits only ~5 ms/token of read stall exists and one-layer-stale recall
+covers part of it; the larger decode lever was the cache capacity the second
+stage set consumed (next section). Decode reads rise from 11.99 to
+13.2 MiB/token (10.9 vs 4.1 GiB prefetched overall), the price of the
+predictions that miss.
+
+[Decode prediction, AR](artifacts/m3-streaming/bench-iq2-decode-ar-cand1.log) ·
+[Decode prediction, AR control](artifacts/m3-streaming/bench-iq2-decode-ar-ctrl1.log) ·
+[Decode prediction, DSpark](artifacts/m3-streaming/bench-iq2-decode-ds-cand1.log) ·
+[Decode prediction, DSpark control](artifacts/m3-streaming/bench-iq2-decode-ds-ctrl1.log)
+
+### Compact prefetch stage and cache reserve (2026-10-27)
+
+The decode dip of the prefill pipelining came from the second stage set
+taking ~3.6 GiB of expert-cache headroom; two changes give the memory back.
+
+- **The prefetch stage no longer mirrors the demand stage.** Demand reads
+  were always safe in one whole-layer buffer — the blocking routes copy
+  orders them behind the previous layer's compute — so only the background
+  jobs needed a second buffer, and jobs touch just the predicted experts.
+  The prefetch stage is now a 192-row compact buffer with two 96-row parity
+  halves (~1.5 GiB): a job's experts take rows in its layer's half, a job
+  beyond 96 experts truncates (the excess stays a demand read), and a failed
+  job is simply not adopted. Resolving the job moved ahead of the phase's
+  table build so the table can point adopted experts at their rows.
+- **The cache reserve drops from 8 GiB to 4 GiB.** The resident path runs
+  with a 1 GiB dispatch reserve under the same loads; the streamed reserve
+  now covers the shared batch scratch (1.4 GiB at 1M context), one session's
+  FP4 state and transient peaks. 3 GiB measured one 572 tok/s prefill round
+  riding the reclaim floor; 4 GiB is tight across every round.
+
+Matched arms against the decode-prefetch build (same protocol). The cache reaches
+103.8 GiB (AR) / 99.1 GiB (DSpark, which loads the drafter); hashes and
+DSpark's 71/107 identical on every arm:
+
+| Build | AR pp2048 | AR tg128 | DSpark pp2048 | DSpark tg128 |
+| --- | ---: | ---: | ---: | ---: |
+| decode prefetch (8 GiB reserve, whole-layer set) | 787.5–788.0 | 15.86–15.92 | 744.5–749.3 | 17.87–17.91 |
+| compact set, 4 GiB reserve | 739.9–747.9 | 17.34–17.38 | 763.9–765.1 | 19.03–19.07 |
+| original control (028086ab) | 652.6–663.6 | 16.53–16.59 | 616.7–620.5 | 19.05–19.11 |
+
+Decode recovers past the original control (+4.8% AR, parity on DSpark, from
+4–6% below it), and DSpark prefill improves. AR prefill sits 5% under the
+decode-prefetch build while DSpark prefill gains: across the pipelined builds the
+AR prefill rate anti-correlates with the route-hit rate (88.3% hits → 787,
+95.3% → 742 tok/s), so the residual is a residency effect (the Engram reads of the
+[read-path profile](#storage-reads)), not a pipeline cost — reads fall from 13.2 to 9.3 MiB/token on the same
+arms.
+
+[Compact stage, AR](artifacts/m3-streaming/bench-iq2-compact-ar-cand1.log) ·
+[Compact stage, DSpark](artifacts/m3-streaming/bench-iq2-compact-ds-cand1.log)
+
+### Opt-in streaming, IQ1_M and the compact stage stride (2026-10-27)
+
+Streaming became opt-in (`--stream-experts`, `--expert-cache-bytes`); a
+model that does not fit now fails to load instead of streaming silently.
+While streaming, the 5.31 GiB of dense weights go through the device heap
+instead of managed memory.
+
+**Compact stage stride.** The 3K teacher-forced score of the streamed
+IQ2_XXS build had fallen from 6.0041 (`4b5ee8ea`) to 35.83 (`10ad16a4`).
+Bisection put it on the compact prefetch stage (`522c8653`): disabling
+prefetch or wide jobs restored 6.0041, and so did a whole-layer stage, also
+with jobs still truncated at 96 experts. The stage is sized by the largest
+expert of any layer, but rows were addressed with the current layer's
+expert size; the build mixes 56-, 66- and 74-byte block types, so a layer
+with large experts ran past the start of the other parity half, and the next
+layer's job overwrote rows the current layer was still reading. Rows now use
+the allocation stride. The streamed score is 6.0041 again, identical to
+`4b5ee8ea` on all 2,999 positions. `ds41.expert_store` gained a mixed-size
+fixture (odd layers half the size) that fails without the fix. `gufo bench`
+token hashes did not catch it: their synthetic prompts score no text.
+
+**IQ1_M streamed.** The IQ1_M build has 17 layers of IQ1_S experts and two
+IQ2_S down projections, which the streamed batched path had never run.
+IQ2_S has no FP16 tile kernel, so those rows go through the table-indexed
+expert GEMV; the store also skips dropped routes (-1) as the resident
+kernels do, instead of failing the batch. Teacher-forced 3K, 2048- and
+952-token exact batches:
+
+| IQ1_M path | Perplexity | Target top-1 | Agreement with resident |
+| --- | ---: | ---: | ---: |
+| Resident | 6.320 | 57.7% | — |
+| Streamed, 32 GiB expert cache | 6.303 | 57.8% | 96.1% |
+
+Single-token decode scores are bit-identical to resident on 256 positions;
+the batched difference is the FP16 tile and GEMV rounding seen between the
+resident batched and decode paths.
+
+`gufo bench` pp2048/tg128 on IQ1_M, with the memory free once `gufo serve`
+is ready at 262,144 tokens (no drafter):
+
+| Expert cache | Free memory | pp2048 | tg128 |
+| --- | ---: | ---: | ---: |
+| Resident | 5.6 GiB | 1,212.3 ± 33.9 | 24.44 ± 0.13 |
+| 64 GiB | 48.6 GiB | 616.2 ± 29.4 | 16.45 ± 3.19 |
+| 32 GiB | 78.8 GiB | 437.2 ± 5.8 | 12.17 ± 2.34 |
+| 16 GiB | 93.3 GiB | 374.4 ± 1.3 | 9.13 ± 1.23 |
+
+Streamed IQ2_XXS against the pre-merge build with the same stride fix,
+alternated twice: tg128 18.81/19.13 against 19.13/18.96 tok/s, no
+measurable change from the heap placement. Prefill was inconclusive
+(pp2048 853/927 against 735/953, each ± 300-460): the startup seed caches
+the 10,240 ranked experts (82 GiB) of 15,360, so the first repetition reads
+the rest (81% route hits) and the second hits on every route.
+
+### Slots per expert size and the full built-in ranking (2026-10-27)
+
+Two changes let a capped cache hold more experts; neither touches the
+arithmetic.
+
+- **One slot size per expert size.** Every slot was sized for the largest
+  expert of any layer, but the builds mix block types: IQ1_M has six expert
+  sizes (6.59-8.26 MiB, mean 7.11) and IQ2_XXS eight (7.38-9.76 MiB, mean
+  8.20), so 14% and 16% of the cache went unused. Slots now come in one
+  class per distinct size, each growing by 128 MiB chunks (512 MiB before,
+  to bound what a class strands in a part-used chunk). Once the cache stops
+  growing, an expert may take the smallest larger free slot or evict from
+  its own or a larger class, never a smaller one.
+- **The built-in ranking orders all 15,360 experts.** The import kept the
+  first 10,240 of the source permutation, so a cache larger than 82 GiB
+  (IQ2_XXS) started part empty and the first request read the rest. The
+  table now keeps the whole ranking; the first 10,240 entries are
+  unchanged. Experts a custom histogram omits follow its ranked ones,
+  interleaved across layers.
+
+`ds41.expert_store` gained cases for both (seven half-size experts in the
+cache of four full-size ones, a large expert that streams rather than take
+a small slot, and the seed past a one-expert histogram); they fail on the
+previous store.
+
+`gufo bench` pp2048/tg128 (`-r 2`), against the opt-in build above:
+
+| Model, expert cache | Experts seeded | pp2048 | tg128 | Route hits |
+| --- | ---: | ---: | ---: | ---: |
+| IQ1_M, 64 GiB | 7,436 → 8,658 | 616.2 → 751.6 ± 98.1 | 16.45 → 17.90 | 70.8% → 85.7% |
+| IQ1_M, 32 GiB | 3,718 → 4,325 | 437.2 → 462.5 ± 1.8 | 12.17 → 12.94 | 45.5% → 48.6% |
+| IQ1_M, 16 GiB | 1,859 → 2,155 | 374.4 → 383.6 ± 2.0 | 9.13 → 9.74 | 30.2% → 32.7% |
+| IQ2_XXS, automatic (105 GiB) | 10,240 → 12,688 | 853/927 → 918.9 ± 403.5 | 18.81/19.13 → 19.96 | 91.4% → 97.0% |
+
+Free memory is unchanged: the cap bounds the allocation either way. The
+seed takes longer in proportion (13.1 → 14.6 s at 64 GiB, 18.7 → 20.2 s
+for IQ2_XXS). The IQ2_XXS prefill spread no longer comes from expert reads
+(1.57 MiB/token in the first repetition, 93.6% hits); the Engram row reads
+([read-path profile](#storage-reads)), whose page cache the full expert
+cache displaces, are the likely remainder.
+
+### Decode profile and per-layer expert tables (2026-10-27)
+
+A rocprofv3 trace of warm IQ2_XXS decode (119 tokens of tg128 after
+pp512, automatic cache, medians per token) splits the 50.1 ms token into
+40.3 ms of kernels and 9.8 ms of GPU idle:
+
+| Part | ms/token |
+| --- | ---: |
+| Dense Q5_K GEMV (`gemv_kernel<13,…>`) | 22.2 |
+| Routed expert GEMV | 11.5 |
+| Other kernels (attention, hyper-connections, router, …) | 6.6 |
+| Idle: miss reads between the hit and miss launches (~4 per token) | 5.3 |
+| Idle: ~200 small blocking copies | ~3 |
+
+The dense GEMV runs near the measured bandwidth ceiling, so speculative
+verification, which reads it once for several tokens, is the larger decode
+lever. Timers around the Engram futures and the read phases put the Engram
+wait at ~0.1 ms per pp2048 batch and the first prefill's expert read wait at
+0.35 s (0 once warm): the Engram is not what slows a new prompt.
+
+The copies were each layer's three expert tables and two hit/miss row
+arrays, uploaded with blocking `hipMemcpy`. The store now keeps one device
+table per layer and uploads it asynchronously only when one of its entries
+changed; a warm cache almost never changes one. The hit/miss rows are
+uploaded, in one asynchronous copy, only for a batch that both hits and
+misses — the only case whose launches read them. The routes copy that
+starts the next prepare orders every upload before its pinned mirror is
+rewritten. Copies per token fell from ~200 to 23 (the slot fills after
+reads), GPU idle from 9.8 to 8.1 ms and the traced token from 50.1 to
+48.1 ms.
+
+Alternated `gufo bench` (pp2048/tg128, `-r 2`): tg128 20.23/20.40 →
+20.93/20.95 tok/s (+3.2%); pp2048 985.9/1061.2 → 1074.3/1077.2, inside its
+first-repetition spread. Streamed IQ2_XXS decode scores are bit-identical
+on 256 positions with the automatic cache and with a 16 GiB cache (71%
+route hits, so most layers split).
+
+### DSpark on streamed IQ2_XXS (2026-10-27)
+
+`gufo bench` pp512/tg512 with the Lucebox Q2_K/Q4_K drafter: 33.5 tok/s
+against 21.3 plain (+58%). Route hits settle at ~99.3% either way, but
+verification reads are never predicted (0% prefetched), so ~13 MiB/token
+of misses remain. A rocprofv3 trace of the second half of a DSpark tg512
+splits the span into routed experts 44% (36% the 8-row verification
+groups: ~36 distinct experts per layer at ~32 µs each, the single-token
+per-expert cost, so bandwidth-bound), dense GEMV 31% (8-row launches at
+1.4-1.8× the single-token time), other kernels 11%, idle 10% (about half
+of it miss reads) and the drafter 4%.
+
+The task-major multi-token dense GEMV ([resident engine
+table](#resident-engine-m1m5)) took 8-row verification steps 129.7 →
+118.8 ms on resident IQ1_M; streamed DSpark tg512 stayed inside its
+cache-warming spread (33.17–34.14 → 33.15–34.73 tok/s over three
+alternating pairs).
+
+### E18: cost-aware draft prefix (retained)
+
+Greedy cycles with the learned head now verify the draft prefix that
+maximizes expected emitted tokens per cycle time, using the head's
+predictions as acceptance probabilities and the session's measured cycle
+times by width (the timing policy's estimates). Every emitted token still
+takes exactly one draw at its position, so outputs do not depend on the
+width. A cycle's time error also moves the other widths' estimates by 5%;
+without that, widths the cut seldom picks kept their priors.
+
+Per-cycle traces (all five drafts, the head's predictions and the decoded
+sequence) give each draft's uncensored acceptance. The head is close to
+calibrated (0.9+ rows accepted ≥ 99%, 0.5 rows about 55%). Verification
+times by rows (`--spec-bench`) are 43.4, 58.0, 69.8, 78.8, 96.6, 107.5,
+120.4 and 133.8 ms on streamed IQ2_XXS for 1-8 rows; 41.1, 52.8, 65.5,
+75.7, 87.0, 98.3, 113.5 and 123.6 ms on resident IQ1_M. Replayed over five
+prompts against the ≥ 0.5 cut, expected tokens per time gains +3.1%
+streamed and +0.9% resident; a cumulative-confidence cut gains less
+(+2.4%), any fixed width loses.
+
+Matched A/B, five prompts × two alternating repetitions of 512 greedy
+tokens against `d258afc1`:
+
+| Model | Geomean | Faster | Base → candidate tok/s range |
+| --- | --- | --- | --- |
+| Streamed IQ2_XXS | +3.76% | 10/10 | 29.37-38.87 → 30.37-40.03 |
+| Resident IQ1_M | +0.65% | 8/10 | 31.15-43.74 → 31.39-43.65 |
+
+All 40 runs match plain decoding token for token. Fewer drafts are verified
+(streamed 404-440 instead of 468-492 per 512 tokens) at higher acceptance.
+The coding prompt, already at 84-88% acceptance with full blocks, measured
+−1.1% and −0.2% resident. Rejected: the same cut with per-width estimates
+only (+2.91% streamed, −1.87% resident, 0/10 faster): the 1- and 3-draft
+estimates stayed at their 69.6 and 95.5 ms priors against about 62 and
+86 ms measured, so those widths were almost never chosen. Runs, traces and
+the replay are in [the E18 record](artifacts/2026-10-27-cost-aware-draft-prefix/summary.txt).

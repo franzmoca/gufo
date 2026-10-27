@@ -1,0 +1,4 @@
+<｜begin▁of▁sentence｜><｜User｜>Write a Python function that parses an ISO 8601 duration string like P3DT4H12M into a timedelta, with input validation and unit tests using pytest.<｜Assistant｜></think>
+<｜begin▁of▁sentence｜><｜User｜>Explain how a write-ahead log makes a database crash-safe, and compare it with shadow paging. Use a concrete example with two transactions.<｜Assistant｜></think>
+<｜begin▁of▁sentence｜><｜User｜>A train leaves at 9:40 and travels 245 km at 70 km/h, then stops for 25 minutes, then covers 130 km at 104 km/h. When does it arrive? Show your reasoning step by step.<｜Assistant｜><think>
+<｜begin▁of▁sentence｜><｜User｜>Refactor this C function to avoid the buffer overflow and explain each change:\nvoid copy(char *dst, const char *src) {\n  int i = 0;\n  while (src[i]) { dst[i] = src[i]; i++; }\n}<｜Assistant｜></think>
