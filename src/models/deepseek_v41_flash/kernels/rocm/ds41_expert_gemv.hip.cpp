@@ -201,7 +201,7 @@ struct Format<22> {
 /* Row sums of one expert matrix; with kSwiGLU, a wave takes the same rows
  * of the gate (w) and up (w_up) matrices and stores
  * route_w[slot] * silu(min(gate, limit)) * clamp(up, +-limit). */
-template <int kType, int U, bool kSwiGLU>
+template <int kType, int U, bool kSwiGLU, bool kTable>
 __global__ void __launch_bounds__(kWave* kWaves)
     expert_gemv_kernel(const uint8_t* __restrict__ w, const uint8_t* __restrict__ w_up,
                        const uint8_t* const* __restrict__ w_table, const uint8_t* const* __restrict__ w_up_table,
@@ -231,9 +231,13 @@ __global__ void __launch_bounds__(kWave* kWaves)
   if (row >= m) return;
   const float* xt = x + (uint64_t)(blockIdx.y / slots_per_x) * x_slot + 32 * t;
   const uint32_t blocks_per_row = k / 256;
+  /* The resident layout keeps its original address arithmetic; a runtime
+   * choice here rescheduled the IQ2 loops with dependency delays. */
   const uint64_t row_bytes = (uint64_t)row * blocks_per_row * F::kBlockBytes;
-  const uint8_t* base = w_table ? w_table[id] + row_bytes : w + (uint64_t)id * expert_bytes + row_bytes;
-  const uint8_t* base_up = kSwiGLU ? (w_up_table ? w_up_table[id] + row_bytes : w_up + (uint64_t)id * expert_bytes + row_bytes) : nullptr;
+  const uint64_t offset = (uint64_t)id * expert_bytes + row_bytes;
+  const uint8_t* base = kTable ? w_table[id] + row_bytes : w + offset;
+  const uint8_t* base_up =
+      kSwiGLU ? (kTable ? w_up_table[id] + row_bytes : w_up + offset) : nullptr;
   float acc = 0.0f;
   float acc_up = 0.0f;
   uint32_t blk = 0;
@@ -330,7 +334,7 @@ __global__ void expert_plan_kernel(const int32_t* __restrict__ ids, uint32_t slo
  * decodes its expert's weights once for the group's up to kCols slots, slot
  * s reading x + (s / slots_per_x) * x_slot and writing row s of y. Every
  * slot sees the arithmetic of expert_gemv_kernel. */
-template <int kType, int U, bool kSwiGLU, int kCols>
+template <int kType, int U, bool kSwiGLU, int kCols, bool kTable>
 __global__ void __launch_bounds__(kWave* kWaves)
     expert_group_kernel(const uint8_t* __restrict__ w, const uint8_t* __restrict__ w_up,
                         const uint8_t* const* __restrict__ w_table, const uint8_t* const* __restrict__ w_up_table,
@@ -369,10 +373,10 @@ __global__ void __launch_bounds__(kWave* kWaves)
   for (int c = 0; c < kCols; ++c) xt[c] = x + (uint64_t)(slot[c] / slots_per_x) * x_slot + 32 * t;
   const uint32_t blocks_per_row = k / 256;
   const uint64_t row_bytes = (uint64_t)row * blocks_per_row * F::kBlockBytes;
-  const uint8_t* base = w_table ? w_table[id] + row_bytes : w + (uint64_t)id * expert_bytes + row_bytes;
+  const uint64_t offset = (uint64_t)id * expert_bytes + row_bytes;
+  const uint8_t* base = kTable ? w_table[id] + row_bytes : w + offset;
   const uint8_t* base_up =
-      kSwiGLU ? (w_up_table ? w_up_table[id] + row_bytes : w_up + (uint64_t)id * expert_bytes + row_bytes)
-              : nullptr;
+      kSwiGLU ? (kTable ? w_up_table[id] + row_bytes : w_up + offset) : nullptr;
   float acc[kCols] = {};
   float acc_up[kCols] = {};
   uint32_t blk = 0;
@@ -433,7 +437,7 @@ __global__ void __launch_bounds__(kWave* kWaves)
   }
 }
 
-template <int kType, int U, int kCols>
+template <int kType, int U, int kCols, bool kTable>
 int launch_group(const void* w, const void* w_up, const void* const* w_table, const void* const* w_up_table,
                  const float* route_w, float limit, uint64_t expert_bytes, const int32_t* plan, uint32_t groups,
                  const float* x, uint32_t x_slot, uint32_t slots_per_x, float* y, uint32_t m, uint32_t k,
@@ -443,17 +447,29 @@ int launch_group(const void* w, const void* w_up, const void* const* w_table, co
   const auto* table = reinterpret_cast<const uint8_t* const*>(w_table);
   const auto* table_up = reinterpret_cast<const uint8_t* const*>(w_up_table);
   if (w_up)
-    expert_group_kernel<kType, U, true, kCols><<<blocks, kWave * kWaves>>>(
+    expert_group_kernel<kType, U, true, kCols, kTable><<<blocks, kWave * kWaves>>>(
         static_cast<const uint8_t*>(w), static_cast<const uint8_t*>(w_up), table, table_up, route_w, limit, x, y, m,
         k, plan, expert_bytes, x_slot, slots_per_x, zero_dropped);
   else
-    expert_group_kernel<kType, U, false, kCols><<<blocks, kWave * kWaves>>>(
+    expert_group_kernel<kType, U, false, kCols, kTable><<<blocks, kWave * kWaves>>>(
         static_cast<const uint8_t*>(w), nullptr, table, table_up, nullptr, 0.0f, x, y, m, k, plan, expert_bytes,
         x_slot, slots_per_x, zero_dropped);
   const hipError_t err = hipGetLastError();
   if (err == hipSuccess) return 0;
   fprintf(stderr, "ds41: grouped expert gemv launch failed: %s\n", hipGetErrorString(err));
   return 1;
+}
+
+template <int kType, int U, int kCols>
+int launch_group(const void* w, const void* w_up, const void* const* w_table, const void* const* w_up_table,
+                 const float* route_w, float limit, uint64_t expert_bytes, const int32_t* plan, uint32_t groups,
+                 const float* x, uint32_t x_slot, uint32_t slots_per_x, float* y, uint32_t m, uint32_t k,
+                 int zero_dropped) {
+  if (w_table)
+    return launch_group<kType, U, kCols, true>(w, w_up, w_table, w_up_table, route_w, limit, expert_bytes, plan,
+                                               groups, x, x_slot, slots_per_x, y, m, k, zero_dropped);
+  return launch_group<kType, U, kCols, false>(w, w_up, w_table, w_up_table, route_w, limit, expert_bytes, plan,
+                                              groups, x, x_slot, slots_per_x, y, m, k, zero_dropped);
 }
 
 template <int kType, int U>
@@ -474,7 +490,7 @@ int dispatch_group(const void* w, const void* w_up, const void* const* w_table, 
                                            x, x_slot, slots_per_x, y, m, k, zero_dropped);
 }
 
-template <int kType, int U>
+template <int kType, int U, bool kTable>
 int launch(const void* w, const void* w_up, const void* const* w_table, const void* const* w_up_table,
            const float* route_w, float limit, uint64_t expert_bytes, const int32_t* ids, uint32_t slots,
            const float* x, uint32_t x_slot, uint32_t slots_per_x, float* y, uint32_t m, uint32_t k,
@@ -484,17 +500,29 @@ int launch(const void* w, const void* w_up, const void* const* w_table, const vo
   const auto* table = reinterpret_cast<const uint8_t* const*>(w_table);
   const auto* table_up = reinterpret_cast<const uint8_t* const*>(w_up_table);
   if (w_up)
-    expert_gemv_kernel<kType, U, true><<<blocks, kWave * kWaves>>>(
+    expert_gemv_kernel<kType, U, true, kTable><<<blocks, kWave * kWaves>>>(
         static_cast<const uint8_t*>(w), static_cast<const uint8_t*>(w_up), table, table_up, route_w, limit, x, y, m,
         k, ids, expert_bytes, x_slot, slots_per_x, zero_dropped);
   else
-    expert_gemv_kernel<kType, U, false><<<blocks, kWave * kWaves>>>(
-        static_cast<const uint8_t*>(w), nullptr, table, table_up, nullptr, 0.0f, x, y, m, k, ids, expert_bytes, x_slot,
-        slots_per_x, zero_dropped);
+    expert_gemv_kernel<kType, U, false, kTable><<<blocks, kWave * kWaves>>>(
+            static_cast<const uint8_t*>(w), nullptr, table, table_up, nullptr, 0.0f, x, y, m, k, ids, expert_bytes, x_slot,
+            slots_per_x, zero_dropped);
   const hipError_t err = hipGetLastError();
   if (err == hipSuccess) return 0;
   fprintf(stderr, "ds41: expert gemv launch failed: %s\n", hipGetErrorString(err));
   return 1;
+}
+
+template <int kType, int U>
+int launch(const void* w, const void* w_up, const void* const* w_table, const void* const* w_up_table,
+           const float* route_w, float limit, uint64_t expert_bytes, const int32_t* ids, uint32_t slots,
+           const float* x, uint32_t x_slot, uint32_t slots_per_x, float* y, uint32_t m, uint32_t k,
+           int zero_dropped) {
+  if (w_table)
+    return launch<kType, U, true>(w, w_up, w_table, w_up_table, route_w, limit, expert_bytes, ids, slots, x, x_slot,
+                                  slots_per_x, y, m, k, zero_dropped);
+  return launch<kType, U, false>(w, w_up, w_table, w_up_table, route_w, limit, expert_bytes, ids, slots, x, x_slot,
+                                 slots_per_x, y, m, k, zero_dropped);
 }
 
 }  // namespace

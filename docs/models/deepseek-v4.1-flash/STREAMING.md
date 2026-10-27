@@ -113,7 +113,7 @@ machine as the October 26 runs (gpu-test binary, seed 19 s, 82.8% route hits):
 | Build | Prefill tok/s | Decode tok/s | DSpark decode tok/s |
 | --- | ---: | ---: | ---: |
 | October 26 (stage copies, shared overlap) | 592.1 | 11.65 | 13.50 |
-| October 27 (tables, split overlap, upload streams) | 666.1–669.6 | 14.99–15.00 | 17.92–17.94 |
+| October 27 (tables, split overlap, upload streams) | 664.7–669.6 | 14.99–15.08 | 17.92–17.96 |
 
 The DSpark run drafted and accepted the same 110/71 tokens with the same
 output hash. Decode host wait fell from 6.51 to 5.25 ms/token; the remaining
