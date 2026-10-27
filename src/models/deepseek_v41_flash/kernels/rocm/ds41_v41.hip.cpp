@@ -1891,15 +1891,16 @@ __global__ __launch_bounds__(256) void attention_f16_kernel(const float* q, cons
 #pragma unroll
       for (uint32_t r = 0; r < ROWS; r++) {
         const uint32_t pos = lo + min(tile * ROWS + r, n_window - 1);
-        const float* src =
-            pos < pos0 ? ring + (uint64_t)(pos & (window - 1)) * DIM : chunk + (uint64_t)(pos - pos0) * DIM;
-        raw[r] = *reinterpret_cast<const uint2*>(src + 2 * tid);
+        const float* base = pos < pos0 ? ring : chunk;
+        const uint32_t at = (pos < pos0 ? pos & (window - 1) : pos - pos0) * DIM + 2 * tid;
+        raw[r] = *reinterpret_cast<const uint2*>(base + at);
       }
     } else {
       const uint32_t c0 = (tile - window_tiles) * ROWS;
 #pragma unroll
       for (uint32_t r = 0; r < ROWS; r++) {
-        const uint64_t row = comp_idx[min(c0 + r, n_comp - 1)];
+        /* 32-bit offsets from the uniform bases (a context's rows stay far below 4 GiB). */
+        const uint32_t row = comp_idx[min(c0 + r, n_comp - 1)];
         raw[r] = make_uint2(comp.codes[row * (DIM / 2) + tid], comp.scales[row * (DIM / 16) + tid / 8]);
       }
     }
