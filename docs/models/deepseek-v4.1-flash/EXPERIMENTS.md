@@ -89,6 +89,39 @@ teacher-forced score against the oracle's perplexity 6.309
 | Batched mHC state passes fused (`hc_state_pass_kernel`): the mixes and the collapse with its RMS norm read the state once (the collapse uses the pre-mix that was known before the mix, from the shifted mHC), and before the FFN the attention expand runs in the same pass, so the expanded state is not read back twice. The mix loop is rolled (34 → 7 KB of code) | Retained for 16 tokens and up. `ds41.hc_state_pass`: mixes and normalized rows within 3e-7 of the separate kernels, the state bit-identical. 2K batch 3427 → 3359 ms, 952-token batch 1820 → 1790 ms, 18.5K prefill 33.3 → 31.5 s (with the 256-row dense kernel); 18.5K perplexity 6.273 (oracle 6.267), agreement 96.2%; batched 3K 6.320, 96.0% (rounding drift through the FP8/FP4 fake quantization; earlier rounding-only changes spanned 6.285-6.326). |
 
 
+## Streamed expert staging overlap (2026-10-27)
+
+Baseline: the October 26 M3 working tree (four direct readers, stage copies
+of resident experts, shared-expert overlap); candidate adds per-expert weight
+tables, split hit/miss gate+up launches and per-reader upload streams. Same
+machine, model, histogram sidecar and `gpu-test` binary family; the previous
+build's own logs are the control. `ds41_gemv_bench` shows the table
+indirection at parity with the packed layout, bit-identical.
+
+| Experiment | Decision / evidence |
+| --- | --- |
+| E2: read resident experts through per-expert pointer tables instead of staging copies | Retained: removes up to ~57 MB/layer of D2D staging per decode token; part of the combined +29% AR / +33% DSpark decode gain below. `ds41.expert_store` verifies table contents, eviction and admission on synthetic shards. |
+| E3: split gate+up launches so resident experts compute while misses stream | Retained: the overlapped launch zeroes the read rows, the post-read launch (zero_dropped=0) completes them; every row keeps its single-launch arithmetic, so tg128 outputs hash `04842be7…40254` on both builds, AR and DSpark (110 drafted / 71 accepted in both). |
+| E4: per-reader upload streams instead of blocking legacy-stream copies | Retained: uploads overlap the layers' kernels; no visible downside. GPU_MAX_HW_QUEUES side-stream serialization, if it occurs, degrades to the old behavior. |
+| E5: second wave of decode overlap (router-predicted prefetch) | Not attempted here; measured as BACKLOG item 12 with Xolotl's 62-70% one-layer router recall and ~6-slots/layer cap as the design reference. |
+
+Combined matched `gufo bench` pp2048/tg128: prefill 592.1 → 666.1-669.6
+tok/s, AR decode 11.65 → 14.99-15.00 tok/s, DSpark decode 13.50 → 17.92-17.94
+tok/s at identical acceptance and output hash (DSpark prefill spread 494-628
+tok/s across the two runs, so the AR prefill pair is the retained number). Decode host wait 6.51 →
+5.25 ms/token; route hits unchanged (82.8%), so the gain is overlap, not
+cache policy. Resident IQ1_M pp2048/tg64 (1070/23.0 on release) stayed
+within the previous build's own 945-1129 / 22.5-23.7 spread. Kernel-level
+IQ2_XS checks: routed_f16 22.7 TOPS at pp2048 shapes (98% of IQ2_XXS's
+23.1), MMQ 11.6 (fallback path, unused when the F16 path covers the type),
+decode GEMV 112-116 GB/s with the table mode bit-identical at parity speed.
+
+Qualification: `ds41.expert_store`, `ds41.mmq_typed` and the shared format
+check pass; the native-context probe peaks at 106.4 GiB RSS with 8.7 GiB
+available at 1M context; the tools, conversation, sampling-defaults and
+batch HTTP suites pass against `gufo serve` with the Lucebox drafter.
+[Logs](artifacts/m3-streaming/bench-iq2-tables-ar1.log).
+
 ## Post-M6 resident optimization pass (2026-10-26)
 
 Baseline source: `ee49a0fd` (sampling defaults from `edce52dd`); production
@@ -598,3 +631,27 @@ backing: every capture is refused, and a 2K continued prefill gains nothing
 (970.3 against 968.5 tok/s). 2048 stays the default; 4096 remains an option where
 memory allows a cache beside it (not measured).
 Runs are in [the E16 record](artifacts/2026-10-26-prefill-batch/summary.txt).
+
+### E17: streamed IQ2_XXS reader and mixed-quant kernels
+
+The first streaming path serialized expert reads and staged all selected
+weights. Four parallel readers improved a matched cold pp2048/tg128 from
+144.5–144.8 / 5.77–6.01 to 172.6–172.9 / 6.80–7.16 tok/s. Aligned direct
+reads improved the four-reader result to 213.8–214.1 / 8.97–8.98 tok/s;
+unaligned end-of-file reads and the buffered fallback are covered by the
+expert-store test. A repeated warm prefill/decode gives the same rates with
+buffered and direct I/O. Four readers beat one, but eight and twelve did not
+improve the per-layer direct-read test. `io_uring` and polling offered no
+measured benefit over threads in a sustained raw-read control.
+
+The GGUF mixes IQ2_XS with IQ1_M and IQ2_XXS. Its new IQ2_XS FP16 routed
+matrix-core kernel halves the measured 140- and 2048-row expert projection
+time; on cold pp2048, it gives 217.5–218.1 against 213.9–214.5 tok/s and
+preserves the independent 3K scoring quality. Starting selected-expert reads
+while the independent shared expert computes raises that result to 219.6–219.8
+tok/s and decode from 8.84 to 9.02 tok/s. Both overlap controls have identical
+generated-token hashes; a 16-row full-logit and route comparison is byte-exact.
+The prior generic and FP16 prompt paths have different rounding, so their
+score files are compared to the oracle rather than claimed byte-identical.
+[Storage, research and all raw runs](STREAMING.md) ·
+[quality](QUALITY.md#streamed-iq2_xxs-m3-preliminary).

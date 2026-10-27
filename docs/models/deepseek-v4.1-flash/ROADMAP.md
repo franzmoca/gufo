@@ -25,7 +25,7 @@ same GGUF.
 | M4 Component cache and serving | done |
 | M5 DSpark, prompt lookup and approximations | in progress: DSpark and prompt lookup done |
 | M6 Vision | done |
-| M3 SSD expert streaming (IQ2_XXS) | planned, after M6 |
+| M3 SSD expert streaming (IQ2_XXS) | done: streamed serving qualified; prefetch follow-ups in BACKLOG |
 | M7 Higher-precision Engram tables | planned |
 
 Order: M4, M5, M6, M3, then M7. M4-M6 build on the resident IQ1_M model;
@@ -67,7 +67,7 @@ State is small: about 890 B/token of compressed KV and index K plus a fixed
 128-row SWA ring per layer at the reference precision; stored as FP4 codes
 and scales it is about 0.9 GiB at 1M tokens.
 
-GGUF types: experts are IQ1_S/IQ1_M/IQ2_XXS/IQ2_S per layer (gate and up
+GGUF types: experts are IQ1_S/IQ1_M/IQ2_XXS/IQ2_XS/IQ2_S per layer (gate and up
 share a type; down may differ); dense projections Q8_0/Q5_K; router,
 compressor, indexer and Engram q/k BF16; hc and norms F32; `token_embd` and
 `output` Q5_K; Engram index tensors I32/I64.
@@ -152,13 +152,35 @@ Open performance items are tracked in [BACKLOG.md](BACKLOG.md).
 
 ### M3 SSD expert streaming (IQ2_XXS)
 
-- Expert store v2: a slot pool sized from free memory, decayed-use eviction,
-  scan-resistant admission during prefill, promotion of experts routed by the
-  last prompt rows, and a seed hot list from a routing histogram.
-- Reads sorted by offset and merged; no speculative next-layer prefetch during
-  decode; prefill may prefetch the next layer's selected experts.
-- Hit rate, bytes per token and stall time in `diagnose` and logs.
-- Compare resident IQ1_M with streamed IQ2_XXS on quality and speed.
+- The loader keeps dense weights resident and streams selected experts when
+  the complete model does not fit. A memory-bounded slot pool uses decayed
+  routing counts, fills free slots during prefill and resists scans once full;
+  the final prompt rows and unusually frequent experts can displace cold slots.
+  Reads are ordered by shard and offset, adjacent misses are merged, and four
+  direct-I/O readers upload through their own streams.
+- Kernels consume per-expert weight tables (cache slot or stage row), so
+  resident experts are read in place with no staging copy. While the reads
+  stream, the shared expert and the resident experts' gate+up compute; the
+  read rows complete the batch afterwards, with bit-identical outputs
+  ([STREAMING.md](STREAMING.md#overlapped-staging-2026-10-27)). Decode does
+  not prefetch unselected experts; see BACKLOG items 11-13 for the measured
+  next steps (router-free next-layer prefill sweeps, router-predicted decode
+  prefetch, opt-in route bias).
+- An optional `MODEL.gguf.expert-histogram` seeds the cache at startup; the
+  built-in V4.1 ranking (10,240 experts, from Xolotl's calibration trace)
+  applies without one. `tools/ds41/expert_histogram.py` builds a histogram
+  from the independent oracle's `routes.npz` files; use representative
+  prompts of the same quant. Seeding consumes time and memory, and the counts
+  are performance hints only.
+- Logs report cumulative and interval route-hit rates, bytes read per
+  evaluated token and host wait per token. Integration with `gufo diagnose`
+  remains open.
+- IQ2_XXS also contains IQ2_XS expert tensors; both the GPU paths and CPU
+  oracle support them. Quality is in [QUALITY.md](QUALITY.md): oracle-parity
+  scores, bit-identical overlapped staging, the native-context memory check
+  (106.4 GiB peak at 1M context) and the serving suites. Matched speed:
+  pp2048 666-670 tok/s, tg128 15.0 AR and 17.9 with DSpark
+  ([BENCHMARKS.md](BENCHMARKS.md#streamed-iq2_xxs-preliminary-native-measurements)).
 
 ### M4 Component cache and serving
 

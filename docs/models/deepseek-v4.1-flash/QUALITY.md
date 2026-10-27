@@ -440,3 +440,53 @@ preserves all 2,999 argmax and NLL records (six-decimal NLL output), perplexity
 6.319756; production tg128 token hashes also match. This is not a new full-logit
 bitwise claim. No quantization, expert accumulation or route weights changed.
 [Evidence](artifacts/2026-10-26-device-route-plan/summary.json).
+
+## Streamed IQ2_XXS (M3, preliminary)
+
+The ISTA IQ2_XXS build mixes IQ1_M, IQ2_XXS and IQ2_XS expert tensors. On
+gfx1151, the independent oracle and streamed decoder scored the same 2,999
+positions of `docs/KV-CACHE.md`. The GPU ran exact prefill in 2,048- and
+952-token batches. IQ1_M's previously retained oracle score is included as a
+quantization comparison, not as a comparison of two identical backends.
+
+| Build and path | Perplexity | Target top-1 | Agreement with IQ2 oracle |
+| --- | ---: | ---: | ---: |
+| IQ1_M oracle | 6.309 | 58.2% | — |
+| IQ2_XXS oracle | 6.028 | 58.5% | — |
+| IQ2_XXS streamed GPU | 6.009 | 58.7% | 95.3% |
+
+Mean absolute NLL difference between the IQ2 paths is 0.0815. Four logits
+from the capital-of-France continuation have the same argmax; their KL
+divergences range from 0.000042 to 0.00125. The IQ2_XS NumPy and Torch
+dequantizers match llama.cpp bit-for-bit on 2,048 random blocks, and the GPU
+operator test checks an analytic IQ2_XS dot product and batched dispatch.
+
+Six-row speculative verification preserves all 10 retained logit rows
+bit-for-bit against single-token decode. Two joint sessions preserve all 28
+rows against their isolated evaluations. With the Lucebox drafter, a short
+greedy replay produced 27 drafts, accepted 23, and matched plain decoding on
+all 32 tokens.
+[Scores and probe logs](artifacts/m3-streaming/score3k-summary.json),
+[oracle manifest](artifacts/m3-streaming/iq2-oracle-manifest.json),
+[verification](artifacts/m3-streaming/spec-check.log),
+[joint sessions](artifacts/m3-streaming/joint-check.log),
+[DSpark](artifacts/m3-streaming/dspark-check.log).
+
+### Overlapped staging keeps the streamed outputs bit-identical
+
+The October 27 staging change (per-expert weight tables, split hit/miss
+launches, per-reader upload streams) only moves bytes between kernels; every
+route row keeps the arithmetic of a single-launch evaluation. The streamed
+tg128 outputs hash `04842be7…40254` on both the previous and the changed
+build, autoregressive and with the Lucebox drafter (110 drafted, 71 accepted
+in both). `ds41.expert_store` verifies the table contents, eviction, I/O
+failure, the split hit/miss rows and scan-resistant admission on synthetic
+shards; `ds41.mmq_typed` and the extended `ds41_gemv_bench` table mode check
+the IQ1/IQ2 kernels against their packed-layout outputs bit for bit. At the
+native 1M-context budget `ds41_load_probe` peaks at 106.4 GiB RSS with
+8.7 GiB available after generation. The tools, conversation,
+sampling-defaults and batch HTTP suites pass against `gufo serve` with the
+Lucebox drafter (the model's normal mode). The oracle perplexity table
+above is unchanged by construction.
+[AR + DSpark runs](artifacts/m3-streaming/bench-iq2-tables-ar1.log),
+[DSpark](artifacts/m3-streaming/bench-iq2-tables-dspark1.log).
