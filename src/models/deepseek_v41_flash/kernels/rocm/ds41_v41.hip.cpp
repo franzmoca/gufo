@@ -1255,16 +1255,26 @@ __global__ __launch_bounds__(256) void indexer_score_small_kernel(const float* q
 }
 
 /* The same scores on the matrix cores, after the V4 engine's
- * indexer_scores_wmma128_kernel: a block covers 16 tokens and 128 compressed
- * rows, stages the rows once as half and each head's queries (double
- * buffered), and keeps the relu-weighted head sum in fp32. head_dim 128,
- * 256 threads; grid (ceil(len / 128), ceil(n / 16)). */
-__global__ __launch_bounds__(256) void indexer_score_wmma_kernel(const float* q, ds41_fp4_rows keys, const float* w,
-                                                                 float w_scale, float* score, uint64_t score_stride,
-                                                                 uint32_t pos0, uint32_t n, uint32_t ratio,
-                                                                 uint32_t heads) {
-  constexpr uint32_t DIM = 128, QT_PITCH = 18;
-  const uint32_t tile_c = blockIdx.x * 128;
+ * indexer_scores_wmma128_kernel: a block covers 16 tokens and
+ * kScoreWmmaRows compressed rows. Each wave keeps its 16 rows in registers
+ * as binary16 A fragments; the block stages one head's queries at a time as
+ * binary16 [token][dim] (double buffered), and the relu-weighted head sum
+ * stays in fp32. Rows were 128 per block, each block converting every head's
+ * queries again: twice the rows halve that traffic. head_dim 128; grid
+ * (ceil(len / kScoreWmmaRows), ceil(n / 16)). */
+constexpr uint32_t kScoreWmmaWaves = 16, kScoreWmmaRows = 16 * kScoreWmmaWaves;
+__global__ __launch_bounds__(32 * kScoreWmmaWaves) void indexer_score_wmma_kernel(
+    const float* q, ds41_fp4_rows keys, const float* w, float w_scale, float* score, uint64_t score_stride,
+    uint32_t pos0, uint32_t n, uint32_t ratio, uint32_t heads) {
+  using v16h = __attribute__((__vector_size__(16 * sizeof(_Float16)))) _Float16;
+  using v8f = __attribute__((__vector_size__(8 * sizeof(float)))) float;
+  union Frag {
+    v16h f;
+    uint4 u[2];
+  };
+  constexpr uint32_t DIM = 128, STEPS = DIM / 16, Q_PITCH = DIM + 8;
+  constexpr uint32_t THREADS = 32 * kScoreWmmaWaves;
+  const uint32_t tile_c = blockIdx.x * kScoreWmmaRows;
   const uint32_t tile_t = blockIdx.y * 16;
   const uint32_t tid = threadIdx.x;
   const uint32_t warp = tid / 32;
@@ -1273,34 +1283,45 @@ __global__ __launch_bounds__(256) void indexer_score_wmma_kernel(const float* q,
   const uint32_t visible_max = comp_len(pos0 + last - 1, ratio);
   if (tile_c >= visible_max) return;
 
-  __shared__ half q_sh[2][DIM * QT_PITCH];
-  __shared__ half k_sh[128 * DIM];
-  for (uint32_t i8 = tid; i8 < 128 * (DIM / 8); i8 += 256) {
-    const uint32_t c = i8 / (DIM / 8);
-    const uint32_t d = (i8 % (DIM / 8)) * 8;
-    uint4 packed = make_uint4(0u, 0u, 0u, 0u);
-    if (tile_c + c < visible_max) {
-      float4 lo, hi;
-      ik_load8(keys, tile_c + c, d, DIM, &lo, &hi);
-      const uint2 a = half4_bits(lo), b = half4_bits(hi);
-      packed = make_uint4(a.x, a.y, b.x, b.y);
-    }
-    *reinterpret_cast<uint4*>(&k_sh[c * DIM + d]) = packed;
-  }
-  /* Q^T of one head as [d][token]. */
-  const auto stage_q = [&](uint32_t h, half* dst) {
-    for (uint32_t i4 = tid; i4 < 16 * (DIM / 4); i4 += 256) {
-      const uint32_t r = i4 / (DIM / 4);
-      const uint32_t d = (i4 % (DIM / 4)) * 4;
-      float4 v4 = make_float4(0.0f, 0.0f, 0.0f, 0.0f);
-      if (tile_t + r < n) v4 = *reinterpret_cast<const float4*>(q + ((uint64_t)(tile_t + r) * heads + h) * DIM + d);
-      dst[(d + 0) * QT_PITCH + r] = __float2half_rn(v4.x);
-      dst[(d + 1) * QT_PITCH + r] = __float2half_rn(v4.y);
-      dst[(d + 2) * QT_PITCH + r] = __float2half_rn(v4.z);
-      dst[(d + 3) * QT_PITCH + r] = __float2half_rn(v4.w);
-    }
+  __shared__ __align__(16) __half q_sh[2][16 * Q_PITCH];
+  /* Q of one head as [token][d]: each thread loads four values of the next
+   * head before the current head's products and stores them after. */
+  static_assert(16 * DIM / 4 == THREADS, "one float4 of a head's queries per thread");
+  const uint32_t q_row = tid / (DIM / 4), q_dim = (tid % (DIM / 4)) * 4;
+  const auto load_q = [&](uint32_t h) {
+    return tile_t + q_row < n ? *reinterpret_cast<const float4*>(q + ((uint64_t)(tile_t + q_row) * heads + h) * DIM + q_dim)
+                              : make_float4(0.0f, 0.0f, 0.0f, 0.0f);
   };
-  stage_q(0, q_sh[0]);
+  const auto store_q = [&](float4 v4, __half* dst) {
+    __half* o = dst + q_row * Q_PITCH + q_dim;
+    o[0] = __float2half_rn(v4.x);
+    o[1] = __float2half_rn(v4.y);
+    o[2] = __float2half_rn(v4.z);
+    o[3] = __float2half_rn(v4.w);
+  };
+  store_q(load_q(0), q_sh[0]);
+  /* A fragments: compressed row lane % 16 of this wave's 16, dims 16 s .. 16 s + 15.
+   * The upper half-wave holds each step's two 8-dim halves swapped, as the
+   * rocwmma fragments did: the odd output rows sum the products in that order. */
+  const uint32_t swap = lane / 16;
+  Frag a[STEPS];
+  {
+    const uint32_t row = tile_c + warp * 16 + lane % 16;
+#pragma unroll
+    for (uint32_t s = 0; s < STEPS; s++) {
+#pragma unroll
+      for (uint32_t part = 0; part < 2; part++) {
+        uint4 packed = make_uint4(0u, 0u, 0u, 0u);
+        if (row < visible_max) {
+          float4 lo, hi;
+          ik_load8(keys, row, s * 16 + (part ^ swap) * 8, DIM, &lo, &hi);
+          const uint2 x = half4_bits(lo), y = half4_bits(hi);
+          packed = make_uint4(x.x, x.y, y.x, y.y);
+        }
+        a[s].u[part] = packed;
+      }
+    }
+  }
   __syncthreads();
 
   /* Accumulator element e is compressed row 2 * e + lane / 16 of this wave's
@@ -1310,30 +1331,37 @@ __global__ __launch_bounds__(256) void indexer_score_wmma_kernel(const float* q,
   float acc[8] = {};
   for (uint32_t h = 0; h < heads; h++) {
     const uint32_t cur = h & 1u;
-    if (h + 1 < heads) stage_q(h + 1, q_sh[cur ^ 1u]);
-    rocwmma::fragment<rocwmma::matrix_a, 16, 16, 16, half, rocwmma::row_major> a;
-    rocwmma::fragment<rocwmma::matrix_b, 16, 16, 16, half, rocwmma::row_major> b;
-    rocwmma::fragment<rocwmma::accumulator, 16, 16, 16, float> c;
-    rocwmma::fill_fragment(c, 0.0f);
+    const float4 next = h + 1 < heads ? load_q(h + 1) : make_float4(0.0f, 0.0f, 0.0f, 0.0f);
+    const __half* qb = q_sh[cur] + (lane % 16) * Q_PITCH;
+    v8f c = {};
 #pragma unroll
-    for (uint32_t k0 = 0; k0 < DIM; k0 += 16) {
-      rocwmma::load_matrix_sync(a, k_sh + warp * 16 * DIM + k0, DIM);
-      rocwmma::load_matrix_sync(b, q_sh[cur] + k0 * QT_PITCH, QT_PITCH);
-      rocwmma::mma_sync(c, a, b, c);
+    for (uint32_t s = 0; s < STEPS; s++) {
+      Frag b;
+      const uint4 lo = *reinterpret_cast<const uint4*>(qb + s * 16);
+      const uint4 hi = *reinterpret_cast<const uint4*>(qb + s * 16 + 8);
+      b.u[0] = swap ? hi : lo;
+      b.u[1] = swap ? lo : hi;
+      c = __builtin_amdgcn_wmma_f32_16x16x16_f16_w32(a[s].f, b.f, c);
     }
     if (token < n) {
       const float wh = w[(uint64_t)token * heads + h] * w_scale;
 #pragma unroll
-      for (uint32_t e = 0; e < 8; e++) acc[e] += fmaxf(c.x[e], 0.0f) * wh;
+      for (uint32_t e = 0; e < 8; e++) acc[e] += fmaxf(c[e], 0.0f) * wh;
     }
+    if (h + 1 < heads) store_q(next, q_sh[cur ^ 1u]);
     __syncthreads();
   }
-  if (token >= n) return;
-  const uint32_t visible = comp_len(pos0 + token, ratio);
+  /* Through shared memory, so each token's rows are stored contiguously. */
+  __shared__ float out_sh[16][kScoreWmmaRows + 1];
 #pragma unroll
-  for (uint32_t e = 0; e < 8; e++) {
-    const uint32_t j = comp_base + 2 * e;
-    if (j < visible) score[token * score_stride + j] = acc[e];
+  for (uint32_t e = 0; e < 8; e++) out_sh[lane % 16][comp_base - tile_c + 2 * e] = acc[e];
+  __syncthreads();
+  for (uint32_t r = warp; r < 16; r += kScoreWmmaWaves) {
+    const uint32_t t = tile_t + r;
+    if (t >= n) break;
+    const uint32_t visible = comp_len(pos0 + t, ratio);
+    for (uint32_t j = lane; j < kScoreWmmaRows && tile_c + j < visible; j += 32)
+      score[t * score_stride + tile_c + j] = out_sh[r][j];
   }
 }
 
@@ -2712,7 +2740,8 @@ extern "C" int ds41_v41_indexer_score(const float* q, ds41_fp4_rows keys, const 
     return launch_ok("indexer score");
   }
   if (head_dim == 128) {
-    indexer_score_wmma_kernel<<<dim3((len + 127) / 128, (n + 15) / 16), 256>>>(q, keys, w, w_scale, score,
+    indexer_score_wmma_kernel<<<dim3((len + kScoreWmmaRows - 1) / kScoreWmmaRows, (n + 15) / 16),
+                                32 * kScoreWmmaWaves>>>(q, keys, w, w_scale, score,
                                                                                score_stride, pos0, n, ratio, heads);
     return launch_ok("indexer score");
   }
