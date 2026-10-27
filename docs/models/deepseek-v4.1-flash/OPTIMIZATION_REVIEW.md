@@ -46,11 +46,11 @@ lookup: single-session verification of up to 16 rows keeps decode numerics
 ## Scope and source pins
 
 The production CMake target builds `v41_decode.cpp`, `v41_session.cpp` and
-`v41_dspark.cpp`. It does **not** build the inherited `runtime/session.cpp`
-or `runtime/rocm_graph.cpp`. Those files contain capabilities that must not be
-mistaken for active V4.1 features, including stochastic proposal callbacks,
-confidence policies and batched execution. The same distinction applies to
-the V4.1 sampler bridge: an exposed callback is not evidence it is invoked.
+`v41_dspark.cpp`. The inherited `runtime/session.cpp` and
+`runtime/rocm_graph.cpp` it never built have since been removed; their
+stochastic proposal callbacks, confidence policies and batched execution were
+not active V4.1 features. The same distinction applies to the V4.1 sampler
+bridge: an exposed callback is not evidence it is invoked.
 
 All repositories were read at the following revisions. PRs are proposals,
 not merged guarantees; their descriptions' performance claims were not
