@@ -1392,16 +1392,17 @@ void StagingCountsAgainstRamCeiling() {
 }
 // On a host with less free RAM than twice the reserve, the headroom ceiling
 // falls below the automatic budget (half the available RAM). The automatic
-// budget still applies, as for whole-state snapshots; an explicit limit keeps
-// the reserve.
+// budget still applies, as for whole-state snapshots, and an explicit limit
+// may use it too: one below it is never refused, even with no headroom left.
 void AutomaticBudgetIgnoresHeadroomCeiling() {
   class LowHostRunner final : public Runner {
   public:
+    explicit LowHostRunner(std::size_t ceiling) : ceiling_(ceiling) {}
     mutable std::size_t committed{};
     TextRunnerResourceClaim ResourceClaim() const override {
       auto claim = Runner::ResourceClaim();
       claim.retained_snapshot_capacity_bytes = 2 << 20;
-      claim.retained_snapshot_ceiling_bytes = 1 << 20;
+      claim.retained_snapshot_ceiling_bytes = ceiling_;
       return claim;
     }
     std::unique_ptr<ComponentCacheResources> CreateComponentCacheResources(
@@ -1412,12 +1413,18 @@ void AutomaticBudgetIgnoresHeadroomCeiling() {
       };
       return resources;
     }
+
+  private:
+    std::size_t ceiling_;
   };
-  for (const auto& [requested, backing] :
-       {std::pair{0ULL, 2ULL << 20}, std::pair{4ULL << 20, 1ULL << 20}}) {
-    auto runner = std::make_shared<LowHostRunner>();
-    TextRunnerPool pool(runner, 1, {}, {.capacity_bytes = requested});
-    assert(runner->committed == backing);
+  for (const std::size_t ceiling : {std::size_t{1} << 20, std::size_t{0}}) {
+    for (const auto& [requested, backing] :
+         {std::pair{0ULL, 2ULL << 20}, std::pair{1ULL << 20, 1ULL << 20},
+          std::pair{4ULL << 20, 2ULL << 20}}) {
+      auto runner = std::make_shared<LowHostRunner>(ceiling);
+      TextRunnerPool pool(runner, 1, {}, {.capacity_bytes = requested});
+      assert(runner->committed == backing);
+    }
   }
 }
 // Slots that pin host memory lower both measured budgets and are charged in

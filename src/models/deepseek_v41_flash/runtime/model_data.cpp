@@ -1546,6 +1546,26 @@ static void dspark_open(ds41_dspark_model* d, const char* path) {
   }
 }
 
+/* Free CMA pages count as available memory but only hold movable pages, so
+ * the resident weights and every later GPU allocation must fit beside them.
+ * The kernel's KHO scratch area (Ubuntu 26.04) can make that several GiB. */
+static void warn_free_cma(void) {
+  FILE* f = fopen("/proc/meminfo", "r");
+  if (!f) return;
+  char line[256];
+  unsigned long long cma_kib = 0;
+  while (fgets(line, sizeof(line), f))
+    if (sscanf(line, "CmaFree: %llu kB", &cma_kib) == 1) break;
+  fclose(f);
+  if (cma_kib < (1ull << 20)) return;
+  gufo::server::Logger::LogFormatted(
+      gufo::server::LogLevel::kWarn, "ds41",
+      "%.2f GiB of the available memory is free CMA (CmaFree in /proc/meminfo), which GPU memory cannot use; "
+      "the resident model and its sessions need that memory. If it is the kernel's KHO scratch area "
+      "(Ubuntu 26.04), boot with kho=off",
+      (double)cma_kib / 1048576.0);
+}
+
 /* =========================================================================
  * Engram Tables.
  * =========================================================================
@@ -1757,6 +1777,7 @@ int ds41_engine_open(ds41_engine** out, const ds41_engine_options* opt) {
           (double)model_resident_bytes(&e->engram->file) / 1073741824.0,
           e->engram->row_bytes);
     }
+    warn_free_cma();
     if (opt->dspark_model_path && opt->dspark_model_path[0]) {
       e->dspark = new ds41_dspark_model();
       dspark_open(e->dspark, opt->dspark_model_path);

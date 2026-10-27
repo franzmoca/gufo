@@ -313,9 +313,10 @@ struct ComponentTextCache::Impl {
       auto ceiling =
           claim.retained_snapshot_ceiling_bytes.value_or(measured) + pinned;
       // The automatic budget may use the host reserve, as whole-state
-      // snapshots do; only explicit limits stop at the ceiling.
-      if (automatic_ram)
-        ceiling = std::max(ceiling, automatic_bytes);
+      // snapshots do. An explicit limit may reach it too, so a limit below
+      // the automatic budget is never refused; larger ones stop at the
+      // ceiling.
+      ceiling = std::max(ceiling, automatic_bytes);
       // Staging is pinned host memory too, so the host keeps its reserve
       // only if both fit under the ceiling.
       const auto staging = ledger.Limits().staging_bytes;
