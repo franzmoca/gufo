@@ -180,72 +180,106 @@ __global__ void __launch_bounds__(kWave* kWaves)
 }
 
 
-/* Several tokens over a short Q5_K row (2 slices): the lane layout above
- * re-reads each block's activations in every wave, 8 tasks per load, and
- * those vector loads, not the weights, bound it at 8 tokens. Here wave w
- * takes task w of 32 rows (one per lane), so a wave's activations are
- * uniform and come through scalar loads; the vector unit loads only
- * weights. Each lane keeps the S slice accumulators of the kernel above
- * (blocks s, s + S, ... in order), the tasks then combine in its xor-tree
- * order ((a0 + a4) + (a2 + a6)) + ((a1 + a5) + (a3 + a7)) and the slices add
- * in wave order, so every row and token matches it bit for bit. */
+/* Several tokens over Q5_K rows. The lane layout above re-reads each
+ * block's activations in every wave, eight tasks per load, and at 8 tokens
+ * those vector loads, not the weights, bound it. Here wave w takes task w of
+ * 32 rows (one per lane), so a wave's activations are uniform and come
+ * through scalar loads; the vector unit loads only weights. Workgroup
+ * (tile, slice) runs blocks slice, slice + S, ... in order, as a slice wave
+ * above does, reduces the tasks in its xor-tree order
+ * ((a0 + a4) + (a2 + a6)) + ((a1 + a5) + (a3 + a7)) and stores the slice
+ * result; the tile's last workgroup (atomic counter) adds the S slice
+ * results in wave order. Every row and token matches the kernel above bit
+ * for bit. */
 template <int kType, int S, int kCols>
 __global__ void __launch_bounds__(kWave* kWaves)
-    task_gemv_kernel(const uint8_t* __restrict__ w, const float* __restrict__ x, uint64_t x_stride,
-                     float* __restrict__ y, uint32_t y_stride, uint32_t m, uint32_t k, uint32_t rows_per_x,
-                     uint32_t n) {
+    split_gemv_kernel(const uint8_t* __restrict__ w, const float* __restrict__ x, uint64_t x_stride,
+                      float* __restrict__ y, uint32_t y_stride, uint32_t m, uint32_t k, uint32_t rows_per_x,
+                      uint32_t n, float* __restrict__ part, uint32_t* __restrict__ counter) {
   using F = Format<kType>;
   static_assert(F::kTasks == kWaves, "one wave per task");
-  __shared__ float red[kWaves / 2][S][kCols][kWave];
+  __shared__ float red[kWaves / 2][kCols][kWave];
   const int lane = threadIdx.x % kWave;
   const int t = __builtin_amdgcn_readfirstlane(threadIdx.x / kWave);
-  const uint32_t row0 = blockIdx.x * kWave;
+  const uint32_t tile = blockIdx.x / S;
+  const uint32_t slice = blockIdx.x % S;
+  const uint32_t row0 = tile * kWave;
   const uint32_t row = min(row0 + lane, m - 1);
   const uint32_t blocks_per_row = k / 256;
   const uint8_t* base = w + (uint64_t)row * blocks_per_row * F::kBlockBytes;
   // rows_per_x is m or a multiple of 32, so a workgroup shares its x row.
   const float* xr = x + (uint64_t)(row0 / rows_per_x) * k;
-  float acc[S][kCols] = {};
-  typename F::Raw next = F::Load(base, t);
-  for (uint32_t b0 = 0; b0 < blocks_per_row; b0 += S) {
+  float acc[kCols] = {};
+  typename F::Raw next{};
+  if (slice < blocks_per_row) next = F::Load(base + (uint64_t)slice * F::kBlockBytes, t);
+  for (uint32_t blk = slice; blk < blocks_per_row; blk += S) {
+    const typename F::Raw raw = next;
+    if (blk + S < blocks_per_row) next = F::Load(base + (uint64_t)(blk + S) * F::kBlockBytes, t);
+    float wv[32];
+    F::Decode(raw, t, wv);
 #pragma unroll
-    for (int s = 0; s < S; ++s) {
-      const uint32_t blk = b0 + s;
-      if (blk >= blocks_per_row) break;
-      const typename F::Raw raw = next;
-      if (blk + 1 < blocks_per_row) next = F::Load(base + (uint64_t)(blk + 1) * F::kBlockBytes, t);
-      float wv[32];
-      F::Decode(raw, t, wv);
-#pragma unroll
-      for (int c = 0; c < kCols; ++c)
-        if (c < (int)n) acc[s][c] = F::Dot(acc[s][c], wv, t, xr + c * x_stride + blk * 256);
-    }
+    for (int c = 0; c < kCols; ++c)
+      if (c < (int)n) acc[c] = F::Dot(acc[c], wv, t, xr + c * x_stride + blk * 256);
   }
   /* Xor tree over the tasks: partner offset 4, then 2, then 1. */
 #pragma unroll
   for (int offset = kWaves / 2; offset > 0; offset >>= 1) {
     if (t >= offset && t < 2 * offset)
 #pragma unroll
-      for (int s = 0; s < S; ++s)
-#pragma unroll
-        for (int c = 0; c < kCols; ++c) red[t - offset][s][c][lane] = acc[s][c];
+      for (int c = 0; c < kCols; ++c) red[t - offset][c][lane] = acc[c];
     __syncthreads();
     if (t < offset)
 #pragma unroll
-      for (int s = 0; s < S; ++s)
-#pragma unroll
-        for (int c = 0; c < kCols; ++c) acc[s][c] += red[t][s][c][lane];
+      for (int c = 0; c < kCols; ++c) acc[c] += red[t][c][lane];
     __syncthreads();
   }
-  if (t != 0 || row0 + lane >= m) return;
+  if (t != 0) return;
+  const bool valid = row0 + lane < m;  // part rows are exactly m apart
+#pragma unroll
+  for (int c = 0; c < kCols; ++c)
+    if (c < (int)n && valid) part[((uint64_t)slice * kCols + c) * m + row0 + lane] = acc[c];
+  __threadfence();
+  uint32_t done = 0;
+  if (lane == 0) done = atomicAdd(&counter[tile], 1u);
+  if (__shfl(done, 0, kWave) != S - 1) return;
+  __threadfence();
+  if (lane == 0) counter[tile] = 0;  // ready for the next launch
+  if (!valid) return;
 #pragma unroll
   for (int c = 0; c < kCols; ++c) {
     if (c >= (int)n) break;
-    float total = acc[0][c];
+    float total = 0.0f;
 #pragma unroll
-    for (int s = 1; s < S; ++s) total += acc[s][c];
+    for (int s = 0; s < S; ++s) {
+      const float v = __hip_atomic_load(&part[((uint64_t)s * kCols + c) * m + row0 + lane], __ATOMIC_RELAXED,
+                                        __HIP_MEMORY_SCOPE_AGENT);
+      total = s ? total + v : v;
+    }
     y[(uint64_t)c * y_stride + row0 + lane] = total;
   }
+}
+
+/* Slice results and per-tile counters of split_gemv_kernel: every launch
+ * runs on the null stream, so one buffer serves them in turn. */
+constexpr uint64_t kSplitPartFloats = 8ull * 16 * 32768;
+struct SplitScratch {
+  float* part = nullptr;
+  uint32_t* counter = nullptr;
+};
+const SplitScratch& split_scratch() {
+  static const SplitScratch scratch = [] {
+    SplitScratch s;
+    const uint64_t tiles = kSplitPartFloats / 32;
+    if (hipMalloc(&s.part, kSplitPartFloats * sizeof(float)) != hipSuccess ||
+        hipMalloc(&s.counter, tiles * sizeof(uint32_t)) != hipSuccess ||
+        hipMemset(s.counter, 0, tiles * sizeof(uint32_t)) != hipSuccess ||
+        hipDeviceSynchronize() != hipSuccess) {
+      (void)hipGetLastError();
+      s = {};
+    }
+    return s;
+  }();
+  return scratch;
 }
 
 /* The second matrix of a pair (w2, y2 from row m1), or none (m1 = m). */
@@ -268,11 +302,16 @@ void launch(const void* w, const void* w_up, float limit, const float* x, float*
   constexpr uint32_t kRows = (kWave / Format<kType>::kTasks) * (kWaves / S);
   const uint32_t blocks = (m + kRows - 1) / kRows;
   const auto* w2 = static_cast<const uint8_t*>(second.w);
-  if constexpr (kType == 13 && S == 2 && kCols > 1) {
-    if (!w_up && second.m1 == m && (rows_per_x == m || rows_per_x % kWave == 0)) {
-      task_gemv_kernel<kType, S, kCols><<<(m + kWave - 1) / kWave, kWave * kWaves>>>(
-          static_cast<const uint8_t*>(w), x, tokens.x_stride, y, tokens.y_stride, m, k, rows_per_x, tokens.n);
-      return;
+  if constexpr (kType == 13 && kCols > 1) {
+    if (!w_up && second.m1 == m && (rows_per_x == m || rows_per_x % kWave == 0) &&
+        (uint64_t)m * S * kCols <= kSplitPartFloats) {
+      const SplitScratch& scratch = split_scratch();
+      if (scratch.part) {
+        split_gemv_kernel<kType, S, kCols><<<(m + kWave - 1) / kWave * S, kWave * kWaves>>>(
+            static_cast<const uint8_t*>(w), x, tokens.x_stride, y, tokens.y_stride, m, k, rows_per_x, tokens.n,
+            scratch.part, scratch.counter);
+        return;
+      }
     }
   }
   if (w_up)
