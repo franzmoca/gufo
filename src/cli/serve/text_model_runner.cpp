@@ -515,12 +515,14 @@ ContinuationCache::SnapshotSupport MakeSnapshotSupport(
                 resources.retained_snapshot_capacity_bytes.value_or(0);
             validated->snapshot_automatic_bytes = std::min(
                 TextRunnerRamCacheOptions::kAutomaticMaxBytes, automatic);
-            validated->snapshot_max_bytes =
-                resources.retained_snapshot_ceiling_bytes.value_or(automatic);
+            validated->snapshot_max_bytes = std::max(
+                resources.retained_snapshot_ceiling_bytes.value_or(automatic),
+                validated->snapshot_automatic_bytes);
             if (options.capacity_bytes == 0)
               return validated->snapshot_automatic_bytes;
             // An explicit limit is the operator's choice to trade headroom
-            // for retention, bounded so the host keeps a fixed reserve.
+            // for retention. Up to the automatic budget it is always
+            // accepted; beyond it the host keeps a fixed reserve.
             return std::min(options.capacity_bytes,
                             validated->snapshot_max_bytes);
           },
@@ -642,15 +644,12 @@ struct TextRunnerPool::Impl {
       const auto resources = validated.runner->ResourceClaim();
       const auto automatic =
           resources.retained_snapshot_capacity_bytes.value_or(0);
-      // An automatic budget is not capped by the headroom ceiling, as for
-      // whole-state snapshots; explicit limits keep the host reserve.
-      const auto ceiling =
-          ram_cache_options.capacity_bytes
-              ? resources.retained_snapshot_ceiling_bytes.value_or(automatic)
-              : std::max(resources.retained_snapshot_ceiling_bytes.value_or(
-                             automatic),
-                         std::min(TextRunnerRamCacheOptions::kAutomaticMaxBytes,
-                                  automatic));
+      // The automatic budget is not capped by the headroom ceiling, as for
+      // whole-state snapshots. Explicit limits up to it are always accepted;
+      // larger ones keep the host reserve.
+      const auto ceiling = std::max(
+          resources.retained_snapshot_ceiling_bytes.value_or(automatic),
+          std::min(TextRunnerRamCacheOptions::kAutomaticMaxBytes, automatic));
       const auto requested =
           ram_cache_options.capacity_bytes
               ? ram_cache_options.capacity_bytes

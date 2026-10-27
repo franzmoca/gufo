@@ -352,7 +352,7 @@ captured; RAM-retained snapshots and their captures in progress share the RAM bu
 
 | Limit | Default | Set by |
 | --- | --- | --- |
-| Retained snapshot bytes, RAM | smaller of 32 GiB and half the available host RAM; an explicit value up to the available host RAM minus 4 GiB; 27B also checks HIP free memory | `--cache-ram-bytes` |
+| Retained snapshot bytes, RAM | smaller of 32 GiB and half the available host RAM; an explicit value up to the larger of that budget and the available host RAM minus 4 GiB; 27B also checks HIP free memory | `--cache-ram-bytes` |
 | RAM checkpoint records | 128, independent of `--sessions` | internal safety limit |
 | Disk bytes | 8 GiB | `--cache-disk-bytes` |
 | Disk staging bytes | smaller of `MemAvailable / 8` and the disk budget | `--cache-disk-staging-bytes` |
