@@ -1100,3 +1100,49 @@ only (+2.91% streamed, −1.87% resident, 0/10 faster): the 1- and 3-draft
 estimates stayed at their 69.6 and 95.5 ms priors against about 62 and
 86 ms measured, so those widths were almost never chosen. Runs, traces and
 the replay are in [the E18 record](artifacts/2026-10-27-cost-aware-draft-prefix/summary.txt).
+
+## Prefill at depth (2026-10-27)
+
+Native pp2048 on resident IQ1_M fell from 1,126 tok/s at depth 0 to 1,017
+at 64K and 838 at 128K. A rocprofv3 trace of 128K of depth preparation put
+the growth in two kernels on encoder layers 2, 8 and 14, which score every
+prompt row against depth / 2 compressed index keys: per 2,048-token chunk the
+indexer scores grew 4 → 227 ms and the top-k 1 → 270 ms by ~115K, while
+attention, projections and mHC stayed flat. Both kernels serve the streamed
+`IQ2_XXS` model unchanged. [Record](artifacts/2026-10-27-indexer-depth/summary.txt).
+
+| Depth | Base | E19 | E19 + E20 |
+| ---: | ---: | ---: | ---: |
+| 32K | 1,133 | 1,161 | 1,182 |
+| 64K | 1,017 | 1,109 | 1,155 |
+| 128K | 838 | 1,003 | 1,098 |
+
+### E19: two-pass indexer top-k (retained)
+
+The radix select read each token's score row six times with per-thread
+contiguous slices (uncoalesced) and histogrammed the top byte, where nearly
+every score shares one of a few bins of LDS atomics. Now one coalesced pass
+builds a 12-bit histogram (narrowed only while the k-th key's bin holds more
+than 2,048 keys), one ordered pass appends the higher bins' indices and the
+bin's keys to shared lists, the exact key and its ties are resolved in
+shared memory, and two index-ordered lists are merged. The output keeps the
+old order: keys above the k-th in index order, then the first ties (not one
+sorted list; a first draft that sorted everything differed). Per index layer
+at 128K: 102.3 → 4.7 ms; at depth 0, 0.29 → 0.48 ms. Byte-identical on the
+128K/64K dumps and on 3,400 adversarial rows against the old kernel.
+
+### E20: register-resident keys for the WMMA indexer scores (retained)
+
+Each block covered 16 tokens and 128 compressed rows and converted every
+head's FP32 queries again, about 16 GB of query reads per layer at 128K.
+Now each of 16 waves keeps its 16 rows' keys as binary16 A fragments in
+registers, a block covers 256 rows, the next head's queries are loaded
+before the current head's products and stored after them, and the scores
+leave through shared memory as contiguous rows. rocwmma's fragments had
+held each 16-dim step's two halves swapped in the upper half-wave, which
+changes the odd rows' summation order; the raw-builtin kernel mirrors that
+(selecting in registers, so both half-waves keep reading the same LDS
+addresses) and stays byte-identical. Per layer at 128K: 84.5 → 39.9 ms
+(13.1 → 27.8 TFLOP/s); 2× at every depth. Rejected variants: 512-row blocks
+(45.7 ms), two 16-token tiles per block (50.4), interleaved head pairs
+(56.2, register pressure), head weights from LDS (42.5).
