@@ -102,7 +102,7 @@ hf download Lucebox/DeepSeek-V4.1-Flash-1017-ROCMFP-GGUF \
 
 | Source | File | Notes |
 | --- | --- | --- |
-| [ISTA-DASLab GSQ-RCO](https://huggingface.co/ISTA-DASLab/DeepSeek-V4.1-Flash-1017-GSQ-RCO-GGUF) | `*-IQ1_M-0000{1..4}-of-00004.gguf` or `*-IQ2_XXS-0000{1..4}-of-00004.gguf`, `DeepSeek-V4.1-Flash-Engram-IQ4_NL.gguf` | `IQ1_M` fits resident; `IQ2_XXS` (138 GB) streams experts when memory is insufficient. |
+| [ISTA-DASLab GSQ-RCO](https://huggingface.co/ISTA-DASLab/DeepSeek-V4.1-Flash-1017-GSQ-RCO-GGUF) | `*-IQ1_M-0000{1..4}-of-00004.gguf` or `*-IQ2_XXS-0000{1..4}-of-00004.gguf`, `DeepSeek-V4.1-Flash-Engram-IQ4_NL.gguf` | `IQ1_M` fits resident; `IQ2_XXS` (138 GB) needs `--stream-experts`. |
 | [Lucebox](https://huggingface.co/Lucebox/DeepSeek-V4.1-Flash-1017-ROCMFP-GGUF) | `DeepSeek-V4.1-Flash-1017-DSpark-draft-Q2K-Q4K.gguf` | **Recommended drafter**: 4.59 GiB resident. |
 | [unsloth](https://huggingface.co/unsloth/DeepSeek-V4.1-Flash-1017-GGUF) | `dspark-DeepSeek-V4.1-Flash-1017-Q8_0.gguf` | Supported: 7.42 GiB resident, about 2.6 GiB less host memory left, similar speed and acceptance. |
 
@@ -165,14 +165,37 @@ server exits. Useful options:
   (about 50 s); later starts reuse the hashes.
 
 To try the larger quant, download its four shards beside the Engram file and
-pass its first shard to the same command:
+pass its first shard with `--stream-experts`:
 
 ```sh
 hf download ISTA-DASLab/DeepSeek-V4.1-Flash-1017-GSQ-RCO-GGUF \
   --include "*IQ2_XXS*" --local-dir ds41
 ./result/bin/gufo serve llm \
-  -m ds41/DeepSeek-V4.1-Flash-1017-GSQ-RCO-IQ2_XXS-00001-of-00004.gguf
+  -m ds41/DeepSeek-V4.1-Flash-1017-GSQ-RCO-IQ2_XXS-00001-of-00004.gguf \
+  --stream-experts
 ```
+
+Streaming is never chosen automatically: without `--stream-experts`, a model
+that does not fit the available memory fails to load and states what it
+needs. `--expert-cache-bytes N` bounds the streamed expert cache (default:
+available memory minus 4 GiB); a smaller cache leaves more memory free and
+reads more experts from the SSD.
+
+`--stream-experts` also runs the `IQ1_M` build in less memory, more slowly.
+`gufo bench` (pp2048, tg128, no drafter) and the host memory free once the
+server is ready at a 256K context:
+
+| `IQ1_M` | Free memory | Prefill (tok/s) | Decode (tok/s) |
+| --- | ---: | ---: | ---: |
+| Resident | 5.6 GiB | 1,212 | 24.4 |
+| Streamed, `--expert-cache-bytes 68719476736` (64 GiB) | 48.6 GiB | 616 | 16.5 |
+| Streamed, 32 GiB cache | 78.8 GiB | 437 | 12.2 |
+| Streamed, 16 GiB cache | 93.3 GiB | 374 | 9.1 |
+
+Decode depends on how many routed experts the cache already holds, so it
+varies with the text. The automatic prompt cache may later take up to half
+of the free memory (at most 32 GiB); add `--cache-ram-bytes` to keep that
+memory free as well.
 
 Optionally seed the expert cache from recorded oracle routes. For example,
 this histogram comes from the 3,000-token repository-documentation quality

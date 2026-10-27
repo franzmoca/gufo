@@ -307,3 +307,60 @@ Two-disk experiments on the second NVMe (KIOXIA EXCERIA 1.8T, `/`,
 Follow-ups are backlog items 14 and 15: Engram batch dedup/sort with a
 bounded hot-row cache, and a rank-major expert-contiguous repack whose jobs
 become single sequential runs (the 8.2 vs 5.7 GiB/s gap is its headroom).
+
+## Opt-in streaming, IQ1_M and the compact stage stride (2026-10-27)
+
+Streaming is now explicit: `--stream-experts` keeps dense weights resident
+and streams routed experts, `--expert-cache-bytes` bounds the expert cache,
+and without the flag a model that does not fit available memory (free CMA
+excluded) fails to load with what it needs. While streaming, the weight
+placement is decided from the resident tensors only, so the 5.31 GiB of
+dense weights go through the device heap instead of managed memory.
+
+**Compact stage stride.** The 3K teacher-forced score of the streamed
+IQ2_XXS build had fallen from 6.0041 (`4b5ee8ea`) to 35.83 (`10ad16a4`).
+Bisection put it on the compact prefetch stage (`522c8653`): disabling
+prefetch or wide jobs restored 6.0041, and so did a whole-layer stage, also
+with jobs still truncated at 96 experts. The stage is sized by the largest
+expert of any layer, but rows were addressed with the current layer's
+expert size; the build mixes 56-, 66- and 74-byte block types, so a layer
+with large experts ran past the start of the other parity half, and the next
+layer's job overwrote rows the current layer was still reading. Rows now use
+the allocation stride. The streamed score is 6.0041 again, identical to
+`4b5ee8ea` on all 2,999 positions. `ds41.expert_store` gained a mixed-size
+fixture (odd layers half the size) that fails without the fix. `gufo bench`
+token hashes did not catch it: their synthetic prompts score no text.
+
+**IQ1_M streamed.** The IQ1_M build has 17 layers of IQ1_S experts and two
+IQ2_S down projections, which the streamed batched path had never run.
+IQ2_S has no FP16 tile kernel, so those rows go through the table-indexed
+expert GEMV; the store also skips dropped routes (-1) as the resident
+kernels do, instead of failing the batch. Teacher-forced 3K, 2048- and
+952-token exact batches:
+
+| IQ1_M path | Perplexity | Target top-1 | Agreement with resident |
+| --- | ---: | ---: | ---: |
+| Resident | 6.320 | 57.7% | — |
+| Streamed, 32 GiB expert cache | 6.303 | 57.8% | 96.1% |
+
+Single-token decode scores are bit-identical to resident on 256 positions;
+the batched difference is the FP16 tile and GEMV rounding seen between the
+resident batched and decode paths.
+
+`gufo bench` pp2048/tg128 on IQ1_M, with the memory free once `gufo serve`
+is ready at 262,144 tokens (no drafter):
+
+| Expert cache | Free memory | pp2048 | tg128 |
+| --- | ---: | ---: | ---: |
+| Resident | 5.6 GiB | 1,212.3 ± 33.9 | 24.44 ± 0.13 |
+| 64 GiB | 48.6 GiB | 616.2 ± 29.4 | 16.45 ± 3.19 |
+| 32 GiB | 78.8 GiB | 437.2 ± 5.8 | 12.17 ± 2.34 |
+| 16 GiB | 93.3 GiB | 374.4 ± 1.3 | 9.13 ± 1.23 |
+
+Streamed IQ2_XXS against the pre-merge build with the same stride fix,
+alternated twice: tg128 18.81/19.13 against 19.13/18.96 tok/s, no
+measurable change from the heap placement. Prefill was inconclusive
+(pp2048 853/927 against 735/953, each ± 300-460): the startup seed caches
+the 10,240 ranked experts (82 GiB) of 15,360, so the first repetition reads
+the rest (81% route hits) and the second hits on every route.
+

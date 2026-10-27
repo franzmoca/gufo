@@ -152,8 +152,10 @@ Open performance items are tracked in [BACKLOG.md](BACKLOG.md).
 
 ### M3 SSD expert streaming (IQ2_XXS)
 
-- The loader keeps dense weights resident and streams selected experts when
-  the complete model does not fit. A memory-bounded slot pool uses decayed
+- With `--stream-experts`, the loader keeps dense weights resident and
+  streams selected experts; `--expert-cache-bytes` bounds their cache.
+  Without it, a model that does not fit fails to load with the memory it
+  needs, rather than silently running slower. A memory-bounded slot pool uses decayed
   routing counts, fills free slots during prefill and resists scans once full;
   the final prompt rows and unusually frequent experts can displace cold slots.
   Reads are ordered by shard and offset, adjacent misses are merged, and four
