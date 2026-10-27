@@ -1117,7 +1117,13 @@ bool moe(ds41_decoder* d, uint32_t il, uint32_t n) {
                                              rows, DS41_N_EXPERT, 1, 0)) {
     return false;
   } else if (streamed) {
-    return false;  // no table-indexed kernel for this shape
+    /* No FP16 tile kernel for this type (IQ2_S, two down projections of the
+     * IQ1_M build): each row through the table-indexed expert GEMV. */
+    int status = 0;
+    if (!expert_gemv(down_type, down, d->route_ids, rows, d->mid6, true, d->down6, kDim, DS41_N_FF_EXP, &status,
+                     down_table) ||
+        status)
+      return false;
   }
   /* The routed rows (down6) and the shared output (sd) are summed by block()'s hc expand. */
   return d->engine->expert_store || shared_moe(d, l, n);
