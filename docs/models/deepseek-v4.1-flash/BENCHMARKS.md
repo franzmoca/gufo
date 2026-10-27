@@ -9,6 +9,41 @@ on this machine, so the tables carry no reference columns. HTTP through
 for real chat text; see [native prefill](#native-prefill) for `gufo bench`.
 [Method and quality](QUALITY.md) · [Experiments](EXPERIMENTS.md)
 
+## Streamed IQ2_XXS, preliminary native measurements
+
+On the same 128 GB Strix Halo with a Samsung 990 PRO, the 128.75 GiB
+`IQ2_XXS` backbone streams its routed experts and keeps the dense weights
+resident. These are native `gufo bench` pp2048/tg128 measurements with
+synthetic tokens and no drafter, not the HTTP prose workload in the tables
+below. Each process starts with empty expert slots; before each run only the
+model and Engram files' clean page-cache entries are evicted. The tg test
+follows the prefill test in the same process, so its expert cache is partly
+warm. Each range contains the two retained matched runs.
+
+| Reader and kernels | Prefill tok/s | Decode tok/s |
+| --- | ---: | ---: |
+| One buffered reader | 144.5–144.8 | 5.77–6.01 |
+| Four buffered readers | 172.6–172.9 | 6.80–7.16 |
+| Four direct readers | 213.8–214.1 | 8.97–8.98 |
+| Direct reads, IQ2_XS FP16 kernel and shared-expert overlap | 219.6–219.8 | 9.02 |
+
+For a repeated identical prompt and generation in the same process, the
+second prefill reached 937 tok/s and the second decode 13.44 tok/s with both
+buffered and direct reads. Real sessions, cache history and speculative
+acceptance can give different rates. The raw comparisons, filesystem controls
+and other engines' configurations are in [streaming research](STREAMING.md).
+
+With the built-in ranking preloading 10,240 experts at startup and the
+overlapped staging of October 27 (per-expert weight tables, split hit/miss
+launches, per-reader upload streams), the same pp2048/tg128 measurements with
+the histogram sidecar reach 666.1–669.6 tok/s prefill and 14.99–15.00 tok/s
+decode without a drafter, and 17.92–17.94 tok/s with the Lucebox DSpark
+drafter (same 110 drafted / 71 accepted and the same token hash as the
+previous build; the DSpark prefill runs spread 494–628 tok/s with the page
+cache, so the AR prefill pair is the retained number). At the native
+1M-context budget the streamed model peaks at 106.4 GiB RSS with 8.7 GiB
+still available.
+
 ## Single user, autoregressive
 
 pp2048 / tg128; depth is the cached prefix in tokens.

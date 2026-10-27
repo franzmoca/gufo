@@ -2,8 +2,9 @@
 
 Gufo runs **DeepSeek-V4.1-Flash-1017**, a 763B-parameter mixture-of-experts
 model with a native 1M-token context, on a single AMD Strix Halo with 128 GB
-of unified memory. The whole quantized backbone stays resident in GPU memory;
-only the Engram lookup tables are read from the SSD, one row per token.
+of unified memory. The `IQ1_M` backbone stays resident in GPU memory; the
+larger `IQ2_XXS` backbone can stream its routed experts from SSD. Engram
+lookup tables are read from the SSD in both configurations.
 
 > [!WARNING]
 > **Headless, dedicated deployment only.** The resident model leaves about
@@ -16,7 +17,7 @@ only the Engram lookup tables are read from the SSD, one row per token.
 ## What it runs
 
 - **Backbone:** ISTA-DASLab's GSQ-RCO `IQ1_M` build (1.75 bits per weight),
-  resident in GTT.
+  resident in GTT, or the experimental `IQ2_XXS` build with streamed experts.
 - **Engram tables:** the shared `IQ4_NL` file, read from disk.
 - **DSpark speculative decoding** with a separate drafter, plus prompt lookup:
   copies of earlier context are verified up to 15 tokens at a time.
@@ -47,6 +48,12 @@ The prompt cache sizes itself from what is left; in this configuration it
 holds about 1.25 GB of checkpoints. The machine therefore has no room for
 anything else: no desktop, no second model, no larger prefill batches
 (`--prefill-batch 4096` leaves the prompt cache no memory at all).
+
+For `IQ2_XXS`, Gufo keeps about 5.3 GiB of dense weights resident and uses a
+memory-bounded expert cache. Cold prefill reads many experts from the SSD;
+the cache, session state, drafter, vision tower and prompt cache share the
+available memory. The engine reports cache hit rate, bytes read and host
+wait in its logs.
 
 ### Host setup
 
@@ -86,7 +93,7 @@ hf download Lucebox/DeepSeek-V4.1-Flash-1017-ROCMFP-GGUF \
 
 | Source | File | Notes |
 | --- | --- | --- |
-| [ISTA-DASLab GSQ-RCO](https://huggingface.co/ISTA-DASLab/DeepSeek-V4.1-Flash-1017-GSQ-RCO-GGUF) | `*-IQ1_M-0000{1..4}-of-00004.gguf`, `DeepSeek-V4.1-Flash-Engram-IQ4_NL.gguf` | The only build that fits resident. `IQ2_XXS` (138 GB) needs SSD expert streaming, which is planned. |
+| [ISTA-DASLab GSQ-RCO](https://huggingface.co/ISTA-DASLab/DeepSeek-V4.1-Flash-1017-GSQ-RCO-GGUF) | `*-IQ1_M-0000{1..4}-of-00004.gguf` or `*-IQ2_XXS-0000{1..4}-of-00004.gguf`, `DeepSeek-V4.1-Flash-Engram-IQ4_NL.gguf` | `IQ1_M` fits resident; `IQ2_XXS` (138 GB) streams experts when memory is insufficient. |
 | [Lucebox](https://huggingface.co/Lucebox/DeepSeek-V4.1-Flash-1017-ROCMFP-GGUF) | `DeepSeek-V4.1-Flash-1017-DSpark-draft-Q2K-Q4K.gguf` | **Recommended drafter**: 4.59 GiB resident. |
 | [unsloth](https://huggingface.co/unsloth/DeepSeek-V4.1-Flash-1017-GGUF) | `dspark-DeepSeek-V4.1-Flash-1017-Q8_0.gguf` | Supported: 7.42 GiB resident, about 2.6 GiB less host memory left, similar speed and acceptance. |
 
@@ -145,9 +152,32 @@ server exits. Useful options:
   first token instead of 12 s). The first start with it hashes the weights
   (about 50 s); later starts reuse the hashes.
 
+To try the larger quant, download its four shards beside the Engram file and
+pass its first shard to the same command:
+
+```sh
+hf download ISTA-DASLab/DeepSeek-V4.1-Flash-1017-GSQ-RCO-GGUF \
+  --include "*IQ2_XXS*" --local-dir ds41
+./result/bin/gufo serve llm \
+  -m ds41/DeepSeek-V4.1-Flash-1017-GSQ-RCO-IQ2_XXS-00001-of-00004.gguf
+```
+
+Optionally seed the expert cache from recorded oracle routes. For example,
+this histogram comes from the 3,000-token repository-documentation quality
+test; representative routes from your own workload may be more useful:
+
+```sh
+nix develop -c python3 tools/ds41/expert_histogram.py \
+  --model ds41/DeepSeek-V4.1-Flash-1017-GSQ-RCO-IQ2_XXS-00001-of-00004.gguf \
+  docs/models/deepseek-v4.1-flash/artifacts/m3-streaming/iq2-oracle-routes3k.npz
+```
+
+The resulting sidecar is discovered automatically. Seeding reads experts
+at startup; remove the sidecar to start with an empty expert cache.
+
 ## Performance
 
-Measured over HTTP with `gufo serve` (greedy, thinking off, real chat
+The following `IQ1_M` results are measured over HTTP with `gufo serve` (greedy, thinking off, real chat
 text); full tables and charts are on the
 [benchmark card](docs/models/deepseek-v4.1-flash/BENCHMARKS.md).
 
@@ -175,8 +205,12 @@ text); full tables and charts are on the
 ## Status
 
 Production target is Strix Halo `gfx1151` on Linux, like the rest of Gufo.
-Next: streaming the `IQ2_XXS` experts from the SSD, so the stronger build
-runs on the same machine. Development history and every measured experiment,
-including rejected ones, are in
+`IQ2_XXS` expert streaming is qualified for evaluation: with the built-in
+expert ranking it prefills at 666-670 tok/s and decodes at 15.0 tok/s
+(17.9 with DSpark) on `gufo bench` pp2048/tg128, with outputs bit-identical
+to the staged build and the serving suites passing. The remaining streaming
+work (prefetch sweeps, router-predicted decode prefetch) is in the
+[backlog](docs/models/deepseek-v4.1-flash/BACKLOG.md). Development history
+and every measured experiment, including rejected ones, are in
 [EXPERIMENTS.md](docs/models/deepseek-v4.1-flash/EXPERIMENTS.md) and the
 [roadmap](docs/models/deepseek-v4.1-flash/ROADMAP.md).

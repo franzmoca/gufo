@@ -191,6 +191,41 @@ slower than plain AR: 51.22 / 52.42 / 55.93 tok/s at C4 / C6 / C8 against
 16-row pass, about 16 / users − 1 rows per session as Gemma does, and fall
 back to AR rows when that leaves no draft.
 
+### 11. Streamed prefill: read the next layer's experts during this layer
+
+At prefill scale a layer routes to nearly every expert, so the next layer's
+uncached experts can be read without waiting for its router. ds4 fills two
+whole-layer stage buffers in layer parity with a dedicated loader thread
+(prefill ≥1024 tokens); kyojin's model puts router-free next-layer prefetch
+at 49% → 97% of resident prefill speed. Our stage buffers are already
+whole-layer sized, so a ping-pong pair costs ~3.6 GiB of cache capacity.
+After the October 27 overlap work, pp2048 is 666–670 tok/s with about 3.2 s
+of reads per batch against ~2 s of compute, so the ceiling is roughly
+max(reads, compute): pipelining should recover most of the compute half.
+Requires an async submit/priority path in the read pool (demand reads of the
+current layer must preempt the sweep).
+
+### 12. Streamed decode: router-predicted expert prefetch
+
+After the overlapped staging work, decode waits ~5 ms/token on reads at
+82-83% route hits; each miss still stalls its layer (~1.7 ms per expert at
+5.7 GiB/s). Xolotl evaluates the next layer's router on the current hidden
+state (62-70% top-6 recall one layer early), issues at most ~6 prefetches
+per layer on a second stream before attention, and budgets the issue rate
+(~0.7/token); over-prefetching measured slower on a shared SSD, and
+speculative file reads without the router prediction were dead in three
+separate attempts. Prefetch into free slots only, never evict, and let
+demand reads preempt. This composes with DSpark: verification reuses each
+staged expert across the whole draft block.
+
+### 13. Route bias toward resident experts (quality-affecting, optional)
+
+Xolotl multiplies streamed experts' router logits by ~0.5 (resident bonus,
+streamed penalty; every expert stays reachable) for 13.7 → 30.3 tok/s on a
+4090 at ~1 point of top-1 agreement cost; x0.25 keeps 85% agreement. This
+changes outputs, so it is an approximation in the M5 sense, off by default
+and behind explicit opt-in, with its own quality gates, not part of M3.
+
 ## Memory
 
 Resident weights take 112.27 GiB GTT. A session at the native 1M context
