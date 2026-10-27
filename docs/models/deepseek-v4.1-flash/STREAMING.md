@@ -364,3 +364,44 @@ measurable change from the heap placement. Prefill was inconclusive
 the 10,240 ranked experts (82 GiB) of 15,360, so the first repetition reads
 the rest (81% route hits) and the second hits on every route.
 
+## Slots per expert size and the full built-in ranking (2026-10-27)
+
+Two changes let a capped cache hold more experts; neither touches the
+arithmetic.
+
+- **One slot size per expert size.** Every slot was sized for the largest
+  expert of any layer, but the builds mix block types: IQ1_M has six expert
+  sizes (6.59-8.26 MiB, mean 7.11) and IQ2_XXS eight (7.38-9.76 MiB, mean
+  8.20), so 14% and 16% of the cache went unused. Slots now come in one
+  class per distinct size, each growing by 128 MiB chunks (512 MiB before,
+  to bound what a class strands in a part-used chunk). Once the cache stops
+  growing, an expert may take the smallest larger free slot or evict from
+  its own or a larger class, never a smaller one.
+- **The built-in ranking orders all 15,360 experts.** The import kept the
+  first 10,240 of the source permutation, so a cache larger than 82 GiB
+  (IQ2_XXS) started part empty and the first request read the rest. The
+  table now keeps the whole ranking; the first 10,240 entries are
+  unchanged. Experts a custom histogram omits follow its ranked ones,
+  interleaved across layers.
+
+`ds41.expert_store` gained cases for both (seven half-size experts in the
+cache of four full-size ones, a large expert that streams rather than take
+a small slot, and the seed past a one-expert histogram); they fail on the
+previous store.
+
+`gufo bench` pp2048/tg128 (`-r 2`), against the opt-in build above:
+
+| Model, expert cache | Experts seeded | pp2048 | tg128 | Route hits |
+| --- | ---: | ---: | ---: | ---: |
+| IQ1_M, 64 GiB | 7,436 → 8,658 | 616.2 → 751.6 ± 98.1 | 16.45 → 17.90 | 70.8% → 85.7% |
+| IQ1_M, 32 GiB | 3,718 → 4,325 | 437.2 → 462.5 ± 1.8 | 12.17 → 12.94 | 45.5% → 48.6% |
+| IQ1_M, 16 GiB | 1,859 → 2,155 | 374.4 → 383.6 ± 2.0 | 9.13 → 9.74 | 30.2% → 32.7% |
+| IQ2_XXS, automatic (105 GiB) | 10,240 → 12,688 | 853/927 → 918.9 ± 403.5 | 18.81/19.13 → 19.96 | 91.4% → 97.0% |
+
+Free memory is unchanged: the cap bounds the allocation either way. The
+seed takes longer in proportion (13.1 → 14.6 s at 64 GiB, 18.7 → 20.2 s
+for IQ2_XXS). The IQ2_XXS prefill spread no longer comes from expert reads
+(1.57 MiB/token in the first repetition, 93.6% hits); the Engram row reads
+of backlog item 14, whose page cache the full expert cache displaces, are
+the likely remainder.
+

@@ -188,9 +188,9 @@ server is ready at a 256K context:
 | `IQ1_M` | Free memory | Prefill (tok/s) | Decode (tok/s) |
 | --- | ---: | ---: | ---: |
 | Resident | 5.6 GiB | 1,212 | 24.4 |
-| Streamed, `--expert-cache-bytes 68719476736` (64 GiB) | 48.6 GiB | 616 | 16.5 |
-| Streamed, 32 GiB cache | 78.8 GiB | 437 | 12.2 |
-| Streamed, 16 GiB cache | 93.3 GiB | 374 | 9.1 |
+| Streamed, `--expert-cache-bytes 68719476736` (64 GiB) | 48.6 GiB | 752 | 17.9 |
+| Streamed, 32 GiB cache | 78.8 GiB | 462 | 12.9 |
+| Streamed, 16 GiB cache | 93.3 GiB | 384 | 9.7 |
 
 Decode depends on how many routed experts the cache already holds, so it
 varies with the text. The automatic prompt cache may later take up to half

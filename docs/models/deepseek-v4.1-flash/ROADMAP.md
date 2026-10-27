@@ -169,8 +169,10 @@ Open performance items are tracked in [BACKLOG.md](BACKLOG.md).
   next steps (router-free next-layer prefill sweeps, router-predicted decode
   prefetch, opt-in route bias).
 - An optional `MODEL.gguf.expert-histogram` seeds the cache at startup; the
-  built-in V4.1 ranking (10,240 experts, from Xolotl's calibration trace)
-  applies without one. `tools/ds41/expert_histogram.py` builds a histogram
+  built-in V4.1 ranking (all 15,360 experts, from Xolotl's calibration trace)
+  applies without one; experts a histogram omits follow its ranked ones, and
+  slots come in one size per expert size of the build.
+  `tools/ds41/expert_histogram.py` builds a histogram
   from the independent oracle's `routes.npz` files; use representative
   prompts of the same quant. Seeding consumes time and memory, and the counts
   are performance hints only.
