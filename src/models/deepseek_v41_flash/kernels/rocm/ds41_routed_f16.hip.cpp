@@ -1,4 +1,4 @@
-/* Batched routed-expert projections for IQ1_S, IQ1_M and IQ2_XXS weights on
+/* Batched routed-expert projections for IQ1_S, IQ1_M, IQ2_XXS and IQ2_XS weights on
  * the FP16 matrix cores. The activations are rounded to FP16 (11-bit
  * mantissa, against the 8-bit block quantization of MMQ's Q8_1 inputs) and
  * each weight decodes to FP16 with its sub-block scale folded in, so the K
@@ -214,11 +214,63 @@ struct Format<16> {
   }
 };
 
+/* IQ2_XS (74 bytes): d, qs[32] as u16 and eight scale bytes. Each
+ * 32-value sub-block has four 9-bit codebook indices and four 7-bit sign
+ * indices. The low and high scale nibbles apply to two groups each. */
+template <>
+struct Format<17> {
+  static constexpr int kBytes = 74, kWords = 19;
+  static constexpr bool kAligned = false;
+  struct Tables {
+    uint4 grid[512];
+    uint4 signs[128];
+  };
+  static __device__ void fill(Tables& t, int tid) {
+    for (int i = tid; i < 512 + 128; i += 256) {
+      uint32_t w[4];
+#pragma unroll
+      for (int j = 0; j < 4; ++j) {
+        if (i < 512) {
+          const uint64_t g = iq2xs_grid[i];
+          w[j] = pack_half2(static_cast<float>((g >> (16 * j)) & 0xffu),
+                            static_cast<float>((g >> (16 * j + 8)) & 0xffu));
+        } else {
+          const uint32_t signs = ksigns_iq2xs[i - 512];
+          w[j] = ((signs >> (2 * j)) & 1u) << 15 | ((signs >> (2 * j + 1)) & 1u) << 31;
+        }
+      }
+      (i < 512 ? t.grid[i] : t.signs[i - 512]) = make_uint4(w[0], w[1], w[2], w[3]);
+    }
+  }
+  struct Sub {
+    uint32_t qs[2], scale[2];
+  };
+  static __device__ __forceinline__ Sub sub(const Raw<kWords>& b, int ib) {
+    const uint32_t sc = (b.w[(66 + ib) / 4] >> (8 * ((66 + ib) % 4))) & 0xffu;
+    const float d = half_bits(b.w[0]) * 0.25f;
+    const float lo = d * (0.5f + static_cast<float>(sc & 15u));
+    const float hi = d * (0.5f + static_cast<float>(sc >> 4));
+    return {{__builtin_amdgcn_alignbyte(b.w[2 * ib + 1], b.w[2 * ib], 2),
+             __builtin_amdgcn_alignbyte(b.w[2 * ib + 2], b.w[2 * ib + 1], 2)},
+            {pack_half2(lo, lo), pack_half2(hi, hi)}};
+  }
+  static __device__ __forceinline__ void decode(const Sub& s, int l, const Tables& t, uint32_t* out) {
+    const uint32_t q = (s.qs[l / 2] >> (16 * (l % 2))) & 0xffffu;
+    const uint4 g = t.grid[q & 511u];
+    const uint4 sg = t.signs[q >> 9];
+    const half2_t scale = __builtin_bit_cast(half2_t, s.scale[l / 2]);
+    const uint32_t gw[4] = {g.x ^ sg.x, g.y ^ sg.y, g.z ^ sg.z, g.w ^ sg.w};
+#pragma unroll
+    for (int i = 0; i < 4; ++i) out[i] = __builtin_bit_cast(uint32_t, __builtin_bit_cast(half2_t, gw[i]) * scale);
+  }
+};
+
 __device__ __forceinline__ float finite_or_zero(float v) { return __builtin_isfinite(v) ? v : 0.0f; }
 
 template <int kType, bool kPair, bool kHalfOut>
 __global__ __launch_bounds__(256) void routed_f16_kernel(
-    const uint8_t* __restrict__ w0, const uint8_t* __restrict__ w1, uint64_t expert_bytes,
+    const uint8_t* __restrict__ w0, const uint8_t* __restrict__ w1,
+    const uint8_t* const* __restrict__ w0_table, const uint8_t* const* __restrict__ w1_table, uint64_t expert_bytes,
     const uint16_t* __restrict__ x, uint32_t x_div, const int32_t* __restrict__ rows,
     const int32_t* __restrict__ bounds, const int32_t* __restrict__ tiles, const float* __restrict__ route_w,
     float limit, void* __restrict__ y, uint32_t m, uint32_t k) {
@@ -246,7 +298,11 @@ __global__ __launch_bounds__(256) void routed_f16_kernel(
 #pragma unroll
   for (int p = 0; p < 2; ++p) {
     row[p] = r_wave + (kPair ? 0 : 16 * p) + lane % 16;
-    const uint8_t* base = (kPair && p ? w1 : w0) + (uint64_t)expert * expert_bytes;
+    const uint8_t* base;
+    if (kPair && p)
+      base = w1_table ? w1_table[expert] : w1 + (uint64_t)expert * expert_bytes;
+    else
+      base = w0_table ? w0_table[expert] : w0 + (uint64_t)expert * expert_bytes;
     wp[p] = base + (uint64_t)(row[p] < m ? row[p] : m - 1) * row_bytes;
   }
 
@@ -376,18 +432,19 @@ __global__ __launch_bounds__(256) void routed_f16_kernel(
 }
 
 template <int kType>
-void launch_routed(const uint8_t* w, const uint8_t* w_up, uint64_t expert_bytes, const uint16_t* x, uint32_t x_div,
+void launch_routed(const uint8_t* w, const uint8_t* w_up, const uint8_t* const* w_table,
+                   const uint8_t* const* w_up_table, uint64_t expert_bytes, const uint16_t* x, uint32_t x_div,
                    const int32_t* rows, const int32_t* bounds, const int32_t* tiles, uint32_t n_tiles,
                    const float* route_w, float limit, void* y, int y_half, uint32_t m, uint32_t k) {
   if (w_up && y_half)
     routed_f16_kernel<kType, true, true><<<dim3((m + 127) / 128, n_tiles), 256>>>(
-        w, w_up, expert_bytes, x, x_div, rows, bounds, tiles, route_w, limit, y, m, k);
+        w, w_up, w_table, w_up_table, expert_bytes, x, x_div, rows, bounds, tiles, route_w, limit, y, m, k);
   else if (w_up)
     routed_f16_kernel<kType, true, false><<<dim3((m + 127) / 128, n_tiles), 256>>>(
-        w, w_up, expert_bytes, x, x_div, rows, bounds, tiles, route_w, limit, y, m, k);
+        w, w_up, w_table, w_up_table, expert_bytes, x, x_div, rows, bounds, tiles, route_w, limit, y, m, k);
   else
     routed_f16_kernel<kType, false, false><<<dim3((m + 255) / 256, n_tiles), 256>>>(
-        w, nullptr, expert_bytes, x, x_div, rows, bounds, tiles, nullptr, 0.0f, y, m, k);
+        w, nullptr, w_table, w_up_table, expert_bytes, x, x_div, rows, bounds, tiles, nullptr, 0.0f, y, m, k);
 }
 
 }  // namespace
@@ -395,19 +452,29 @@ void launch_routed(const uint8_t* w, const uint8_t* w_up, uint64_t expert_bytes,
 extern "C" int ds41_v41_routed_f16(int type, const void* w, const void* w_up, uint64_t expert_bytes, const uint16_t* x,
                                    uint32_t x_div, const int32_t* rows, const int32_t* bounds, const int32_t* tiles,
                                    uint32_t n_tiles, const float* route_w, float limit, void* y, int y_half,
-                                   uint32_t m, uint32_t k) {
+                                   uint32_t m, uint32_t k, const void* const* w_table,
+                                   const void* const* w_up_table) {
   if (k % 256 != 0 || n_tiles == 0 || x_div == 0) return 1;
   const auto* a = static_cast<const uint8_t*>(w);
   const auto* b = static_cast<const uint8_t*>(w_up);
+  const auto* ta = reinterpret_cast<const uint8_t* const*>(w_table);
+  const auto* tb = reinterpret_cast<const uint8_t* const*>(w_up_table);
   switch (type) {
   case 19:
-    launch_routed<19>(a, b, expert_bytes, x, x_div, rows, bounds, tiles, n_tiles, route_w, limit, y, y_half, m, k);
+    launch_routed<19>(a, b, ta, tb, expert_bytes, x, x_div, rows, bounds, tiles, n_tiles, route_w, limit, y, y_half,
+                      m, k);
     break;
   case 29:
-    launch_routed<29>(a, b, expert_bytes, x, x_div, rows, bounds, tiles, n_tiles, route_w, limit, y, y_half, m, k);
+    launch_routed<29>(a, b, ta, tb, expert_bytes, x, x_div, rows, bounds, tiles, n_tiles, route_w, limit, y, y_half,
+                      m, k);
     break;
   case 16:
-    launch_routed<16>(a, b, expert_bytes, x, x_div, rows, bounds, tiles, n_tiles, route_w, limit, y, y_half, m, k);
+    launch_routed<16>(a, b, ta, tb, expert_bytes, x, x_div, rows, bounds, tiles, n_tiles, route_w, limit, y, y_half,
+                      m, k);
+    break;
+  case 17:
+    launch_routed<17>(a, b, ta, tb, expert_bytes, x, x_div, rows, bounds, tiles, n_tiles, route_w, limit, y, y_half,
+                      m, k);
     break;
   default:
     return 1;

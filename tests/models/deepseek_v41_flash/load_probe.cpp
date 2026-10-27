@@ -935,6 +935,7 @@ int main(int argc, char** argv) {
       std::fclose(score_file);
     if (dump.routes)
       std::fclose(dump.routes);
+    Report("evaluated");
     ds41_decoder_destroy(decoder);
   }
   ds41_engine_close(engine);

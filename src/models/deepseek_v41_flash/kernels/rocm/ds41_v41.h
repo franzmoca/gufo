@@ -42,13 +42,17 @@ int ds41_v41_gemv_pair(int type, const void* w1, float* y1, uint32_t m1, const v
  * clamp(up x, +-limit), for n tokens of k floats (y rows m floats). */
 int ds41_v41_gemv_swiglu(int type, const void* gate, const void* up, const float* x, float* y, uint32_t m, uint32_t k,
                          float limit, int slices, uint32_t n);
-/* Decode routed experts in IQ1_S, IQ1_M, IQ2_XXS or IQ2_S with FP32
+/* Decode routed experts in IQ1_S, IQ1_M, IQ2_XXS, IQ2_XS or IQ2_S with FP32
  * activations: y[s, 0:m] = W[ids[s]] x_s for s < slots, x_s = x + (s /
  * slots_per_x) * x_slot (x_slot 0 shares one input); expert e's blocks start
- * at w + e * expert_bytes, and a negative id writes zeros. Every slot sees the
- * same arithmetic. Returns 1 for other types. */
+ * at w + e * expert_bytes, or at w_table[e] when w_table holds the expert's
+ * base pointers (the streamed store's resident slots and stage rows), and a
+ * negative id writes zeros unless zero_dropped is 0, which leaves y[s]
+ * untouched for a later launch to fill. Every slot sees the same arithmetic.
+ * Returns 1 for other types. */
 int ds41_v41_gemv_experts(int type, const void* w, uint64_t expert_bytes, const int32_t* ids, uint32_t slots,
-                          const float* x, uint32_t x_slot, uint32_t slots_per_x, float* y, uint32_t m, uint32_t k);
+                          const float* x, uint32_t x_slot, uint32_t slots_per_x, float* y, uint32_t m, uint32_t k,
+                          const void* const* w_table = nullptr, int zero_dropped = 1);
 /* Gate and up of the same experts (one type, same layout) over the inputs of
  * ds41_v41_gemv_experts, fused with the SwiGLU of ds41_v41_swiglu: y[s, r] =
  * route_w[s] * silu(min(gate, limit)) * clamp(up, +-limit); route_w may be
@@ -56,7 +60,8 @@ int ds41_v41_gemv_experts(int type, const void* w, uint64_t expert_bytes, const 
 int ds41_v41_gemv_experts_swiglu(int type, const void* gate, const void* up, uint64_t expert_bytes,
                                  const int32_t* ids, uint32_t slots, const float* x, uint32_t x_slot,
                                  uint32_t slots_per_x, const float* route_w, float limit, float* y, uint32_t m,
-                                 uint32_t k);
+                                 uint32_t k, const void* const* w_table = nullptr,
+                                 const void* const* w_up_table = nullptr, int zero_dropped = 1);
 
 /* Small batches of routed experts, each expert's weights decoded once for
  * all slots routed to it. ds41_v41_expert_plan groups the `slots` (<=
@@ -74,7 +79,8 @@ int ds41_v41_expert_plan(const int32_t* ids, uint32_t slots, int32_t* plan);
 int ds41_v41_gemv_experts_grouped(int type, const void* w, const void* w_up, const float* route_w, float limit,
                                   uint64_t expert_bytes, const int32_t* plan, uint32_t slots, uint32_t cols,
                                   const float* x, uint32_t x_slot, uint32_t slots_per_x, float* y, uint32_t m,
-                                  uint32_t k);
+                                  uint32_t k, const void* const* w_table = nullptr,
+                                  const void* const* w_up_table = nullptr, int zero_dropped = 1);
 
 /* Batched dense projections (Q5_K) on the FP16 matrix cores: for each group
  * z < groups, out[t, z m + r] = W_z[r] . x[t, z k : z k + k] over n tokens,
@@ -95,7 +101,8 @@ int ds41_v41_dense_f16(int type, const void* w, const float* x, float* out, uint
 int ds41_v41_routed_f16(int type, const void* w, const void* w_up, uint64_t expert_bytes, const uint16_t* x,
                         uint32_t x_div, const int32_t* rows, const int32_t* bounds, const int32_t* tiles,
                         uint32_t n_tiles, const float* route_w, float limit, void* y, int y_half, uint32_t m,
-                        uint32_t k);
+                        uint32_t k, const void* const* w_table = nullptr,
+                        const void* const* w_up_table = nullptr);
 /* y[0:n] = x[0:n] rounded to FP16 (bits). */
 int ds41_v41_to_half(const float* x, uint16_t* y, uint64_t n);
 /* Host side: rows[slots], bounds[n_experts + 1] and tiles (at most

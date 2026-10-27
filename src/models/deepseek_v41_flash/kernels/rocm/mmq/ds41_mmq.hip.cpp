@@ -4430,6 +4430,7 @@ extern "C" int ds41_mmq_moe_vec_typed(int type, const void* W, const float* X,
   X(GGML_TYPE_IQ1_S)            \
   X(GGML_TYPE_IQ1_M)            \
   X(GGML_TYPE_IQ2_XXS)          \
+  X(GGML_TYPE_IQ2_XS)           \
   X(GGML_TYPE_IQ2_S)
 
 extern "C" int ds41_mmq_dense_typed(int type, const void* W, const float* X,

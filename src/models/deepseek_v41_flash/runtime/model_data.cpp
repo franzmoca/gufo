@@ -30,6 +30,7 @@
 #include <vector>
 
 #include "../kernels/rocm/resident_api.h"
+#include "expert_store.h"
 #include "model.h"
 #include "model_data_internal.h"
 #include "native_internal.h"
@@ -766,19 +767,25 @@ static uint64_t accelerator_rocm_preload_span_bytes(const ds41_model* m) {
 
 /* The token embedding is dequantized on the host one row per token, so it
  * stays in the mapped file instead of taking device memory. */
-static bool tensor_device_resident(const ds41_tensor* t) {
+static bool tensor_device_resident(const ds41_tensor* t, const ds41_weights* weights, bool streaming) {
   static const char kHostOnly[] = "token_embd.weight";
-  return !(t->name.len == sizeof(kHostOnly) - 1 &&
-           memcmp(t->name.ptr, kHostOnly, sizeof(kHostOnly) - 1) == 0);
+  if (t->name.len == sizeof(kHostOnly) - 1 && memcmp(t->name.ptr, kHostOnly, sizeof(kHostOnly) - 1) == 0)
+    return false;
+  if (streaming && weights)
+    for (const ds41_layer_weights& l : weights->layer)
+      if (t == l.ffn_gate_exps || t == l.ffn_up_exps || t == l.ffn_down_exps) return false;
+  return true;
 }
 
 static bool accelerator_cache_model_tensor_spans(const ds41_model* m,
+                                                 const ds41_weights* weights,
+                                                 bool streaming,
                                                  uint64_t* cached_out) {
   std::vector<accelerator_tensor_span> spans;
   spans.reserve(static_cast<size_t>(m->n_tensors));
   for (uint64_t i = 0; i < m->n_tensors; i++) {
     const ds41_tensor* t = &m->tensors[i];
-    if (t->bytes == 0 || !tensor_device_resident(t))
+    if (t->bytes == 0 || !tensor_device_resident(t, weights, streaming))
       continue;
     if (t->abs_offset > m->size || t->bytes > m->size - t->abs_offset) {
       return false;
@@ -829,13 +836,13 @@ static bool accelerator_cache_model_tensor_spans(const ds41_model* m,
   return true;
 }
 
-static bool accelerator_cache_model_tensors(const ds41_model* m) {
+static bool accelerator_cache_model_tensors(const ds41_model* m, const ds41_weights* weights, bool streaming) {
   if (!m || !m->map || m->size == 0)
     return false;
 
   const double t0 = ds41_now_seconds();
   uint64_t cached = 0;
-  const bool cache_ok = accelerator_cache_model_tensor_spans(m, &cached);
+  const bool cache_ok = accelerator_cache_model_tensor_spans(m, weights, streaming, &cached);
   const bool upload_ok = ds41_gpu_release_model_staging() != 0;
   if (!cache_ok || !upload_ok)
     return false;
@@ -1614,12 +1621,26 @@ static void engram_close(ds41_engram_tables* e) {
 
 /* Bytes of the tensors uploaded to the device; nothing in the Engram file is
  * resident. */
-static uint64_t model_resident_bytes(const ds41_model* m) {
+static uint64_t model_resident_bytes(const ds41_model* m, const ds41_weights* weights = nullptr,
+                                     bool streaming = false) {
   uint64_t bytes = 0;
   for (uint64_t i = 0; i < m->n_tensors; i++)
-    if (tensor_device_resident(&m->tensors[i]))
+    if (tensor_device_resident(&m->tensors[i], weights, streaming))
       bytes += m->tensors[i].bytes;
   return bytes;
+}
+
+/* Match ds41_dspark_upload's widened F16 allocation for the placement plan. */
+static uint64_t dspark_resident_bytes(const ds41_dspark_model* dspark) {
+  if (!dspark) return 0;
+  uint64_t total = 0;
+  for (const ds41_dspark_source& source : dspark->sources) {
+    const bool widen = source.src->type == DS41_TENSOR_F16 && source.dst != &dspark->markov_w1 &&
+                       source.dst != &dspark->markov_w2;
+    const uint64_t bytes = widen ? source.src->elements * sizeof(float) : source.src->bytes;
+    total += (bytes + 255) / 256 * 256;
+  }
+  return total;
 }
 
 static void ds41_release_instance_lock(void) {
@@ -1728,7 +1749,7 @@ int ds41_engine_open(ds41_engine** out, const ds41_engine_options* opt) {
       engram_open(e->engram, e->weights, e->model, engram_path.c_str());
       gufo::server::Logger::LogFormatted(
           gufo::server::LogLevel::kInfo, "ds41",
-          "%s: %u backbone shard(s), %.2f GiB resident weights; Engram %s "
+          "%s: %u backbone shard(s), %.2f GiB device-eligible weights; Engram %s "
           "(%.2f GiB, %" PRIu64 " B rows, read from disk)",
           DS41_MODEL_SHAPE_NAME, e->model->n_shards,
           (double)model_resident_bytes(e->model) / 1073741824.0,
@@ -1754,6 +1775,16 @@ int ds41_engine_open(ds41_engine** out, const ds41_engine_options* opt) {
       return 1;
     }
 
+    const uint64_t available = ds41_expert_available_memory();
+    const uint64_t needed = model_resident_bytes(e->model) + dspark_resident_bytes(e->dspark) + (2ull << 30);
+    const bool streaming = available != 0 && needed > available;
+    if (streaming) {
+      gufo::server::Logger::LogFormatted(
+          gufo::server::LogLevel::kInfo, "ds41",
+          "streaming routed experts: %.2f GiB dense weights, %.2f GiB available unified memory",
+          (double)model_resident_bytes(e->model, e->weights, true) / 1073741824.0,
+          (double)available / 1073741824.0);
+    }
     (void)ds41_gpu_set_model_shards(e->model->shard_fd, e->model->shard_offset,
                                     e->model->shard_size, e->model->n_shards);
     if (!ds41_gpu_set_model_map_range(
@@ -1768,7 +1799,7 @@ int ds41_engine_open(ds41_engine** out, const ds41_engine_options* opt) {
       *out = NULL;
       return 1;
     }
-    if (!accelerator_cache_model_tensors(e->model)) {
+    if (!accelerator_cache_model_tensors(e->model, e->weights, streaming)) {
       fprintf(stderr, "ds41: ROCm failed to prepare startup model cache\n");
       ds41_engine_close(e);
       *out = NULL;
@@ -1785,6 +1816,25 @@ int ds41_engine_open(ds41_engine** out, const ds41_engine_options* opt) {
           gufo::server::LogLevel::kInfo, "ds41",
           "DSpark drafter %s: %.2f GiB resident", opt->dspark_model_path,
           (double)e->dspark->device_bytes / 1073741824.0);
+    }
+
+    if (streaming) {
+      e->expert_store = ds41_expert_store_create(e->model, e->weights);
+      if (!e->expert_store) {
+        fprintf(stderr, "ds41: failed to initialize the streamed expert store\n");
+        ds41_engine_close(e);
+        *out = nullptr;
+        return 1;
+      }
+      const std::string histogram = std::string(opt->model_path) + ".expert-histogram";
+      const bool custom = access(histogram.c_str(), F_OK) == 0;
+      if (custom && !ds41_expert_store_seed(e->expert_store, histogram.c_str())) {
+        fprintf(stderr, "ds41: failed to load expert histogram %s; using the built-in ranking\n", histogram.c_str());
+        if (!ds41_expert_store_seed_default(e->expert_store))
+          fprintf(stderr, "ds41: failed to warm the expert cache\n");
+      } else if (!custom && !ds41_expert_store_seed_default(e->expert_store)) {
+        fprintf(stderr, "ds41: failed to warm the expert cache\n");
+      }
     }
 
     *out = e;
@@ -1848,6 +1898,8 @@ void ds41_engine_close(ds41_engine* e) {
     return;
   if (e->image_bias)
     (void)hipFree(e->image_bias);
+  ds41_expert_store_log(e->expert_store);
+  ds41_expert_store_destroy(e->expert_store);
   weights_free(e->weights);
   if (e->dspark) {
     ds41_dspark_free(e->dspark);

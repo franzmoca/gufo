@@ -22,6 +22,7 @@
 #include <vector>
 
 #include "ds41_v41.h"
+#include "expert_store.h"
 #include "mmq/ds41_mmq.h"
 #include "resident_api.h"
 #include "model.h"
@@ -213,6 +214,9 @@ struct Activations {
   uint8_t* expert_class = nullptr;  // routed tile-width class per expert
   int32_t* routed_plan = nullptr;   // ds41_v41_routed_plan rows, bounds and tiles
   int32_t* expert_plan = nullptr;   // ds41_v41_expert_plan groups of a small batch
+  /* The streamed store's split gate+up passes: the resident-expert plan that
+   * overlaps the projection reads, and the read-expert plan after them. */
+  int32_t* expert_plan_split[2] = {nullptr, nullptr};
   float *g6 = nullptr, *u6 = nullptr, *mid6 = nullptr, *down6 = nullptr;
   float *sg = nullptr, *su = nullptr, *sm = nullptr, *sd = nullptr;
   float *engram_in = nullptr, *engram_kv = nullptr, *logits = nullptr;
@@ -317,6 +321,7 @@ bool mmq_batched(uint32_t type) {
   case DS41_TENSOR_IQ1_S:
   case DS41_TENSOR_IQ1_M:
   case DS41_TENSOR_IQ2_XXS:
+  case DS41_TENSOR_IQ2_XS:
   case DS41_TENSOR_IQ2_S:
     return true;
   default:
@@ -747,11 +752,10 @@ bool attention(ds41_decoder* d, uint32_t il, uint32_t n, const Joint* joint) {
   return linear(d, l->attn_output_b, d->oa, d->attn_out, n);
 }
 
-/* Bytes per 256 values of the routed-expert types the FP32-activation expert
- * GEMV decodes; 0 for others. */
 /* Batched routed projections on the FP16 matrix cores (ds41_v41_routed_f16). */
 bool routed_f16_type(int type) {
-  return type == (int)DS41_TENSOR_IQ1_S || type == (int)DS41_TENSOR_IQ1_M || type == (int)DS41_TENSOR_IQ2_XXS;
+  return type == (int)DS41_TENSOR_IQ1_S || type == (int)DS41_TENSOR_IQ1_M ||
+         type == (int)DS41_TENSOR_IQ2_XXS || type == (int)DS41_TENSOR_IQ2_XS;
 }
 
 /* ds41_v41_routed_plan's rows, bounds and tiles for batches up to cap tokens. */
@@ -768,6 +772,8 @@ uint64_t expert_block_bytes(int type) {
     return 56;
   case DS41_TENSOR_IQ2_XXS:
     return 66;
+  case DS41_TENSOR_IQ2_XS:
+    return 74;
   case DS41_TENSOR_IQ2_S:
     return 82;
   default:
@@ -779,11 +785,13 @@ uint64_t expert_block_bytes(int type) {
  * where it measured faster than mmvq: IQ1 always, IQ2 with one input per slot
  * (down). Returns false to fall back to mmvq. */
 bool expert_gemv(int type, const void* w, const int32_t* ids, uint32_t slots, const float* x, bool per_slot, float* y,
-                 uint32_t m, uint32_t k, int* status) {
+                 uint32_t m, uint32_t k, int* status, const void* const* w_table = nullptr,
+                 int zero_dropped = 1) {
   const uint64_t block = expert_block_bytes(type);
   const bool iq1 = type == (int)DS41_TENSOR_IQ1_S || type == (int)DS41_TENSOR_IQ1_M;
   if (block == 0 || (!per_slot && !iq1)) return false;
-  *status = ds41_v41_gemv_experts(type, w, (uint64_t)m * k / 256 * block, ids, slots, x, per_slot ? k : 0, 1, y, m, k);
+  *status = ds41_v41_gemv_experts(type, w, (uint64_t)m * k / 256 * block, ids, slots, x, per_slot ? k : 0, 1, y, m,
+                                  k, w_table, zero_dropped);
   return true;
 }
 
@@ -792,6 +800,22 @@ bool expert_gemv(int type, const void* w, const int32_t* ids, uint32_t slots, co
  * with the single-token arithmetic and no host round trip for a plan. */
 static_assert(DS41_V41_GEMV_MAX_TOKENS <= DS41_V41_EXPERT_PLAN_COLS &&
               DS41_V41_GEMV_MAX_TOKENS * DS41_N_EXPERT_USED <= DS41_V41_EXPERT_PLAN_SLOTS);
+
+bool shared_moe(ds41_decoder* d, const ds41_layer_weights* l, uint32_t n) {
+  const ds41_tensor* sg = l->ffn_gate_shexp;
+  const ds41_tensor* su = l->ffn_up_shexp;
+  if (n <= d->decode_rows && sg->type == su->type && sg->elements == su->elements && gemv_type(sg->type)) {
+    const uint32_t k = (uint32_t)sg->dim[0];
+    const uint32_t m = (uint32_t)(sg->elements / k);
+    if (ds41_v41_gemv_swiglu((int)sg->type, dev(d, sg), dev(d, su), d->xn, d->sm, m, k, kSwigluLimit,
+                             gemv_slices(m, k), n))
+      return false;
+  } else if (!linear_pair(d, sg, d->sg, su, d->su, d->xn, n) ||
+             ds41_v41_swiglu(d->sg, d->su, nullptr, d->sm, n, DS41_N_FF_EXP, kSwigluLimit)) {
+    return false;
+  }
+  return linear(d, l->ffn_down_shexp, d->sm, d->sd, n);
+}
 
 bool moe(ds41_decoder* d, uint32_t il, uint32_t n) {
   const ds41_layer_weights* l = &d->engine->weights->layer[il];
@@ -811,14 +835,76 @@ bool moe(ds41_decoder* d, uint32_t il, uint32_t n) {
                        hi - lo))
       return false;
   }
-  const void* gate = dev(d, l->ffn_gate_exps);
-  const void* up = dev(d, l->ffn_up_exps);
-  const void* down = dev(d, l->ffn_down_exps);
-  if (!gate || !up || !down) return false;
   const int gate_type = (int)l->ffn_gate_exps->type;
   const int up_type = (int)l->ffn_up_exps->type;
   const int down_type = (int)l->ffn_down_exps->type;
   const int rows = (int)n * used;
+  /* Small batches take gate, up and SwiGLU in one pass when gate and up share
+   * a type (the IQ2 types too: the pair runs as fast as two mmvq launches). */
+  const bool fused_pair = gate_type == up_type && (gate_type == (int)DS41_TENSOR_IQ1_S ||
+                                                   gate_type == (int)DS41_TENSOR_IQ1_M ||
+                                                   gate_type == (int)DS41_TENSOR_IQ2_XXS ||
+                                                   gate_type == (int)DS41_TENSOR_IQ2_XS);
+  const void* gate = nullptr;
+  const void* up = nullptr;
+  const void* down = nullptr;
+  /* While the store streams the missing experts, the shared expert and the
+   * resident routed experts compute; the read rows complete the batch after
+   * the reads. */
+  struct StreamWork {
+    ds41_decoder* d;
+    const ds41_layer_weights* layer;
+    uint32_t n, rows, used;
+    int gate_type;
+    int32_t* plan_hit;
+    bool fused;
+    bool gate_up_done = false;
+    ds41_expert_overlap info{};
+  };
+  StreamWork work{d,       l,          n,         (uint32_t)rows, (uint32_t)used, gate_type,
+                  d->expert_plan_split[0], fused_pair};
+  const auto streamed_overlap = [](void* context, const ds41_expert_overlap* info) {
+    StreamWork& w = *static_cast<StreamWork*>(context);
+    if (!shared_moe(w.d, w.layer, w.n))
+      return false;
+    if (!info || !info->hit_ids || info->miss_rows == 0 || info->miss_rows == info->rows || !w.fused)
+      return true;
+    w.info = *info;
+    w.gate_up_done = true;
+    const uint64_t expert_bytes =
+        (uint64_t)DS41_N_FF_EXP * kDim / 256 * expert_block_bytes(w.gate_type);
+    if (w.n == 1)
+      return ds41_v41_gemv_experts_swiglu(w.gate_type, info->table[0], info->table[1], expert_bytes,
+                                          info->hit_ids, w.used, w.d->xn, 0, 1, w.d->route_w, kSwigluLimit,
+                                          w.d->mid6, DS41_N_FF_EXP, kDim,
+                                          static_cast<const void* const*>(info->table[0]),
+                                          static_cast<const void* const*>(info->table[1]), 1) == 0;
+    if (ds41_v41_expert_plan(info->hit_ids, w.rows, w.plan_hit))
+      return false;
+    return ds41_v41_gemv_experts_grouped(w.gate_type, info->table[0], info->table[1], w.d->route_w,
+                                         kSwigluLimit, expert_bytes, w.plan_hit, w.rows, w.n, w.d->xn, kDim,
+                                         w.used, w.d->mid6, DS41_N_FF_EXP, kDim,
+                                         static_cast<const void* const*>(info->table[0]),
+                                         static_cast<const void* const*>(info->table[1]), 1) == 0;
+  };
+  if (d->engine->expert_store) {
+    if (!ds41_expert_store_prepare(d->engine->expert_store, il, d->route_ids, n, &gate, &up, &down,
+                                   streamed_overlap, &work))
+      return false;
+  } else {
+    gate = dev(d, l->ffn_gate_exps);
+    up = dev(d, l->ffn_up_exps);
+    down = dev(d, l->ffn_down_exps);
+  }
+  if (!gate || !up || !down) return false;
+  /* The streamed tables map each expert index to its device weights; the
+   * resident path passes packed tensor bases instead. */
+  const void* const* gate_table =
+      d->engine->expert_store ? static_cast<const void* const*>(gate) : nullptr;
+  const void* const* up_table =
+      d->engine->expert_store ? static_cast<const void* const*>(up) : nullptr;
+  const void* const* down_table =
+      d->engine->expert_store ? static_cast<const void* const*>(down) : nullptr;
   /* Batched passes size their tiles from the real expert buckets: at 512
    * tokens over 384 experts the mean bucket is 8 rows. */
   struct RoutedBounds {
@@ -834,10 +920,12 @@ bool moe(ds41_decoder* d, uint32_t il, uint32_t n) {
   if (grouped && ds41_v41_expert_plan(d->route_ids, (uint32_t)rows, d->expert_plan)) return false;
   /* y = W x over the planned slots (with w_up: the routed SwiGLU into mid6). */
   const auto grouped_gemv = [&](int type, const void* w, const void* w_up, const float* x, uint32_t x_slot,
-                                uint32_t slots_per_x, float* y, uint32_t m, uint32_t k) {
+                                uint32_t slots_per_x, float* y, uint32_t m, uint32_t k,
+                                const void* const* w_table = nullptr, const void* const* w_up_table = nullptr) {
     return ds41_v41_gemv_experts_grouped(type, w, w_up, w_up ? d->route_w : nullptr, w_up ? kSwigluLimit : 0.0f,
                                          (uint64_t)m * k / 256 * expert_block_bytes(type), d->expert_plan,
-                                         (uint32_t)rows, n, x, x_slot, slots_per_x, y, m, k) == 0;
+                                         (uint32_t)rows, n, x, x_slot, slots_per_x, y, m, k, w_table, w_up_table,
+                                         1) == 0;
   };
   const bool f16_gate = !small && gate_type == up_type && routed_f16_type(gate_type);
   const bool f16_down = !small && routed_f16_type(down_type);
@@ -886,16 +974,34 @@ bool moe(ds41_decoder* d, uint32_t il, uint32_t n) {
         return false;
     }
   }
-  /* Small batches take gate, up and SwiGLU in one pass when gate and up share
-   * a type (IQ2_XXS too: the pair runs as fast as two mmvq launches). */
-  const bool fused_pair = gate_type == up_type && (gate_type == (int)DS41_TENSOR_IQ1_S ||
-                                                   gate_type == (int)DS41_TENSOR_IQ1_M ||
-                                                   gate_type == (int)DS41_TENSOR_IQ2_XXS);
-  if (grouped && gate_type == up_type) {
-    if (!grouped_gemv(gate_type, gate, up, d->xn, kDim, used, d->mid6, DS41_N_FF_EXP, kDim)) return false;
+  /* The streamed store already ran the resident experts' gate+up during the
+   * reads; finish with the rows the reads filled, in place of the zeros the
+   * overlapped launch left. A batch without reads keeps one full pass. */
+  const bool streamed = d->engine->expert_store != nullptr;
+  if (streamed && small && fused_pair) {
+    const uint64_t expert_bytes =
+        (uint64_t)DS41_N_FF_EXP * kDim / 256 * expert_block_bytes(gate_type);
+    const int32_t* ids = work.gate_up_done ? work.info.miss_ids : d->route_ids;
+    if (n == 1) {
+      if (ds41_v41_gemv_experts_swiglu(gate_type, gate, up, expert_bytes, ids, used, d->xn, 0, 1,
+                                       d->route_w, kSwigluLimit, d->mid6, DS41_N_FF_EXP, kDim, gate_table,
+                                       up_table, work.gate_up_done ? 0 : 1))
+        return false;
+    } else {
+      if (ds41_v41_expert_plan(ids, (uint32_t)rows, d->expert_plan_split[1])) return false;
+      if (ds41_v41_gemv_experts_grouped(gate_type, gate, up, d->route_w, kSwigluLimit, expert_bytes,
+                                        d->expert_plan_split[1], (uint32_t)rows, n, d->xn, kDim, used,
+                                        d->mid6, DS41_N_FF_EXP, kDim, gate_table, up_table,
+                                        work.gate_up_done ? 0 : 1))
+        return false;
+    }
+  } else if (grouped && gate_type == up_type) {
+    if (!grouped_gemv(gate_type, gate, up, d->xn, kDim, used, d->mid6, DS41_N_FF_EXP, kDim, gate_table, up_table))
+      return false;
   } else if (grouped) {
-    if (!grouped_gemv(gate_type, gate, nullptr, d->xn, kDim, used, d->g6, DS41_N_FF_EXP, kDim) ||
-        !grouped_gemv(up_type, up, nullptr, d->xn, kDim, used, d->u6, DS41_N_FF_EXP, kDim))
+    if (!grouped_gemv(gate_type, gate, nullptr, d->xn, kDim, used, d->g6, DS41_N_FF_EXP, kDim,
+                      gate_table) ||
+        !grouped_gemv(up_type, up, nullptr, d->xn, kDim, used, d->u6, DS41_N_FF_EXP, kDim, up_table))
       return false;
   } else if (n == 1 && fused_pair) {
     if (ds41_v41_gemv_experts_swiglu(gate_type, gate, up,
@@ -905,26 +1011,32 @@ bool moe(ds41_decoder* d, uint32_t il, uint32_t n) {
       return false;
   } else if (small) {
     int status = 0;
-    if (!expert_gemv(gate_type, gate, d->route_ids, rows, d->xn, false, d->g6, DS41_N_FF_EXP, kDim, &status))
-      status = ds41_mmq_moe_vec_typed(gate_type, gate, d->xn, d->route_ids, d->g6, DS41_N_FF_EXP, kDim, (int)n,
-                                      DS41_N_EXPERT, used, 0);
+    if (!expert_gemv(gate_type, gate, d->route_ids, rows, d->xn, false, d->g6, DS41_N_FF_EXP, kDim, &status,
+                     gate_table))
+      status = streamed ? 1
+                       : ds41_mmq_moe_vec_typed(gate_type, gate, d->xn, d->route_ids, d->g6, DS41_N_FF_EXP, kDim,
+                                                (int)n, DS41_N_EXPERT, used, 0);
     if (status) return false;
-    if (!expert_gemv(up_type, up, d->route_ids, rows, d->xn, false, d->u6, DS41_N_FF_EXP, kDim, &status))
-      status = ds41_mmq_moe_vec_typed(up_type, up, d->xn, d->route_ids, d->u6, DS41_N_FF_EXP, kDim, (int)n,
-                                      DS41_N_EXPERT, used, 0);
+    if (!expert_gemv(up_type, up, d->route_ids, rows, d->xn, false, d->u6, DS41_N_FF_EXP, kDim, &status,
+                     up_table))
+      status = streamed ? 1
+                        : ds41_mmq_moe_vec_typed(up_type, up, d->xn, d->route_ids, d->u6, DS41_N_FF_EXP, kDim,
+                                                 (int)n, DS41_N_EXPERT, used, 0);
     if (status) return false;
   } else if (f16_gate) {
     const uint64_t expert_bytes = (uint64_t)DS41_N_FF_EXP * kDim / 256 * expert_block_bytes(gate_type);
     if (ds41_v41_to_half(d->xn, x16, (uint64_t)n * kDim) ||
         ds41_v41_routed_f16(gate_type, gate, up, expert_bytes, x16, (uint32_t)used, plan_rows, plan_bounds,
                             plan_tiles, n_tiles, d->route_w, kSwigluLimit, f16_down ? (void*)mid16 : (void*)d->mid6,
-                            f16_down, DS41_N_FF_EXP, kDim))
+                            f16_down, DS41_N_FF_EXP, kDim, gate_table, up_table))
       return false;
-  } else if (gate_type == up_type) {
+  } else if (!streamed && gate_type == up_type) {
     /* Batches quantize the input once and store SwiGLU from the up pass. */
     if (ds41_mmq_moe_swiglu_typed(gate_type, gate, up, d->xn, d->route_ids, d->route_w, d->g6, d->mid6,
                                   DS41_N_FF_EXP, kDim, (int)n, DS41_N_EXPERT, used, kSwigluLimit, 0))
       return false;
+  } else if (streamed) {
+    return false;  // no table-indexed kernel for this shape
   } else if (ds41_mmq_moe_typed(gate_type, gate, d->xn, d->route_ids, d->g6, DS41_N_FF_EXP, kDim, (int)n,
                                 DS41_N_EXPERT, used, 0) ||
              ds41_mmq_moe_typed(up_type, up, d->xn, d->route_ids, d->u6, DS41_N_FF_EXP, kDim, (int)n, DS41_N_EXPERT,
@@ -939,37 +1051,31 @@ bool moe(ds41_decoder* d, uint32_t il, uint32_t n) {
   if (f16_down && !f16_gate && ds41_v41_to_half(d->mid6, mid16, (uint64_t)rows * DS41_N_FF_EXP)) return false;
   /* Each (token, slot) row multiplies its own expert's down projection. */
   if (grouped) {
-    if (!grouped_gemv(down_type, down, nullptr, d->mid6, DS41_N_FF_EXP, 1, d->down6, kDim, DS41_N_FF_EXP))
+    if (!grouped_gemv(down_type, down, nullptr, d->mid6, DS41_N_FF_EXP, 1, d->down6, kDim, DS41_N_FF_EXP,
+                      down_table))
       return false;
   } else if (small) {
     int status = 0;
-    if (!expert_gemv(down_type, down, d->route_ids, rows, d->mid6, true, d->down6, kDim, DS41_N_FF_EXP, &status))
-      status = ds41_mmq_moe_vec_typed(down_type, down, d->mid6, d->route_ids, d->down6, kDim, DS41_N_FF_EXP, rows,
-                                      DS41_N_EXPERT, 1, 0);
+    if (!expert_gemv(down_type, down, d->route_ids, rows, d->mid6, true, d->down6, kDim, DS41_N_FF_EXP, &status,
+                     down_table))
+      status = streamed ? 1
+                        : ds41_mmq_moe_vec_typed(down_type, down, d->mid6, d->route_ids, d->down6, kDim,
+                                                 DS41_N_FF_EXP, rows, DS41_N_EXPERT, 1, 0);
     if (status) return false;
   } else if (f16_down) {
     const uint64_t expert_bytes = (uint64_t)DS41_N_FF_EXP * kDim / 256 * expert_block_bytes(down_type);
     if (ds41_v41_routed_f16(down_type, down, nullptr, expert_bytes, mid16, 1, plan_rows, plan_bounds, plan_tiles,
-                            n_tiles, nullptr, 0.0f, d->down6, 0, kDim, DS41_N_FF_EXP))
+                            n_tiles, nullptr, 0.0f, d->down6, 0, kDim, DS41_N_FF_EXP, down_table,
+                            nullptr))
       return false;
-  } else if (ds41_mmq_moe_typed(down_type, down, d->mid6, d->route_ids, d->down6, kDim, DS41_N_FF_EXP, rows,
-                                DS41_N_EXPERT, 1, 0)) {
+  } else if (!streamed && ds41_mmq_moe_typed(down_type, down, d->mid6, d->route_ids, d->down6, kDim, DS41_N_FF_EXP,
+                                             rows, DS41_N_EXPERT, 1, 0)) {
     return false;
-  }
-  const ds41_tensor* sg = l->ffn_gate_shexp;
-  const ds41_tensor* su = l->ffn_up_shexp;
-  if (n <= d->decode_rows && sg->type == su->type && sg->elements == su->elements && gemv_type(sg->type)) {
-    const uint32_t k = (uint32_t)sg->dim[0];
-    const uint32_t m = (uint32_t)(sg->elements / k);
-    if (ds41_v41_gemv_swiglu((int)sg->type, dev(d, sg), dev(d, su), d->xn, d->sm, m, k, kSwigluLimit,
-                             gemv_slices(m, k), n))
-      return false;
-  } else if (!linear_pair(d, sg, d->sg, su, d->su, d->xn, n) ||
-             ds41_v41_swiglu(d->sg, d->su, nullptr, d->sm, n, DS41_N_FF_EXP, kSwigluLimit)) {
-    return false;
+  } else if (streamed) {
+    return false;  // no table-indexed kernel for this shape
   }
   /* The routed rows (down6) and the shared output (sd) are summed by block()'s hc expand. */
-  return linear(d, l->ffn_down_shexp, d->sm, d->sd, n);
+  return d->engine->expert_store || shared_moe(d, l, n);
 }
 
 /* Tokens from which block() fuses the batched state passes. */
@@ -1135,7 +1241,10 @@ std::shared_ptr<SharedActivations> make_activations(ds41_engine* engine, uint32_
     a.expert_class = alloc<uint8_t>(sh->device, DS41_N_EXPERT);
     a.routed_plan = alloc<int32_t>(sh->device, routed_plan_ints(cap));
     a.expert_plan = alloc<int32_t>(sh->device, DS41_V41_EXPERT_PLAN_INTS(DS41_V41_EXPERT_PLAN_SLOTS));
-    ok = a.candidates && a.topk && a.block_select && a.route_ids && a.expert_class && a.routed_plan && a.expert_plan;
+    a.expert_plan_split[0] = alloc<int32_t>(sh->device, DS41_V41_EXPERT_PLAN_INTS(DS41_V41_EXPERT_PLAN_SLOTS));
+    a.expert_plan_split[1] = alloc<int32_t>(sh->device, DS41_V41_EXPERT_PLAN_INTS(DS41_V41_EXPERT_PLAN_SLOTS));
+    ok = a.candidates && a.topk && a.block_select && a.route_ids && a.expert_class && a.routed_plan &&
+         a.expert_plan && a.expert_plan_split[0] && a.expert_plan_split[1];
   }
   for (uint32_t slot = 0; slot < DS41_N_ENGRAM_LAYER && ok; slot++)
     ok = hipHostMalloc(&a.engram_pinned[slot], (uint64_t)kEngramPinnedTokens * kEngramIn * sizeof(float)) ==
