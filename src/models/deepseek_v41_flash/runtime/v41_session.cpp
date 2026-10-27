@@ -47,13 +47,14 @@ struct ds41_session {
   static constexpr uint32_t kVerifyRows = DS41_DECODER_MAX_SPECULATIVE;
   static constexpr float kAcceptPrior = 0.7f;
   /* Greedy cycles with the drafter's learned acceptance head draft the
-   * request's limit and verify the prefix whose rows each predict acceptance
-   * >= kLearnedDraft (+13% greedy over the timing policy). Sampled cycles do
-   * the same with q's top probability >= kConfidentDraft: diffuse rows are
-   * accepted 19-51% of the time, against 85% for the rest; the learned cut
-   * measured no gain there. Either cut depends only on the draft, never on
-   * timing, so seeded replay is unaffected. */
-  static constexpr float kLearnedDraft = 0.5f;
+   * request's limit and verify the prefix that maximizes the expected
+   * emitted tokens over the cycle's time, with the head's predictions as the
+   * acceptance estimates. Each emitted token takes one draw at its position
+   * whatever the prefix, so the timing-based cut leaves outputs unchanged.
+   * Sampled cycles verify the prefix whose q top probability is
+   * >= kConfidentDraft: diffuse rows are accepted 19-51% of the time, against
+   * 85% for the rest; the learned cut measured no gain there. That cut
+   * depends only on q, never on timing, so seeded replay is unaffected. */
   static constexpr float kConfidentDraft = 0.6f;
   /* Plain steps before a one-draft cycle re-measures acceptance: from the
    * first, doubling while the policy keeps returning to plain steps. */
@@ -282,20 +283,31 @@ void ds41_session_prepare_batch_execution(ds41_session*) {}
 
 namespace {
 
-constexpr float kPolicyRate = 0.1f, kPolicyRelax = 0.02f;
+/* A cycle's time also moves the other widths' estimates by kPolicyShift of
+ * its error: widths the policy rarely picks otherwise keep their prior. */
+constexpr float kPolicyRate = 0.1f, kPolicyRelax = 0.02f, kPolicyShift = 0.05f;
 
-uint32_t draft_width(ds41_session* s, uint32_t limit) {
-  auto& p = s->policy;
+/* The drafts per cycle that maximize the expected emitted tokens over the
+ * cycle's time; accept[k] estimates P(draft k + 1 is accepted | the drafts
+ * before it were). */
+uint32_t best_width(const ds41_session* s, const float* accept, uint32_t limit) {
+  const auto& p = s->policy;
   uint32_t best_w = 0;
   float best = 1.0f / p.cycle_ms[0], expected = 1.0f, reach = 1.0f;
   for (uint32_t w = 1; w <= limit; w++) {
-    reach *= p.accept[w - 1];
+    reach *= accept[w - 1];
     expected += reach;
     if (expected / p.cycle_ms[w] > best) {
       best = expected / p.cycle_ms[w];
       best_w = w;
     }
   }
+  return best_w;
+}
+
+uint32_t draft_width(ds41_session* s, uint32_t limit) {
+  auto& p = s->policy;
+  uint32_t best_w = best_width(s, p.accept, limit);
   if (best_w > 0) {
     p.probe = ds41_session::kProbeFirst;
   } else if (limit > 0 && ++p.plain >= p.probe) {
@@ -444,11 +456,11 @@ int prepare(Cycle& c, char* error, size_t capacity) {
         (ds41_dspark_state_end(s->dspark) != c.first ||
          !ds41_dspark_draft(s->dspark, anchor, c.block + 1, c.tail, sampler, top, learned ? confidence : nullptr)))
       c.tail = 0;
-    if (learned || c.stochastic) {
-      const float* score = learned ? confidence : top;
-      const float floor = learned ? ds41_session::kLearnedDraft : ds41_session::kConfidentDraft;
+    if (learned) {
+      c.tail = best_width(s, confidence, c.tail);
+    } else if (c.stochastic) {
       uint32_t confident = 0;
-      while (confident < c.tail && score[confident] >= floor) ++confident;
+      while (confident < c.tail && top[confident] >= ds41_session::kConfidentDraft) ++confident;
       c.tail = confident;
     }
   }
@@ -594,7 +606,8 @@ int finish(Cycle& c, char* error, size_t capacity) {
   /* Drafts after the first rejection say nothing about their acceptance. */
   for (uint32_t k = 0; k < std::min(accepted, c.tail); k++) ema(p.accept[k], k + 1 < accepted ? 1.0f : 0.0f);
   for (uint32_t k = c.tail; k < DS41_DSPARK_BLOCK; k++) ema(p.accept[k], ds41_session::kAcceptPrior, kPolicyRelax);
-  ema(p.cycle_ms[c.tail], ms(c.t0, t2));
+  const float miss = ms(c.t0, t2) - p.cycle_ms[c.tail];
+  for (uint32_t w = 1; w <= DS41_DSPARK_BLOCK; w++) p.cycle_ms[w] += (w == c.tail ? kPolicyRate : kPolicyShift) * miss;
   if (trace)
     fprintf(stderr, "ds41: DSpark pos=%u drafted=%u accepted=%u draft=%.1fms verify=%.1fms\n", c.first, c.tail,
             accepted - 1, ms(c.t0, c.t1), ms(c.t1, t2));
