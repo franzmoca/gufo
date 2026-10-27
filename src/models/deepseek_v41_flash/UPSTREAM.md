@@ -5,8 +5,8 @@ stays unchanged. V4.1 semantics (CSA2 KV/index sharing, YoCo layout, shifted
 mHC, Engram, sqrtsoftplus routing) follow the official DeepSeek-V4.1-Flash-1017
 `inference/model.py` and `inference/engram.py`, and the GGUF layout follows the
 `deepseek41` architecture of the ISTA-DASLab GSQ-RCO builds. The independent
-CPU oracle lives in `tools/ds41/`. Plan and status:
-[docs/models/deepseek-v4.1-flash/ROADMAP.md](../../../docs/models/deepseek-v4.1-flash/ROADMAP.md).
+CPU oracle lives in `tools/ds41/`. Status and history:
+[docs/models/deepseek-v4.1-flash/EXPERIMENTS.md](../../../docs/models/deepseek-v4.1-flash/EXPERIMENTS.md).
 
 The notes below describe the V4 engine this package was forked from.
 
