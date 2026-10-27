@@ -182,7 +182,7 @@ int main() {
     const char* name;
     tune::Launcher launcher;
   } variants[] = {
-      {"prod", [](const void* w, const float* x, float* o, uint32_t m, uint32_t n, uint32_t k, uint32_t g) { return ds41_v41_dense_f16(13, w, x, o, m, n, k, g); }},
+      {"prod", [](const void* w, const float* x, float* o, uint32_t m, uint32_t n, uint32_t k, uint32_t g) { return ds41_v41_dense_f16(13, w, x, o, m, n, k, g, 0); }},
       {"t64", tune::launch<64, false>},
       {"t64+db", tune::launch<64, true>},
       {"t128+db", tune::launch<128, true>},

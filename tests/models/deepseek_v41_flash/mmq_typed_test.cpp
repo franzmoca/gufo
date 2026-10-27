@@ -3,6 +3,7 @@
 #include <hip/hip_runtime.h>
 
 #include <algorithm>
+#include <bit>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
@@ -870,7 +871,41 @@ bool DenseF16Case(const TypeCase& t, int M, int N, int K, int groups,
   (void)hipMalloc(&want, sizeof(float) * n_out);
   const std::size_t matrix_bytes =
       static_cast<std::size_t>(M) * K / t.block_values * t.block_bytes;
-  bool ok = ds41_v41_dense_f16(t.type, dw, dx, got, M, N, K, groups) == 0;
+  bool ok = ds41_v41_dense_f16(t.type, dw, dx, got, M, N, K, groups, 0) == 0;
+  /* FP16 activations (rounded as the staging rounds them) and FP16 outputs
+   * reproduce the FP32 launch bit for bit. */
+  bool same = ok;
+  if (ok) {
+    uint16_t *x16 = nullptr, *y16 = nullptr;
+    float* y = nullptr;
+    (void)hipMalloc(&x16, sizeof(uint16_t) * x.size());
+    (void)hipMalloc(&y16, sizeof(uint16_t) * n_out);
+    (void)hipMalloc(&y, sizeof(float) * n_out);
+    const auto ref = Host(got, n_out);
+    std::vector<uint16_t> ref16(n_out);
+    for (std::size_t i = 0; i < n_out; ++i)
+      ref16[i] = std::bit_cast<uint16_t>(static_cast<_Float16>(ref[i]));
+    const auto half_out = [&]() {
+      std::vector<uint16_t> h(n_out);
+      (void)hipMemcpy(h.data(), y16, h.size() * sizeof(uint16_t),
+                      hipMemcpyDeviceToHost);
+      return h == ref16;
+    };
+    same = ds41_v41_to_half(dx, x16, x.size()) == 0 &&
+           ds41_v41_dense_f16(t.type, dw, x16, y, M, N, K, groups,
+                              DS41_V41_DENSE_X_HALF) == 0 &&
+           Host(y, n_out) == ref &&
+           ds41_v41_dense_f16(t.type, dw, dx, y16, M, N, K, groups,
+                              DS41_V41_DENSE_OUT_HALF) == 0 &&
+           half_out() &&
+           ds41_v41_dense_f16(
+               t.type, dw, x16, y16, M, N, K, groups,
+               DS41_V41_DENSE_X_HALF | DS41_V41_DENSE_OUT_HALF) == 0 &&
+           half_out();
+    (void)hipFree(x16);
+    (void)hipFree(y16);
+    (void)hipFree(y);
+  }
   for (int token = 0; ok && token < N; ++token)
     for (int z = 0; ok && z < groups; ++z)
       ok = ds41_v41_gemv(
@@ -882,13 +917,14 @@ bool DenseF16Case(const TypeCase& t, int M, int N, int K, int groups,
                0, 4, 1, K, M) == 0;
   const double e =
       ok ? RelativeError(Host(got, n_out), Host(want, n_out)) : INFINITY;
-  std::printf("dense f16 %-8s M=%d N=%d K=%d groups=%d rel_err=%.2e\n", t.name,
-              M, N, K, groups, e);
+  std::printf(
+      "dense f16 %-8s M=%d N=%d K=%d groups=%d rel_err=%.2e fp16 io %s\n",
+      t.name, M, N, K, groups, e, same ? "identical" : "DIFFERS");
   (void)hipFree(dw);
   (void)hipFree(dx);
   (void)hipFree(got);
   (void)hipFree(want);
-  return e < 2e-3;
+  return e < 2e-3 && same;
 }
 
 /* The FP16 matrix-core routed kernel against the FP32-activation expert

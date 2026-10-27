@@ -1789,14 +1789,16 @@ __device__ __forceinline__ void lds_barrier() { asm volatile("s_waitcnt lgkmcnt(
  * the lanes' own columns and one with the opposite half's (permlanex16)
  * cover them. With `rope` (rope_table_kernel at pos0 for the batch), q's
  * tail kAttnRope dimensions are rotated as ds41_v41_rope_tail does, and the
- * output gets ds41_v41_rope_fp8's inverse rotation and FP8 rounding. The
+ * output gets ds41_v41_rope_fp8's inverse rotation and FP8 rounding. With
+ * out16 the output rows are stored as FP16 there instead of out. The
  * kernel's code is kept within the instruction cache (a rolled epilogue,
  * DPP reductions, table decoding); larger code ran several times slower. */
 __global__ __launch_bounds__(256) void attention_f16_kernel(const float* q, const float* ring, const float* chunk,
                                                             uint32_t window, uint32_t floor, ds41_fp4_rows comp,
                                                             const uint32_t* all_idx, uint32_t k, uint32_t ratio,
-                                                            const float* sinks, float* out, uint32_t pos0,
-                                                            uint32_t heads, float scale, const float2* rope) {
+                                                            const float* sinks, float* out, _Float16* out16,
+                                                            uint32_t pos0, uint32_t heads, float scale,
+                                                            const float2* rope) {
   constexpr uint32_t DIM = 512, HEADS = 32, ROWS = kAttnRows, ROPE = kAttnRope, TAIL = DIM - ROPE;
   const uint32_t token = blockIdx.x;
   const uint32_t head0 = blockIdx.y * HEADS;
@@ -2055,9 +2057,14 @@ __global__ __launch_bounds__(256) void attention_f16_kernel(const float* q, cons
           for (uint32_t c = 0; c < 2; c++) v[2 * pr + c] = fp8_round_scaled(v[2 * pr + c], eb);
         }
       }
-      float* o = out + ((uint64_t)token * heads + head0 + head) * DIM;
-      *reinterpret_cast<float2*>(o + d_own) = make_float2(v[0], v[1]);
-      *reinterpret_cast<float2*>(o + d_other) = make_float2(v[2], v[3]);
+      const uint64_t o = ((uint64_t)token * heads + head0 + head) * DIM;
+      if (out16) {
+        *reinterpret_cast<attn_half2*>(out16 + o + d_own) = attn_half2{(_Float16)v[0], (_Float16)v[1]};
+        *reinterpret_cast<attn_half2*>(out16 + o + d_other) = attn_half2{(_Float16)v[2], (_Float16)v[3]};
+      } else {
+        *reinterpret_cast<float2*>(out + o + d_own) = make_float2(v[0], v[1]);
+        *reinterpret_cast<float2*>(out + o + d_other) = make_float2(v[2], v[3]);
+      }
     }
   }
 }
@@ -2819,8 +2826,8 @@ extern "C" int ds41_v41_apply_mask(float* score, uint64_t score_stride, const ui
 
 extern "C" int ds41_v41_attention(float* q, const float* ring, const float* chunk, uint32_t window,
                                   uint32_t floor, ds41_fp4_rows comp, const uint32_t* idx, uint32_t k, uint32_t ratio,
-                                  const float* sinks, float* out, float* partial, uint32_t pos0, uint32_t n,
-                                  uint32_t heads, uint32_t head_dim, float scale, const float* inv_freq,
+                                  const float* sinks, float* out, uint16_t* out_half, float* partial, uint32_t pos0,
+                                  uint32_t n, uint32_t heads, uint32_t head_dim, float scale, const float* inv_freq,
                                   uint32_t rope_dim, float* rope_scratch) {
   static_assert(DS41_V41_ATTN_PARTIAL_PER_HEAD == kAttnSplits * kAttnPartial, "partial layout");
   if (inv_freq && (rope_dim % 32 != 0 || rope_dim > head_dim)) return 1;
@@ -2839,9 +2846,11 @@ extern "C" int ds41_v41_attention(float* q, const float* ring, const float* chun
       rope_table_kernel<<<blocks_for((uint64_t)n * rope_dim / 2), kThreads>>>(inv_freq, rope, rope_dim / 2, pos0, n);
     }
     attention_f16_kernel<<<dim3(n, heads / 32), 256>>>(q, ring, chunk, window, floor, comp, idx, k, ratio, sinks, out,
-                                                       pos0, heads, scale, rope);
+                                                       reinterpret_cast<_Float16*>(out_half), pos0, heads, scale,
+                                                       rope);
     return launch_ok("attention");
   }
+  if (out_half) return 1;
   if (inv_freq && ds41_v41_rope_tail(q, n * heads, head_dim, rope_dim, inv_freq, pos0, heads, 1, 0)) return 1;
   if (split) {
     attention_split_kernel<<<dim3(heads / kAttnSplitHeads, kAttnSplits, n), 32 * kAttnSplitHeads>>>(
