@@ -1132,9 +1132,16 @@ bool moe(ds41_decoder* d, uint32_t il, uint32_t n) {
 /* Tokens from which block() fuses the batched state passes. */
 constexpr uint32_t kStatePassTokens = 16;
 
-bool block(ds41_decoder* d, uint32_t il, int prev, int next, uint32_t n, const Joint* joint = nullptr) {
+/* Runs layer il on n rows. `then`, when set, is layer il + 1, which runs
+ * next on the same h: a batch then closes with that layer's attention state
+ * pass (mixes and xn) on the expanded state, and *mixed tells the next call
+ * to skip its own; nothing may change h in between. */
+bool block(ds41_decoder* d, uint32_t il, int prev, int next, uint32_t n, const Joint* joint = nullptr,
+           bool* mixed = nullptr, const ds41_layer_weights* then = nullptr) {
   const ds41_layer_weights* l = &d->engine->weights->layer[il];
   const float eps = DS41_RMS_EPS;
+  const bool entered = mixed && *mixed;
+  if (mixed) *mixed = false;
   /* Batches read each state once for its mixes and collapse (the FFN's
    * after the attention expand); the collapse uses the pre-mix that was
    * known before the mix. */
@@ -1144,15 +1151,27 @@ bool block(ds41_decoder* d, uint32_t il, int prev, int next, uint32_t n, const J
       return ds41_v41_hc_sinkhorn(d->mixes, f32(d, scale), f32(d, base), pre, post, comb, kHc,
                                   DS41_N_HC_SINKHORN_ITER, DS41_HC_EPS, n) == 0;
     };
-    return ds41_v41_hc_state_pass(nullptr, nullptr, nullptr, d->h, nullptr, d->pre[prev], f32(d, l->attn_norm),
-                                  d->xn, f32(d, l->hc_attn_fn), d->mixes, kHc, kDim, eps, n) == 0 &&
-           sinkhorn(l->hc_attn_scale, l->hc_attn_base, d->pre[next], d->post, d->comb) && attention(d, il, n, joint) &&
-           ds41_v41_hc_state_pass(d->attn_out, d->post, d->comb, d->h, d->h2, d->pre[next], f32(d, l->ffn_norm),
-                                  d->xn, f32(d, l->hc_ffn_fn), d->mixes, kHc, kDim, eps, n) == 0 &&
-           sinkhorn(l->hc_ffn_scale, l->hc_ffn_base, d->pre[prev], d->ffn_post, d->ffn_comb) && moe(d, il, n) &&
-           ds41_v41_hc_expand_sum(d->down6, d->sd, DS41_N_EXPERT_USED, d->h2, d->ffn_post, d->ffn_comb, d->h, kHc,
-                                  kDim, n) == 0;
+    if (!(entered || ds41_v41_hc_state_pass(nullptr, nullptr, 0, nullptr, nullptr, d->h, nullptr, d->pre[prev],
+                                            f32(d, l->attn_norm), d->xn, f32(d, l->hc_attn_fn), d->mixes, kHc,
+                                            kDim, eps, n) == 0) ||
+        !sinkhorn(l->hc_attn_scale, l->hc_attn_base, d->pre[next], d->post, d->comb) ||
+        !attention(d, il, n, joint) ||
+        ds41_v41_hc_state_pass(d->attn_out, nullptr, 0, d->post, d->comb, d->h, d->h2, d->pre[next],
+                               f32(d, l->ffn_norm), d->xn, f32(d, l->hc_ffn_fn), d->mixes, kHc, kDim, eps, n) ||
+        !sinkhorn(l->hc_ffn_scale, l->hc_ffn_base, d->pre[prev], d->ffn_post, d->ffn_comb) || !moe(d, il, n))
+      return false;
+    if (!then)
+      return ds41_v41_hc_expand_sum(d->down6, d->sd, DS41_N_EXPERT_USED, d->h2, d->ffn_post, d->ffn_comb, d->h, kHc,
+                                    kDim, n) == 0;
+    /* The next layer's attention collapse uses this FFN's pre-mix. */
+    if (ds41_v41_hc_state_pass(d->sd, d->down6, DS41_N_EXPERT_USED, d->ffn_post, d->ffn_comb, d->h2, d->h,
+                               d->pre[prev], f32(d, then->attn_norm), d->xn, f32(d, then->hc_attn_fn), d->mixes, kHc,
+                               kDim, eps, n))
+      return false;
+    *mixed = true;
+    return true;
   }
+  if (entered) return false;
   /* Attention uses the pre-mix of the previous FFN (shifted mHC). */
   if (!hc_mix(d, l->hc_attn_fn, l->hc_attn_scale, l->hc_attn_base, d->h, d->pre[next], d->post, d->comb, n) ||
       ds41_v41_hc_collapse_norm(d->h, d->pre[prev], f32(d, l->attn_norm), d->xn, kHc, kDim, eps, n) ||
@@ -1167,6 +1186,15 @@ bool block(ds41_decoder* d, uint32_t il, int prev, int next, uint32_t n, const J
                              n))
     return false;
   return true;
+}
+
+/* Layer il + 1 for block()'s fused close when it runs next on the same rows
+ * and nothing changes h in between: no Engram add or replay boundary. */
+const ds41_layer_weights* next_layer(const ds41_decoder* d, uint32_t il, bool boundary) {
+  const uint32_t nl = il + 1;
+  if (nl >= DS41_N_LAYER || ds41_layer_engram_slot(nl) >= 0 || (boundary && nl == DS41_FIRST_DECODER_LAYER))
+    return nullptr;
+  return &d->engine->weights->layer[nl];
 }
 
 /* Allocates the batch scratch, sizing the batch from the memory left after
@@ -1568,8 +1596,9 @@ bool replay_boundary(ds41_decoder* d, uint32_t il, int prev, uint32_t skip, uint
   /* The attention input as block() derives it for this many rows. */
   const bool collapsed =
       skip >= kStatePassTokens
-          ? ds41_v41_hc_state_pass(nullptr, nullptr, nullptr, d->h, nullptr, d->pre[prev], f32(d, l->attn_norm),
-                                   d->xn, f32(d, l->hc_attn_fn), d->mixes, kHc, kDim, DS41_RMS_EPS, skip) == 0
+          ? ds41_v41_hc_state_pass(nullptr, nullptr, 0, nullptr, nullptr, d->h, nullptr, d->pre[prev],
+                                   f32(d, l->attn_norm), d->xn, f32(d, l->hc_attn_fn), d->mixes, kHc, kDim,
+                                   DS41_RMS_EPS, skip) == 0
           : ds41_v41_hc_collapse_norm(d->h, d->pre[prev], f32(d, l->attn_norm), d->xn, kHc, kDim, DS41_RMS_EPS,
                                       skip) == 0;
   if (!collapsed || !linear(d, l->attn_compressor_kv, d->xn, d->ckv, skip) ||
@@ -1666,7 +1695,8 @@ int eval_rows(ds41_decoder* d, const int* tokens, uint32_t n, uint32_t keep_from
   const uint32_t feature_rows = std::min(kept, DS41_DSPARK_FEATURE_ROWS);
   d->feature_rows = 0;
   d->window_floor = keep_from;
-  uint32_t rows = n;  // rows of the current layer
+  uint32_t rows = n;    // rows of the current layer
+  bool mixed = false;  // the previous block made this layer's attention mixes
   for (uint32_t il = 0; il < DS41_N_LAYER && ok; il++) {
     if (il == DS41_FIRST_DECODER_LAYER && skip) {
       ok = replay_boundary(d, il, prev, skip, n);
@@ -1682,7 +1712,7 @@ int eval_rows(ds41_decoder* d, const int* tokens, uint32_t n, uint32_t keep_from
                                 (uint64_t)DS41_DSPARK_TARGET_LAYERS * kDim, kHc, kDim, feature_rows) == 0;
     }
     /* block() leaves this layer's FFN pre-mix in pre[prev]. */
-    ok = ok && block(d, il, prev, prev ^ 1, rows);
+    ok = ok && block(d, il, prev, prev ^ 1, rows, nullptr, &mixed, next_layer(d, il, skip != 0));
     if (ok && layer_fn) {
       ok = hipMemcpy(d->host_h.data(), d->h + (rows - 1) * hd, hd * sizeof(float), hipMemcpyDeviceToHost) ==
                hipSuccess &&
@@ -1838,6 +1868,7 @@ int ds41_decoder_eval_joint(ds41_decoder* const* ds, const int* const* tokens, c
   }
   const Joint joint{ds, ns, count};
   const int prev = 0;
+  bool mixed = false;  // the previous block made this layer's attention mixes
   for (uint32_t il = 0; il < DS41_N_LAYER && ok; il++) {
     const int slot = ds41_layer_engram_slot(il);
     if (slot >= 0) ok = engram_reads[slot].get() && engram(lead, il, lead->engram_pinned[slot], total);
@@ -1849,7 +1880,7 @@ int ds41_decoder_eval_joint(ds41_decoder* const* ds, const int* const* tokens, c
           ok = ds41_v41_hc_mean(d->h + (uint64_t)(ns[i] - feature_rows) * hd, d->features + (uint64_t)f * kDim,
                                 (uint64_t)DS41_DSPARK_TARGET_LAYERS * kDim, kHc, kDim, feature_rows) == 0;
     }
-    ok = ok && block(lead, il, prev, prev ^ 1, total, &joint);
+    ok = ok && block(lead, il, prev, prev ^ 1, total, &joint, &mixed, next_layer(lead, il, false));
   }
   for (uint32_t slot = 0; slot < DS41_N_ENGRAM_LAYER; slot++)
     if (engram_reads[slot].valid()) engram_reads[slot].wait();

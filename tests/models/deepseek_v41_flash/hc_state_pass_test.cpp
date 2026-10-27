@@ -1,6 +1,7 @@
 // The batched mHC state pass against the separate kernels it fuses: the
-// expand (or the plain state), the mixes over it and the collapse with its
-// RMS norm, on random data with an odd token count.
+// expand (or the expand of a sum of rows, or the plain state), the mixes over
+// it and the collapse with its RMS norm, on random data with an odd token
+// count.
 #include <hip/hip_runtime.h>
 
 #include <algorithm>
@@ -50,11 +51,15 @@ double RelErr(const std::vector<float>& got, const std::vector<float>& want) {
   return ref > 0.0 ? err / ref : err;
 }
 
-bool Case(uint32_t n, bool expand, std::mt19937& rng) {
+/* rows < 0: the plain state; otherwise expanded from y plus `rows` rows. */
+bool Case(uint32_t n, int rows, std::mt19937& rng) {
+  const bool expand = rows >= 0;
+  const uint32_t r = expand ? (uint32_t)rows : 0;
   const float eps = 1e-6f;
   const std::size_t state = (std::size_t)n * kHc * kDim;
   auto* h = Device(Random(state, -2.0f, 2.0f, rng));
   auto* y = Device(Random((std::size_t)n * kDim, -2.0f, 2.0f, rng));
+  auto* x = Device(Random((std::size_t)n * (r + 1) * kDim, -2.0f, 2.0f, rng));
   auto* post = Device(Random((std::size_t)n * kHc, 0.0f, 2.0f, rng));
   auto* comb = Device(Random((std::size_t)n * kHc * kHc, 0.0f, 1.0f, rng));
   auto* pre = Device(Random((std::size_t)n * kHc, 0.0f, 1.0f, rng));
@@ -70,18 +75,19 @@ bool Case(uint32_t n, bool expand, std::mt19937& rng) {
   const float* src = h;
   bool ok = true;
   if (expand) {
-    ok = ds41_v41_hc_expand(y, h, post, comb, want_h, kHc, kDim, n) == 0;
+    ok = ds41_v41_hc_expand_sum(x, y, r, h, post, comb, want_h, kHc, kDim, n) ==
+         0;
     src = want_h;
   }
   ok = ok && ds41_v41_hc_mixes(fn, src, want_mix, kHc, kDim, eps, n) == 0 &&
        ds41_v41_hc_collapse_norm(src, pre, norm_w, want_xn, kHc, kDim, eps,
                                  n) == 0 &&
-       ds41_v41_hc_state_pass(expand ? y : nullptr, post, comb, h, got_h, pre,
-                              norm_w, got_xn, fn, got_mix, kHc, kDim, eps,
+       ds41_v41_hc_state_pass(expand ? y : nullptr, x, r, post, comb, h, got_h,
+                              pre, norm_w, got_xn, fn, got_mix, kHc, kDim, eps,
                               n) == 0 &&
        hipDeviceSynchronize() == hipSuccess;
   if (!ok) {
-    std::printf("hc state pass n=%u expand=%d: launch failed\n", n, expand);
+    std::printf("hc state pass n=%u rows=%d: launch failed\n", n, rows);
     return false;
   }
   const double e_mix = RelErr(Host(got_mix, (std::size_t)n * kMix),
@@ -91,10 +97,10 @@ bool Case(uint32_t n, bool expand, std::mt19937& rng) {
   const double e_h =
       expand ? RelErr(Host(got_h, state), Host(want_h, state)) : 0.0;
   const bool pass = e_mix < 1e-5 && e_xn < 1e-5 && e_h < 1e-6;
-  std::printf("hc state pass n=%u expand=%d mixes %.2e xn %.2e state %.2e %s\n",
-              n, expand, e_mix, e_xn, e_h, pass ? "ok" : "FAIL");
-  for (float* p : {h, y, post, comb, pre, norm_w, fn, want_h, got_h, want_mix,
-                   got_mix, want_xn, got_xn})
+  std::printf("hc state pass n=%u rows=%d mixes %.2e xn %.2e state %.2e %s\n",
+              n, rows, e_mix, e_xn, e_h, pass ? "ok" : "FAIL");
+  for (float* p : {h, y, x, post, comb, pre, norm_w, fn, want_h, got_h,
+                   want_mix, got_mix, want_xn, got_xn})
     (void)hipFree(p);
   return pass;
 }
@@ -110,7 +116,7 @@ int main() {
   std::mt19937 rng(41);
   bool ok = true;
   for (uint32_t n : {16u, 37u})
-    for (bool expand : {false, true})
-      ok = Case(n, expand, rng) && ok;
+    for (int rows : {-1, 0, 6})
+      ok = Case(n, rows, rng) && ok;
   return ok ? 0 : 1;
 }

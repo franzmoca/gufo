@@ -170,12 +170,13 @@ int ds41_v41_hc_mix(const float* fn, const float* h, const float* scale, const f
 int ds41_v41_hc_collapse_norm(const float* h, const float* pre, const float* weight, float* out, uint32_t hc,
                               uint32_t dim, float eps, uint32_t n);
 /* Batched hc_mixes and hc_collapse_norm over one read of the state: with y,
- * the state is first ds41_v41_hc_expand(y, h, post, comb) and stored to
- * h_out, otherwise it is h. mixes come from fn, xn from pre and norm_w.
- * Returns 1 for hc != 4 or dim not a multiple of 256 up to 8192. */
-int ds41_v41_hc_state_pass(const float* y, const float* post, const float* comb, const float* h, float* h_out,
-                           const float* pre, const float* norm_w, float* xn, const float* fn, float* mixes,
-                           uint32_t hc, uint32_t dim, float eps, uint32_t n);
+ * the state is first ds41_v41_hc_expand_sum(x, y, rows, h, post, comb) and
+ * stored to h_out, otherwise it is h. mixes come from fn, xn from pre and
+ * norm_w. Returns 1 for hc != 4, dim not a multiple of 256 up to 8192, or
+ * rows without y. */
+int ds41_v41_hc_state_pass(const float* y, const float* x, uint32_t rows, const float* post, const float* comb,
+                           const float* h, float* h_out, const float* pre, const float* norm_w, float* xn,
+                           const float* fn, float* mixes, uint32_t hc, uint32_t dim, float eps, uint32_t n);
 /* out[t, b, i] = post[t, b] * y[t, i] + sum_a comb[t, a, b] * residual[t, a, i]. */
 int ds41_v41_hc_expand(const float* y, const float* residual, const float* post, const float* comb, float* out,
                        uint32_t hc, uint32_t dim, uint32_t n);

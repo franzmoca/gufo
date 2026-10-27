@@ -522,12 +522,14 @@ __global__ __launch_bounds__(256) void hc_mixes_rows_kernel(const float* fn, con
 
 /* Batched pass over the mHC state (hc = 4) of kMixTokens tokens per block,
  * each thread taking two 4-channel groups of every copy: with kExpand the
- * state is first expanded, s = post y + comb^T h, and stored to h_out;
+ * state is first expanded, s = post y + comb^T h with y = y + sum_r x[r]
+ * (as hc_expand_sum_kernel), and stored to h_out;
  * then the mixes of s (as hc_mixes_rows_kernel) and the collapse
  * weight * RMSNorm(sum_c pre_c s_c) come from the same registers, so the
  * state is read once. */
 template <bool kExpand>
-__global__ __launch_bounds__(1024) void hc_state_pass_kernel(const float* y, const float* post, const float* comb,
+__global__ __launch_bounds__(1024) void hc_state_pass_kernel(const float* y, const float* x, uint32_t rows,
+                                                             const float* post, const float* comb,
                                                              const float* h, float* h_out, const float* pre,
                                                              const float* norm_w, float* xn, const float* fn,
                                                              float* mixes, uint32_t dim, uint32_t tokens, float eps) {
@@ -545,7 +547,11 @@ __global__ __launch_bounds__(1024) void hc_state_pass_kernel(const float* y, con
     for (uint32_t g = 0; g < G; g++) {
       const uint32_t q = threadIdx.x + g * blockDim.x;
       if constexpr (kExpand) {
-        const float4 yv = reinterpret_cast<const float4*>(y + tok * dim)[q];
+        float4 yv = reinterpret_cast<const float4*>(y + tok * dim)[q];
+        for (uint32_t r = 0; r < rows; r++) {
+          const float4 xv = reinterpret_cast<const float4*>(x + (tok * rows + r) * dim)[q];
+          yv.x += xv.x, yv.y += xv.y, yv.z += xv.z, yv.w += xv.w;
+        }
         float4 hv[HC];
 #pragma unroll
         for (uint32_t a = 0; a < HC; a++) hv[a] = ht[a * groups + q];
@@ -2678,16 +2684,19 @@ extern "C" int ds41_v41_hc_sinkhorn(const float* mixes, const float* scale, cons
   return launch_ok("hc sinkhorn");
 }
 
-extern "C" int ds41_v41_hc_state_pass(const float* y, const float* post, const float* comb, const float* h,
-                                     float* h_out, const float* pre, const float* norm_w, float* xn, const float* fn,
-                                     float* mixes, uint32_t hc, uint32_t dim, float eps, uint32_t n) {
-  if (hc != 4 || dim % 256 != 0 || dim / 8 > 1024) return 1;
+extern "C" int ds41_v41_hc_state_pass(const float* y, const float* x, uint32_t rows, const float* post,
+                                     const float* comb, const float* h, float* h_out, const float* pre,
+                                     const float* norm_w, float* xn, const float* fn, float* mixes, uint32_t hc,
+                                     uint32_t dim, float eps, uint32_t n) {
+  if (hc != 4 || dim % 256 != 0 || dim / 8 > 1024 || (rows && !y)) return 1;
   if (n == 0) return 0;
   const dim3 grid((n + kMixTokens - 1) / kMixTokens);
   if (y)
-    hc_state_pass_kernel<true><<<grid, dim / 8>>>(y, post, comb, h, h_out, pre, norm_w, xn, fn, mixes, dim, n, eps);
+    hc_state_pass_kernel<true>
+        <<<grid, dim / 8>>>(y, x, rows, post, comb, h, h_out, pre, norm_w, xn, fn, mixes, dim, n, eps);
   else
-    hc_state_pass_kernel<false><<<grid, dim / 8>>>(y, post, comb, h, h_out, pre, norm_w, xn, fn, mixes, dim, n, eps);
+    hc_state_pass_kernel<false>
+        <<<grid, dim / 8>>>(y, x, 0, post, comb, h, h_out, pre, norm_w, xn, fn, mixes, dim, n, eps);
   return launch_ok("hc state pass");
 }
 
