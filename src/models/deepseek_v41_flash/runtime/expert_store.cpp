@@ -17,7 +17,6 @@
 #include <cstdio>
 #include <filesystem>
 #include <fstream>
-#include <functional>
 #include <limits>
 #include <memory>
 #include <mutex>
@@ -35,7 +34,17 @@
 namespace {
 
 constexpr uint64_t kGiB = 1ull << 30;
-constexpr uint64_t kReserve = 8 * kGiB;
+/* Headroom kept above the cache for everything allocated after it: the
+ * shared batch scratch (~1.4 GiB at 1M context), one session's FP4 state
+ * (~0.9 GiB at 1M, far less at serving depths) and transient prefill peaks.
+ * The resident path keeps a 1 GiB dispatch reserve under the same loads;
+ * sessions that no longer fit fall back to the disk prompt cache. */
+constexpr uint64_t kReserve = 4 * kGiB;
+/* Rows of the compact prefetch stage: two parity halves, so the job a layer
+ * adopts and the job submitted for the layer after never share rows. A
+ * whole-layer set measured 3.6 GiB; jobs touch only the predicted experts
+ * (~70 at pp2048, 6 at decode) plus slack for cold caches. */
+constexpr uint32_t kPrefetchStageRows = 192;
 constexpr uint64_t kChunkBytes = 512ull << 20;
 constexpr uint64_t kReadBytes = 32ull << 20;
 constexpr uint64_t kDirectAlign = 4096;
@@ -119,6 +128,7 @@ struct PrefetchJob {
   std::vector<ReadTask> tasks;
   std::array<uint32_t, DS41_N_EXPERT> task_begin{};  // first task per expert
   std::array<uint32_t, DS41_N_EXPERT> task_count{};  // tasks per expert
+  std::array<uint32_t, DS41_N_EXPERT> row_of{};  // compact stage row per expert
   std::vector<uint32_t> experts;  // experts the completed job stages
   std::atomic<uint64_t> bytes{0};
   std::atomic<bool> failed{false};
@@ -216,40 +226,46 @@ public:
    * workers on it while the caller's overlap callback runs. `adopt_wide`
    * gates prefill-scale jobs, which a small batch must drop instead of
    * reading a whole prompt's experts. */
-  bool Execute(uint32_t layer, bool adopt_wide,
-               const std::function<std::vector<ReadTask>(const PrefetchJob*)>& build,
-               bool (*overlap)(void*, const ds41_expert_overlap*),
-               void* overlap_context, const ds41_expert_overlap& info,
-               std::shared_ptr<PrefetchJob>* adopted, uint64_t* dropped_bytes) {
-    std::shared_ptr<PrefetchJob> job, parked;
-    std::vector<ReadTask> tasks;
+  /* Resolves the background job before a demand phase of `layer` is
+   * planned: quiesces its tasks and adopts a healthy same-layer job (a wide
+   * one only when adopt_wide), parks a next-layer job to resume after the
+   * phase, and drops anything overtaken. Callers need the adopted job's row
+   * assignment to build the weight table, which is why this is separate
+   * from RunPhase. A job submitted between Resolve and RunPhase runs as
+   * background after the phase and is simply double-read if it targeted
+   * this layer — harmless, and rarer than the prediction it loses. */
+  std::shared_ptr<PrefetchJob> Resolve(uint32_t layer, bool adopt_wide,
+                                       uint64_t* dropped_bytes) {
+    std::unique_lock lock(mutex_);
+    if (!pf_run_)
+      return nullptr;
+    std::shared_ptr<PrefetchJob> job;
+    pf_stop_ = true;
+    resolving_ = true;
+    pf_idle_.wait(lock, [this] { return pf_inflight_ == 0; });
+    pf_run_ = false;
+    pf_stop_ = false;
+    resolving_ = false;
+    pf_->taken = pf_next_;
+    if (pf_->layer == layer && !pf_->failed.load() && (adopt_wide || !pf_->wide))
+      job = pf_;  // its un-run, routed tasks join the phase
+    else if (pf_->layer == layer + 1 && !pf_->failed.load())
+      parked_ = pf_;  // the next layer's parity half is free; resume after
+    else
+      *dropped_bytes += pf_->bytes.load();
+    pf_.reset();
+    pf_next_ = 0;
+    return job;
+  }
+
+  bool RunPhase(uint32_t layer, const std::vector<ReadTask>& tasks,
+                bool (*overlap)(void*, const ds41_expert_overlap*),
+                void* overlap_context, const ds41_expert_overlap& info) {
     {
-      /* Resolve and arm under one lock hold: a SubmitPrefetch racing this
-       * window would otherwise arm a same-layer job after adoption is
-       * decided, double-writing rows the phase is about to fill. */
-      std::unique_lock lock(mutex_);
-      if (pf_run_) {
-        pf_stop_ = true;
-        resolving_ = true;
-        pf_idle_.wait(lock, [this] { return pf_inflight_ == 0; });
-        pf_run_ = false;
-        pf_stop_ = false;
-        resolving_ = false;
-        pf_->taken = pf_next_;
-        if (pf_->layer == layer && !pf_->failed.load() &&
-            (adopt_wide || !pf_->wide))
-          job = pf_;  // its un-run tasks join this phase below
-        else if (pf_->layer == layer + 1 && !pf_->failed.load())
-          parked = pf_;  // the next layer's set is free; resume after
-        else
-          *dropped_bytes += pf_->bytes.load();
-        pf_.reset();
-        pf_next_ = 0;
-      }
-      tasks = build(job.get());
+      std::lock_guard lock(mutex_);
       demand_ = &tasks;
       demand_next_ = 0;
-      parked_ = 0;
+      parked_workers_ = 0;
       phase_failed_.store(false);
       ++wake_;
       start_.notify_all();
@@ -257,31 +273,27 @@ public:
     const bool overlap_ok = !overlap || overlap(overlap_context, &info);
     {
       std::unique_lock lock(mutex_);
-      done_.wait(lock, [this] { return parked_ == threads_.size(); });
+      done_.wait(lock, [this] { return parked_workers_ == threads_.size(); });
       demand_ = nullptr;
-      parked_ = 0;
+      parked_workers_ = 0;
       /* After the phase: a job submitted mid-phase runs next; otherwise the
        * parked next-layer job resumes. Both target layer + 1; anything else
        * was overtaken by events and is not queued in the first place. */
-      if (pending_) {
-        if (pending_->layer == layer + 1) {
-          pf_ = std::move(pending_);
-          pf_next_ = 0;
-          pf_run_ = true;
-          ++wake_;
-        } else {
-          pending_.reset();
-        }
-      } else if (parked) {
-        pf_ = std::move(parked);
-        pf_next_ = pf_->taken;  // continue where the quiesce stopped it
+      std::shared_ptr<PrefetchJob> next;
+      if (pending_ && pending_->layer == layer + 1)
+        next = std::move(pending_);
+      else if (parked_ && parked_->layer == layer + 1)
+        next = std::move(parked_);
+      pending_.reset();
+      parked_.reset();
+      if (next) {
+        pf_ = std::move(next);
+        pf_next_ = pf_->taken;  // a parked job resumes where it stopped
         pf_run_ = true;
         ++wake_;
       }
     }
     start_.notify_all();
-    if (adopted)
-      *adopted = job;
     return overlap_ok && !phase_failed_.load();
   }
 
@@ -397,7 +409,7 @@ private:
               task = &(*demand_)[demand_next_++];
               demand = true;
             } else {
-              if (++parked_ == threads_.size())
+              if (++parked_workers_ == threads_.size())
                 done_.notify_one();
               break;
             }
@@ -436,12 +448,12 @@ private:
   std::condition_variable start_, done_, pf_idle_;
   const std::vector<ReadTask>* demand_ = nullptr;
   size_t demand_next_ = 0;
-  uint32_t parked_ = 0;
   std::atomic<bool> phase_failed_{false};
-  std::shared_ptr<PrefetchJob> pf_, pending_;
+  std::shared_ptr<PrefetchJob> pf_, pending_, parked_;
   bool pf_run_ = false, pf_stop_ = false, resolving_ = false;
   size_t pf_next_ = 0;
   uint32_t pf_inflight_ = 0;
+  uint32_t parked_workers_ = 0;
   uint64_t wake_ = 0;
   bool stopping_ = false;
   std::atomic<uint64_t> direct_reads_{0}, buffered_reads_{0};
@@ -507,8 +519,13 @@ uint64_t ds41_expert_available_memory() {
 struct ds41_expert_store {
   std::array<std::array<Source, 3>, DS41_N_LAYER> source{};
   std::array<std::array<Entry, DS41_N_EXPERT>, DS41_N_LAYER> entries{};
-  /* Ping-pong whole-layer stage sets, used in layer parity so a background
-   * sweep of layer L + 1 never touches the rows layer L computes from. */
+  /* The demand stage (whole-layer, rows indexed by expert id) and the
+   * compact prefetch stage (two parity halves of job-relative rows).
+   * Demand reads are ordered behind the previous layer's compute by the
+   * blocking routes copy, so they safely share one buffer; background jobs
+   * lack that ordering and write the compact stage instead, where the
+   * parity halves keep a job from clobbering the rows the layer before
+   * adopted. */
   std::array<std::array<uint8_t*, 3>, 2> stage{};
   bool stage_pairs = false;
   /* The only layer a concurrent prefetch submission may target: the next
@@ -864,11 +881,11 @@ bool ds41_expert_store_seed(ds41_expert_store* store, const char* path) {
 
 namespace {
 
-/* Read tasks for the wanted experts, merging consecutive experts of one
- * projection into chunks of at most kReadBytes and ordering chunks by shard
- * and offset for sequential access. */
+/* Demand read tasks into the whole-layer stage, merging consecutive experts
+ * of one projection into chunks of at most kReadBytes and ordering chunks by
+ * shard and offset for sequential access. */
 std::vector<ReadTask> build_read_tasks(const ds41_expert_store* store, uint32_t layer,
-                                       uint32_t set, const std::array<bool, DS41_N_EXPERT>& wanted) {
+                                       const std::array<bool, DS41_N_EXPERT>& wanted) {
   const auto& src = store->source[layer];
   std::array<uint32_t, 3> order{0, 1, 2};
   std::sort(order.begin(), order.end(), [&](uint32_t a, uint32_t b) {
@@ -887,7 +904,7 @@ std::vector<ReadTask> build_read_tasks(const ds41_expert_store* store, uint32_t 
         ++e;
       uint64_t offset = src[p].offset + (uint64_t)first * src[p].bytes;
       uint64_t left = (e - first) * src[p].bytes;
-      uint8_t* dst = store->stage[set][p] + (uint64_t)first * src[p].bytes;
+      uint8_t* dst = store->stage[0][p] + (uint64_t)first * src[p].bytes;
       while (left) {
         const uint64_t bytes = std::min(left, kReadBytes);
         tasks.push_back({src[p].fd, src[p].direct_fd, offset, bytes, dst});
@@ -900,8 +917,8 @@ std::vector<ReadTask> build_read_tasks(const ds41_expert_store* store, uint32_t 
   return tasks;
 }
 
-/* The second stage set is bought only when prefetch actually starts, so it
- * never shrinks the startup seed's memory budget. */
+/* The compact prefetch stage is bought only when prefetch actually starts,
+ * so it never shrinks the startup seed's memory budget. */
 bool ensure_stage_pairs(ds41_expert_store* store) {
   if (store->stage_pairs)
     return true;
@@ -910,7 +927,8 @@ bool ensure_stage_pairs(ds41_expert_store* store) {
     for (uint32_t layer = 0; layer < DS41_N_LAYER; ++layer)
       bytes[p] = std::max(bytes[p], store->source[layer][p].bytes);
   for (uint32_t p = 0; p < 3; ++p)
-    if (hipMalloc(&store->stage[1][p], bytes[p] * DS41_N_EXPERT) != hipSuccess) {
+    if (hipMalloc(&store->stage[1][p],
+                  bytes[p] * kPrefetchStageRows) != hipSuccess) {
       for (uint32_t q = 0; q <= p; ++q) {
         if (store->stage[1][q])
           (void)hipFree(store->stage[1][q]);
@@ -922,9 +940,9 @@ bool ensure_stage_pairs(ds41_expert_store* store) {
   return true;
 }
 
-/* Prefetch tasks of one expert: a chunked range per projection, in the
- * shard/offset-sorted projection order. */
-void append_expert_tasks(const ds41_expert_store* store, uint32_t layer, uint32_t set,
+/* Prefetch tasks of one expert into a compact stage row: a chunked range
+ * per projection, in the shard/offset-sorted projection order. */
+void append_expert_tasks(const ds41_expert_store* store, uint32_t layer, uint32_t row,
                          uint32_t e, std::vector<ReadTask>& tasks) {
   const auto& src = store->source[layer];
   std::array<uint32_t, 3> order{0, 1, 2};
@@ -934,7 +952,7 @@ void append_expert_tasks(const ds41_expert_store* store, uint32_t layer, uint32_
   });
   for (uint32_t p : order) {
     uint64_t offset = src[p].offset + (uint64_t)e * src[p].bytes;
-    uint8_t* dst = store->stage[set][p] + (uint64_t)e * src[p].bytes;
+    uint8_t* dst = store->stage[1][p] + (uint64_t)row * src[p].bytes;
     for (uint64_t left = src[p].bytes; left;) {
       const uint64_t bytes = std::min(left, kReadBytes);
       tasks.push_back({src[p].fd, src[p].direct_fd, offset, bytes, dst});
@@ -953,13 +971,18 @@ std::shared_ptr<PrefetchJob> build_prefetch_job(
   auto job = std::make_shared<PrefetchJob>();
   job->layer = layer;
   job->wide = wide;
-  /* Tasks are grouped per expert, so a later prepare can adopt exactly the
-   * routed experts' reads and skip waiting for wrong predictions. */
-  for (uint32_t e = 0; e < DS41_N_EXPERT; ++e) {
+  /* Tasks are grouped per expert at a compact row of the job's parity half,
+   * so a later prepare can adopt exactly the routed experts' reads; experts
+   * beyond the half simply stay demand reads. */
+  constexpr uint32_t kHalf = kPrefetchStageRows / 2;
+  const uint32_t base = (layer & 1) * kHalf;
+  uint32_t used = 0;
+  for (uint32_t e = 0; e < DS41_N_EXPERT && used < kHalf; ++e) {
     if (!wanted[e])
       continue;
+    job->row_of[e] = base + used++;
     job->task_begin[e] = static_cast<uint32_t>(job->tasks.size());
-    append_expert_tasks(store, layer, layer & 1, e, job->tasks);
+    append_expert_tasks(store, layer, job->row_of[e], e, job->tasks);
     job->task_count[e] =
         static_cast<uint32_t>(job->tasks.size()) - job->task_begin[e];
     job->experts.push_back(e);
@@ -1046,19 +1069,42 @@ bool ds41_expert_store_prepare(ds41_expert_store* store, uint32_t layer,
     admit[e] = n_tokens <= kRecentRows || recent[e] ||
                counts[e] >= std::max(4u, n_tokens / 32);
   }
+  /* Resolve the background job before planning the phase: the table and the
+   * demand reads both need its compact row assignment. */
+  uint32_t misses = 0;
+  for (uint32_t e = 0; e < DS41_N_EXPERT; ++e)
+    misses += missing[e] ? 1u : 0u;
+  /* Predictions may target this layer or the next; after the last layer the
+   * next evaluation's first prepare reopens the window. */
+  store->pf_expected.store(layer + 1 < DS41_N_LAYER ? layer + 1 : 0,
+                           std::memory_order_relaxed);
+  const uint64_t orphaned = store->readers->TakeOrphaned();
+  store->stats.bytes_read += orphaned;
+  store->stats.prefetch_dropped_bytes += orphaned;
+  std::shared_ptr<PrefetchJob> adopted;
+  uint64_t dropped = 0;
+  const bool phase = misses || !store->readers->Idle();
+  if (phase)
+    adopted = store->readers->Resolve(layer, n_tokens >= kSweepTokens, &dropped);
+  store->stats.bytes_read += dropped;
+  store->stats.prefetch_dropped_bytes += dropped;
   /* Map every expert of the layer to its weights: the cache slot when
-   * resident, else the stage row the read fills. The kernels index the
+   * resident, the adopted job's compact stage row when it stages one, else
+   * the demand stage row the phase's reads fill. The kernels index the
    * table, so resident experts are read in place without a staging copy. */
-  const uint32_t set = store->stage_pairs ? (layer & 1) : 0;
   const auto& src = store->source[layer];
   for (uint32_t e = 0; e < DS41_N_EXPERT; ++e) {
     const uint32_t slot_id = store->entries[layer][e].slot;
     const uint8_t* base =
         slot_id != kNoSlot ? store->slots[slot_id].data : nullptr;
+    const bool covered = adopted && adopted->task_count[e] != 0;
+    const uint32_t job_row = covered ? adopted->row_of[e] : 0;
     uint64_t staged = 0;
     for (uint32_t p = 0; p < 3; ++p) {
-      store->table_host[p][e] =
-          base ? base + staged : store->stage[set][p] + (uint64_t)e * src[p].bytes;
+      const uint8_t* row =
+          covered ? store->stage[1][p] + (uint64_t)job_row * src[p].bytes
+                  : store->stage[0][p] + (uint64_t)e * src[p].bytes;
+      store->table_host[p][e] = base ? base + staged : row;
       staged += src[p].bytes;
     }
   }
@@ -1094,56 +1140,34 @@ bool ds41_expert_store_prepare(ds41_expert_store* store, uint32_t layer,
                   hipMemcpyHostToDevice) != hipSuccess)
       return false;
   }
-  // Demand reads of this layer's misses minus whatever a background prefetch
-  // job already covers; its un-run tasks join the phase instead of being
-  // re-read. A batch with nothing to stage and no job in flight skips the
-  // phase and keeps the overlapped launch only.
-  uint32_t misses = 0;
-  for (uint32_t e = 0; e < DS41_N_EXPERT; ++e)
-    misses += missing[e] ? 1u : 0u;
-  /* Predictions may target this layer or the next; after the last layer the
-   * next evaluation's first prepare reopens the window. */
-  store->pf_expected.store(layer + 1 < DS41_N_LAYER ? layer + 1 : 0,
-                           std::memory_order_relaxed);
-  const uint64_t orphaned = store->readers->TakeOrphaned();
-  store->stats.bytes_read += orphaned;
-  store->stats.prefetch_dropped_bytes += orphaned;
-  if (misses || !store->readers->Idle()) {
+  if (phase) {
+    // Demand reads of the misses no adopted job row covers; the job's
+    // un-run tasks for the experts this batch routes join them.
+    std::array<bool, DS41_N_EXPERT> want{};
+    for (uint32_t e = 0; e < DS41_N_EXPERT; ++e)
+      want[e] = missing[e] && !(adopted && adopted->task_count[e]);
+    std::vector<ReadTask> tasks = build_read_tasks(store, layer, want);
     uint64_t demand_bytes = 0;
-    const auto build = [&](const PrefetchJob* job) {
-      std::array<bool, DS41_N_EXPERT> covered{};
-      if (job)
-        for (uint32_t e : job->experts)
-          covered[e] = true;
-      std::array<bool, DS41_N_EXPERT> want{};
-      for (uint32_t e = 0; e < DS41_N_EXPERT; ++e)
-        want[e] = missing[e] && !covered[e];
-      std::vector<ReadTask> tasks = build_read_tasks(store, layer, set, want);
-      for (const ReadTask& task : tasks)
-        demand_bytes += task.bytes;
-      if (job) {
-        /* Adopt only the experts this batch routes: waiting for a wrong
-         * prediction would cost the phase its whole read. Tasks the workers
-         * already took (index < taken) are done; the rest run in-phase. */
-        const uint32_t taken = static_cast<uint32_t>(job->taken);
-        for (uint32_t e : job->experts) {
-          if (!missing[e])
-            continue;
-          const uint32_t end = job->task_begin[e] + job->task_count[e];
-          for (uint32_t i = std::max(job->task_begin[e], taken); i < end; ++i)
-            tasks.push_back(job->tasks[i]);
-        }
+    for (const ReadTask& task : tasks)
+      demand_bytes += task.bytes;
+    if (adopted) {
+      /* Adopt only the experts this batch routes: waiting for a wrong
+       * prediction would cost the phase its whole read. Tasks the workers
+       * already took (index < taken) are done; the rest run in-phase. */
+      const uint32_t taken = static_cast<uint32_t>(adopted->taken);
+      for (uint32_t e : adopted->experts) {
+        if (!missing[e])
+          continue;
+        const uint32_t end = adopted->task_begin[e] + adopted->task_count[e];
+        for (uint32_t i = std::max(adopted->task_begin[e], taken); i < end; ++i)
+          tasks.push_back(adopted->tasks[i]);
       }
-      return tasks;
-    };
-    std::shared_ptr<PrefetchJob> adopted;
-    uint64_t dropped = 0;
-    if (!store->readers->Execute(layer, n_tokens >= kSweepTokens, build, overlap,
-                                 overlap_context, info, &adopted, &dropped)) {
+    }
+    if (!store->readers->RunPhase(layer, tasks, overlap, overlap_context, info)) {
       fprintf(stderr, "ds41: failed to stage experts or run overlapped work\n");
       return false;
-    }    store->stats.bytes_read += demand_bytes + dropped;
-    store->stats.prefetch_dropped_bytes += dropped;
+    }
+    store->stats.bytes_read += demand_bytes;
     if (adopted) {
       const uint64_t bytes = adopted->bytes.load();
       store->stats.bytes_read += bytes;
@@ -1163,7 +1187,7 @@ bool ds41_expert_store_prepare(ds41_expert_store* store, uint32_t layer,
     Slot& slot = store->slots[slot_id];
     uint8_t* dst = slot.data;
     for (uint32_t p = 0; p < 3; ++p) {
-      if (hipMemcpyAsync(dst, store->stage[set][p] + e * src[p].bytes, src[p].bytes,
+      if (hipMemcpyAsync(dst, store->table_host[p][e], src[p].bytes,
                          hipMemcpyDeviceToDevice, nullptr) != hipSuccess) {
         slot.layer = slot.expert = kNoSlot;
         store->free_slots.push_back(slot_id);
