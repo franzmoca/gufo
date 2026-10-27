@@ -527,6 +527,11 @@ struct ds41_expert_store {
    * parity halves keep a job from clobbering the rows the layer before
    * adopted. */
   std::array<std::array<uint8_t*, 3>, 2> stage{};
+  /* Compact prefetch row stride per projection: the largest expert of any
+   * layer. Rows must not use the layer's own size, or a layer with large
+   * experts overruns into the other parity half when the layer after has
+   * smaller ones (the builds mix 50- to 82-byte block types). */
+  std::array<uint64_t, 3> stage_stride{};
   bool stage_pairs = false;
   /* The only layer a concurrent prefetch submission may target: the next
    * prepare call's. Set by that call before its reads begin. */
@@ -926,6 +931,7 @@ bool ensure_stage_pairs(ds41_expert_store* store) {
   for (uint32_t p = 0; p < 3; ++p)
     for (uint32_t layer = 0; layer < DS41_N_LAYER; ++layer)
       bytes[p] = std::max(bytes[p], store->source[layer][p].bytes);
+  store->stage_stride = bytes;
   for (uint32_t p = 0; p < 3; ++p)
     if (hipMalloc(&store->stage[1][p],
                   bytes[p] * kPrefetchStageRows) != hipSuccess) {
@@ -952,7 +958,7 @@ void append_expert_tasks(const ds41_expert_store* store, uint32_t layer, uint32_
   });
   for (uint32_t p : order) {
     uint64_t offset = src[p].offset + (uint64_t)e * src[p].bytes;
-    uint8_t* dst = store->stage[1][p] + (uint64_t)row * src[p].bytes;
+    uint8_t* dst = store->stage[1][p] + (uint64_t)row * store->stage_stride[p];
     for (uint64_t left = src[p].bytes; left;) {
       const uint64_t bytes = std::min(left, kReadBytes);
       tasks.push_back({src[p].fd, src[p].direct_fd, offset, bytes, dst});
@@ -1041,6 +1047,10 @@ bool ds41_expert_store_prepare(ds41_expert_store* store, uint32_t layer,
   std::array<uint32_t, DS41_N_EXPERT> counts{}, recent{};
   for (size_t i = 0; i < ids.size(); ++i) {
     const int32_t id = ids[i];
+    /* The router drops a slot (-1) when its scores are not finite; the
+     * kernels zero that row, as on the resident path. */
+    if (id == -1)
+      continue;
     if (id < 0 || id >= static_cast<int32_t>(DS41_N_EXPERT)) {
       fprintf(stderr, "ds41: invalid routed expert %d\n", id);
       return false;
@@ -1102,7 +1112,7 @@ bool ds41_expert_store_prepare(ds41_expert_store* store, uint32_t layer,
     uint64_t staged = 0;
     for (uint32_t p = 0; p < 3; ++p) {
       const uint8_t* row =
-          covered ? store->stage[1][p] + (uint64_t)job_row * src[p].bytes
+          covered ? store->stage[1][p] + (uint64_t)job_row * store->stage_stride[p]
                   : store->stage[0][p] + (uint64_t)e * src[p].bytes;
       store->table_host[p][e] = base ? base + staged : row;
       staged += src[p].bytes;
@@ -1126,9 +1136,9 @@ bool ds41_expert_store_prepare(ds41_expert_store* store, uint32_t layer,
     uint32_t miss_rows = 0;
     for (size_t i = 0; i < ids.size(); ++i) {
       const int32_t id = ids[i];
-      const bool is_miss = missing[id];
+      const bool is_miss = id >= 0 && missing[id];
       miss_rows += is_miss;
-      hit[i] = is_miss ? -1 : id;
+      hit[i] = is_miss ? -1 : id;  // a dropped slot stays -1 in both
       miss[i] = is_miss ? id : -1;
     }
     info.miss_rows = miss_rows;
