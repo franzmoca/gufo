@@ -208,7 +208,8 @@ void AddCacheRamOption(gufo::cli::ArgParser& parser,
   parser.AddCustomOption(
       "", "--cache-ram-bytes", "N|off",
       "Retained RAM-cache byte budget (default: 0 = auto: half of free "
-      "RAM, at most 32 GiB; explicit values may use free RAM minus 4 GiB). "
+      "RAM, at most 32 GiB; explicit values may use the larger of that and "
+      "free RAM minus 4 GiB). "
       "off keeps no RAM checkpoints and commits no cache memory; "
       "sessions still reuse their own live state, and --cache-disk still "
       "works (Qwen and Flash-Next then use up to 512 MiB of backing for "
