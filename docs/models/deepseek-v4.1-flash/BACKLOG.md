@@ -221,16 +221,18 @@ a job fails adoption.
 
 ### 12. Streamed decode: router-predicted expert prefetch
 
-After the overlapped staging work, decode waits ~5 ms/token on reads at
-82-83% route hits; each miss still stalls its layer (~1.7 ms per expert at
-5.7 GiB/s). Xolotl evaluates the next layer's router on the current hidden
-state (62-70% top-6 recall one layer early), issues at most ~6 prefetches
-per layer on a second stream before attention, and budgets the issue rate
-(~0.7/token); over-prefetching measured slower on a shared SSD, and
-speculative file reads without the router prediction were dead in three
-separate attempts. Prefetch into free slots only, never evict, and let
-demand reads preempt. This composes with DSpark: verification reuses each
-staged expert across the whole draft block.
+Done (2026-10-27); see
+[STREAMING.md](STREAMING.md#streamed-decode-prefetch-2026-10-27). Single
+tokens whose layer waited on reads predict the next layer's experts with
+its router on the current FFN input, and the store thread submits the
+reads during the current layer's compute; adoption takes only routed
+experts, so wrong predictions cost bandwidth and never phase time.
+Measured +0.8% on AR decode and neutral on DSpark (whose verification
+batches predict nothing by design): at 82–83% route hits only ~5 ms/token
+of stall exists and one-layer-stale recall covers part of it, so the
+compact stage set (11a) remains the bigger decode lever. Xolotl's
+~0.7-prefetch-per-token issue budget was not needed once adoption skips
+unrouted experts.
 
 ### 13. Route bias toward resident experts (quality-affecting, optional)
 

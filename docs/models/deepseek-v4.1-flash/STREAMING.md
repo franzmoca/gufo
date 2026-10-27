@@ -185,9 +185,8 @@ bytes the kernels see.
 Prefill gains 19–21% on both paths. Decode keeps its kernels and its host
 wait (4.88–4.93 ms/token on every arm) but loses 4–6% to the smaller cache:
 the second stage set is the price of the pipelining, and the compact-set
-follow-up targets exactly that. Decode-side predictions measured +0.8%
-once adoption skips unrouted experts (15.89–15.94 vs 15.75–15.78 tok/s)
-and land as backlog item 12.
+follow-up targets exactly that. Decode-side predictions are the next
+section.
 
 [Router-free sweep, candidate](artifacts/m3-streaming/bench-iq2-routersweep-cand1.log) ·
 [Router-free sweep, control](artifacts/m3-streaming/bench-iq2-routersweep-ctrl1.log) ·
@@ -195,3 +194,35 @@ and land as backlog item 12.
 [Prefill prediction, AR control](artifacts/m3-streaming/bench-iq2-prefetch-ar-ctrl1.log) ·
 [Prefill prediction, DSpark](artifacts/m3-streaming/bench-iq2-prefetch-ds-cand1.log) ·
 [Prefill prediction, DSpark control](artifacts/m3-streaming/bench-iq2-prefetch-ds-ctrl1.log)
+
+## Streamed decode prefetch (2026-10-27)
+
+Backlog item 12. Single-token steps use the same pipeline: when a layer's
+read overlap actually waited on reads, it enqueues the next layer's router
+on the current FFN input, and the store thread submits the predicted
+experts' reads, which the next layer's prepare adopts for the experts it
+routes. Layers without misses predict nothing — a prediction without a
+read stall to hide its matvec costs more than the read it saves — and
+adoption skips unrouted experts, so wrong predictions cost bandwidth only.
+
+Matched arms against the item-11 build (same protocol, two rounds; the
+token hash 04842be7… and DSpark's 71/107 are identical on every arm):
+
+| Build | AR pp2048 | AR tg128 | DSpark pp2048 | DSpark tg128 |
+| --- | ---: | ---: | ---: | ---: |
+| prefill prediction only | 789.1–792.4 | 15.78–15.79 | 746.7–748.2 | 17.83–17.86 |
+| with decode prediction | 778.7–788.0 | 15.91–15.92 | 748.4–750.2 | 17.84–17.89 |
+
+Decode gains 0.8% on AR (every round separated well outside the ±0.01
+run-to-run spread) and is neutral on DSpark, whose verification batches of
+2–16 rows predict nothing by design. The gain is small because at 82–83%
+route hits only ~5 ms/token of read stall exists and one-layer-stale recall
+covers part of it; the larger decode lever is the cache capacity the second
+stage set consumes, which item 11a targets. Decode reads rise from 11.99 to
+13.2 MiB/token (10.9 vs 4.1 GiB prefetched overall), the price of the
+predictions that miss.
+
+[Decode prediction, AR](artifacts/m3-streaming/bench-iq2-decode-ar-cand1.log) ·
+[Decode prediction, AR control](artifacts/m3-streaming/bench-iq2-decode-ar-ctrl1.log) ·
+[Decode prediction, DSpark](artifacts/m3-streaming/bench-iq2-decode-ds-cand1.log) ·
+[Decode prediction, DSpark control](artifacts/m3-streaming/bench-iq2-decode-ds-ctrl1.log)
