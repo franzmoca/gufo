@@ -284,11 +284,12 @@ int main() {
         "wide prefetch submits and drains");
     stats = ds41_expert_store_get_stats(store);
     const uint64_t demand_only = stats.bytes_read;
+    constexpr uint32_t kHalf = 96;  // one parity half of the compact stage
     check(run(1, scan), "wide adoption stage bytes");
     stats = ds41_expert_store_get_stats(store);
-    check(stats.bytes_read - demand_only == 384 * kSlot &&
-              stats.prefetch_bytes == 384 * kSlot,
-          "batch-scale prepare adopts the wide prefetch");
+    check(stats.bytes_read - demand_only == kHalf * kSlot &&
+              stats.prefetch_bytes == kHalf * kSlot,
+          "batch-scale prepare adopts the truncated wide prefetch");
     check(run(2, scan), "wide drop source layer stage bytes");
     check(
         ds41_expert_store_prefetch(store, 3, all.data(), DS41_N_EXPERT, true) &&
@@ -299,8 +300,8 @@ int main() {
     const std::vector<int32_t> one{40, 40, 40, 40, 40, 40};
     check(run(3, one), "small batch after wide stage bytes");
     stats = ds41_expert_store_get_stats(store);
-    check(stats.bytes_read == reswept + kSlot + 384 * kSlot &&
-              stats.prefetch_dropped_bytes == 384 * kSlot,
+    check(stats.bytes_read == reswept + kSlot + kHalf * kSlot &&
+              stats.prefetch_dropped_bytes == kHalf * kSlot,
           "small batch drops the wide prefetch");
   }
   ds41_expert_store_destroy(store);

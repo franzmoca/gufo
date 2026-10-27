@@ -208,16 +208,20 @@ cache, which decode pays as 4–6% until the compact set below lands.
 
 ### 11a. Compact the prefetch stage set
 
-The ping-pong prefetch set is whole-layer sized (~3.6 GiB) only because
-rows are indexed by expert id. Predicted jobs touch at most the routed set
-(~70 experts at pp2048, 6 at decode) plus the layer's demand misses, so a
-96–128 row set with a job-relative row assignment would free ~2.5 GiB of
-cache and recover most of decode's 4–6%. Requires the adopting prepare to
-extend the job's row assignment for its uncovered misses (a pool peek at
-table-build time), a spill path for oversized batches (pp4096 can exceed
-128 routed+missed experts; the odd layers' demand can spill into the even
-set, which their compute no longer reads), and re-reads into job rows when
-a job fails adoption.
+Done (2026-10-27), simpler than planned; see
+[STREAMING.md](STREAMING.md#compact-prefetch-stage-and-cache-reserve-2026-10-27).
+Demand reads never needed the second buffer (the blocking routes copy orders
+them behind the previous layer's compute), so only background jobs got one:
+a 192-row compact stage with two 96-row parity halves (~1.5 GiB instead of
+3.6), job-relative rows, truncation instead of spill, and non-adoption
+instead of re-reads. With the cache reserve lowered from 8 GiB to 4 GiB
+(the resident path runs with 1 GiB; 3 GiB measured reclaim-floor outliers),
+decode recovers past the original control (AR 17.3–17.4 vs 16.5–16.6
+tok/s) while prefill keeps its gain. One observation stays open: across the
+pipelined builds, AR prefill anti-correlates with the route-hit rate
+(88.3% hits → 787, 95.3% → 742 tok/s); profile where a fuller cache gives
+the slower prefill (suspects: slot-read traffic pattern at prefill, the
+eviction scan's O(slots) pass per admission).
 
 ### 12. Streamed decode: router-predicted expert prefetch
 

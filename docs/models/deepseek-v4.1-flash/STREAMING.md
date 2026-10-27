@@ -226,3 +226,44 @@ predictions that miss.
 [Decode prediction, AR control](artifacts/m3-streaming/bench-iq2-decode-ar-ctrl1.log) ·
 [Decode prediction, DSpark](artifacts/m3-streaming/bench-iq2-decode-ds-cand1.log) ·
 [Decode prediction, DSpark control](artifacts/m3-streaming/bench-iq2-decode-ds-ctrl1.log)
+
+## Compact prefetch stage and cache reserve (2026-10-27)
+
+Backlog item 11a. The item-11 decode dip came from the second stage set
+taking ~3.6 GiB of expert-cache headroom; two changes give the memory back.
+
+- **The prefetch stage no longer mirrors the demand stage.** Demand reads
+  were always safe in one whole-layer buffer — the blocking routes copy
+  orders them behind the previous layer's compute — so only the background
+  jobs needed a second buffer, and jobs touch just the predicted experts.
+  The prefetch stage is now a 192-row compact buffer with two 96-row parity
+  halves (~1.5 GiB): a job's experts take rows in its layer's half, a job
+  beyond 96 experts truncates (the excess stays a demand read), and a failed
+  job is simply not adopted. Resolving the job moved ahead of the phase's
+  table build so the table can point adopted experts at their rows.
+- **The cache reserve drops from 8 GiB to 4 GiB.** The resident path runs
+  with a 1 GiB dispatch reserve under the same loads; the streamed reserve
+  now covers the shared batch scratch (1.4 GiB at 1M context), one session's
+  FP4 state and transient peaks. 3 GiB measured one 572 tok/s prefill round
+  riding the reclaim floor; 4 GiB is tight across every round.
+
+Matched arms against the item-12 build (same protocol). The cache reaches
+103.8 GiB (AR) / 99.1 GiB (DSpark, which loads the drafter); hashes and
+DSpark's 71/107 identical on every arm:
+
+| Build | AR pp2048 | AR tg128 | DSpark pp2048 | DSpark tg128 |
+| --- | ---: | ---: | ---: | ---: |
+| item 12 (8 GiB reserve, whole-layer set) | 787.5–788.0 | 15.86–15.92 | 744.5–749.3 | 17.87–17.91 |
+| 11a (4 GiB reserve, compact set) | 739.9–747.9 | 17.34–17.38 | 763.9–765.1 | 19.03–19.07 |
+| original control (028086ab) | 652.6–663.6 | 16.53–16.59 | 616.7–620.5 | 19.05–19.11 |
+
+Decode recovers past the original control (+4.8% AR, parity on DSpark, from
+4–6% below it), and DSpark prefill improves. AR prefill sits 5% under the
+item-12 build while DSpark prefill gains: across the pipelined builds the
+AR prefill rate anti-correlates with the route-hit rate (88.3% hits → 787,
+95.3% → 742 tok/s), so the residual is a residency effect worth a profile,
+not a pipeline cost — reads fall from 13.2 to 9.3 MiB/token on the same
+arms.
+
+[Compact stage, AR](artifacts/m3-streaming/bench-iq2-compact-ar-cand1.log) ·
+[Compact stage, DSpark](artifacts/m3-streaming/bench-iq2-compact-ds-cand1.log)
