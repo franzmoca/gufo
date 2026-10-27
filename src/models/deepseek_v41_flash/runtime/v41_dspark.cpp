@@ -235,7 +235,14 @@ bool ds41_dspark_upload(ds41_dspark_model* m) {
     offsets.push_back(total);
     total += (bytes + kAlign - 1) / kAlign * kAlign;
   }
-  if (hipMalloc(&m->device, total) != hipSuccess) {
+  if (const hipError_t err = hipMalloc(&m->device, total); err != hipSuccess) {
+    (void)hipGetLastError();
+    size_t free_b = 0, total_b = 0;
+    (void)hipMemGetInfo(&free_b, &total_b);
+    fprintf(stderr,
+            "ds41: DSpark drafter needs %.2f GiB of GPU memory, %.2f GiB free of %.2f GiB after the backbone: %s\n",
+            (double)total / 1073741824.0, (double)free_b / 1073741824.0, (double)total_b / 1073741824.0,
+            hipGetErrorString(err));
     m->device = nullptr;
     return false;
   }

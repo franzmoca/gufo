@@ -710,12 +710,24 @@ static gufo::hip::WeightAllocator* hip_model_weight_allocator(void) {
     g_model_weight_alloc =
         std::make_unique<gufo::hip::WeightAllocator>(g_model_registered_size);
     if (g_model_weight_alloc->placement() == gufo::hip::Placement::kManaged) {
-      fprintf(stderr,
-              DS41_GPU_LOG_PREFIX
-              "weights (%.2f GiB) do not fit the device heap above its "
-              "%.2f GiB dispatch reserve; placing them in managed memory\n",
-              (double)g_model_registered_size / 1073741824.0,
-              (double)gufo::hip::kDispatchReserve / 1073741824.0);
+      // A heap far below system memory usually means the GTT limit kept its
+      // default of half the RAM. Managed weights are pageable system memory:
+      // the kernel may swap them, and later device allocations (the DSpark
+      // drafter, session scratch) find the heap too small.
+      size_t free_b = 0, total_b = 0;
+      (void)hipMemGetInfo(&free_b, &total_b);
+      gufo::server::Logger::LogFormatted(
+          gufo::server::LogLevel::kWarn, "ds4",
+          "weights (%.2f GiB) do not fit the GPU memory heap (%.2f GiB free "
+          "of %.2f GiB) above its %.2f GiB dispatch reserve; placing them in "
+          "pageable managed memory, where the kernel may swap them and later "
+          "GPU allocations can fail. Raise the GTT limit so the heap covers "
+          "system memory: kernel parameters ttm.pages_limit=32505856 "
+          "(amdttm.pages_limit with AMD's DKMS driver) and "
+          "amdgpu.gttsize=126976 on a 128 GB Strix Halo",
+          (double)g_model_registered_size / 1073741824.0,
+          (double)free_b / 1073741824.0, (double)total_b / 1073741824.0,
+          (double)gufo::hip::kDispatchReserve / 1073741824.0);
     }
   }
   return g_model_weight_alloc.get();
