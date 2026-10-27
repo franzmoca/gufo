@@ -788,7 +788,8 @@ void PrintServeHelp(std::string_view program_name,
     parser.AddOption(
         "", "--cache-ram-bytes", "N",
         "Retained RAM-cache byte budget (default: 0 = auto: half of free "
-        "RAM, at most 32 GiB; explicit values may use free RAM minus 4 GiB). "
+        "RAM, at most 32 GiB; explicit values may use the larger of that and "
+        "free RAM minus 4 GiB). "
         "Flash-Next pins it about 1 GiB at a time as captures need it",
         "Cache", &cache_ram_bytes);
     parser.AddOption("", "--cache-disk", "DIR",
@@ -1459,7 +1460,8 @@ int RunServe(std::span<const char* const> args) {
     llm_parser.AddOption(
         "", "--cache-ram-bytes", "N",
         "Retained RAM-cache byte budget (default: 0 = auto: half of free "
-        "RAM, at most 32 GiB; explicit values may use free RAM minus 4 GiB). "
+        "RAM, at most 32 GiB; explicit values may use the larger of that and "
+        "free RAM minus 4 GiB). "
         "Flash-Next pins it about 1 GiB at a time as captures need it",
         "Cache", &cache_ram_bytes);
     llm_parser.AddOption("", "--cache-disk", "DIR",

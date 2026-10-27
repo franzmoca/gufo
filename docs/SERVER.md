@@ -225,8 +225,9 @@ at 32 GiB and half the available host RAM after model/state allocation, respecti
 container limits. Available RAM is `MemAvailable` minus `CmaFree`: free CMA
 pages, such as the kernel's KHO scratch area on Ubuntu 26.04, only hold
 movable pages, not GPU allocations. 27B also checks HIP free memory. A
-positive value sets a byte cap that may exceed the automatic budget, up to the
-available host RAM minus 4 GiB; the startup line reports both as
+positive value sets a byte cap: any value up to the automatic budget is
+accepted, and larger ones up to the available host RAM minus 4 GiB; the
+startup line reports both as
 `automatic_bytes` and `max_bytes`.
 On Qwen27B and Flash-Next, the pinned disk staging buffer comes out of that ceiling, and
 `max_bytes` excludes it. Other models' disk staging and temporary disk-save
