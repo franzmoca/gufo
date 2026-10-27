@@ -1742,6 +1742,7 @@ __device__ __forceinline__ float sum16(float v) {
 
 constexpr uint32_t kAttnRope = 64;  // the fused rotations' rope_dim
 constexpr uint32_t kAttnRows = 16;
+constexpr uint32_t kAttnMaxTopk = 512;  // attention_f16_kernel's k
 constexpr uint32_t kAttnRowPitch = 512 + 8;  // halves per staged KV row
 constexpr uint32_t kAttnProbPitch = 16 + 8;  // halves per probability row
 typedef _Float16 attn_half16 __attribute__((ext_vector_type(16)));
@@ -1802,6 +1803,9 @@ __global__ __launch_bounds__(256) void attention_f16_kernel(const float* q, cons
 
   __shared__ uint32_t fp4_pairs[256];  // code byte -> its two E2M1 values as FP16
   __shared__ uint16_t e4m3_half[256];  // scale byte -> FP16
+  /* The token's compressed row indices: a tile's rows then cost no chain
+   * of dependent global loads (index, then the row's bytes). */
+  __shared__ uint32_t comp_idx[kAttnMaxTopk];
   __shared__ __attribute__((aligned(16))) _Float16 kv_row[ROWS * kAttnRowPitch];
   __shared__ __attribute__((aligned(16))) _Float16 probs[HEADS * kAttnProbPitch];
   __shared__ float part[4][ROWS][HEADS + 1];
@@ -1821,6 +1825,7 @@ __global__ __launch_bounds__(256) void attention_f16_kernel(const float* q, cons
     fp4_pairs[tid] = (uint32_t)__builtin_bit_cast(uint16_t, lo_value) |
                      (uint32_t)__builtin_bit_cast(uint16_t, hi_value) << 16;
     e4m3_half[tid] = __builtin_bit_cast(uint16_t, (_Float16)e4m3_value(tid));
+    for (uint32_t i = tid; i < n_comp; i += 256) comp_idx[i] = idx[i];
   }
 
   /* Q fragments (B operand: lane = head, 16 dimensions per step). */
@@ -1894,30 +1899,34 @@ __global__ __launch_bounds__(256) void attention_f16_kernel(const float* q, cons
       const uint32_t c0 = (tile - window_tiles) * ROWS;
 #pragma unroll
       for (uint32_t r = 0; r < ROWS; r++) {
-        const uint64_t row = idx[min(c0 + r, n_comp - 1)];
+        const uint64_t row = comp_idx[min(c0 + r, n_comp - 1)];
         raw[r] = make_uint2(comp.codes[row * (DIM / 2) + tid], comp.scales[row * (DIM / 16) + tid / 8]);
       }
     }
   };
   /* The tile's columns 2 t (even) and 2 t + 1 (odd) as B operands. */
   attn_half16 col_even, col_odd;
+  const auto put = [&](uint32_t r, uint32_t pair) {
+    const attn_half2 v = __builtin_bit_cast(attn_half2, pair);
+    col_even[r] = v.x;
+    col_odd[r] = v.y;
+    *reinterpret_cast<uint32_t*>(&kv_row[r * kAttnRowPitch + 2 * tid]) = pair;
+  };
+  /* One branch per tile, not per row. */
   const auto store = [&](uint32_t tile) {
-    const bool window_tile = tile < window_tiles;
+    if (tile < window_tiles) {
 #pragma unroll
-    for (uint32_t r = 0; r < ROWS; r++) {
-      uint32_t pair;
-      if (window_tile) {
+      for (uint32_t r = 0; r < ROWS; r++) {
         const _Float16 a = (_Float16)__uint_as_float(raw[r].x), b = (_Float16)__uint_as_float(raw[r].y);
-        pair = (uint32_t)__builtin_bit_cast(uint16_t, a) | (uint32_t)__builtin_bit_cast(uint16_t, b) << 16;
-      } else {
+        put(r, (uint32_t)__builtin_bit_cast(uint16_t, a) | (uint32_t)__builtin_bit_cast(uint16_t, b) << 16);
+      }
+    } else {
+#pragma unroll
+      for (uint32_t r = 0; r < ROWS; r++) {
         const _Float16 sc = __builtin_bit_cast(_Float16, e4m3_half[raw[r].y]);
         const attn_half2 v = __builtin_bit_cast(attn_half2, fp4_pairs[raw[r].x]) * attn_half2{sc, sc};
-        pair = __builtin_bit_cast(uint32_t, v);
+        put(r, __builtin_bit_cast(uint32_t, v));
       }
-      const attn_half2 v = __builtin_bit_cast(attn_half2, pair);
-      col_even[r] = v.x;
-      col_odd[r] = v.y;
-      *reinterpret_cast<uint32_t*>(&kv_row[r * kAttnRowPitch + 2 * tid]) = pair;
     }
   };
 
@@ -2812,7 +2821,7 @@ extern "C" int ds41_v41_attention(float* q, const float* ring, const float* chun
    * it applies the rotations itself. */
   if (!split && n >= DS41_V41_ATTN_SPLIT_TOKENS && head_dim == 512 && heads % 32 == 0 && window <= 256 &&
       (window & (window - 1)) == 0 &&
-      (ratio == 0 || k <= 512) && (!inv_freq || rope_dim == kAttnRope)) {
+      (ratio == 0 || k <= kAttnMaxTopk) && (!inv_freq || rope_dim == kAttnRope)) {
     float2* rope = nullptr;
     if (inv_freq) {
       if (!rope_scratch) return 1;
