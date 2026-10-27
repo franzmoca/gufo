@@ -114,6 +114,13 @@ machine as the October 26 runs (gpu-test binary, seed 19 s, 82.8% route hits):
 | --- | ---: | ---: | ---: |
 | October 26 (stage copies, shared overlap) | 592.1 | 11.65 | 13.50 |
 | October 27 (tables, split overlap, upload streams) | 664.7–669.6 | 14.99–15.08 | 17.92–17.96 |
+| October 27 (retuned expert GEMV) | 521.6–529.6* | 16.57–16.94 | 19.34 |
+
+*Prefill keeps its kernels; the page-cache spread spans 494–669 tok/s across
+these runs. The retuned expert GEMV (see EXPERIMENTS.md) leaves every token
+hash unchanged: 04842be7… on AR and DSpark (71 accepted in both, 110 vs 107
+drafted under the timing-adaptive drafter), resident `IQ1_M` at 70d5a48a…
+(23.86–24.38 vs 23.36–23.55 tok/s).
 
 The DSpark run drafted and accepted the same 110/71 tokens with the same
 output hash. Decode host wait fell from 6.51 to 5.25 ms/token; the remaining
@@ -126,4 +133,5 @@ inside the previous build's own run-to-run spread (945–1129 / 22.5–23.7).
 [io_uring control](artifacts/m3-streaming/io-uring-bench.log) ·
 [Direct-I/O candidate](artifacts/m3-streaming/bench-iq2-direct-io-candidate1.log) ·
 [Buffered control](artifacts/m3-streaming/bench-iq2-buffered-io-control1.log) ·
-[Overlapped staging](artifacts/m3-streaming/bench-iq2-tables-ar1.log)
+[Overlapped staging](artifacts/m3-streaming/bench-iq2-tables-ar1.log) ·
+[Retuned GEMV pairs](artifacts/m3-streaming/bench-iq2-fast-ctrl2.log)

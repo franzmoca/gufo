@@ -8,7 +8,16 @@
  * so a group of eight is d s (sum n_i x_i + (delta - 1) sum x_i): one convert
  * and one FMA per weight instead of decoding each weight to a float first.
  * The 8 KiB IQ1 codebook is copied to LDS, where the per-lane lookups do not
- * queue on the texture path behind the weight and activation loads. */
+ * queue on the texture path behind the weight and activation loads; the IQ2
+ * grids and sign tables are staged the same way, as u32 word pairs.
+ *
+ * Each task's payload is loaded as whole words (memcpy from the 2-byte
+ * aligned block) instead of per-16-bit loads, and the IQ2 decode keeps each
+ * grid entry in its u32 halves (byte extract + convert; casting the u64
+ * entry emits a quarter-rate ldexp) with signs applied by flipping the
+ * float sign bit. The fused gate/up pass loads x once per block into
+ * registers and feeds both accumulations, halving activation loads. With
+ * these the kernels decode at 194-200 GB/s, the dense GEMV's level. */
 #include <hip/hip_runtime.h>
 
 #include <cstdint>
@@ -25,12 +34,6 @@ using ds41_gemv_tasks::HalfBits;
 
 constexpr int kWave = 32;
 constexpr int kWaves = 8;
-
-/* A task's 16-bit words of one block (IQ blocks are only 2-byte aligned
- * inside a row), loaded ahead of the decode. */
-struct Raw {
-  uint32_t r[7];
-};
 
 /* sum_i (n_i + c) x_i over one 8-value IQ1 grid group: the nibbles move to
  * bytes (elements 0-3 low, 4-7 high) so each converts in one instruction. */
@@ -54,35 +57,85 @@ __device__ __forceinline__ float Iq1Dot(uint32_t grid, float c, const float* x) 
   return __builtin_fmaf(c, sum, dot);
 }
 
-/* Eight grid magnitudes (one per byte) with the sign bits of `signs`. */
-__device__ __forceinline__ void Iq2Group(uint64_t grid, uint32_t signs, float scale, float* w) {
+/* Iq1Dot over a register-resident slice of x (same FMA chain, scalar reads). */
+__device__ __forceinline__ float Iq1DotR(uint32_t grid, float c, const float (&xr)[32], int base) {
+#pragma clang fp reassociate(off)
+  const uint32_t lo = grid & 0x0F0F0F0F;
+  const uint32_t hi = (grid >> 4) & 0x0F0F0F0F;
+  float dot = static_cast<float>(lo & 0xFF) * xr[base];
+  dot = __builtin_fmaf(static_cast<float>((lo >> 8) & 0xFF), xr[base + 1], dot);
+  dot = __builtin_fmaf(static_cast<float>((lo >> 16) & 0xFF), xr[base + 2], dot);
+  dot = __builtin_fmaf(static_cast<float>(lo >> 24), xr[base + 3], dot);
+  dot = __builtin_fmaf(static_cast<float>(hi & 0xFF), xr[base + 4], dot);
+  dot = __builtin_fmaf(static_cast<float>((hi >> 8) & 0xFF), xr[base + 5], dot);
+  dot = __builtin_fmaf(static_cast<float>((hi >> 16) & 0xFF), xr[base + 6], dot);
+  dot = __builtin_fmaf(static_cast<float>(hi >> 24), xr[base + 7], dot);
+  const float sum = ((xr[base] + xr[base + 1]) + (xr[base + 2] + xr[base + 3])) +
+                    ((xr[base + 4] + xr[base + 5]) + (xr[base + 6] + xr[base + 7]));
+  return __builtin_fmaf(c, sum, dot);
+}
+
+/* Accumulate<32> over a register-resident x slice (same FMA chain). */
+__device__ __forceinline__ float AccumulateR(float acc, const float (&w)[32], const float (&xr)[32]) {
+#pragma unroll
+  for (int i = 0; i < 32; i += 4) {
+    acc = __builtin_fmaf(w[i], xr[i], acc);
+    acc = __builtin_fmaf(w[i + 1], xr[i + 1], acc);
+    acc = __builtin_fmaf(w[i + 2], xr[i + 2], acc);
+    acc = __builtin_fmaf(w[i + 3], xr[i + 3], acc);
+  }
+  return acc;
+}
+
+/* Eight grid magnitudes (one per byte) with the sign bits of `signs`. The
+ * entry arrives as its u32 halves (never cast the u64 entry to float: the
+ * conversion lowers to a quarter-rate ldexp); -v is the float with its sign
+ * bit flipped, one xor instead of a compare and select. */
+__device__ __forceinline__ void Iq2Group(uint32_t glo, uint32_t ghi, uint32_t signs, float scale, float* w) {
 #pragma unroll
   for (int i = 0; i < 8; ++i) {
-    const float v = static_cast<float>((grid >> (8 * i)) & 0xFF) * scale;
-    w[i] = (signs >> i) & 1 ? -v : v;
+    const uint32_t b = (((i < 4) ? glo : ghi) >> (8 * (i & 3))) & 0xFFu;
+    const float v = static_cast<float>(b) * scale;
+    w[i] = __uint_as_float(__float_as_uint(v) ^ (((signs >> i) & 1u) << 31));
   }
 }
+
+/* The IQ2 grids staged in LDS as lo/hi u32 word pairs, with the signs. */
+struct Iq2Tab {
+  const uint32_t* words;
+  const uint8_t* signs;
+};
 
 template <int kType>
 struct Format;
 
 /* IQ1_S (50 bytes): d, qs[32], qh[8] as u16; sub-block t uses qs[4 t..],
- * qh[t] (3 high index bits per group, 3-bit scale, delta sign). */
+ * qh[t] (3 high index bits per group, 3-bit scale, delta sign). The task's
+ * qs arrives as one word, the 8-byte scale tail as one u64. */
 template <>
 struct Format<19> {
   static constexpr int kBlockBytes = 50;
   static constexpr bool kIq1Grid = true;
+  static constexpr int kIq2Words = 0;
+  static constexpr bool kXReg = true;
+  struct Raw {
+    uint32_t d, qs, qh;
+  };
   static __device__ __forceinline__ Raw Load(const uint8_t* b, int t) {
-    const auto* h = reinterpret_cast<const uint16_t*>(b);
-    return {{h[0], h[1 + 2 * t], h[2 + 2 * t], h[17 + t]}};
+    Raw r{};
+    __builtin_memcpy(&r.d, b, 2);
+    __builtin_memcpy(&r.qs, b + 2 + 4 * t, 4);
+    r.qh = reinterpret_cast<const uint16_t*>(b)[17 + t];
+    return r;
   }
   /* acc + scale * dot as one explicit FMA, so no kernel's contraction choice
    * changes the result. */
-  static __device__ __forceinline__ float Acc(float acc, const Raw& a, int, const float* x, const uint32_t* grid) {
+  static __device__ __forceinline__ float Acc(float acc, const Raw& a, int, const float* x, const uint32_t* grid,
+                                              const Iq2Tab&) {
 #pragma clang fp reassociate(off)
-    const float d = HalfBits(a.r[0]);
-    const uint32_t qs = a.r[1] | (a.r[2] << 16);
-    const uint32_t qh = a.r[3];
+    const float d = HalfBits(a.d);
+    const uint32_t qs = a.qs;
+    const uint32_t qh = a.qh;
     const float scale = d * static_cast<float>(2 * ((qh >> 12) & 7) + 1);
     const float c = (qh & 0x8000 ? -IQ1S_DELTA : IQ1S_DELTA) - 1.0f;
     float dot = 0.0f;
@@ -91,26 +144,54 @@ struct Format<19> {
       dot += Iq1Dot(grid[((qs >> (8 * l)) & 0xFF) | (((qh >> (3 * l)) & 7) << 8)], c, x + 8 * l);
     return __builtin_fmaf(scale, dot, acc);
   }
+  static __device__ __forceinline__ float AccR(float acc, const Raw& a, int, const float (&xr)[32],
+                                               const uint32_t* grid, const Iq2Tab&) {
+#pragma clang fp reassociate(off)
+    const float d = HalfBits(a.d);
+    const uint32_t qs = a.qs;
+    const uint32_t qh = a.qh;
+    const float scale = d * static_cast<float>(2 * ((qh >> 12) & 7) + 1);
+    const float c = (qh & 0x8000 ? -IQ1S_DELTA : IQ1S_DELTA) - 1.0f;
+    float dot = 0.0f;
+#pragma unroll
+    for (int l = 0; l < 4; ++l)
+      dot += Iq1DotR(grid[((qs >> (8 * l)) & 0xFF) | (((qh >> (3 * l)) & 7) << 8)], c, xr, 8 * l);
+    return __builtin_fmaf(scale, dot, acc);
+  }
 };
 
 /* IQ1_M (56 bytes): qs[32], qh[16], four u16 scale words whose top nibbles
- * hold d. Groups 0-1 of sub-block t use its low 3-bit scale, 2-3 the high. */
+ * hold d. Groups 0-1 of sub-block t use its low 3-bit scale, 2-3 the high.
+ * The task's qs arrives as one word and the scale tail as one u64. */
 template <>
 struct Format<29> {
   static constexpr int kBlockBytes = 56;
   static constexpr bool kIq1Grid = true;
+  static constexpr int kIq2Words = 0;
+  static constexpr bool kXReg = false;
+  struct Raw {
+    uint32_t qs, qh, s0, s1;
+  };
   static __device__ __forceinline__ Raw Load(const uint8_t* b, int t) {
-    const auto* h = reinterpret_cast<const uint16_t*>(b);
-    return {{h[2 * t], h[2 * t + 1], h[16 + t], h[24], h[25], h[26], h[27]}};
+    Raw r{};
+    __builtin_memcpy(&r.qs, b + 4 * t, 4);
+    r.qh = reinterpret_cast<const uint16_t*>(b)[16 + t];
+    uint64_t s;
+    __builtin_memcpy(&s, b + 48, 8);
+    r.s0 = static_cast<uint32_t>(s);
+    r.s1 = static_cast<uint32_t>(s >> 32);
+    return r;
   }
-  static __device__ __forceinline__ float Acc(float acc, const Raw& a, int t, const float* x, const uint32_t* grid) {
-    const uint32_t qs = a.r[0] | (a.r[1] << 16);
-    const uint32_t sc0 = a.r[3], sc1 = a.r[4], sc2 = a.r[5], sc3 = a.r[6];
+  static __device__ __forceinline__ float Acc(float acc, const Raw& a, int t, const float* x, const uint32_t* grid,
+                                              const Iq2Tab&) {
+    const uint32_t qs = a.qs;
+    const uint32_t sc0 = a.s0 & 0xFFFF, sc1 = a.s0 >> 16, sc2 = a.s1 & 0xFFFF, sc3 = a.s1 >> 16;
     const float d = HalfBits((sc0 >> 12) | ((sc1 >> 8) & 0x00F0) | ((sc2 >> 4) & 0x0F00) | (sc3 & 0xF000));
-    const uint32_t word = a.r[3 + (t >> 1)] >> (6 * (t & 1));
+    const uint32_t sw[4] = {sc0, sc1, sc2, sc3};
+    const uint32_t word = sw[t >> 1] >> (6 * (t & 1));
     const float s1 = d * static_cast<float>(2 * (word & 7) + 1);
     const float s2 = d * static_cast<float>(2 * ((word >> 3) & 7) + 1);
-    const uint32_t qh0 = a.r[2] & 0xFF, qh1 = a.r[2] >> 8;
+    const uint32_t qh0 = a.qh & 0xFF, qh1 = a.qh >> 8;
     const uint32_t high[4] = {(qh0 << 8) & 0x700, (qh0 << 4) & 0x700, (qh1 << 8) & 0x700, (qh1 << 4) & 0x700};
     const uint32_t flag[4] = {qh0 & 0x08, qh0 & 0x80, qh1 & 0x08, qh1 & 0x80};
     float dot[4];
@@ -123,78 +204,162 @@ struct Format<29> {
 };
 
 /* IQ2_XXS (66 bytes): d, then per sub-block four grid bytes and a u32 with
- * four 7-bit sign indices and a 4-bit scale. */
+ * four 7-bit sign indices and a 4-bit scale; the task's eight bytes arrive
+ * as one word pair. */
 template <>
 struct Format<16> {
   static constexpr int kBlockBytes = 66;
   static constexpr bool kIq1Grid = false;
+  static constexpr int kIq2Words = 512;
+  static constexpr bool kXReg = true;
+  struct Raw {
+    uint32_t d, qs, aux;
+  };
   static __device__ __forceinline__ Raw Load(const uint8_t* b, int t) {
-    const auto* h = reinterpret_cast<const uint16_t*>(b);
-    const uint16_t* g = h + 1 + 4 * t;
-    return {{h[0], g[0], g[1], g[2], g[3]}};
+    Raw r{};
+    __builtin_memcpy(&r.d, b, 2);
+    uint64_t v;
+    __builtin_memcpy(&v, b + 2 + 8 * t, 8);
+    r.qs = static_cast<uint32_t>(v);
+    r.aux = static_cast<uint32_t>(v >> 32);
+    return r;
   }
-  static __device__ __forceinline__ float Acc(float acc, const Raw& a, int, const float* x, const uint32_t*) {
-    const float d = HalfBits(a.r[0]);
-    const uint32_t qs = a.r[1] | (a.r[2] << 16);
-    const uint32_t aux = a.r[3] | (a.r[4] << 16);
+  template <bool kReg>
+  static __device__ __forceinline__ float AccT(float acc, const Raw& a, int, const float* x, const float (&xr)[32],
+                                               const uint32_t*, const Iq2Tab& tab) {
+    const float d = HalfBits(a.d);
+    const uint32_t qs = a.qs, aux = a.aux;
     const float scale = d * (0.5f + static_cast<float>(aux >> 28)) * 0.25f;
     float w[32];
 #pragma unroll
-    for (int l = 0; l < 4; ++l)
-      Iq2Group(iq2xxs_grid[(qs >> (8 * l)) & 0xFF], ksigns_iq2xs[(aux >> (7 * l)) & 127], scale, w + 8 * l);
+    for (int l = 0; l < 4; ++l) {
+      const uint32_t idx = (qs >> (8 * l)) & 0xFF;
+      Iq2Group(tab.words[2 * idx], tab.words[2 * idx + 1], tab.signs[(aux >> (7 * l)) & 127], scale, w + 8 * l);
+    }
+    if constexpr (kReg)
+      return acc + AccumulateR(0.0f, w, xr);
     return acc + Accumulate<32>(0.0f, w, x);
+  }
+  static __device__ __forceinline__ float Acc(float acc, const Raw& a, int t, const float* x, const uint32_t* g,
+                                              const Iq2Tab& tab) {
+    float xr[32] = {};
+    return AccT<false>(acc, a, t, x, xr, g, tab);
+  }
+  static __device__ __forceinline__ float AccR(float acc, const Raw& a, int t, const float (&xr)[32],
+                                               const uint32_t* g, const Iq2Tab& tab) {
+    return AccT<true>(acc, a, t, nullptr, xr, g, tab);
   }
 };
 
-/* IQ2_XS (74 bytes): d, 32 grid/sign words, eight pairs of scales. */
+/* IQ2_XS (74 bytes): d, 32 grid/sign words, eight pairs of scales; the
+ * task's four q words arrive as one word pair. */
 template <>
 struct Format<17> {
   static constexpr int kBlockBytes = 74;
   static constexpr bool kIq1Grid = false;
+  static constexpr int kIq2Words = 1024;
+  static constexpr bool kXReg = true;
+  struct Raw {
+    uint32_t d, s0, s1, sc;
+  };
   static __device__ __forceinline__ Raw Load(const uint8_t* b, int t) {
-    const auto* h = reinterpret_cast<const uint16_t*>(b);
-    return {{h[0], h[1 + 4 * t], h[2 + 4 * t], h[3 + 4 * t], h[4 + 4 * t], h[33 + (t >> 1)]}};
+    Raw r{};
+    __builtin_memcpy(&r.d, b, 2);
+    __builtin_memcpy(&r.sc, b + 66 + 2 * (t >> 1), 2);
+    uint64_t v;
+    __builtin_memcpy(&v, b + 2 + 8 * t, 8);
+    r.s0 = static_cast<uint32_t>(v);
+    r.s1 = static_cast<uint32_t>(v >> 32);
+    return r;
   }
-  static __device__ __forceinline__ float Acc(float acc, const Raw& a, int t, const float* x, const uint32_t*) {
-    const float d = HalfBits(a.r[0]);
-    const uint32_t sc = (a.r[5] >> (8 * (t & 1))) & 0xFF;
+  template <bool kReg>
+  static __device__ __forceinline__ float AccT(float acc, const Raw& a, int t, const float* x, const float (&xr)[32],
+                                               const uint32_t*, const Iq2Tab& tab) {
+    const float d = HalfBits(a.d);
+    const uint32_t sc = (a.sc >> (8 * (t & 1))) & 0xFF;
     const float low = d * (0.5f + static_cast<float>(sc & 0xF)) * 0.25f;
     const float high = d * (0.5f + static_cast<float>(sc >> 4)) * 0.25f;
     float w[32];
 #pragma unroll
     for (int l = 0; l < 4; ++l) {
-      const uint32_t q = a.r[1 + l];
-      Iq2Group(iq2xs_grid[q & 0x1FF], ksigns_iq2xs[q >> 9], l < 2 ? low : high, w + 8 * l);
+      const uint32_t q = ((l < 2 ? a.s0 : a.s1) >> (16 * (l & 1))) & 0xFFFF;
+      Iq2Group(tab.words[2 * (q & 0x1FF)], tab.words[2 * (q & 0x1FF) + 1], tab.signs[q >> 9], l < 2 ? low : high,
+               w + 8 * l);
     }
+    if constexpr (kReg)
+      return acc + AccumulateR(0.0f, w, xr);
     return acc + Accumulate<32>(0.0f, w, x);
+  }
+  static __device__ __forceinline__ float Acc(float acc, const Raw& a, int t, const float* x, const uint32_t* g,
+                                              const Iq2Tab& tab) {
+    float xr[32] = {};
+    return AccT<false>(acc, a, t, x, xr, g, tab);
+  }
+  static __device__ __forceinline__ float AccR(float acc, const Raw& a, int t, const float (&xr)[32],
+                                               const uint32_t* g, const Iq2Tab& tab) {
+    return AccT<true>(acc, a, t, nullptr, xr, g, tab);
   }
 };
 
-/* IQ2_S (82 bytes): d, qs[32], signs[32], qh[8], scales[8]. */
+/* IQ2_S (82 bytes): d, qs[32], signs[32], qh[8], scales[8]; the task's qs
+ * and signs arrive as one word each, qh and the scale pair as u16s. */
 template <>
 struct Format<22> {
   static constexpr int kBlockBytes = 82;
   static constexpr bool kIq1Grid = false;
+  static constexpr int kIq2Words = 2048;
+  static constexpr bool kXReg = true;
+  struct Raw {
+    uint32_t d, qs, signs, qh, sc;
+  };
   static __device__ __forceinline__ Raw Load(const uint8_t* b, int t) {
-    const auto* h = reinterpret_cast<const uint16_t*>(b);
-    return {{h[0], h[1 + 2 * t], h[2 + 2 * t], h[17 + 2 * t], h[18 + 2 * t], h[33 + (t >> 1)], h[37 + (t >> 1)]}};
+    Raw r{};
+    __builtin_memcpy(&r.d, b, 2);
+    __builtin_memcpy(&r.qs, b + 2 + 4 * t, 4);
+    __builtin_memcpy(&r.signs, b + 34 + 4 * t, 4);
+    __builtin_memcpy(&r.qh, b + 66 + 2 * (t >> 1), 2);
+    __builtin_memcpy(&r.sc, b + 74 + 2 * (t >> 1), 2);
+    return r;
   }
-  static __device__ __forceinline__ float Acc(float acc, const Raw& a, int t, const float* x, const uint32_t*) {
-    const float d = HalfBits(a.r[0]);
-    const uint32_t qs = a.r[1] | (a.r[2] << 16);
-    const uint32_t signs = a.r[3] | (a.r[4] << 16);
-    const uint32_t qh = (a.r[5] >> (8 * (t & 1))) & 0xFF;
-    const uint32_t sc = (a.r[6] >> (8 * (t & 1))) & 0xFF;
+  template <bool kReg>
+  static __device__ __forceinline__ float AccT(float acc, const Raw& a, int t, const float* x, const float (&xr)[32],
+                                               const uint32_t*, const Iq2Tab& tab) {
+    const float d = HalfBits(a.d);
+    const uint32_t qh = (a.qh >> (8 * (t & 1))) & 0xFF;
+    const uint32_t sc = (a.sc >> (8 * (t & 1))) & 0xFF;
     const float low = d * (0.5f + static_cast<float>(sc & 0xF)) * 0.25f;
     const float high = d * (0.5f + static_cast<float>(sc >> 4)) * 0.25f;
     float w[32];
 #pragma unroll
-    for (int l = 0; l < 4; ++l)
-      Iq2Group(iq2s_grid[((qs >> (8 * l)) & 0xFF) | ((qh << (8 - 2 * l)) & 0x300)], (signs >> (8 * l)) & 0xFF,
-               l < 2 ? low : high, w + 8 * l);
+    for (int l = 0; l < 4; ++l) {
+      const uint32_t idx = ((a.qs >> (8 * l)) & 0xFF) | ((qh << (8 - 2 * l)) & 0x300);
+      Iq2Group(tab.words[2 * idx], tab.words[2 * idx + 1], (a.signs >> (8 * l)) & 0xFF, l < 2 ? low : high, w + 8 * l);
+    }
+    if constexpr (kReg)
+      return acc + AccumulateR(0.0f, w, xr);
     return acc + Accumulate<32>(0.0f, w, x);
   }
+  static __device__ __forceinline__ float Acc(float acc, const Raw& a, int t, const float* x, const uint32_t* g,
+                                              const Iq2Tab& tab) {
+    float xr[32] = {};
+    return AccT<false>(acc, a, t, x, xr, g, tab);
+  }
+  static __device__ __forceinline__ float AccR(float acc, const Raw& a, int t, const float (&xr)[32],
+                                               const uint32_t* g, const Iq2Tab& tab) {
+    return AccT<true>(acc, a, t, nullptr, xr, g, tab);
+  }
 };
+
+/* The global u64 grid table of one IQ2 format, staged to LDS by the kernels. */
+template <int kType>
+__device__ __forceinline__ const uint64_t* Iq2GridTable() {
+  if constexpr (kType == 16)
+    return iq2xxs_grid;
+  else if constexpr (kType == 17)
+    return iq2xs_grid;
+  else
+    return iq2s_grid;
+}
 
 /* Grid (row tiles of 32, slots). The raw words of U blocks are loaded before
  * any of them is decoded. */
@@ -211,6 +376,8 @@ __global__ void __launch_bounds__(kWave* kWaves)
   using F = Format<kType>;
   constexpr uint32_t kRows = 4 * kWaves;
   __shared__ uint32_t grid[F::kIq1Grid ? NGRID_IQ1S : 1];
+  __shared__ uint32_t iq2_words[F::kIq2Words ? F::kIq2Words : 1];
+  __shared__ uint8_t iq2_signs[F::kIq2Words ? 128 : 1];
   const int32_t id = ids[blockIdx.y];
   y += (uint64_t)blockIdx.y * m;
   if (id < 0) {  // dropped slot
@@ -224,6 +391,16 @@ __global__ void __launch_bounds__(kWave* kWaves)
     for (uint32_t i = threadIdx.x; i < NGRID_IQ1S; i += blockDim.x) grid[i] = iq1s_grid_gpu[i];
     __syncthreads();
   }
+  if constexpr (F::kIq2Words) {
+    for (uint32_t i = threadIdx.x; i < F::kIq2Words / 2; i += blockDim.x) {
+      const uint64_t g = Iq2GridTable<kType>()[i];
+      iq2_words[2 * i] = static_cast<uint32_t>(g);
+      iq2_words[2 * i + 1] = static_cast<uint32_t>(g >> 32);
+    }
+    for (uint32_t i = threadIdx.x; i < 128; i += blockDim.x) iq2_signs[i] = ksigns_iq2xs[i];
+    __syncthreads();
+  }
+  const Iq2Tab tab{iq2_words, iq2_signs};
   const int lane = threadIdx.x % kWave;
   const int wave = threadIdx.x / kWave;
   const int t = lane % 8;
@@ -242,8 +419,8 @@ __global__ void __launch_bounds__(kWave* kWaves)
   float acc_up = 0.0f;
   uint32_t blk = 0;
   for (; blk + U <= blocks_per_row; blk += U) {
-    Raw raw[U];
-    Raw raw_up[kSwiGLU ? U : 1];
+    typename F::Raw raw[U];
+    typename F::Raw raw_up[kSwiGLU ? U : 1];
 #pragma unroll
     for (int u = 0; u < U; ++u) {
       raw[u] = F::Load(base + (uint64_t)(blk + u) * F::kBlockBytes, t);
@@ -251,14 +428,47 @@ __global__ void __launch_bounds__(kWave* kWaves)
     }
 #pragma unroll
     for (int u = 0; u < U; ++u) {
-      acc = F::Acc(acc, raw[u], t, xt + (blk + u) * 256, grid);
-      if constexpr (kSwiGLU) acc_up = F::Acc(acc_up, raw_up[u], t, xt + (blk + u) * 256, grid);
+      const float* xb = xt + (blk + u) * 256;
+      if constexpr (kSwiGLU && F::kXReg) {
+        /* x loads once per block, feeding the gate and up accumulations. */
+        float xr[32];
+#pragma unroll
+        for (int i = 0; i < 32; i += 4) {
+          const float4 f = *reinterpret_cast<const float4*>(xb + i);
+          xr[i] = f.x;
+          xr[i + 1] = f.y;
+          xr[i + 2] = f.z;
+          xr[i + 3] = f.w;
+        }
+        acc = F::AccR(acc, raw[u], t, xr, grid, tab);
+        acc_up = F::AccR(acc_up, raw_up[u], t, xr, grid, tab);
+      } else {
+        acc = F::Acc(acc, raw[u], t, xb, grid, tab);
+        if constexpr (kSwiGLU) acc_up = F::Acc(acc_up, raw_up[u], t, xb, grid, tab);
+      }
     }
   }
   for (; blk < blocks_per_row; ++blk) {
-    acc = F::Acc(acc, F::Load(base + (uint64_t)blk * F::kBlockBytes, t), t, xt + blk * 256, grid);
-    if constexpr (kSwiGLU)
-      acc_up = F::Acc(acc_up, F::Load(base_up + (uint64_t)blk * F::kBlockBytes, t), t, xt + blk * 256, grid);
+    const typename F::Raw raw = F::Load(base + (uint64_t)blk * F::kBlockBytes, t);
+    typename F::Raw raw_up{};
+    if constexpr (kSwiGLU) raw_up = F::Load(base_up + (uint64_t)blk * F::kBlockBytes, t);
+    const float* xb = xt + blk * 256;
+    if constexpr (kSwiGLU && F::kXReg) {
+      float xr[32];
+#pragma unroll
+      for (int i = 0; i < 32; i += 4) {
+        const float4 f = *reinterpret_cast<const float4*>(xb + i);
+        xr[i] = f.x;
+        xr[i + 1] = f.y;
+        xr[i + 2] = f.z;
+        xr[i + 3] = f.w;
+      }
+      acc = F::AccR(acc, raw, t, xr, grid, tab);
+      acc_up = F::AccR(acc_up, raw_up, t, xr, grid, tab);
+    } else {
+      acc = F::Acc(acc, raw, t, xb, grid, tab);
+      if constexpr (kSwiGLU) acc_up = F::Acc(acc_up, raw_up, t, xb, grid, tab);
+    }
   }
 #pragma unroll
   for (int offset = 4; offset > 0; offset >>= 1) {
@@ -344,6 +554,8 @@ __global__ void __launch_bounds__(kWave* kWaves)
   using F = Format<kType>;
   constexpr uint32_t kRows = 4 * kWaves;
   __shared__ uint32_t grid[F::kIq1Grid ? NGRID_IQ1S : 1];
+  __shared__ uint32_t iq2_words[F::kIq2Words ? F::kIq2Words : 1];
+  __shared__ uint8_t iq2_signs[F::kIq2Words ? 128 : 1];
   if ((int32_t)blockIdx.y >= plan[0]) return;
   const int32_t* g = plan + 1 + blockIdx.y * kPlanGroup;
   const int32_t id = g[0];
@@ -363,6 +575,16 @@ __global__ void __launch_bounds__(kWave* kWaves)
     for (uint32_t i = threadIdx.x; i < NGRID_IQ1S; i += blockDim.x) grid[i] = iq1s_grid_gpu[i];
     __syncthreads();
   }
+  if constexpr (F::kIq2Words) {
+    for (uint32_t i = threadIdx.x; i < F::kIq2Words / 2; i += blockDim.x) {
+      const uint64_t g2 = Iq2GridTable<kType>()[i];
+      iq2_words[2 * i] = static_cast<uint32_t>(g2);
+      iq2_words[2 * i + 1] = static_cast<uint32_t>(g2 >> 32);
+    }
+    for (uint32_t i = threadIdx.x; i < 128; i += blockDim.x) iq2_signs[i] = ksigns_iq2xs[i];
+    __syncthreads();
+  }
+  const Iq2Tab tab{iq2_words, iq2_signs};
   const int lane = threadIdx.x % kWave;
   const int wave = threadIdx.x / kWave;
   const int t = lane % 8;
@@ -381,8 +603,8 @@ __global__ void __launch_bounds__(kWave* kWaves)
   float acc_up[kCols] = {};
   uint32_t blk = 0;
   for (; blk + U <= blocks_per_row; blk += U) {
-    Raw raw[U];
-    Raw raw_up[kSwiGLU ? U : 1];
+    typename F::Raw raw[U];
+    typename F::Raw raw_up[kSwiGLU ? U : 1];
 #pragma unroll
     for (int u = 0; u < U; ++u) {
       raw[u] = F::Load(base + (uint64_t)(blk + u) * F::kBlockBytes, t);
@@ -393,20 +615,50 @@ __global__ void __launch_bounds__(kWave* kWaves)
 #pragma unroll
       for (int c = 0; c < kCols; ++c) {
         if (c >= cols) break;
-        acc[c] = F::Acc(acc[c], raw[u], t, xt[c] + (blk + u) * 256, grid);
-        if constexpr (kSwiGLU) acc_up[c] = F::Acc(acc_up[c], raw_up[u], t, xt[c] + (blk + u) * 256, grid);
+        const float* xb = xt[c] + (blk + u) * 256;
+        if constexpr (kSwiGLU && F::kXReg) {
+          float xr[32];
+#pragma unroll
+          for (int i = 0; i < 32; i += 4) {
+            const float4 f = *reinterpret_cast<const float4*>(xb + i);
+            xr[i] = f.x;
+            xr[i + 1] = f.y;
+            xr[i + 2] = f.z;
+            xr[i + 3] = f.w;
+          }
+          acc[c] = F::AccR(acc[c], raw[u], t, xr, grid, tab);
+          acc_up[c] = F::AccR(acc_up[c], raw_up[u], t, xr, grid, tab);
+        } else {
+          acc[c] = F::Acc(acc[c], raw[u], t, xb, grid, tab);
+          if constexpr (kSwiGLU) acc_up[c] = F::Acc(acc_up[c], raw_up[u], t, xb, grid, tab);
+        }
       }
     }
   }
   for (; blk < blocks_per_row; ++blk) {
-    const Raw raw = F::Load(base + (uint64_t)blk * F::kBlockBytes, t);
-    Raw raw_up{};
+    const typename F::Raw raw = F::Load(base + (uint64_t)blk * F::kBlockBytes, t);
+    typename F::Raw raw_up{};
     if constexpr (kSwiGLU) raw_up = F::Load(base_up + (uint64_t)blk * F::kBlockBytes, t);
 #pragma unroll
     for (int c = 0; c < kCols; ++c) {
       if (c >= cols) break;
-      acc[c] = F::Acc(acc[c], raw, t, xt[c] + blk * 256, grid);
-      if constexpr (kSwiGLU) acc_up[c] = F::Acc(acc_up[c], raw_up, t, xt[c] + blk * 256, grid);
+      const float* xb = xt[c] + blk * 256;
+      if constexpr (kSwiGLU && F::kXReg) {
+        float xr[32];
+#pragma unroll
+        for (int i = 0; i < 32; i += 4) {
+          const float4 f = *reinterpret_cast<const float4*>(xb + i);
+          xr[i] = f.x;
+          xr[i + 1] = f.y;
+          xr[i + 2] = f.z;
+          xr[i + 3] = f.w;
+        }
+        acc[c] = F::AccR(acc[c], raw, t, xr, grid, tab);
+        acc_up[c] = F::AccR(acc_up[c], raw_up, t, xr, grid, tab);
+      } else {
+        acc[c] = F::Acc(acc[c], raw, t, xb, grid, tab);
+        if constexpr (kSwiGLU) acc_up[c] = F::Acc(acc_up[c], raw_up, t, xb, grid, tab);
+      }
     }
   }
 #pragma unroll
@@ -534,7 +786,7 @@ int dispatch(int type, const void* w, const void* w_up, const void* const* w_tab
              const float* x, uint32_t x_slot, uint32_t slots_per_x, float* y, uint32_t m, uint32_t k,
              int zero_dropped) {
   if (!ids || slots == 0 || slots_per_x == 0 || m == 0 || k % 256 != 0) return 1;
-  /* Blocks loaded ahead: 2 measured best for IQ1_S, 1 for the others. */
+  /* Blocks loaded ahead: 2 measured best for every format but IQ1_M. */
   switch (type) {
   case 19:
     return launch<19, 2>(w, w_up, w_table, w_up_table, route_w, limit, expert_bytes, ids, slots, x, x_slot,
@@ -543,13 +795,13 @@ int dispatch(int type, const void* w, const void* w_up, const void* const* w_tab
     return launch<29, 1>(w, w_up, w_table, w_up_table, route_w, limit, expert_bytes, ids, slots, x, x_slot,
                          slots_per_x, y, m, k, zero_dropped);
   case 16:
-    return launch<16, 1>(w, w_up, w_table, w_up_table, route_w, limit, expert_bytes, ids, slots, x, x_slot,
+    return launch<16, 2>(w, w_up, w_table, w_up_table, route_w, limit, expert_bytes, ids, slots, x, x_slot,
                          slots_per_x, y, m, k, zero_dropped);
   case 17:
-    return launch<17, 1>(w, w_up, w_table, w_up_table, route_w, limit, expert_bytes, ids, slots, x, x_slot,
+    return launch<17, 2>(w, w_up, w_table, w_up_table, route_w, limit, expert_bytes, ids, slots, x, x_slot,
                          slots_per_x, y, m, k, zero_dropped);
   case 22:
-    return launch<22, 1>(w, w_up, w_table, w_up_table, route_w, limit, expert_bytes, ids, slots, x, x_slot,
+    return launch<22, 2>(w, w_up, w_table, w_up_table, route_w, limit, expert_bytes, ids, slots, x, x_slot,
                          slots_per_x, y, m, k, zero_dropped);
   default:
     return 1;
@@ -600,13 +852,13 @@ extern "C" int ds41_v41_gemv_experts_grouped(int type, const void* w, const void
     return dispatch_group<29, 1>(w, w_up, w_table, w_up_table, route_w, limit, expert_bytes, plan, slots, cols, x,
                                  x_slot, slots_per_x, y, m, k, zero_dropped);
   case 16:
-    return dispatch_group<16, 1>(w, w_up, w_table, w_up_table, route_w, limit, expert_bytes, plan, slots, cols, x,
+    return dispatch_group<16, 2>(w, w_up, w_table, w_up_table, route_w, limit, expert_bytes, plan, slots, cols, x,
                                  x_slot, slots_per_x, y, m, k, zero_dropped);
   case 17:
-    return dispatch_group<17, 1>(w, w_up, w_table, w_up_table, route_w, limit, expert_bytes, plan, slots, cols, x,
+    return dispatch_group<17, 2>(w, w_up, w_table, w_up_table, route_w, limit, expert_bytes, plan, slots, cols, x,
                                  x_slot, slots_per_x, y, m, k, zero_dropped);
   case 22:
-    return dispatch_group<22, 1>(w, w_up, w_table, w_up_table, route_w, limit, expert_bytes, plan, slots, cols, x,
+    return dispatch_group<22, 2>(w, w_up, w_table, w_up_table, route_w, limit, expert_bytes, plan, slots, cols, x,
                                  x_slot, slots_per_x, y, m, k, zero_dropped);
   default:
     return 1;
