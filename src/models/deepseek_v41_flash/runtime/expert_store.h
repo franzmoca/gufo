@@ -3,6 +3,8 @@
 
 #include <cstdint>
 
+#include <hip/hip_runtime_api.h>
+
 struct ds41_expert_store;
 struct ds41_model;
 struct ds41_weights;
@@ -14,6 +16,8 @@ struct ds41_expert_store_stats {
   uint64_t tokens = 0;
   uint64_t stall_ns = 0;
   uint64_t cache_bytes = 0;
+  uint64_t prefetch_bytes = 0;         // staged by background prefetch jobs
+  uint64_t prefetch_dropped_bytes = 0; // prefetched bytes no prepare consumed
 };
 
 /* Available unified host memory, including reclaimable file cache. */
@@ -57,6 +61,32 @@ bool ds41_expert_store_prepare(ds41_expert_store* store, uint32_t layer,
                                const void** down,
                                bool (*overlap)(void*, const ds41_expert_overlap*) = nullptr,
                                void* overlap_context = nullptr);
+
+/* Queue a background read of the given uncached experts of `layer` into the
+ * stage set the layer's next prepare consumes, without displacing anything.
+ * The reads run only while no demand phase does; the next prepare for the
+ * layer adopts what is still pending, and any other prepare drops it.
+ * `wide` marks a prefill-scale expert set, which only a batch-scale prepare
+ * adopts. Best effort: returns false when the layer is not the next
+ * prepare's target or successor, has no uncached listed experts, or the job
+ * was refused. */
+bool ds41_expert_store_prefetch(ds41_expert_store* store, uint32_t layer,
+                                const int32_t* experts, uint32_t count,
+                                bool wide = false);
+
+/* Records a router prediction whose ids `done` signals in decoder-owned
+ * pinned memory; a store thread submits the prefetch when the event lands.
+ * Returns false when the record was refused (best effort by design). */
+bool ds41_expert_store_predict(ds41_expert_store* store, uint32_t layer,
+                               hipEvent_t done, const int32_t* ids, uint32_t count,
+                               bool wide);
+
+/* Waits until every recorded prediction has been submitted, so the ids and
+ * event may be released. */
+void ds41_expert_store_predict_flush(ds41_expert_store* store);
+
+/* True when no background prefetch work is queued or running. */
+bool ds41_expert_store_prefetch_idle(const ds41_expert_store* store);
 ds41_expert_store_stats ds41_expert_store_get_stats(
     const ds41_expert_store* store);
 void ds41_expert_store_log(const ds41_expert_store* store);

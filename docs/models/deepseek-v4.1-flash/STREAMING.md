@@ -135,3 +135,63 @@ inside the previous build's own run-to-run spread (945–1129 / 22.5–23.7).
 [Buffered control](artifacts/m3-streaming/bench-iq2-buffered-io-control1.log) ·
 [Overlapped staging](artifacts/m3-streaming/bench-iq2-tables-ar1.log) ·
 [Retuned GEMV pairs](artifacts/m3-streaming/bench-iq2-fast-ctrl2.log)
+
+## Prefill read pipelining with router predictions (2026-10-27)
+
+Backlog item 11. A prefill layer's missing experts are no longer read after
+its router has chosen them: the reads start during the previous layer's
+compute.
+
+- **Background read jobs.** The four read workers also serve one background
+  job between demand phases, and a demand phase always preempts it. The
+  next prepare of the job's layer adopts its un-run tasks — grouped per
+  expert, and only for the experts the batch actually routes, so a wrong
+  prediction costs bandwidth but never phase time. A prepare for the layer
+  after parks the job across its phase; anything overtaken is dropped once
+  its in-flight tasks drain.
+- **Ping-pong stage sets.** A background job writes the stage set of its
+  layer's parity, disjoint from the rows the current layer's compute reads.
+  The second set (~3.6 GiB) is bought lazily after the startup seed, so
+  seeding keeps its memory budget, but the runtime cache then grows to 98.0
+  instead of 101.6 GiB and decode pays for the difference in extra reads;
+  a compact stage set sized to the predicted expert count is the follow-up
+  that recovers it.
+- **Router prediction.** The read overlap of a prefill layer L enqueues
+  layer L+1's router matmul on this layer's FFN input (one layer stale),
+  where the extra matvec hides in the read stall. A store thread submits
+  the read job when the ids land in pinned memory, so layer L+1's reads
+  overlap layer L's compute.
+
+A router-free sweep of the next layer's uncached experts — the original
+item-11 design, as ds4's Strix Halo path does — was measured first and
+rejected on this model: V4.1 Flash routing is skewed enough that a
+2048-token prompt touches only a fraction of each layer's experts, and with
+the ranked seed resident the sweep read 3.6x the demand volume of the first
+pass (22.9 vs 6.4 GiB), dropping pp2048 to 389.61/386.69 tok/s against
+664.03/661.93 for the control. The predicted job reads ~1.6x the demand
+volume, and the overlap absorbs it.
+
+Matched `gufo bench` arms (pp2048/tg128, alternating binaries, targeted
+shard page eviction between runs, two rounds each). The tg128 token hash
+04842be7… and DSpark's 71 accepted of 107 drafted are identical on every
+arm; the streamed pipeline changes only when bytes arrive, never which
+bytes the kernels see.
+
+| Build | AR pp2048 | AR tg128 | DSpark pp2048 | DSpark tg128 |
+| --- | ---: | ---: | ---: | ---: |
+| control (028086ab) | 652.6–663.6 | 16.53–16.59 | 616.7–620.5 | 19.05–19.11 |
+| prefill prediction | 779.3–785.1 | 15.75–15.94 | 737.2–748.0 | 17.78–17.91 |
+
+Prefill gains 19–21% on both paths. Decode keeps its kernels and its host
+wait (4.88–4.93 ms/token on every arm) but loses 4–6% to the smaller cache:
+the second stage set is the price of the pipelining, and the compact-set
+follow-up targets exactly that. Decode-side predictions measured +0.8%
+once adoption skips unrouted experts (15.89–15.94 vs 15.75–15.78 tok/s)
+and land as backlog item 12.
+
+[Router-free sweep, candidate](artifacts/m3-streaming/bench-iq2-routersweep-cand1.log) ·
+[Router-free sweep, control](artifacts/m3-streaming/bench-iq2-routersweep-ctrl1.log) ·
+[Prefill prediction, AR](artifacts/m3-streaming/bench-iq2-prefetch-ar-cand1.log) ·
+[Prefill prediction, AR control](artifacts/m3-streaming/bench-iq2-prefetch-ar-ctrl1.log) ·
+[Prefill prediction, DSpark](artifacts/m3-streaming/bench-iq2-prefetch-ds-cand1.log) ·
+[Prefill prediction, DSpark control](artifacts/m3-streaming/bench-iq2-prefetch-ds-ctrl1.log)
