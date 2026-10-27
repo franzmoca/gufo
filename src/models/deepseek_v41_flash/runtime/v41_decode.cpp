@@ -832,12 +832,17 @@ bool shared_moe(ds41_decoder* d, const ds41_layer_weights* l, uint32_t n) {
 
 /* Enqueues the next layer's router on this layer's FFN input (one layer
  * stale) and records the prediction; the store's thread turns the landed
- * ids into a background read the next layer's prepare adopts. Called from
- * the read overlap, so the extra matvec hides in the read stall. */
-void predict_next_layer(ds41_decoder* d, uint32_t il, uint32_t n) {
+ * ids into a background read the next layer's prepare adopts, skipping the
+ * experts the batch does not route. Called from the read overlap, where the
+ * extra matvec hides in the read stall. Single tokens predict only when
+ * this layer waited on reads: misses cluster in neighbouring layers, and a
+ * prediction without a stall to hide it costs more than the read it saves. */
+void predict_next_layer(ds41_decoder* d, uint32_t il, uint32_t n, bool misses_now) {
   if (!d->engine->expert_store || !d->pred_ok || il + 1 >= DS41_N_LAYER)
     return;
-  if (n < kPrefillPredictTokens)
+  if (n != 1 && n < kPrefillPredictTokens)
+    return;
+  if (n == 1 && !misses_now)
     return;
   const ds41_layer_weights* nl = &d->engine->weights->layer[il + 1];
   const uint32_t used = DS41_N_EXPERT_USED;
@@ -906,7 +911,7 @@ bool moe(ds41_decoder* d, uint32_t il, uint32_t n) {
     StreamWork& w = *static_cast<StreamWork*>(context);
     if (!shared_moe(w.d, w.layer, w.n))
       return false;
-    predict_next_layer(w.d, w.il, w.n);
+    predict_next_layer(w.d, w.il, w.n, info && info->miss_rows > 0);
     if (!info || !info->hit_ids || info->miss_rows == 0 || info->miss_rows == info->rows || !w.fused)
       return true;
     w.info = *info;
