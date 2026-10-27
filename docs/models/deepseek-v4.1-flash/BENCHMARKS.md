@@ -36,8 +36,8 @@ and other engines' configurations are in [streaming research](STREAMING.md).
 With the built-in ranking preloading 10,240 experts at startup and the
 overlapped staging of October 27 (per-expert weight tables, split hit/miss
 launches, per-reader upload streams), the same pp2048/tg128 measurements with
-the histogram sidecar reach 666.1–669.6 tok/s prefill and 14.99–15.00 tok/s
-decode without a drafter, and 17.92–17.94 tok/s with the Lucebox DSpark
+the histogram sidecar reach 664.7–669.6 tok/s prefill and 14.99–15.08 tok/s
+decode without a drafter, and 17.92–17.96 tok/s with the Lucebox DSpark
 drafter (same 110 drafted / 71 accepted and the same token hash as the
 previous build; the DSpark prefill runs spread 494–628 tok/s with the page
 cache, so the AR prefill pair is the retained number). At the native
