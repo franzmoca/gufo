@@ -143,6 +143,24 @@ per-lane grid-LUT IQ2 decode against a 214 GB/s Q2_0 kernel at the same
 | Fast-math contraction context in the IQ1_M tail | A pragma-free re-expression of `acc + fmaf(s1, d01, s2*(d23))` reproduces the production bits; freezing it with `#pragma clang fp reassociate(off)` does not (production's own emission reassociates). The port keeps the source expression verbatim; the tune bench's replica variant guards it. |
 | Alternating matched `gufo bench` pairs (gpu-test binaries, seed 19, two controls and two candidates interleaved) | Streamed IQ2_XXS AR tg128 15.90/16.06 -> 16.57/16.94 tok/s and DSpark 18.54 -> 19.34 (71 accepted and token hash 04842be7… unchanged; 110 -> 107 drafted under the timing-adaptive drafter); decode host wait 5.4-6.5 -> 5.2-5.6 ms/token; resident IQ1_M tg128 23.55/23.36 -> 23.86/24.38 (hash 70d5a48a… unchanged). Prefill untouched (routed_f16 path). |
 
+## Post-retune kernel survey (2026-10-27)
+
+After the expert GEMV retune, a rocprof pass over a streamed DSpark
+pp2048/tg64 run (4.15 s GPU busy) ranked every remaining kernel family and
+the survey measured each candidate's headroom. The model tensor mixes were
+read with llama.cpp's gguf-py: the streamed build's routed experts are
+gate/up IQ1_M x16, IQ2_XXS x17, IQ2_XS x7 and down IQ1_M x28, IQ2_XXS x8,
+IQ2_XS x4; the resident build gate/up IQ1_S x28, IQ2_XXS x9, IQ1_M x3 and
+down IQ1_S x27, IQ1_M x9, IQ2_XXS x2, IQ2_S x2; the Lucebox drafter's
+experts are Q4_K x3 and Q2_K x3 of six layers.
+
+| Candidate | Decision / evidence |
+| --- | --- |
+| Dense Q5_K FP16 prefill (`ds41_dense_f16.hip.cpp`, 493 ms / 11.9% of the run) | Kept. 32.2-33.5 TFLOP/s across q_b/o_b/sh_gate/wo_a (`tools/bench/ds41_dense_f16_tune.hip`), WMMA-issue bound (128 WMMAs against ~2.1k VALU per body, 615 s_delay_alu); the iterative-ILP scheduler flag measured 32.1-33.4 with identical hashes (rejected), and the tile/stage knobs are the ones the Gemma 4 audit already exhausted on the same kernel class at 37-40 TFLOP/s. The remaining ~15% is scheduling overlap, not instructions. |
+| LDS-staged activations for the IQ1 down GEMV (162-167 GB/s, the weakest decode kernels; 28 of 40 streamed down layers are IQ1_M) | Rejected: the per-lane 128-byte activation stride makes every read an 8-way LDS bank conflict -- 43-49 GB/s, 4x slower than the global path. The down launches also show a fixed per-launch floor (85-96 us across 13.8-22.7 MB and all five formats), so activation traffic is not what holds them at ~165 GB/s. |
+| DSpark drafter expert projections through the vendored mmvq (`mul_mat_vec_q_moe<10>` 49.8 ms + Q4_K paths ~12 ms + q8_1/fp4 passes ~19 ms of the run) | Not attempted: ~80 ms of a 4.15 s run. The drafter is not the DSpark bottleneck; the target's verification and head dominate. |
+| Output head and dense decode GEMV, attention prefill/decode, routed F16 prefill | Kept. The head streams 227-237 GB/s (near the 239.7 measured peak); the routed F16 decodes through LDS FP16-packed codebooks with XOR signs at fork-grade (22.8-26.5 TOPS, no slow-opcode pathologies in isa_mix); attention carries its own retained tuning history. |
+
 ## Post-M6 resident optimization pass (2026-10-26)
 
 Baseline source: `ee49a0fd` (sampling defaults from `edce52dd`); production
