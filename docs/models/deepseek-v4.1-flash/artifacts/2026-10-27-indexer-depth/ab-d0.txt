@@ -1,0 +1,12 @@
+== base
+| DeepSeek V4.1 Flash              | 112.43 GiB | ROCm (HIP) |             pp2048 |      1197.18 ± 54.95 |
+| DeepSeek V4.1 Flash              | 112.43 GiB | ROCm (HIP) |               tg64 |         23.67 ± 0.00 |
+== score
+| DeepSeek V4.1 Flash              | 112.43 GiB | ROCm (HIP) |             pp2048 |      1130.36 ± 79.32 |
+| DeepSeek V4.1 Flash              | 112.43 GiB | ROCm (HIP) |               tg64 |         23.99 ± 0.47 |
+== base
+| DeepSeek V4.1 Flash              | 112.43 GiB | ROCm (HIP) |             pp2048 |      1164.75 ± 65.68 |
+| DeepSeek V4.1 Flash              | 112.43 GiB | ROCm (HIP) |               tg64 |         24.31 ± 0.18 |
+== score
+| DeepSeek V4.1 Flash              | 112.43 GiB | ROCm (HIP) |             pp2048 |      1177.22 ± 35.31 |
+| DeepSeek V4.1 Flash              | 112.43 GiB | ROCm (HIP) |               tg64 |         24.22 ± 0.16 |

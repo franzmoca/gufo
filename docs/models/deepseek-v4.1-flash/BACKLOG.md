@@ -33,7 +33,9 @@ head take ~23.9 ms near the 235 GB/s read peak.
 
 **Prefill** (pp2048 at 32K with bounded replay, 2026-10-26): 1,773.84 ms of
 GPU time; routed FP16 606 ms, dense FP16 518, attention 219, mHC 137,
-indexer 83, top-k 45.
+indexer 83, top-k 45. After E19/E20 (2026-10-27) the indexer scores take
+about a quarter and the top-k a twentieth of that per layer at 128K; native
+pp2048 runs 1,182 tok/s at 32K, 1,155 at 64K and 1,098 at 128K.
 
 **Verification rows** (`--spec-bench`, 1–8 rows, 2026-10-27, ms):
 
@@ -107,7 +109,10 @@ reads as capture boundaries.
 
 E1 restricts FP32 rescoring of 1–4 rows to layer 20's candidate blocks
 after 16K. Prefill rescoring (WMMA) still scores the full history and masks
-afterwards, and the final top-k still scans dense scores. Keep absolute
+afterwards, and the final top-k still scans dense scores (both about 4×
+cheaper per row after E19/E20; the encoder index layers 2, 8 and 14 have no
+candidate mask and remain the main depth cost, ~40 ms each per 2K batch at
+128K). Keep absolute
 position tie order, the pinned newest block, causal partial blocks and the
 emitted row order; at or below 16K keep the dense route unless compact
 dispatch measures faster.
