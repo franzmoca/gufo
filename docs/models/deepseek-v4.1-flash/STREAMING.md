@@ -405,3 +405,40 @@ for IQ2_XXS). The IQ2_XXS prefill spread no longer comes from expert reads
 of backlog item 14, whose page cache the full expert cache displaces, are
 the likely remainder.
 
+
+## Decode profile and per-layer expert tables (2026-10-27)
+
+A rocprofv3 trace of warm IQ2_XXS decode (119 tokens of tg128 after
+pp512, automatic cache, medians per token) splits the 50.1 ms token into
+40.3 ms of kernels and 9.8 ms of GPU idle:
+
+| Part | ms/token |
+| --- | ---: |
+| Dense Q5_K GEMV (`gemv_kernel<13,…>`) | 22.2 |
+| Routed expert GEMV | 11.5 |
+| Other kernels (attention, hyper-connections, router, …) | 6.6 |
+| Idle: miss reads between the hit and miss launches (~4 per token) | 5.3 |
+| Idle: ~200 small blocking copies | ~3 |
+
+The dense GEMV runs near the measured bandwidth ceiling, so speculative
+verification, which reads it once for several tokens, is the larger decode
+lever. Timers around the Engram futures and the read phases put the Engram
+wait at ~0.1 ms per pp2048 batch and the first prefill's expert read wait at
+0.35 s (0 once warm): the Engram is not what slows a new prompt.
+
+The copies were each layer's three expert tables and two hit/miss row
+arrays, uploaded with blocking `hipMemcpy`. The store now keeps one device
+table per layer and uploads it asynchronously only when one of its entries
+changed; a warm cache almost never changes one. The hit/miss rows are
+uploaded, in one asynchronous copy, only for a batch that both hits and
+misses — the only case whose launches read them. The routes copy that
+starts the next prepare orders every upload before its pinned mirror is
+rewritten. Copies per token fell from ~200 to 23 (the slot fills after
+reads), GPU idle from 9.8 to 8.1 ms and the traced token from 50.1 to
+48.1 ms.
+
+Alternated `gufo bench` (pp2048/tg128, `-r 2`): tg128 20.23/20.40 →
+20.93/20.95 tok/s (+3.2%); pp2048 985.9/1061.2 → 1074.3/1077.2, inside its
+first-repetition spread. Streamed IQ2_XXS decode scores are bit-identical
+on 256 positions with the automatic cache and with a 16 GiB cache (71%
+route hits, so most layers split).
