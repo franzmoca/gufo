@@ -111,7 +111,7 @@ __global__ __launch_bounds__(kThreads) void dense_q5k_f16_kernel(const uint8_t* 
                                                                  const float* __restrict__ x, float* __restrict__ out,
                                                                  uint32_t m, uint32_t n, uint32_t k, uint32_t groups,
                                                                  uint32_t tile0) {
-  __shared__ __attribute__((aligned(16))) _Float16 act[kTile * kPitch];
+  __shared__ __attribute__((aligned(16))) _Float16 act[2][kTile * kPitch];
   const int tid = threadIdx.x, wave = tid / 32, lane = tid % 32, h = lane / 16;
   const uint32_t z = blockIdx.z;
   const uint64_t row_bytes = (uint64_t)k / 256 * kQ5Bytes;
@@ -128,7 +128,8 @@ __global__ __launch_bounds__(kThreads) void dense_q5k_f16_kernel(const uint8_t* 
   constexpr int kPer = kStageK * kTile / kThreads;
   const uint32_t st = tid % kTile, sh = tid / kTile;
   const float* xs = kFull || t0 + st < n ? x + (t0 + st) * x_stride + (uint64_t)z * k + kPer * sh : nullptr;
-  _Float16* as = act + st * kPitch + kPer * sh;
+  _Float16* as0 = act[0] + st * kPitch + kPer * sh;
+  _Float16* as1 = act[1] + st * kPitch + kPer * sh;
   /* The next two stages' activations, loaded while the current one
    * computes. */
   float4 pre[kPer / 4], pre2[kPer / 4];
@@ -138,8 +139,12 @@ __global__ __launch_bounds__(kThreads) void dense_q5k_f16_kernel(const uint8_t* 
       for (int c = 0; c < kPer / 4; ++c) pre2[c] = reinterpret_cast<const float4*>(xs + k0)[c];
     }
   };
+  /* Stage g stores into buffer g & 1 while stage g-1 still reads the other
+   * one: one barrier per stage instead of two. */
+  int g = 0;
   const auto store = [&]() {
     if (kFull || xs) {
+      _Float16* as = (g & 1) ? as1 : as0;
 #pragma unroll
       for (int c = 0; c < kPer / 8; ++c) {
         const float4 a = pre[2 * c], b = pre[2 * c + 1];
@@ -165,7 +170,6 @@ __global__ __launch_bounds__(kThreads) void dense_q5k_f16_kernel(const uint8_t* 
 #pragma unroll
     for (int stage = 0; stage < 4; ++stage) {
       const uint32_t k0 = sb * 256 + stage * kStageK;
-      lds_barrier();
       store();
       lds_barrier();
 #pragma unroll
@@ -187,7 +191,8 @@ __global__ __launch_bounds__(kThreads) void dense_q5k_f16_kernel(const uint8_t* 
           /* Half h reads values 8 h .. 8 h + 7 of its token row and takes
            * the other eight from the opposite half. */
           const auto frag = [&](int t) {
-            const uint4 own = *reinterpret_cast<const uint4*>(act + (t * 16 + lane % 16) * kPitch + kk + 8 * h);
+            const uint4 own =
+                *reinterpret_cast<const uint4*>(act[g & 1] + (t * 16 + lane % 16) * kPitch + kk + 8 * h);
             uint32_t v[8] = {own.x, own.y, own.z, own.w};
 #pragma unroll
             for (int i = 0; i < 4; ++i)
@@ -199,6 +204,7 @@ __global__ __launch_bounds__(kThreads) void dense_q5k_f16_kernel(const uint8_t* 
             if (t < live) acc[t] = __builtin_amdgcn_wmma_f32_16x16x16_f16_w32(frag(t), b, acc[t]);
         }
       }
+      ++g;
     }
   }
 

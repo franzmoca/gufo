@@ -182,20 +182,40 @@ bool attention(const ds41_dspark_stage& st, ds41_dspark_scratch& s, const float*
   return lin(st.o_b, s.oa, s.attn_out, n);
 }
 
+/* The routed experts' FP32-activation GEMV (ds41_expert_gemv.hip.cpp) covers
+ * the drafter's Q2_K and Q4_K layers: one fused gate/up/SwiGLU launch and
+ * one down launch replace the three mmvq passes and their Q8_1 rounding,
+ * streaming the weights at the dense GEMV's bandwidth. */
+static int expert_block_bytes(uint32_t type) { return type == 10 ? 84 : type == 12 ? 144 : 0; }
+
 bool moe(const ds41_dspark_stage& st, ds41_dspark_scratch& s) {
   const uint32_t n = kRows;
   const int experts = (int)DS41_DSPARK_EXPERTS;
+  const int gu_type = (int)st.gate_exps.type;
+  const uint64_t gu_bytes = (uint64_t)DS41_N_FF_EXP * kDim / 256 * expert_block_bytes(gu_type);
+  const uint64_t down_bytes = (uint64_t)kDim * DS41_N_FF_EXP / 256 * expert_block_bytes(st.down_exps.type);
+  const bool gemv_experts =
+      gu_type == (int)st.up_exps.type && gu_type == (int)st.down_exps.type && expert_block_bytes(gu_type) != 0;
   if (!lin(st.gate_inp, s.xn, s.router, n) ||
       ds41_v41_route(s.router, f32(st.probs_b), s.route_ids, s.route_w, DS41_DSPARK_EXPERTS, kRouted,
-                     DS41_EXPERT_WEIGHT_SCALE, n) ||
-      ds41_mmq_moe_vec_typed((int)st.gate_exps.type, st.gate_exps.p, s.xn, s.route_ids, s.g, DS41_N_FF_EXP, kDim,
-                             (int)n, experts, (int)kRouted, 0) ||
-      ds41_mmq_moe_vec_typed((int)st.up_exps.type, st.up_exps.p, s.xn, s.route_ids, s.u, DS41_N_FF_EXP, kDim, (int)n,
-                             experts, (int)kRouted, 0) ||
-      ds41_v41_swiglu(s.g, s.u, s.route_w, s.mid, n * kRouted, DS41_N_FF_EXP, kSwigluLimit) ||
-      ds41_mmq_moe_vec_typed((int)st.down_exps.type, st.down_exps.p, s.mid, s.route_ids, s.down, kDim, DS41_N_FF_EXP,
-                             (int)(n * kRouted), experts, 1, 0))
+                     DS41_EXPERT_WEIGHT_SCALE, n))
     return false;
+  if (gemv_experts) {
+    if (ds41_v41_gemv_experts_swiglu(gu_type, st.gate_exps.p, st.up_exps.p, gu_bytes, s.route_ids, n * kRouted,
+                                     s.xn, kDim, kRouted, s.route_w, kSwigluLimit, s.mid, DS41_N_FF_EXP, kDim,
+                                     nullptr, nullptr, 1) ||
+        ds41_v41_gemv_experts((int)st.down_exps.type, st.down_exps.p, down_bytes, s.route_ids, n * kRouted, s.mid,
+                              DS41_N_FF_EXP, 1, s.down, kDim, DS41_N_FF_EXP, nullptr, 1))
+      return false;
+  } else if (ds41_mmq_moe_vec_typed(gu_type, st.gate_exps.p, s.xn, s.route_ids, s.g, DS41_N_FF_EXP, kDim,
+                                    (int)n, experts, (int)kRouted, 0) ||
+             ds41_mmq_moe_vec_typed((int)st.up_exps.type, st.up_exps.p, s.xn, s.route_ids, s.u, DS41_N_FF_EXP, kDim,
+                                    (int)n, experts, (int)kRouted, 0) ||
+             ds41_v41_swiglu(s.g, s.u, s.route_w, s.mid, n * kRouted, DS41_N_FF_EXP, kSwigluLimit) ||
+             ds41_mmq_moe_vec_typed((int)st.down_exps.type, st.down_exps.p, s.mid, s.route_ids, s.down, kDim,
+                                    DS41_N_FF_EXP, (int)(n * kRouted), experts, 1, 0)) {
+    return false;
+  }
   if (st.gate_shexp.type == st.up_shexp.type && gemv_type(st.gate_shexp.type)) {
     if (ds41_v41_gemv_swiglu((int)st.gate_shexp.type, st.gate_shexp.p, st.up_shexp.p, s.xn, s.sm, DS41_N_FF_EXP,
                              kDim, kSwigluLimit, 0, n))

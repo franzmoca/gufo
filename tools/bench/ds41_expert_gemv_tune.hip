@@ -454,14 +454,91 @@ struct TuneFormat<22, kFeat> {
   }
 };
 
-template <int kType, int U, bool kSwiGLU, int kFeat>
-__global__ void __launch_bounds__(kWave* kWaves)
+/* Q4_K (144 bytes, 16-byte aligned blocks): the dense GEMV's task split
+ * (LoadQ45K/DecodeQ45K/DotQ45K), one header and one 16-byte payload load
+ * per task. The task's 32 values live in two 16-value slices 32 apart, so
+ * the fused gate/up pass keeps the plain two-read accumulation. */
+template <int kFeat>
+struct TuneFormat<12, kFeat> {
+  static constexpr int kBlockBytes = 144;
+  static constexpr bool kIq1Grid = false;
+  static constexpr bool kIq2Grid = false;
+  static constexpr int kIq2Words = 0;
+  static constexpr int kGridEntries = 0;
+  static constexpr bool kXReg = false;
+  struct Raw {
+    uint4 header, q;
+  };
+  static __device__ __forceinline__ Raw Load(const uint8_t* b, int t) {
+    const int p = t >> 1, h = t & 1;
+    return {*reinterpret_cast<const uint4*>(b), *reinterpret_cast<const uint4*>(b + 16 + 32 * p + 16 * h)};
+  }
+  static __device__ __forceinline__ float Acc1(float acc, const Raw& a, int t, const float* x,
+                                               const uint32_t*, const Tab&) {
+    float w[32];
+    ds41_gemv_tasks::DecodeQ45K<false>({a.header, a.q, {}}, t, w);
+    /* The kernel hands the task's 32-float slice; DotQ45K offsets by the
+     * task itself, so pass the block base. */
+    return acc + ds41_gemv_tasks::DotQ45K(0.0f, w, t, x - 32 * t);
+  }
+  static __device__ __forceinline__ float Acc1R(float acc, const Raw& a, int t, const float (&xr)[32],
+                                                const uint32_t* grid, const Tab& tab) {
+    return Acc1(acc, a, t, xr, grid, tab);
+  }
+};
+
+/* Q2_K (84 bytes): d, dmin, 16 scale/min bytes (one per 16-value sub-block)
+ * and 64 qs bytes (two bits per value). Task t holds sub-blocks 2t and 2t+1
+ * contiguously: one scale word and one 8-byte payload load. Weight =
+ * d sc v - dmin mn with v in {0..3}. */
+template <int kFeat>
+struct TuneFormat<10, kFeat> {
+  static constexpr int kBlockBytes = 84;
+  static constexpr bool kIq1Grid = false;
+  static constexpr bool kIq2Grid = false;
+  static constexpr int kIq2Words = 0;
+  static constexpr int kGridEntries = 0;
+  static constexpr bool kXReg = false;
+  struct Raw {
+    uint32_t dm, sc;
+    uint32_t qs[8];
+  };
+  static __device__ __forceinline__ Raw Load(const uint8_t* b, int t) {
+    Raw r{};
+    __builtin_memcpy(&r.dm, b + 80, 4);
+    __builtin_memcpy(&r.sc, b + 2 * t, 2);
+    __builtin_memcpy(r.qs, b + 16 + 32 * (t >> 2), 32);
+    return r;
+  }
+  static __device__ __forceinline__ float Acc1(float acc, const Raw& a, int t, const float* x,
+                                              const uint32_t*, const Tab&) {
+    const float d = HalfBits(a.dm & 0xFFFFu), dmin = HalfBits(a.dm >> 16);
+    const uint32_t shift = 2u * (t & 3);
+    float w[32];
+#pragma unroll
+    for (int i = 0; i < 32; ++i) {
+      const uint32_t byte = (a.qs[i >> 2] >> (8 * (i & 3))) & 0xFFu;
+      const uint32_t sb = (a.sc >> (8 * (i >> 4))) & 0xFFu;
+      const float dsc = d * static_cast<float>(sb & 0xFu);
+      const float off = dmin * static_cast<float>(sb >> 4);
+      w[i] = dsc * static_cast<float>((byte >> shift) & 3u) - off;
+    }
+    return acc + ds41_gemv_tasks::Accumulate<32>(0.0f, w, x);
+  }
+  static __device__ __forceinline__ float Acc1R(float acc, const Raw& a, int t, const float (&xr)[32],
+                                                const uint32_t* grid, const Tab& tab) {
+    return Acc1(acc, a, t, xr, grid, tab);
+  }
+};
+
+template <int kType, int U, bool kSwiGLU, int kFeat, int kRowT, int kTW>
+__global__ void __launch_bounds__(kTW)
     tune_gemv_kernel(const uint8_t* __restrict__ w, const uint8_t* __restrict__ w_up,
                      const float* __restrict__ route_w, float limit, const float* __restrict__ x,
                      float* __restrict__ y, uint32_t m, uint32_t k, const int32_t* __restrict__ ids,
                      uint64_t expert_bytes, uint32_t x_slot, uint32_t slots_per_x) {
   using F = TuneFormat<kType, kFeat>;
-  constexpr uint32_t kRows = 4 * kWaves;
+  constexpr uint32_t kRows = 4 * kTW / kWave;
   __shared__ uint32_t s_iq1[F::kIq1Grid ? NGRID_IQ1S : 1];
   __shared__ uint32_t s_iq2[(F::kIq2Grid && (kFeat & kLdsL)) ? 2 * F::kGridEntries : 1];
   __shared__ uint8_t s_signs[(F::kIq2Grid && (kFeat & kLdsL)) ? 128 : 1];
@@ -485,10 +562,14 @@ __global__ void __launch_bounds__(kWave* kWaves)
   const int lane = threadIdx.x % kWave;
   const int wave = threadIdx.x / kWave;
   const int t = lane % 8;
-  const uint32_t row = blockIdx.x * kRows + wave * 4 + lane / 8;
-  if (row >= m) return;
-  const float* xt = x + (uint64_t)(blockIdx.y / slots_per_x) * x_slot + 32 * t;
   const uint32_t blocks_per_row = k / 256;
+  /* kRowT row tiles per workgroup: the tables fill once and the launch
+   * covers the same rows in the same order, one tile at a time. */
+#pragma unroll
+  for (int rt = 0; rt < kRowT; ++rt) {
+  const uint32_t row = (blockIdx.x * kRowT + rt) * kRows + wave * 4 + lane / 8;
+  if (row >= m) continue;
+  const float* xt = x + (uint64_t)(blockIdx.y / slots_per_x) * x_slot + 32 * t;
   const uint64_t row_bytes = (uint64_t)row * blocks_per_row * F::kBlockBytes;
   const uint64_t offset = (uint64_t)id * expert_bytes + row_bytes;
   const uint8_t* base = w + offset;
@@ -552,44 +633,49 @@ __global__ void __launch_bounds__(kWave* kWaves)
     acc += __shfl_xor(acc, offset, kWave);
     if constexpr (kSwiGLU) acc_up += __shfl_xor(acc_up, offset, kWave);
   }
-  if (t != 0) return;
-  if constexpr (kSwiGLU) {
-    float g = acc;
-    float u = acc_up;
-    if (limit > 0.0f) {
-      u = fminf(fmaxf(u, -limit), limit);
-      g = fminf(g, limit);
+  if (t == 0) {
+    if constexpr (kSwiGLU) {
+      float g = acc;
+      float u = acc_up;
+      if (limit > 0.0f) {
+        u = fminf(fmaxf(u, -limit), limit);
+        g = fminf(g, limit);
+      }
+      const float h = g / (1.0f + expf(-g)) * u;
+      y[row] = route_w ? route_w[blockIdx.y] * h : h;
+    } else {
+      y[row] = acc;
     }
-    const float h = g / (1.0f + expf(-g)) * u;
-    y[row] = route_w ? route_w[blockIdx.y] * h : h;
-  } else {
-    y[row] = acc;
+  }
   }
 }
 
-template <int kType, int U, bool kSwiGLU, int kFeat>
+template <int kType, int U, bool kSwiGLU, int kFeat, int kRowT, int kTW>
 void launch_tune(const void* w, const void* w_up, uint64_t expert_bytes, const int32_t* ids, uint32_t slots,
                  const float* x, uint32_t x_slot, uint32_t slots_per_x, float* y, uint32_t m, uint32_t k) {
-  constexpr uint32_t kRows = 4 * kWaves;
-  const dim3 blocks((m + kRows - 1) / kRows, slots);
-  tune_gemv_kernel<kType, U, kSwiGLU, kFeat><<<blocks, kWave * kWaves>>>(
+  constexpr uint32_t kRows = 4 * kTW / kWave;
+  const dim3 blocks((m + kRows * kRowT - 1) / (kRows * kRowT), slots);
+  tune_gemv_kernel<kType, U, kSwiGLU, kFeat, kRowT, kTW><<<blocks, kTW>>>(
       static_cast<const uint8_t*>(w), static_cast<const uint8_t*>(w_up), nullptr, 0.0f, x, y, m, k, ids,
       expert_bytes, x_slot, slots_per_x);
 }
 
-template <int kType, int U, int kFeat>
+template <int kType, int U, int kFeat, int kRowT, int kTW>
 void launch_pick(const void* w, const void* w_up, uint64_t expert_bytes, const int32_t* ids, uint32_t slots,
                  const float* x, uint32_t x_slot, uint32_t slots_per_x, float* y, uint32_t m, uint32_t k) {
   if (w_up)
-    launch_tune<kType, U, true, kFeat>(w, w_up, expert_bytes, ids, slots, x, x_slot, slots_per_x, y, m, k);
+    launch_tune<kType, U, true, kFeat, kRowT, kTW>(w, w_up, expert_bytes, ids, slots, x, x_slot, slots_per_x, y, m, k);
   else
-    launch_tune<kType, U, false, kFeat>(w, nullptr, expert_bytes, ids, slots, x, x_slot, slots_per_x, y, m, k);
+    launch_tune<kType, U, false, kFeat, kRowT, kTW>(w, nullptr, expert_bytes, ids, slots, x, x_slot, slots_per_x, y,
+                                                    m, k);
 }
 
 struct Variant {
   const char* name;
   int feat;
   int u;
+  int rt;  // row tiles per workgroup (persistent tables)
+  int tw;  // threads per workgroup, in units of 32 (8, 16, 32)
 };
 
 /* One (shape, variant) instantiation chosen by name at run time. */
@@ -597,32 +683,44 @@ using Launcher = void (*)(const void*, const void*, uint64_t, const int32_t*, ui
                           uint32_t, float*, uint32_t, uint32_t);
 
 template <int kType>
-Launcher VariantLauncher(int feat, int u) {
-  switch (feat | (u << 8)) {
-  case 0x100:
-    return launch_pick<kType, 1, 0>;
-  case kFastL | 0x100:
-    return launch_pick<kType, 1, kFastL>;
-  case kVecL | 0x100:
-    return launch_pick<kType, 1, kVecL>;
-  case (kVecL | kFastL) | 0x100:
-    return launch_pick<kType, 1, kVecL | kFastL>;
-  case (kVecL | kLdsL | kFastL) | 0x100:
-    return launch_pick<kType, 1, kVecL | kLdsL | kFastL>;
-  case (kVecL | kLdsL | kFastL | kXRegL) | 0x100:
-    return launch_pick<kType, 1, kVecL | kLdsL | kFastL | kXRegL>;
-  case (kVecL | kLdsL | kFastL | kXRegL) | 0x200:
-    return launch_pick<kType, 2, kVecL | kLdsL | kFastL | kXRegL>;
-  case kVecL | 0x200:
-    return launch_pick<kType, 2, kVecL>;
-  case (kVecL | kXRegL) | 0x100:
-    return launch_pick<kType, 1, kVecL | kXRegL>;
-  case (kVecL | kXRegL) | 0x200:
-    return launch_pick<kType, 2, kVecL | kXRegL>;
-  case (kVecL | kXRegL) | 0x400:
-    return launch_pick<kType, 4, kVecL | kXRegL>;
-  case (kVecL | kLdsL) | 0x100:
-    return launch_pick<kType, 1, kVecL | kLdsL>;
+Launcher VariantLauncher(int feat, int u, int rt) {
+  switch (feat | (u << 8) | (rt << 12)) {
+  case 0x100 | 0x1000:    return launch_pick<kType, 1, 0, 1, 256>;
+  case kFastL | 0x100 | 0x1000:    return launch_pick<kType, 1, kFastL, 1, 256>;
+  case kVecL | 0x100 | 0x1000:    return launch_pick<kType, 1, kVecL, 1, 256>;
+  case (kVecL | kFastL) | 0x100 | 0x1000:    return launch_pick<kType, 1, kVecL | kFastL, 1, 256>;
+  case (kVecL | kLdsL | kFastL) | 0x100 | 0x1000:    return launch_pick<kType, 1, kVecL | kLdsL | kFastL, 1, 256>;
+  case (kVecL | kLdsL | kFastL | kXRegL) | 0x100 | 0x1000:    return launch_pick<kType, 1, kVecL | kLdsL | kFastL | kXRegL, 1, 256>;
+  case (kVecL | kLdsL | kFastL | kXRegL) | 0x200 | 0x1000:    return launch_pick<kType, 2, kVecL | kLdsL | kFastL | kXRegL, 1, 256>;
+  case kVecL | 0x200 | 0x1000:    return launch_pick<kType, 2, kVecL, 1, 256>;
+  case (kVecL | kXRegL) | 0x100 | 0x1000:    return launch_pick<kType, 1, kVecL | kXRegL, 1, 256>;
+  case (kVecL | kXRegL) | 0x200 | 0x1000:    return launch_pick<kType, 2, kVecL | kXRegL, 1, 256>;
+  case (kVecL | kXRegL) | 0x400 | 0x1000:    return launch_pick<kType, 4, kVecL | kXRegL, 1, 256>;
+  case (kVecL | kLdsL) | 0x100 | 0x1000:    return launch_pick<kType, 1, kVecL | kLdsL, 1, 256>;
+  case (kVecL | kXRegL) | 0x100 | 0x2000:
+    return launch_pick<kType, 1, kVecL | kXRegL, 2, 256>;
+  case (kVecL | kXRegL) | 0x100 | 0x4000:
+    return launch_pick<kType, 1, kVecL | kXRegL, 4, 256>;
+  case kVecL | 0x100 | 0x2000:
+    return launch_pick<kType, 1, kVecL, 2, 256>;
+  case kVecL | 0x100 | 0x4000:
+    return launch_pick<kType, 1, kVecL, 4, 256>;
+  case kVecL | 0x200 | 0x4000:
+    return launch_pick<kType, 2, kVecL, 4, 256>;
+  case (kVecL | kLdsL | kFastL | kXRegL) | 0x200 | 0x2000:
+    return launch_pick<kType, 2, kVecL | kLdsL | kFastL | kXRegL, 2, 256>;
+  case (kVecL | kLdsL | kFastL | kXRegL) | 0x200 | 0x4000:
+    return launch_pick<kType, 2, kVecL | kLdsL | kFastL | kXRegL, 4, 256>;
+  case kVecL | 0x100 | 0x1000 | 0x100000:
+    return launch_pick<kType, 1, kVecL, 1, 512>;
+  case kVecL | 0x200 | 0x1000 | 0x100000:
+    return launch_pick<kType, 2, kVecL, 1, 512>;
+  case kVecL | 0x200 | 0x1000 | 0x200000:
+    return launch_pick<kType, 2, kVecL, 1, 1024>;
+  case (kVecL | kLdsL | kFastL | kXRegL) | 0x200 | 0x1000 | 0x100000:
+    return launch_pick<kType, 2, kVecL | kLdsL | kFastL | kXRegL, 1, 512>;
+  case (kVecL | kLdsL | kFastL | kXRegL) | 0x200 | 0x1000 | 0x200000:
+    return launch_pick<kType, 2, kVecL | kLdsL | kFastL | kXRegL, 1, 1024>;
   default:
     return nullptr;
   }
@@ -630,6 +728,56 @@ Launcher VariantLauncher(int feat, int u) {
 
 }  // namespace
 }  // namespace tune
+
+/* Host FP64 references for the drafter formats, transcribed from
+ * ggml's row dequantization (independent of the GPU decode paths). */
+static double HalfF(uint16_t bits) {
+  const int sign = bits >> 15, exp = (bits >> 10) & 0x1F, frac = bits & 0x3FF;
+  double v;
+  if (exp == 0)
+    v = std::ldexp((double)frac, -24);  // subnormal (and zero)
+  else if (exp == 31)
+    return frac ? NAN : INFINITY;
+  else
+    v = std::ldexp(1024.0 + frac, -10) * std::ldexp(1.0, exp - 15);
+  return sign ? -v : v;
+}
+
+/* Q2_K value idx of one 84-byte block: scales[16] at 0, bit-planed qs[64]
+ * at 16 (value v's two bits at byte 16 + v%32 + 32*(v/128), plane 2*((v/32)&3)),
+ * d at 80 and dmin at 82; weight = d sc v - dmin mn. */
+static double HostQ2K(const uint8_t* b, int idx) {
+  uint16_t d, dmin;
+  std::memcpy(&d, b + 80, 2);
+  std::memcpy(&dmin, b + 82, 2);
+  const uint8_t scale = b[idx / 16];
+  const uint8_t byte = b[16 + (idx % 32) + 32 * (idx / 128)];
+  const int q = (byte >> (2 * ((idx / 32) & 3))) & 3;
+  return HalfF(d) * (scale & 0xF) * q - HalfF(dmin) * (scale >> 4);
+}
+
+/* Q4_K value idx of one 144-byte block, mirroring DecodeQ45K's mapping:
+ * sub-block j = 2 p + (bit 5 of idx), nibble half h = (idx / 16) & 1. */
+static double HostQ4K(const uint8_t* b, int idx) {
+  uint16_t d, dmin;
+  std::memcpy(&d, b, 2);
+  std::memcpy(&dmin, b + 2, 2);
+  /* p picks the 64-value pair (its 16 payload bytes), h the 16-value half
+   * of the pair's 32 bytes; the value's bit 5 selects the nibble and with
+   * p the scale sub-block j = 2 p + bit5. */
+  const int p = idx >> 6, h = (idx >> 4) & 1, i = idx & 0xF, hi = (idx >> 5) & 1;
+  const int j = 2 * p + hi;
+  int sc, mn;
+  if (j < 4) {
+    sc = b[4 + j] & 63;
+    mn = b[8 + j] & 63;
+  } else {
+    sc = (b[j + 8] & 0xF) | ((b[j] >> 6) << 4);
+    mn = (b[j + 8] >> 4) | ((b[j + 4] >> 6) << 4);
+  }
+  const uint8_t nib = (b[16 + 32 * p + 16 * h + i] >> (4 * hi)) & 0xF;
+  return HalfF(d) * sc * (double)nib - HalfF(dmin) * mn;
+}
 
 int main(int argc, char** argv) {
   setbuf(stdout, nullptr);
@@ -645,16 +793,23 @@ int main(int argc, char** argv) {
       {"iq2xxs_gu", 16, 66, 2304, 5120, true},  {"iq2xxs_down", 16, 66, 5120, 2304, false},
       {"iq2xs_gu", 17, 74, 2304, 5120, true},   {"iq2xs_down", 17, 74, 5120, 2304, false},
       {"iq2s_down", 22, 82, 5120, 2304, false},
+      {"q4k_gu", 12, 144, 2304, 5120, true},    {"q4k_down", 12, 144, 5120, 2304, false},
+      {"q2k_gu", 10, 84, 2304, 5120, true},     {"q2k_down", 10, 84, 5120, 2304, false},
   };
-  const tune::Variant iq1_variants[] = {
-      {"repl", 0, 1}, {"vec", tune::kVecL, 0}, {"vec+x", tune::kVecL | tune::kXRegL, 0}, {"vec+x u2", tune::kVecL | tune::kXRegL, 2}};
+  const tune::Variant iq1_variants[] = {{"repl", 0, 1, 1, 8},
+                                        {"vec", tune::kVecL, 0, 1, 8},
+                                        {"vec w16", tune::kVecL, 0, 1, 16},
+                                        {"vec w32", tune::kVecL, 0, 1, 32},
+                                        {"vec+x", tune::kVecL | tune::kXRegL, 0, 1, 8},
+                                        {"vec+x w16", tune::kVecL | tune::kXRegL, 0, 1, 16},
+                                        {"vec+x w32", tune::kVecL | tune::kXRegL, 0, 1, 32}};
   const tune::Variant iq2_variants[] = {
-      {"fast", tune::kFastL, 1},
-      {"vec", tune::kVecL, 1},
-      {"vec+fast", tune::kVecL | tune::kFastL, 1},
-      {"vec+lds+fast", tune::kVecL | tune::kLdsL | tune::kFastL, 1},
-      {"v+l+f+x", tune::kVecL | tune::kLdsL | tune::kFastL | tune::kXRegL, 1},
-      {"v+l+f+x u2", tune::kVecL | tune::kLdsL | tune::kFastL | tune::kXRegL, 2},
+      {"fast", tune::kFastL, 1, 1, 8},
+      {"vec", tune::kVecL, 1, 1, 8},
+      {"vec+lds+fast", tune::kVecL | tune::kLdsL | tune::kFastL, 1, 1, 8},
+      {"v+l+f+x u2", tune::kVecL | tune::kLdsL | tune::kFastL | tune::kXRegL, 2, 1, 8},
+      {"v+l+f+x w16", tune::kVecL | tune::kLdsL | tune::kFastL | tune::kXRegL, 2, 1, 16},
+      {"v+l+f+x w32", tune::kVecL | tune::kLdsL | tune::kFastL | tune::kXRegL, 2, 1, 32},
   };
   constexpr int kExperts = 384;
   constexpr int kRounds = 64;
@@ -670,6 +825,13 @@ int main(int argc, char** argv) {
     std::vector<uint8_t> host(per_expert * kExperts * matrices);
     for (auto& b : host)
       b = static_cast<uint8_t>(rng());
+    if (s.type == 10 || s.type == 12)
+      for (std::size_t at = 0; at + 84 <= host.size(); at += s.block_bytes) {
+        const uint16_t d = 0x1c00 | (rng() & 0x3ff), dmin = 0x1800 | (rng() & 0x3ff);
+        const std::size_t dm_at = s.type == 10 ? at + 80 : at;
+        std::memcpy(&host[dm_at], &d, 2);
+        std::memcpy(&host[dm_at + 2], &dmin, 2);
+      }
     const std::size_t x_count = s.swiglu ? 1 : 6;  // down: one x per slot
     std::vector<float> xh(static_cast<std::size_t>(s.k) * x_count);
     std::normal_distribution<float> normal;
@@ -716,22 +878,55 @@ int main(int argc, char** argv) {
       return ms * 1000.0 / kRounds;
     };
     const double bytes = matrices * 6.0 * per_expert;
-    const double us = time(production);
-    production(0, y);
+    const bool host_ref = s.type == 10;  /* Q2_K keeps the independent FP64 check */
+    double us = 0;
     std::vector<float> ref(static_cast<std::size_t>(s.m) * 6);
-    (void)hipMemcpy(ref.data(), y, ref.size() * sizeof(float), hipMemcpyDeviceToHost);
-    std::printf("%-11s %5dx%-5d %6.1f MB  prod %7.1f us %5.1f GB/s", s.name, s.m, s.k, bytes / 1e6, us,
-                bytes / us / 1e3);
+    if (host_ref) {
+      /* FP64 reference over the first round's six experts; the FP32 GEMV
+       * must agree to its rounding (the dense F16 kernel's 3.5e-4 class). */
+      const auto value = [&](std::size_t expert, uint32_t row, int col, bool up) {
+        const uint8_t* block = host.data() + (up ? per_expert * kExperts : 0) + expert * per_expert +
+                               (row * (s.k / 256) + col / 256) * s.block_bytes;
+        return s.type == 10 ? HostQ2K(block, col % 256) : HostQ4K(block, col % 256);
+      };
+      std::vector<double> xd(xh.begin(), xh.end());
+      for (int slot = 0; slot < 6; ++slot) {
+        const int expert = idh[slot];
+        const double* xs = xd.data() + (s.swiglu ? 0 : (std::size_t)slot * s.k);
+        for (uint32_t row = 0; row < s.m; ++row) {
+          double g = 0, u = 0;
+          for (int col = 0; col < s.k; ++col)
+            g += value(expert, row, col, false) * xs[col];
+          if (s.swiglu) {
+            for (int col = 0; col < s.k; ++col)
+              u += value(expert, row, col, true) * xs[col];
+            const double h = g / (1.0 + std::exp(-g)) * u;
+            ref[(std::size_t)slot * s.m + row] = static_cast<float>(h);
+          } else {
+            ref[(std::size_t)slot * s.m + row] = static_cast<float>(g);
+          }
+        }
+      }
+    } else {
+      us = time(production);
+      production(0, y);
+      (void)hipMemcpy(ref.data(), y, ref.size() * sizeof(float), hipMemcpyDeviceToHost);
+    }
+    std::printf("%-11s %5dx%-5d %6.1f MB%s %7.1f us %5.1f GB/s", s.name, s.m, s.k, bytes / 1e6,
+                host_ref ? "  host" : "  prod", us, us ? bytes / us / 1e3 : 0.0);
     const bool iq1 = s.type == 19 || s.type == 29;
     const tune::Variant* variants = iq1 ? iq1_variants : iq2_variants;
     const int n_variants = iq1 ? 4 : 6;
     for (int vi = 0; vi < n_variants; ++vi) {
       const tune::Variant& v = variants[vi];
-      auto launcher = s.type == 19 ? tune::VariantLauncher<19>(v.feat, v.u ? v.u : (s.type == 19 ? 2 : 1))
-                    : s.type == 29 ? tune::VariantLauncher<29>(v.feat, v.u ? v.u : 1)
-                    : s.type == 16 ? tune::VariantLauncher<16>(v.feat, v.u ? v.u : 1)
-                    : s.type == 17 ? tune::VariantLauncher<17>(v.feat, v.u ? v.u : 1)
-                                   : tune::VariantLauncher<22>(v.feat, v.u ? v.u : 1);
+      const int tw_flag = v.tw == 16 ? 0x100000 : v.tw == 32 ? 0x200000 : 0;
+      auto launcher = s.type == 19 ? tune::VariantLauncher<19>(v.feat | tw_flag, v.u ? v.u : (s.type == 19 ? 2 : 1), v.rt ? v.rt : 1)
+                    : s.type == 29 ? tune::VariantLauncher<29>(v.feat | tw_flag, v.u ? v.u : 1, v.rt ? v.rt : 1)
+                    : s.type == 16 ? tune::VariantLauncher<16>(v.feat | tw_flag, v.u ? v.u : 1, v.rt ? v.rt : 1)
+                    : s.type == 17 ? tune::VariantLauncher<17>(v.feat | tw_flag, v.u ? v.u : 1, v.rt ? v.rt : 1)
+                    : s.type == 12 ? tune::VariantLauncher<12>(v.feat | tw_flag, v.u ? v.u : 1, v.rt ? v.rt : 1)
+                    : s.type == 10 ? tune::VariantLauncher<10>(v.feat | tw_flag, v.u ? v.u : 1, v.rt ? v.rt : 1)
+                                   : tune::VariantLauncher<22>(v.feat | tw_flag, v.u ? v.u : 1, v.rt ? v.rt : 1);
       if (!launcher) {
         std::printf("  %s n/a", v.name);
         continue;
@@ -744,7 +939,20 @@ int main(int argc, char** argv) {
       std::vector<float> got(static_cast<std::size_t>(s.m) * 6);
       (void)hipMemcpy(got.data(), yv, got.size() * sizeof(float), hipMemcpyDeviceToHost);
       const bool same = memcmp(got.data(), ref.data(), got.size() * sizeof(float)) == 0;
-      std::printf("  %s %7.1f us %5.1f GB/s%s", v.name, vus, bytes / vus / 1e3, same ? "" : " MISMATCH");
+      double rel = 0;
+      if (host_ref && same == false) {
+        /* fall through to relative-error reporting below */
+      }
+      if (host_ref) {
+        double num = 0, den = 0;
+        for (std::size_t i = 0; i < got.size(); ++i) {
+          num += (double)got[i] * got[i] - (double)ref[i] * ref[i] >= 0 ? ((double)got[i] - ref[i]) * ((double)got[i] - ref[i]) : ((double)got[i] - ref[i]) * ((double)got[i] - ref[i]);
+          den += (double)ref[i] * ref[i];
+        }
+        rel = std::sqrt(num / std::max(den, 1e-30));
+      }
+      std::printf("  %s %7.1f us %5.1f GB/s%s%.1e", v.name, vus, bytes / vus / 1e3,
+                  same ? " " : host_ref ? (rel < 1e-4 ? " ok(rel) " : " MISMATCH ") : " MISMATCH ", rel);
       if (!same) {
         for (std::size_t i = 0; i < got.size(); ++i)
           if (memcmp(&got[i], &ref[i], 4) != 0) {
