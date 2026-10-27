@@ -61,6 +61,7 @@ constexpr uint32_t kSplitRows = DS41_DECODER_MAX_SPECULATIVE * DS41_N_EXPERT_USE
 constexpr uint32_t kSweepTokens = 1024;
 constexpr uint32_t kSeedPerLayer = DS41_N_EXPERT;
 constexpr uint32_t kNoSlot = std::numeric_limits<uint32_t>::max();
+constexpr uint64_t kTableEntries = uint64_t{DS41_N_LAYER} * DS41_N_EXPERT;
 constexpr uint32_t kNoLayer = std::numeric_limits<uint32_t>::max();
 constexpr std::array<uint16_t, DS41_N_LAYER * DS41_N_EXPERT> kDefaultExpertRank = {
 #include "expert_rank.inc"
@@ -550,12 +551,17 @@ struct ds41_expert_store {
   bool pred_active = false;
   bool pred_stopping = false;
   std::vector<void*> chunks;
-  /* Per-expert device weight bases (slot data or stage rows) with pinned
-   * host mirrors, and the hit/miss route rows of the current prepare call. */
+  /* Per-layer device tables of each expert's weight base (slot data or stage
+   * row) with pinned host mirrors of what was uploaded, and the hit/miss
+   * route rows of the current prepare call (hit rows, then miss rows) with
+   * their pinned staging. A layer's table is uploaded only when it changes,
+   * which a warm cache almost never does; the uploads are asynchronous, as
+   * the blocking routes copy of the next prepare orders them before any
+   * mirror is rewritten. */
   std::array<const uint8_t**, 3> table_host{};
   std::array<const uint8_t**, 3> table{};
-  int32_t* split_hit = nullptr;
-  int32_t* split_miss = nullptr;
+  int32_t* split = nullptr;
+  int32_t* split_host = nullptr;
   std::array<int, DS41_MAX_SHARDS> direct_fds = [] {
     std::array<int, DS41_MAX_SHARDS> fds;
     fds.fill(-1);
@@ -605,10 +611,10 @@ struct ds41_expert_store {
       if (table_host[p])
         (void)hipHostFree(table_host[p]);
     }
-    if (split_hit)
-      (void)hipFree(split_hit);
-    if (split_miss)
-      (void)hipFree(split_miss);
+    if (split)
+      (void)hipFree(split);
+    if (split_host)
+      (void)hipHostFree(split_host);
   }
 
   bool grow(uint32_t size_class) {
@@ -751,14 +757,18 @@ ds41_expert_store* ds41_expert_store_create(const ds41_model* model,
    * seed has taken its memory, so it never shrinks the resident set. */
   for (uint32_t p = 0; p < 3 && ok; ++p)
     ok = hipHostMalloc(reinterpret_cast<void**>(&store->table_host[p]),
-                       DS41_N_EXPERT * sizeof(const uint8_t*)) == hipSuccess &&
+                       kTableEntries * sizeof(const uint8_t*)) == hipSuccess &&
          hipMalloc(reinterpret_cast<void**>(&store->table[p]),
-                   DS41_N_EXPERT * sizeof(const uint8_t*)) == hipSuccess;
+                   kTableEntries * sizeof(const uint8_t*)) == hipSuccess;
+  /* Null mirrors never match a weight base, so each layer's first prepare
+   * uploads its table. */
+  for (uint32_t p = 0; p < 3 && ok; ++p)
+    std::fill_n(store->table_host[p], kTableEntries, nullptr);
   if (ok)
-    ok = hipMalloc(reinterpret_cast<void**>(&store->split_hit),
-                   kSplitRows * sizeof(int32_t)) == hipSuccess &&
-         hipMalloc(reinterpret_cast<void**>(&store->split_miss),
-                   kSplitRows * sizeof(int32_t)) == hipSuccess;
+    ok = hipMalloc(reinterpret_cast<void**>(&store->split),
+                   2 * kSplitRows * sizeof(int32_t)) == hipSuccess &&
+         hipHostMalloc(reinterpret_cast<void**>(&store->split_host),
+                       2 * kSplitRows * sizeof(int32_t)) == hipSuccess;
   if (!ok) {
     fprintf(stderr,
             "ds41: unable to allocate streamed expert staging buffers\n");
@@ -1149,6 +1159,13 @@ bool ds41_expert_store_prepare(ds41_expert_store* store, uint32_t layer,
    * the demand stage row the phase's reads fill. The kernels index the
    * table, so resident experts are read in place without a staging copy. */
   const auto& src = store->source[layer];
+  std::array<const uint8_t**, 3> mirror{};
+  std::array<const uint8_t**, 3> device_table{};
+  for (uint32_t p = 0; p < 3; ++p) {
+    mirror[p] = store->table_host[p] + uint64_t{layer} * DS41_N_EXPERT;
+    device_table[p] = store->table[p] + uint64_t{layer} * DS41_N_EXPERT;
+  }
+  std::array<bool, 3> changed{};
   for (uint32_t e = 0; e < DS41_N_EXPERT; ++e) {
     const uint32_t slot_id = store->entries[layer][e].slot;
     const uint8_t* base =
@@ -1160,14 +1177,17 @@ bool ds41_expert_store_prepare(ds41_expert_store* store, uint32_t layer,
       const uint8_t* row =
           covered ? store->stage[1][p] + (uint64_t)job_row * store->stage_stride[p]
                   : store->stage[0][p] + (uint64_t)e * src[p].bytes;
-      store->table_host[p][e] = base ? base + staged : row;
+      const uint8_t* entry = base ? base + staged : row;
+      changed[p] = changed[p] || mirror[p][e] != entry;
+      mirror[p][e] = entry;
       staged += src[p].bytes;
     }
   }
   for (uint32_t p = 0; p < 3; ++p)
-    if (hipMemcpy(store->table[p], store->table_host[p],
-                  DS41_N_EXPERT * sizeof(uint8_t*),
-                  hipMemcpyHostToDevice) != hipSuccess)
+    if (changed[p] &&
+        hipMemcpyAsync(device_table[p], mirror[p],
+                       DS41_N_EXPERT * sizeof(uint8_t*),
+                       hipMemcpyHostToDevice, nullptr) != hipSuccess)
       return false;
   /* The hit and miss rows keep their route positions, each array holding -1
    * for the other's experts, so one launch over either array leaves exactly
@@ -1176,25 +1196,30 @@ bool ds41_expert_store_prepare(ds41_expert_store* store, uint32_t layer,
   info.layer = layer;
   info.rows = static_cast<uint32_t>(n_routes);
   for (uint32_t p = 0; p < 3; ++p)
-    info.table[p] = store->table[p];
+    info.table[p] = device_table[p];
   if (n_routes <= kSplitRows) {
-    std::vector<int32_t> hit(n_routes), miss(n_routes);
     uint32_t miss_rows = 0;
-    for (size_t i = 0; i < ids.size(); ++i) {
-      const int32_t id = ids[i];
-      const bool is_miss = id >= 0 && missing[id];
-      miss_rows += is_miss;
-      hit[i] = is_miss ? -1 : id;  // a dropped slot stays -1 in both
-      miss[i] = is_miss ? id : -1;
-    }
+    for (size_t i = 0; i < ids.size(); ++i)
+      miss_rows += ids[i] >= 0 && missing[ids[i]];
     info.miss_rows = miss_rows;
-    info.hit_ids = store->split_hit;
-    info.miss_ids = store->split_miss;
-    if (hipMemcpy(store->split_hit, hit.data(), n_routes * sizeof(int32_t),
-                  hipMemcpyHostToDevice) != hipSuccess ||
-        hipMemcpy(store->split_miss, miss.data(), n_routes * sizeof(int32_t),
-                  hipMemcpyHostToDevice) != hipSuccess)
-      return false;
+    /* Only a batch with both hits and misses splits its launches; any other
+     * batch keeps one pass over the routes, so its rows are not uploaded. */
+    if (miss_rows && miss_rows < n_routes) {
+      int32_t* hit = store->split_host;
+      int32_t* miss = store->split_host + n_routes;
+      for (size_t i = 0; i < ids.size(); ++i) {
+        const int32_t id = ids[i];
+        const bool is_miss = id >= 0 && missing[id];
+        hit[i] = is_miss ? -1 : id;  // a dropped slot stays -1 in both
+        miss[i] = is_miss ? id : -1;
+      }
+      info.hit_ids = store->split;
+      info.miss_ids = store->split + n_routes;
+      if (hipMemcpyAsync(store->split, store->split_host,
+                         2 * n_routes * sizeof(int32_t), hipMemcpyHostToDevice,
+                         nullptr) != hipSuccess)
+        return false;
+    }
   }
   if (phase) {
     // Demand reads of the misses no adopted job row covers; the job's
@@ -1243,7 +1268,7 @@ bool ds41_expert_store_prepare(ds41_expert_store* store, uint32_t layer,
     Slot& slot = store->slots[slot_id];
     uint8_t* dst = slot.data;
     for (uint32_t p = 0; p < 3; ++p) {
-      if (hipMemcpyAsync(dst, store->table_host[p][e], src[p].bytes,
+      if (hipMemcpyAsync(dst, mirror[p][e], src[p].bytes,
                          hipMemcpyDeviceToDevice, nullptr) != hipSuccess) {
         store->release(slot_id);
         return false;
@@ -1254,9 +1279,9 @@ bool ds41_expert_store_prepare(ds41_expert_store* store, uint32_t layer,
     slot.expert = e;
     store->entries[layer][e].slot = slot_id;
   }
-  *gate = store->table[0];
-  *up = store->table[1];
-  *down = store->table[2];
+  *gate = device_table[0];
+  *up = device_table[1];
+  *down = device_table[2];
   store->stats.stall_ns += std::chrono::duration_cast<std::chrono::nanoseconds>(
                                std::chrono::steady_clock::now() - start)
                                .count();
