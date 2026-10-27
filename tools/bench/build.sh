@@ -61,7 +61,8 @@ for t in "${targets[@]}"; do
   fi
   if [[ "$src" -ef tools/bench/gemma4_prefill_bench.hip ]] ||
      [[ "$src" -ef tools/bench/ds41_expert_gemv_tune.hip ]] ||
-     [[ "$src" -ef tools/bench/ds41_dense_gemv_tune.hip ]]; then
+     [[ "$src" -ef tools/bench/ds41_dense_gemv_tune.hip ]] ||
+     [[ "$src" -ef tools/bench/ds41_indexer_bench.hip ]]; then
     # Match the production prefill/expert arithmetic and scheduling flags.
     compile+=(-ffast-math -fno-finite-math-only)
   fi
