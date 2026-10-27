@@ -17,6 +17,12 @@ namespace {
 
 constexpr std::array<uint64_t, 3> kSizes{512, 768, 1024};
 
+/* Expert bytes of one projection; the mixed fixture halves odd layers, as
+ * the real builds mix quantization types of different block sizes. */
+uint64_t Size(bool mixed, uint32_t layer, uint32_t projection) {
+  return mixed && layer % 2 ? kSizes[projection] / 2 : kSizes[projection];
+}
+
 uint8_t Byte(uint32_t layer, uint32_t projection, uint32_t expert,
              uint64_t index) {
   return static_cast<uint8_t>(layer * 13 + projection * 31 + expert * 7 +
@@ -30,7 +36,7 @@ struct Fixture {
   std::array<int, 2> fds{-1, -1};
   bool ok = true;
 
-  Fixture() {
+  explicit Fixture(bool mixed = false) {
     for (int& fd : fds) {
       char path[] = "/tmp/gufo-ds41-experts-XXXXXX";
       fd = mkstemp(path);
@@ -57,11 +63,12 @@ struct Fixture {
       for (uint32_t p = 0; p < 3 && ok; ++p) {
         auto& tensor = tensors[layer][p];
         tensor.abs_offset = model.shard_offset[shard] + offsets[shard];
-        tensor.bytes = kSizes[p] * DS41_N_EXPERT;
+        const uint64_t size = Size(mixed, layer, p);
+        tensor.bytes = size * DS41_N_EXPERT;
         std::vector<uint8_t> bytes(tensor.bytes);
         for (uint32_t e = 0; e < DS41_N_EXPERT; ++e)
-          for (uint64_t i = 0; i < kSizes[p]; ++i)
-            bytes[e * kSizes[p] + i] = Byte(layer, p, e, i);
+          for (uint64_t i = 0; i < size; ++i)
+            bytes[e * size + i] = Byte(layer, p, e, i);
         ok = pwrite(fds[shard], bytes.data(), bytes.size(),
                     static_cast<off_t>(offsets[shard])) ==
              static_cast<ssize_t>(bytes.size());
@@ -80,15 +87,19 @@ struct Fixture {
 };
 
 bool CheckStage(uint32_t layer, const std::vector<int32_t>& ids,
-                const std::array<const void*, 3>& table) {
+                const std::array<const void*, 3>& table, bool mixed = false) {
   for (uint32_t p = 0; p < 3; ++p) {
     const auto* const* entries = static_cast<const uint8_t* const*>(table[p]);
-    std::vector<uint8_t> bytes(kSizes[p]);
+    std::vector<const uint8_t*> rows(DS41_N_EXPERT);
+    if (hipMemcpy(rows.data(), entries, rows.size() * sizeof(rows[0]),
+                  hipMemcpyDeviceToHost) != hipSuccess)
+      return false;
+    std::vector<uint8_t> bytes(Size(mixed, layer, p));
     for (int32_t e : ids) {
-      if (hipMemcpy(bytes.data(), entries[e], bytes.size(),
+      if (hipMemcpy(bytes.data(), rows[e], bytes.size(),
                     hipMemcpyDeviceToHost) != hipSuccess)
         return false;
-      for (uint64_t i = 0; i < kSizes[p]; ++i)
+      for (uint64_t i = 0; i < bytes.size(); ++i)
         if (bytes[i] != Byte(layer, p, static_cast<uint32_t>(e), i))
           return false;
     }
@@ -352,6 +363,41 @@ int main() {
                                    &stage[2]),
         "short read");
   ds41_expert_store_destroy(store);
+  // Layers with different expert sizes share the compact prefetch stage. A
+  // wide job for the next layer must leave the rows this layer adopted
+  // intact, so rows are strided by the largest expert of any layer.
+  {
+    Fixture m(true);
+    check(m.ok, "mixed-size fixture");
+    store = ds41_expert_store_create(&m.model, &m.weights, 4 * kSlot);
+    std::vector<int32_t> all(DS41_N_EXPERT);
+    for (uint32_t e = 0; e < DS41_N_EXPERT; ++e)
+      all[e] = static_cast<int32_t>(e);
+    std::vector<int32_t> adopted(1024 * 6);
+    for (uint32_t i = 0; i < adopted.size(); ++i)
+      adopted[i] = static_cast<int32_t>(i % 96);  // one parity half
+    const auto prepare = [&](uint32_t layer, const std::vector<int32_t>& ids) {
+      return hipMemcpy(routes, ids.data(), ids.size() * sizeof(int32_t),
+                       hipMemcpyHostToDevice) == hipSuccess &&
+             ds41_expert_store_prepare(store, layer, routes,
+                                       static_cast<uint32_t>(ids.size() / 6),
+                                       &stage[0], &stage[1], &stage[2]);
+    };
+    check(store && prepare(1, adopted), "mixed source layer");
+    check(
+        ds41_expert_store_prefetch(store, 2, all.data(), DS41_N_EXPERT, true) &&
+            idle(store),
+        "mixed wide prefetch of the larger layer");
+    check(prepare(2, adopted) && CheckStage(2, adopted, stage, true),
+          "mixed wide adoption stage bytes");
+    check(
+        ds41_expert_store_prefetch(store, 3, all.data(), DS41_N_EXPERT, true) &&
+            idle(store),
+        "mixed wide prefetch of the smaller next layer");
+    check(CheckStage(2, adopted, stage, true),
+          "next layer's prefetch keeps the adopted rows");
+    ds41_expert_store_destroy(store);
+  }
   (void)hipFree(routes);
   std::printf("expert store: %s\n", ok ? "PASS" : "FAIL");
   return ok ? 0 : 1;
