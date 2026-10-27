@@ -1343,90 +1343,211 @@ __device__ __forceinline__ uint32_t ordered_key(float v) {
   return (u & 0x80000000u) ? ~u : (u ^ 0x80000000u);
 }
 
-/* Block per token: binary search for the k-th largest key, then emit keys
- * above it and the lowest-index ties, both in index order. */
-__global__ void topk_kernel(const float* all_score, uint64_t score_stride, uint32_t* all_out, uint32_t k_max,
-                            uint32_t pos0, uint32_t ratio, uint32_t div) {
-  __shared__ uint32_t hist[256];
-  __shared__ uint32_t sel_prefix, sel_rank;
-  const uint32_t token = blockIdx.x;
+/* Top-k selection, a block of kTopkThreads per token: the k-th largest key,
+ * then the keys above it in index order followed by its lowest-index ties.
+ *
+ * The row is read twice, coalesced: a 12-bit histogram finds the bin holding
+ * the k-th key (narrowed by further passes only while that bin holds more
+ * than kTopkCap keys), then one ordered pass appends the keys of higher bins
+ * and those of the bin itself to shared lists. The exact key and its ties are
+ * resolved among the bin's keys in shared memory, and the two index-ordered
+ * lists are merged. */
+constexpr uint32_t kTopkThreads = 1024, kTopkWaves = kTopkThreads / 32, kTopkBins = 4096, kTopkCap = 2048,
+                   kTopkItems = 4;
+
+/* Exclusive sum of v (0..7) over the lanes below this one. */
+__device__ __forceinline__ uint32_t lane_prefix(uint32_t v) {
+  uint32_t r = 0u;
+#pragma unroll
+  for (uint32_t b = 0; b < 3; b++) r += __builtin_amdgcn_mbcnt_lo((uint32_t)__ballot((v >> b) & 1u), 0u) << b;
+  return r;
+}
+
+/* Thread-ordered exclusive offsets of two per-thread counts (each 0..7) and
+ * their block totals. Calls alternate between the two halves of `tot`. */
+__device__ __forceinline__ void block_offsets(uint32_t a, uint32_t c, uint32_t* tot, uint32_t* a_off, uint32_t* c_off,
+                                              uint32_t* a_total, uint32_t* c_total) {
+  const uint32_t lane = threadIdx.x % 32u, wave = threadIdx.x / 32u;
+  const uint32_t pa = lane_prefix(a), pc = lane_prefix(c);
+  if (lane == 31u) {
+    tot[wave] = pa + a;
+    tot[kTopkWaves + wave] = pc + c;
+  }
+  __syncthreads();
+  const uint32_t wa = tot[lane], wc = tot[kTopkWaves + lane];
+  uint32_t ia = wa, ic = wc;
+#pragma unroll
+  for (uint32_t o = 1; o < 32u; o <<= 1) {
+    const uint32_t ua = __shfl_up(ia, o, 32), uc = __shfl_up(ic, o, 32);
+    if (lane >= o) {
+      ia += ua;
+      ic += uc;
+    }
+  }
+  *a_off = __shfl(ia - wa, (int)wave, 32) + pa;
+  *c_off = __shfl(ic - wc, (int)wave, 32) + pc;
+  *a_total = __shfl(ia, 31, 32);
+  *c_total = __shfl(ic, 31, 32);
+}
+
+/* The bin of hist[0, bins) holding the rank-th largest key, counting from the
+ * top bin, into *bin; *rank becomes the rank within it and *count its size. */
+__device__ void select_bin(const uint32_t* hist, uint32_t bins, uint32_t* bin, uint32_t* rank, uint32_t* count) {
+  const uint32_t per = (bins + kTopkThreads - 1) / kTopkThreads;
+  uint32_t c[kTopkBins / kTopkThreads];
+  uint32_t sum = 0u;
+#pragma unroll
+  for (uint32_t j = 0; j < kTopkBins / kTopkThreads; j++) {
+    const uint32_t i = per * threadIdx.x + j;
+    c[j] = j < per && i < bins ? hist[bins - 1u - i] : 0u;
+    sum += c[j];
+  }
+  const uint32_t want = *rank;
+  uint32_t total = 0u;
+  uint32_t acc = block_exclusive_scan(sum, &total);
+  if (acc < want && want <= acc + sum) {
+#pragma unroll
+    for (uint32_t j = 0; j < kTopkBins / kTopkThreads; j++) {
+      if (acc + c[j] >= want) {
+        *bin = bins - 1u - (per * threadIdx.x + j);
+        *rank = want - acc;
+        *count = c[j];
+        break;
+      }
+      acc += c[j];
+    }
+  }
+  __syncthreads();
+}
+
+__device__ __forceinline__ uint32_t lower_bound(const uint32_t* v, uint32_t n, uint32_t x) {
+  uint32_t lo = 0u;
+  while (n) {
+    const uint32_t half = n / 2u;
+    if (v[lo + half] < x) {
+      lo += half + 1u;
+      n -= half + 1u;
+    } else {
+      n = half;
+    }
+  }
+  return lo;
+}
+
+__global__ __launch_bounds__(kTopkThreads) void topk_kernel(const float* all_score, uint64_t score_stride,
+                                                            uint32_t* all_out, uint32_t k_max, uint32_t pos0,
+                                                            uint32_t ratio, uint32_t div) {
+  __shared__ uint32_t hist[kTopkBins];  // then the bin's selected indices
+  __shared__ uint32_t above[kTopkCap];
+  __shared__ uint32_t cand_key[kTopkCap], cand_idx[kTopkCap];
+  __shared__ uint32_t tot[2][2 * kTopkWaves];
+  __shared__ uint32_t sel_bin, sel_rank, sel_count;
+  const uint32_t token = blockIdx.x, tid = threadIdx.x;
   const uint32_t n = (comp_len(pos0 + token, ratio) + div - 1) / div;
   const uint32_t k = min(k_max, n);
   if (k == 0) return;
   const float* score = all_score + token * score_stride;
   uint32_t* out = all_out + (uint64_t)token * k_max;
-  const uint32_t per = (n + blockDim.x - 1) / blockDim.x;
-  const uint32_t begin = min(n, threadIdx.x * per);
-  const uint32_t end = min(n, begin + per);
-  /* The k-th largest key, a byte per pass from the top: histogram the keys
-   * that match the bytes chosen so far, then one wave finds the byte holding
-   * the rank (lane L scans digits 255 - 8L down to 248 - 8L). */
-  uint32_t prefix = 0u;
-  uint32_t mask = 0u;
-  uint32_t rank = k;
-  for (int shift = 24; shift >= 0; shift -= 8) {
-    for (uint32_t i = threadIdx.x; i < 256; i += blockDim.x) hist[i] = 0u;
+  /* Bins over bits [20, 32), then [8, 20), then [0, 8). */
+  uint32_t prefix = 0u, mask = 0u, shift = 32u;
+  if (tid == 0) sel_rank = k;
+  for (;;) {
+    const uint32_t width = shift > 8u ? 12u : 8u, bins = 1u << width;
+    shift -= width;
+    for (uint32_t i = tid; i < bins; i += kTopkThreads) hist[i] = 0u;
     __syncthreads();
-    for (uint32_t i = begin; i < end; i++) {
+    for (uint32_t i = tid; i < n; i += kTopkThreads) {
       const uint32_t key = ordered_key(score[i]);
-      if ((key & mask) == prefix) atomicAdd(&hist[(key >> shift) & 255u], 1u);
+      if ((key & mask) == prefix) atomicAdd(&hist[(key >> shift) & (bins - 1u)], 1u);
     }
     __syncthreads();
-    if (threadIdx.x < 32) {
-      const uint32_t lane = threadIdx.x;
-      uint32_t c[8];
-      uint32_t sum = 0u;
+    select_bin(hist, bins, &sel_bin, &sel_rank, &sel_count);
+    prefix |= sel_bin << shift;
+    mask |= (bins - 1u) << shift;
+    if (sel_count <= kTopkCap || shift == 0u) break;
+  }
+  /* Index-ordered keys of the higher bins (`above`) and of the bin (`cand_*`;
+   * past kTopkCap only when every one of them is the k-th key). */
+  uint32_t a_count = 0u, c_count = 0u;
+  for (uint32_t t0 = 0, it = 0; t0 < n; t0 += kTopkThreads * kTopkItems, it++) {
+    const uint32_t i0 = t0 + tid * kTopkItems;
+    uint32_t keys[kTopkItems];
+    uint32_t na = 0u, nc = 0u;
 #pragma unroll
-      for (uint32_t j = 0; j < 8; j++) {
-        c[j] = hist[255u - 8u * lane - j];
-        sum += c[j];
-      }
-      uint32_t incl = sum;
+    for (uint32_t e = 0; e < kTopkItems; e++) {
+      keys[e] = i0 + e < n ? ordered_key(score[i0 + e]) : 0u;
+      const uint32_t m = keys[e] & mask;
+      na += i0 + e < n && m > prefix;
+      nc += i0 + e < n && m == prefix;
+    }
+    uint32_t a_at, c_at, a_total, c_total;
+    block_offsets(na, nc, tot[it & 1u], &a_at, &c_at, &a_total, &c_total);
+    a_at += a_count;
+    c_at += c_count;
 #pragma unroll
-      for (int o = 1; o < 32; o <<= 1) {
-        const uint32_t up = __shfl_up(incl, o, 32);
-        if ((int)lane >= o) incl += up;
-      }
-      uint32_t acc = incl - sum;
-      if (acc < rank && rank <= incl) {
-#pragma unroll
-        for (uint32_t j = 0; j < 8; j++) {
-          if (acc + c[j] >= rank) {
-            sel_prefix = prefix | ((255u - 8u * lane - j) << shift);
-            sel_rank = rank - acc;
-            break;
-          }
-          acc += c[j];
+    for (uint32_t e = 0; e < kTopkItems; e++) {
+      if (i0 + e >= n) break;
+      const uint32_t m = keys[e] & mask;
+      if (m > prefix) {
+        above[a_at++] = i0 + e;
+      } else if (m == prefix) {
+        if (c_at < kTopkCap) {
+          cand_key[c_at] = keys[e];
+          cand_idx[c_at] = i0 + e;
         }
+        c_at++;
       }
     }
+    a_count += a_total;
+    c_count += c_total;
+  }
+  __syncthreads();
+  /* The exact k-th key among the bin's keys, a byte at a time. */
+  const uint32_t cands = min(c_count, kTopkCap);
+  while (shift) {
+    const uint32_t width = min(shift, 8u), bins = 1u << width;
+    shift -= width;
+    for (uint32_t i = tid; i < bins; i += kTopkThreads) hist[i] = 0u;
     __syncthreads();
-    prefix = sel_prefix;
-    rank = sel_rank;
-    mask |= 255u << shift;
+    for (uint32_t i = tid; i < cands; i += kTopkThreads) {
+      const uint32_t key = cand_key[i];
+      if ((key & mask) == prefix) atomicAdd(&hist[(key >> shift) & (bins - 1u)], 1u);
+    }
+    __syncthreads();
+    select_bin(hist, bins, &sel_bin, &sel_rank, &sel_count);
+    prefix |= sel_bin << shift;
+    mask |= (bins - 1u) << shift;
   }
-  const uint32_t t = prefix;
-  uint32_t above = 0;
-  uint32_t equal = 0;
-  for (uint32_t i = begin; i < end; i++) {
-    const uint32_t key = ordered_key(score[i]);
-    above += key > t;
-    equal += key == t;
-  }
-  uint32_t total_above = 0;
-  uint32_t total_equal = 0;
-  uint32_t at = block_exclusive_scan(above, &total_above);
-  uint32_t eq_at = block_exclusive_scan(equal, &total_equal);
-  const uint32_t need = k - total_above;
-  for (uint32_t i = begin; i < end; i++) {
-    const uint32_t key = ordered_key(score[i]);
-    if (key > t) {
-      out[at++] = i;
-    } else if (key == t) {
-      if (eq_at < need) out[total_above + eq_at] = i;
-      eq_at++;
+  /* The bin's keys above the k-th go to `sel`, its first ties to the end of
+   * the output; the keys above the k-th are then merged in index order. */
+  const uint32_t t = prefix, ties = sel_rank, n_above = k - ties;
+  uint32_t* sel = hist;
+  {
+    const uint32_t j0 = tid * 2u;
+    uint32_t ng = 0u, ne = 0u;
+#pragma unroll
+    for (uint32_t e = 0; e < 2u; e++) {
+      ng += j0 + e < cands && cand_key[j0 + e] > t;
+      ne += j0 + e < cands && cand_key[j0 + e] == t;
+    }
+    uint32_t g_at, e_at, g_total, e_total;
+    block_offsets(ng, ne, tot[0], &g_at, &e_at, &g_total, &e_total);
+#pragma unroll
+    for (uint32_t e = 0; e < 2u; e++) {
+      if (j0 + e >= cands) break;
+      const uint32_t key = cand_key[j0 + e];
+      if (key > t) {
+        sel[g_at++] = cand_idx[j0 + e];
+      } else if (key == t) {
+        if (e_at < ties) out[n_above + e_at] = cand_idx[j0 + e];
+        e_at++;
+      }
     }
   }
+  __syncthreads();
+  const uint32_t n_sel = n_above - a_count;
+  for (uint32_t i = tid; i < a_count; i += kTopkThreads) out[i + lower_bound(sel, n_sel, above[i])] = above[i];
+  for (uint32_t i = tid; i < n_sel; i += kTopkThreads) out[i + lower_bound(above, a_count, sel[i])] = sel[i];
 }
 
 /* The candidate mask holds one bit per block (bit b % 32 of word b / 32). */
@@ -2616,8 +2737,8 @@ extern "C" int ds41_v41_indexer_score_candidates(const float* q, ds41_fp4_rows k
 
 extern "C" int ds41_v41_topk(const float* score, uint64_t score_stride, uint32_t* out, uint32_t k, uint32_t pos0,
                              uint32_t n, uint32_t ratio, uint32_t div) {
-  if (k == 0 || div == 0) return 1;
-  topk_kernel<<<n, 1024>>>(score, score_stride, out, k, pos0, ratio, div);
+  if (k == 0 || k > kTopkCap || div == 0) return 1;
+  topk_kernel<<<n, kTopkThreads>>>(score, score_stride, out, k, pos0, ratio, div);
   return launch_ok("topk");
 }
 
