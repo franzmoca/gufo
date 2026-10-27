@@ -55,9 +55,9 @@ constexpr uint32_t kRecentRows = 16;
 /* Route rows of the largest split evaluation (decode, DSpark verification
  * and joint rows); larger batches read their experts in one pass. */
 constexpr uint32_t kSplitRows = DS41_DECODER_MAX_SPECULATIVE * DS41_N_EXPERT_USED;
-/* Batches of at least this many tokens route to nearly every expert, so the
- * store sweeps the next layer's uncached experts during this layer's
- * compute, without waiting for the next router (ds4 gates the same way). */
+/* Batches of at least this many tokens adopt a wide (prefill-scale)
+ * prediction job for their layer; smaller batches drop it instead of reading
+ * a whole prompt's experts. */
 constexpr uint32_t kSweepTokens = 1024;
 constexpr uint32_t kSeedPerLayer = DS41_N_EXPERT;
 constexpr uint32_t kNoSlot = std::numeric_limits<uint32_t>::max();
