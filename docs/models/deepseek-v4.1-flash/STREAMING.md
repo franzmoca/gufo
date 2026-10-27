@@ -267,3 +267,43 @@ arms.
 
 [Compact stage, AR](artifacts/m3-streaming/bench-iq2-compact-ar-cand1.log) ·
 [Compact stage, DSpark](artifacts/m3-streaming/bench-iq2-compact-ds-cand1.log)
+
+## Storage read-path profile (2026-10-27)
+
+Where every byte of a streamed run comes from, measured on the r522c8653
+build with `/proc/<pid>/io` sampling around the bench phases plus targeted
+micro-benchmarks (`tools/ds41/engram_row_bench.py`).
+
+| Read path | Pattern | Mechanism | Measured |
+| --- | --- | --- | --- |
+| Expert weights (demand + prefetch jobs) | per layer, three ~1 GiB blocks (gate, down, up), expert-strided within each | O_DIRECT `pread`, 4 workers, ≤32 MiB chunks | 5.7 GiB/s effective; 8.2 GB/s pure-sequential ceiling on the 990 PRO |
+| Engram rows | 144 B at hashed-random offsets, 2 layers × 24 rows per token | buffered `pread`, ≤32 threads, page cache | 278 K rows/s cold (~1.06 GiB/s at 4 KiB granularity) |
+| Resident experts | slots in managed chunks, read by the kernels | device memory | not an I/O path |
+
+A pp2048 batch moves ~4 GiB of expert reads as ~140 large IOs and 98,304
+Engram rows (2048 tokens × 24 × 2 layers) as 4 KiB-granule IOs — the Engram
+is under 10% of the bytes but ~99% of the operations. The profile also
+explains the item-11a oddity where a fuller cache slowed AR prefill:
+`rchar == read_bytes` for entire runs, i.e. the Engram's page cache scores
+zero hits once the expert cache has grown (clean file pages are exactly what
+its chunk growth reclaims), so every prefill batch spends ~0.35 s of device
+time on random Engram reads that steal queue depth from the expert streams.
+The 98 GiB-cache build (fastest prefill) and the DSpark runs (4.7 GiB more
+free memory) fit the same mechanism.
+
+Two-disk experiments on the second NVMe (KIOXIA EXCERIA 1.8T, `/`,
+2.3 GB/s sequential vs the 990 PRO's 8.2), via symlinks so no code changed:
+
+- **Engram + shards 3-4 on the KIOXIA: pp2048 collapsed to 113-449 tok/s.**
+  Shards are layer-major (layers 0-12 in shard 1, …), so moving whole shards
+  makes those layers' sweeps read at the slow disk's pace and gate every
+  phase that touches them.
+- **Engram alone on the KIOXIA: pp2048 724.9-727.3** (vs 739.9-747.9
+  same-disk), decode unchanged — the KIOXIA's random-read latency costs more
+  than the contention it removes. A split only pays with a second fast disk,
+  or after a repack that stripes each layer's experts proportionally across
+  both.
+
+Follow-ups are backlog items 14 and 15: Engram batch dedup/sort with a
+bounded hot-row cache, and a rank-major expert-contiguous repack whose jobs
+become single sequential runs (the 8.2 vs 5.7 GiB/s gap is its headroom).

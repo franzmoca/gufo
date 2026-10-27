@@ -246,6 +246,32 @@ streamed penalty; every expert stays reachable) for 13.7 → 30.3 tok/s on a
 changes outputs, so it is an approximation in the M5 sense, off by default
 and behind explicit opt-in, with its own quality gates, not part of M3.
 
+### 14. Engram row reads under cache pressure
+
+`engram_read` issues one buffered 144 B `pread` per row; once the expert
+cache has grown, the page cache holds none of them (measured:
+`rchar == read_bytes` for whole runs), so each row is a 4 KiB-granule IO —
+~98 K operations per pp2048 batch, ~0.35 s of device time stealing queue
+depth from the expert streams, and the mechanism behind fuller-cache-slower-
+prefill. In rough order: deduplicate repeated rows within a batch (hash rows
+first), sort the survivors by file offset so same-page rows share one read,
+and evaluate a bounded hot-row LRU (2–4 GiB pinned, decoded rows) — record
+the row-id trace of a real bench first to size its hit rate. A second fast
+NVMe for the Engram would also work; the current KIOXIA measured slower than
+sharing the 990 PRO (see STREAMING.md).
+
+### 15. Rank-major expert-contiguous repack
+
+The GGUF stores each layer's experts as three projection-major ~1 GiB
+blocks, so one expert is three reads a block apart and a job of K experts is
+K strided runs per projection. Repacking to expert-contiguous rows ordered
+by the built-in V4.1 rank (gate|down|up adjacent per expert) makes a decode
+job one ~55 MiB sequential read and a prefill job one contiguous run, and
+moves the effective rate toward the 8.2 GB/s sequential ceiling from today's
+5.7 GiB/s. Needs a repack tool beside `tools/ds41/quants.py`, a loader that
+maps expert id → rank row (sidecar table or new file layout), and a
+validation that streamed outputs stay byte-identical.
+
 ## Memory
 
 Resident weights take 112.27 GiB GTT. A session at the native 1M context
