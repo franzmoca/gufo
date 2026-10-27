@@ -350,6 +350,80 @@ struct Format<22> {
   }
 };
 
+/* Q4_K (144 bytes, 16-byte aligned blocks): the dense GEMV's task split
+ * (DecodeQ45K/DotQ45K), one header and one 16-byte payload load per task.
+ * The task's 32 values live in two 16-value slices 32 apart, so the fused
+ * gate/up pass keeps the plain two-read accumulation. Serves the DSpark
+ * drafter's routed experts (FP32 activations against mmvq's Q8_1). */
+template <>
+struct Format<12> {
+  static constexpr int kBlockBytes = 144;
+  static constexpr bool kIq1Grid = false;
+  static constexpr int kIq2Words = 0;
+  static constexpr bool kXReg = false;
+  struct Raw {
+    uint4 header, q;
+  };
+  static __device__ __forceinline__ Raw Load(const uint8_t* b, int t) {
+    const int p = t >> 1, h = t & 1;
+    return {*reinterpret_cast<const uint4*>(b), *reinterpret_cast<const uint4*>(b + 16 + 32 * p + 16 * h)};
+  }
+  static __device__ __forceinline__ float Acc(float acc, const Raw& a, int t, const float* x, const uint32_t*,
+                                              const Iq2Tab&) {
+    float w[32];
+    ds41_gemv_tasks::DecodeQ45K<false>({a.header, a.q, {}}, t, w);
+    /* The kernel hands the task's 32-float slice; DotQ45K offsets by the
+     * task itself, so pass the block base. */
+    return acc + ds41_gemv_tasks::DotQ45K(0.0f, w, t, x - 32 * t);
+  }
+  static __device__ __forceinline__ float AccR(float acc, const Raw& a, int t, const float (&xr)[32],
+                                               const uint32_t* grid, const Iq2Tab& tab) {
+    return Acc(acc, a, t, xr, grid, tab);
+  }
+};
+
+/* Q2_K (84 bytes): d, dmin, 16 scale/min bytes (one per 16-value sub-block)
+ * and 64 qs bytes (two bits per value). Task t holds sub-blocks 2t and 2t+1
+ * contiguously: one scale word and one 8-byte payload load. Weight =
+ * d sc v - dmin mn with v in {0..3}. */
+template <>
+struct Format<10> {
+  static constexpr int kBlockBytes = 84;
+  static constexpr bool kIq1Grid = false;
+  static constexpr int kIq2Words = 0;
+  static constexpr bool kXReg = false;
+  struct Raw {
+    uint32_t dm, sc;
+    uint32_t qs[8];
+  };
+  static __device__ __forceinline__ Raw Load(const uint8_t* b, int t) {
+    Raw r{};
+    __builtin_memcpy(&r.dm, b + 80, 4);
+    __builtin_memcpy(&r.sc, b + 2 * t, 2);
+    __builtin_memcpy(r.qs, b + 16 + 32 * (t >> 2), 32);
+    return r;
+  }
+  static __device__ __forceinline__ float Acc(float acc, const Raw& a, int t, const float* x,
+                                              const uint32_t*, const Iq2Tab&) {
+    const float d = HalfBits(a.dm & 0xFFFFu), dmin = HalfBits(a.dm >> 16);
+    const uint32_t shift = 2u * (t & 3);
+    float w[32];
+#pragma unroll
+    for (int i = 0; i < 32; ++i) {
+      const uint32_t byte = (a.qs[i >> 2] >> (8 * (i & 3))) & 0xFFu;
+      const uint32_t sb = (a.sc >> (8 * (i >> 4))) & 0xFFu;
+      const float dsc = d * static_cast<float>(sb & 0xFu);
+      const float off = dmin * static_cast<float>(sb >> 4);
+      w[i] = dsc * static_cast<float>((byte >> shift) & 3u) - off;
+    }
+    return acc + Accumulate<32>(0.0f, w, x);
+  }
+  static __device__ __forceinline__ float AccR(float acc, const Raw& a, int t, const float (&xr)[32],
+                                               const uint32_t* grid, const Iq2Tab& tab) {
+    return Acc(acc, a, t, xr, grid, tab);
+  }
+};
+
 /* The global u64 grid table of one IQ2 format, staged to LDS by the kernels. */
 template <int kType>
 __device__ __forceinline__ const uint64_t* Iq2GridTable() {
@@ -788,6 +862,12 @@ int dispatch(int type, const void* w, const void* w_up, const void* const* w_tab
   if (!ids || slots == 0 || slots_per_x == 0 || m == 0 || k % 256 != 0) return 1;
   /* Blocks loaded ahead: 2 measured best for every format but IQ1_M. */
   switch (type) {
+  case 10:
+    return launch<10, 1>(w, w_up, w_table, w_up_table, route_w, limit, expert_bytes, ids, slots, x, x_slot,
+                         slots_per_x, y, m, k, zero_dropped);
+  case 12:
+    return launch<12, 1>(w, w_up, w_table, w_up_table, route_w, limit, expert_bytes, ids, slots, x, x_slot,
+                         slots_per_x, y, m, k, zero_dropped);
   case 19:
     return launch<19, 2>(w, w_up, w_table, w_up_table, route_w, limit, expert_bytes, ids, slots, x, x_slot,
                          slots_per_x, y, m, k, zero_dropped);
@@ -845,6 +925,12 @@ extern "C" int ds41_v41_gemv_experts_grouped(int type, const void* w, const void
       slots_per_x == 0 || m == 0 || k % 256 != 0)
     return 1;
   switch (type) {
+  case 10:
+    return dispatch_group<10, 1>(w, w_up, w_table, w_up_table, route_w, limit, expert_bytes, plan, slots, cols, x,
+                                 x_slot, slots_per_x, y, m, k, zero_dropped);
+  case 12:
+    return dispatch_group<12, 1>(w, w_up, w_table, w_up_table, route_w, limit, expert_bytes, plan, slots, cols, x,
+                                 x_slot, slots_per_x, y, m, k, zero_dropped);
   case 19:
     return dispatch_group<19, 2>(w, w_up, w_table, w_up_table, route_w, limit, expert_bytes, plan, slots, cols, x,
                                  x_slot, slots_per_x, y, m, k, zero_dropped);
