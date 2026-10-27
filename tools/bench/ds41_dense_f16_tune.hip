@@ -43,7 +43,8 @@ int main() {
     const char* name;
     uint32_t m, k, groups;
   } shapes[] = {
-      {"q_b", 32768, 1280, 1}, {"o_b", 5120, 8192, 1}, {"sh_gate", 2304, 5120, 1}, {"wo_a", 8192, 4096, 8},
+      {"q_b", 32768, 1280, 1},    {"o_b", 5120, 8192, 1},     {"sh_gate", 2304, 5120, 1},
+      {"sh_down", 5120, 2304, 1}, {"wo_a", 1024, 4096, 8},    {"engram", 25600, 1280, 1},
   };
   const uint32_t n = 2048;
   std::mt19937 rng(41);
@@ -71,11 +72,11 @@ int main() {
     (void)hipEventCreate(&b);
     auto time = [&](float* out) {
       for (int i = 0; i < copies; ++i)
-        (void)ds41_v41_dense_f16(13, w[i], x, out, s.m, n, s.k, s.groups);
+        (void)ds41_v41_dense_f16(13, w[i], x, out, s.m, n, s.k, s.groups, 0);
       const int iters = std::max(copies, 6);
       (void)hipEventRecord(a, 0);
       for (int i = 0; i < iters; ++i)
-        (void)ds41_v41_dense_f16(13, w[i % copies], x, out, s.m, n, s.k, s.groups);
+        (void)ds41_v41_dense_f16(13, w[i % copies], x, out, s.m, n, s.k, s.groups, 0);
       (void)hipEventRecord(b, 0);
       (void)hipEventSynchronize(b);
       float ms = 0;
@@ -83,7 +84,7 @@ int main() {
       return ms / iters;
     };
     const double ms0 = time(y0);
-    (void)ds41_v41_dense_f16(13, w[0], x, y0, s.m, n, s.k, s.groups);
+    (void)ds41_v41_dense_f16(13, w[0], x, y0, s.m, n, s.k, s.groups, 0);
     std::vector<float> ref(static_cast<std::size_t>(s.groups) * s.m * n);
     (void)hipMemcpy(ref.data(), y0, ref.size() * 4, hipMemcpyDeviceToHost);
     uint64_t hash = 1469598103934665603ull;

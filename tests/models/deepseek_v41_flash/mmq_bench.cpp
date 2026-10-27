@@ -148,9 +148,9 @@ int DenseBench(int type, int m, int k, int groups, int reps, int kTokens) {
       (void)hipEventRecord(e0, 0);
       int rc;
       if (path == 1)
-        rc =
-            ds41_v41_dense_f16(type, dw, static_cast<float*>(dx),
-                               static_cast<float*>(out), m, kTokens, k, groups);
+        rc = ds41_v41_dense_f16(type, dw, static_cast<float*>(dx),
+                                static_cast<float*>(out), m, kTokens, k, groups,
+                                0);
       else if (groups > 1)
         rc = ds41_mmq_dense_grouped_typed(type, dw, static_cast<float*>(dx),
                                           static_cast<float*>(out), m, kTokens,

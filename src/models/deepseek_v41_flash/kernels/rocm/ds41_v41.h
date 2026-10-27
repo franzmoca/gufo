@@ -85,11 +85,16 @@ int ds41_v41_gemv_experts_grouped(int type, const void* w, const void* w_up, con
 /* Batched dense projections (Q5_K) on the FP16 matrix cores: for each group
  * z < groups, out[t, z m + r] = W_z[r] . x[t, z k : z k + k] over n tokens,
  * W_z the z-th [m][k] matrix stored back to back; x rows hold groups * k
- * floats, rounded to FP16 as they are staged, and out rows groups * m;
- * non-finite outputs read as 0. Returns 1 for other types, m not a multiple
- * of 256 or k not a multiple of 256. */
-int ds41_v41_dense_f16(int type, const void* w, const float* x, float* out, uint32_t m, uint32_t n, uint32_t k,
-                       uint32_t groups);
+ * floats, rounded to FP16 as they are staged, and out rows groups * m
+ * floats; non-finite outputs read as 0. With DS41_V41_DENSE_X_HALF in io
+ * the x rows are already FP16 (the same results), with
+ * DS41_V41_DENSE_OUT_HALF out rows are FP16 (rounded from the floats).
+ * Returns 1 for other types, m not a multiple of 256 or k not a multiple
+ * of 256. */
+#define DS41_V41_DENSE_X_HALF 1u
+#define DS41_V41_DENSE_OUT_HALF 2u
+int ds41_v41_dense_f16(int type, const void* w, const void* x, void* out, uint32_t m, uint32_t n, uint32_t k,
+                       uint32_t groups, uint32_t io);
 /* Batched routed experts (IQ1_S, IQ1_M, IQ2_XXS) on the FP16 matrix cores, with FP16
  * activations x. rows lists the slots grouped by expert, expert e owning
  * rows[bounds[e] .. bounds[e + 1]), and tiles[0:n_tiles] names 64 of them
@@ -233,14 +238,17 @@ int ds41_v41_topk(const float* score, uint64_t score_stride, uint32_t* out, uint
  * With `partial` (n * heads * DS41_V41_ATTN_PARTIAL_PER_HEAD floats),
  * batches of up to DS41_V41_ATTN_SPLIT_MAX_TOKENS rows split each row across
  * its own blocks, with the arithmetic of a single-row launch. Without it,
- * batches from DS41_V41_ATTN_SPLIT_TOKENS rows take the matrix cores. */
+ * batches from DS41_V41_ATTN_SPLIT_TOKENS rows take the matrix cores; only
+ * that form takes out_half, which then receives the output rows as FP16 in
+ * place of out (returns 1 for out_half on a batch of another form). */
 #define DS41_V41_ATTN_SPLIT_TOKENS 8u
 #define DS41_V41_ATTN_SPLIT_MAX_TOKENS 16u
 #define DS41_V41_ATTN_PARTIAL_PER_HEAD (20u * 516u)
 int ds41_v41_attention(float* q, const float* ring, const float* chunk, uint32_t window, uint32_t floor,
                        ds41_fp4_rows comp, const uint32_t* idx, uint32_t k, uint32_t ratio, const float* sinks,
-                       float* out, float* partial, uint32_t pos0, uint32_t n, uint32_t heads, uint32_t head_dim,
-                       float scale, const float* inv_freq, uint32_t rope_dim, float* rope_scratch);
+                       float* out, uint16_t* out_half, float* partial, uint32_t pos0, uint32_t n, uint32_t heads,
+                       uint32_t head_dim, float scale, const float* inv_freq, uint32_t rope_dim,
+                       float* rope_scratch);
 
 /* Routing per token: scores = sqrt(softplus(logits)); top-k of scores + bias;
  * weights normalized and multiplied by route_scale. ids/weights are [n, k]. */

@@ -6,6 +6,7 @@
 #include <hip/hip_runtime.h>
 
 #include <algorithm>
+#include <bit>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
@@ -174,14 +175,33 @@ double Case(uint32_t pos0, uint32_t n, uint32_t ratio, uint32_t comp_rows,
   (void)hipMalloc(&dout, sizeof(float) * n * kHeads * kDim);
   (void)hipMalloc(&dtable, sizeof(float) * n * kRope);
   const float scale = 1.0f / std::sqrt((float)kDim);
-  const int rc = ds41_v41_attention(
+  const bool matrix = !(n < DS41_V41_ATTN_SPLIT_TOKENS || split);
+  int rc = ds41_v41_attention(
       dq, dring, dchunk, kWindow, floor, dcomp, didx, kTopK, ratio, dsinks,
-      dout, n < DS41_V41_ATTN_SPLIT_TOKENS || split ? dpartial : nullptr, pos0,
-      n, kHeads, kDim, scale, rope ? dfreq : nullptr, kRope, dtable);
+      dout, nullptr, matrix ? nullptr : dpartial, pos0, n, kHeads, kDim, scale,
+      rope ? dfreq : nullptr, kRope, dtable);
   std::vector<float> out((std::size_t)n * kHeads * kDim);
   (void)hipDeviceSynchronize();
   (void)hipMemcpy(out.data(), dout, out.size() * sizeof(float),
                   hipMemcpyDeviceToHost);
+  /* The matrix-core form's FP16 output is its FP32 output rounded. */
+  if (rc == 0 && matrix) {
+    uint16_t* dhalf = nullptr;
+    (void)hipMalloc(&dhalf, sizeof(uint16_t) * out.size());
+    rc = ds41_v41_attention(dq, dring, dchunk, kWindow, floor, dcomp, didx,
+                            kTopK, ratio, dsinks, nullptr, dhalf, nullptr, pos0,
+                            n, kHeads, kDim, scale, rope ? dfreq : nullptr,
+                            kRope, dtable);
+    std::vector<uint16_t> half(out.size());
+    (void)hipMemcpy(half.data(), dhalf, half.size() * sizeof(uint16_t),
+                    hipMemcpyDeviceToHost);
+    (void)hipFree(dhalf);
+    for (std::size_t i = 0; rc == 0 && i < out.size(); i++)
+      if (half[i] != std::bit_cast<uint16_t>(static_cast<_Float16>(out[i]))) {
+        std::printf("attention n=%u: FP16 output differs at %zu\n", n, i);
+        rc = 1;
+      }
+  }
   for (void* p : {(void*)dq, (void*)dring, (void*)dchunk, (void*)dcodes,
                   (void*)dscales, (void*)dsinks, (void*)didx, (void*)dpartial,
                   (void*)dout, (void*)dfreq, (void*)dtable})
@@ -449,9 +469,9 @@ double Bench(uint32_t pos0, uint32_t n, uint32_t ratio, bool rope,
   const float scale = 1.0f / std::sqrt((float)kDim);
   auto run = [&] {
     return ds41_v41_attention(dq, dring, dchunk, kWindow, 0, {dcodes, dscales},
-                              didx, kTopK, ratio, dsinks, dout, nullptr, pos0,
-                              n, kHeads, kDim, scale, rope ? dfreq : nullptr,
-                              64, dtable);
+                              didx, kTopK, ratio, dsinks, dout, nullptr,
+                              nullptr, pos0, n, kHeads, kDim, scale,
+                              rope ? dfreq : nullptr, 64, dtable);
   };
   double ms = INFINITY;
   if (run() == 0 && hipDeviceSynchronize() == hipSuccess) {

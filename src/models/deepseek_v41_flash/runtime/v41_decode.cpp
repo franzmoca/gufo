@@ -380,7 +380,7 @@ bool linear_raw(uint32_t type, const void* p, uint32_t rows, uint32_t k, const f
     /* Decode batches: FP32 activations, no Q8_1 pass, each weight read once. */
     if (n <= decode_rows && gemv_type(type))
       return ds41_v41_gemv((int)type, p, x, out, rows, k, 0, gemv_slices(rows, k), n, k, rows) == 0;
-    if (dense_f16(type, rows, k, n)) return ds41_v41_dense_f16((int)type, p, x, out, rows, n, k, 1) == 0;
+    if (dense_f16(type, rows, k, n)) return ds41_v41_dense_f16((int)type, p, x, out, rows, n, k, 1, 0) == 0;
     if (n > decode_rows && mmq_batched(type))
       return ds41_mmq_dense_typed((int)type, p, x, out, (int)rows, (int)n, (int)k, 0) == 0;
     for (uint32_t t = 0; t < n; t += 8) {
@@ -702,6 +702,14 @@ bool attention(ds41_decoder* d, uint32_t il, uint32_t n, const Joint* joint) {
     if (!scored) return false;
   }
 
+  /* A single batch on the matrix cores leaves its output as FP16 rows in o
+   * when the FP16 output projections take them (they round them so too). */
+  const ds41_tensor* wo_a = l->attn_output_a;
+  const ds41_tensor* wo_b = l->attn_output_b;
+  const bool o_half = !joint && n >= DS41_V41_ATTN_SPLIT_TOKENS && n > d->decode_rows &&
+                      dense_f16(wo_a->type, DS41_N_LORA_O, kGroupDim, n);
+  const bool oa_half = o_half && dense_f16(wo_b->type, (uint32_t)(wo_b->elements / wo_b->dim[0]),
+                                           (uint32_t)wo_b->dim[0], n);
   if (!each([&](ds41_decoder* e, uint32_t m) {
         LayerState& s = e->layer[il];
         ds41_fp4_rows comp{};
@@ -710,15 +718,15 @@ bool attention(ds41_decoder* d, uint32_t il, uint32_t n, const Joint* joint) {
         /* Decode batches keep the split form's single-row arithmetic. */
         float* partial = m < DS41_V41_ATTN_SPLIT_TOKENS || m <= e->decode_rows ? e->attn_partial : nullptr;
         return ds41_v41_attention(e->q, s.window, e->kvn, DS41_N_SWA, floor, comp, e->topk, DS41_N_INDEXER_TOP_K,
-                                  ratio, f32(e, l->attn_sinks), e->o, partial, e->pos, m, DS41_N_HEAD,
-                                  kHeadDim, 1.0f / sqrtf((float)kHeadDim), freq, kRot, e->rope) == 0 &&
+                                  ratio, f32(e, l->attn_sinks), e->o,
+                                  o_half ? reinterpret_cast<uint16_t*>(e->o) : nullptr, partial, e->pos, m,
+                                  DS41_N_HEAD, kHeadDim, 1.0f / sqrtf((float)kHeadDim), freq, kRot, e->rope) == 0 &&
                (e->spec_eval ? copy_dev(spec_rows(e, e->spec_window, il, 0), e->kvn, (uint64_t)m * kHeadDim)
                              : store_window(s, e->kvn, e->pos, m));
       }))
     return false;
 
   /* Grouped LoRA output: group g maps head slice g of every token. */
-  const ds41_tensor* wo_a = l->attn_output_a;
   const uint64_t group_bytes = wo_a->bytes / DS41_N_OUT_GROUP;
   const uint8_t* wo_a_dev = (const uint8_t*)dev(d, wo_a);
   if (!wo_a_dev) return false;
@@ -739,9 +747,14 @@ bool attention(ds41_decoder* d, uint32_t il, uint32_t n, const Joint* joint) {
   /* Batches take all groups in one launch: the FP16 kernel's grid groups,
    * or MMQ channels with one input quantization. */
   if (dense_f16(wo_a->type, DS41_N_LORA_O, kGroupDim, n)) {
-    if (ds41_v41_dense_f16((int)wo_a->type, wo_a_dev, d->o, d->oa, DS41_N_LORA_O, n, kGroupDim, DS41_N_OUT_GROUP))
+    if (ds41_v41_dense_f16((int)wo_a->type, wo_a_dev, d->o, d->oa, DS41_N_LORA_O, n, kGroupDim, DS41_N_OUT_GROUP,
+                           (o_half ? DS41_V41_DENSE_X_HALF : 0) | (oa_half ? DS41_V41_DENSE_OUT_HALF : 0)))
       return false;
-    return linear(d, l->attn_output_b, d->oa, d->attn_out, n);
+    if (!oa_half) return linear(d, wo_b, d->oa, d->attn_out, n);
+    const void* wo_b_dev = dev(d, wo_b);
+    return wo_b_dev && ds41_v41_dense_f16((int)wo_b->type, wo_b_dev, d->oa, d->attn_out,
+                                          (uint32_t)(wo_b->elements / wo_b->dim[0]), n, (uint32_t)wo_b->dim[0], 1,
+                                          DS41_V41_DENSE_X_HALF) == 0;
   }
   if (n > 8 && mmq_batched(wo_a->type)) {
     if (ds41_mmq_dense_grouped_typed((int)wo_a->type, wo_a_dev, d->o, d->oa, DS41_N_LORA_O, (int)n, kGroupDim,
@@ -814,10 +827,21 @@ bool expert_gemv(int type, const void* w, const int32_t* ids, uint32_t slots, co
 static_assert(DS41_V41_GEMV_MAX_TOKENS <= DS41_V41_EXPERT_PLAN_COLS &&
               DS41_V41_GEMV_MAX_TOKENS * DS41_N_EXPERT_USED <= DS41_V41_EXPERT_PLAN_SLOTS);
 
-bool shared_moe(ds41_decoder* d, const ds41_layer_weights* l, uint32_t n) {
+/* x16, when set, is the FFN input as FP16 rows (the dense FP16 kernel takes
+ * those as it would round xn). */
+bool shared_moe(ds41_decoder* d, const ds41_layer_weights* l, uint32_t n, const uint16_t* x16) {
   const ds41_tensor* sg = l->ffn_gate_shexp;
   const ds41_tensor* su = l->ffn_up_shexp;
-  if (n <= d->decode_rows && sg->type == su->type && sg->elements == su->elements && gemv_type(sg->type)) {
+  const uint32_t sk = (uint32_t)sg->dim[0], sm = (uint32_t)(sg->elements / sk);
+  if (x16 && su->dim[0] == sk && su->elements == sg->elements && dense_f16(sg->type, sm, sk, n) &&
+      dense_f16(su->type, sm, sk, n)) {
+    const void* pg = dev(d, sg);
+    const void* pu = dev(d, su);
+    if (!pg || !pu || ds41_v41_dense_f16((int)sg->type, pg, x16, d->sg, sm, n, sk, 1, DS41_V41_DENSE_X_HALF) ||
+        ds41_v41_dense_f16((int)su->type, pu, x16, d->su, sm, n, sk, 1, DS41_V41_DENSE_X_HALF) ||
+        ds41_v41_swiglu(d->sg, d->su, nullptr, d->sm, n, DS41_N_FF_EXP, kSwigluLimit))
+      return false;
+  } else if (n <= d->decode_rows && sg->type == su->type && sg->elements == su->elements && gemv_type(sg->type)) {
     const uint32_t k = (uint32_t)sg->dim[0];
     const uint32_t m = (uint32_t)(sg->elements / k);
     if (ds41_v41_gemv_swiglu((int)sg->type, dev(d, sg), dev(d, su), d->xn, d->sm, m, k, kSwigluLimit,
@@ -889,6 +913,18 @@ bool moe(ds41_decoder* d, uint32_t il, uint32_t n) {
                                                    gate_type == (int)DS41_TENSOR_IQ1_M ||
                                                    gate_type == (int)DS41_TENSOR_IQ2_XXS ||
                                                    gate_type == (int)DS41_TENSOR_IQ2_XS);
+  const bool grouped = n > 1 && n <= d->decode_rows && expert_block_bytes(gate_type) &&
+                       expert_block_bytes(up_type) && expert_block_bytes(down_type);
+  const bool small = n == 1 || grouped;
+  const bool f16_gate = !small && gate_type == up_type && routed_f16_type(gate_type);
+  const bool f16_down = !small && routed_f16_type(down_type);
+  /* FP16 copies of the input and of the SwiGLU rows, in the buffers the
+   * MMQ path would use for the gate and up rows. The routed FP16 gate/up
+   * and the shared expert's dense projections share the input copy. */
+  auto* x16 = reinterpret_cast<uint16_t*>(d->g6);
+  auto* mid16 = reinterpret_cast<uint16_t*>(d->u6);
+  if (f16_gate && ds41_v41_to_half(d->xn, x16, (uint64_t)n * kDim)) return false;
+  const uint16_t* shared_x16 = f16_gate ? x16 : nullptr;
   const void* gate = nullptr;
   const void* up = nullptr;
   const void* down = nullptr;
@@ -902,14 +938,15 @@ bool moe(ds41_decoder* d, uint32_t il, uint32_t n) {
     int gate_type;
     int32_t* plan_hit;
     bool fused;
+    const uint16_t* x16;
     bool gate_up_done = false;
     ds41_expert_overlap info{};
   };
-  StreamWork work{d,       l,          il,        n,         (uint32_t)rows, (uint32_t)used, gate_type,
-                  d->expert_plan_split[0], fused_pair};
+  StreamWork work{d,         l,          il,        n,         (uint32_t)rows, (uint32_t)used, gate_type,
+                  d->expert_plan_split[0], fused_pair, shared_x16};
   const auto streamed_overlap = [](void* context, const ds41_expert_overlap* info) {
     StreamWork& w = *static_cast<StreamWork*>(context);
-    if (!shared_moe(w.d, w.layer, w.n))
+    if (!shared_moe(w.d, w.layer, w.n, w.x16))
       return false;
     predict_next_layer(w.d, w.il, w.n, info && info->miss_rows > 0);
     if (!info || !info->hit_ids || info->miss_rows == 0 || info->miss_rows == info->rows || !w.fused)
@@ -959,9 +996,6 @@ bool moe(ds41_decoder* d, uint32_t il, uint32_t n) {
       ds41_mmq_set_routed_classes(nullptr, 0, nullptr, nullptr);
     }
   } routed_bounds;
-  const bool grouped = n > 1 && n <= d->decode_rows && expert_block_bytes(gate_type) &&
-                       expert_block_bytes(up_type) && expert_block_bytes(down_type);
-  const bool small = n == 1 || grouped;
   if (grouped && ds41_v41_expert_plan(d->route_ids, (uint32_t)rows, d->expert_plan)) return false;
   /* y = W x over the planned slots (with w_up: the routed SwiGLU into mid6). */
   const auto grouped_gemv = [&](int type, const void* w, const void* w_up, const float* x, uint32_t x_slot,
@@ -972,16 +1006,10 @@ bool moe(ds41_decoder* d, uint32_t il, uint32_t n) {
                                          (uint32_t)rows, n, x, x_slot, slots_per_x, y, m, k, w_table, w_up_table,
                                          1) == 0;
   };
-  const bool f16_gate = !small && gate_type == up_type && routed_f16_type(gate_type);
-  const bool f16_down = !small && routed_f16_type(down_type);
   const int32_t* plan_rows = d->routed_plan;
   int32_t* plan_bounds = d->routed_plan + rows;
   int32_t* plan_tiles = plan_bounds + DS41_N_EXPERT + 1;
   uint32_t n_tiles = 0;
-  /* FP16 copies of the input and of the SwiGLU rows, in the buffers the
-   * MMQ path would use for the gate and up rows. */
-  auto* x16 = reinterpret_cast<uint16_t*>(d->g6);
-  auto* mid16 = reinterpret_cast<uint16_t*>(d->u6);
   if (f16_gate && f16_down) {
     // Both projections consume the device plan; MMQ's host bucket classes
     // and maximum-row bounds are unused on this path.
@@ -1070,8 +1098,7 @@ bool moe(ds41_decoder* d, uint32_t il, uint32_t n) {
     if (status) return false;
   } else if (f16_gate) {
     const uint64_t expert_bytes = (uint64_t)DS41_N_FF_EXP * kDim / 256 * expert_block_bytes(gate_type);
-    if (ds41_v41_to_half(d->xn, x16, (uint64_t)n * kDim) ||
-        ds41_v41_routed_f16(gate_type, gate, up, expert_bytes, x16, (uint32_t)used, plan_rows, plan_bounds,
+    if (ds41_v41_routed_f16(gate_type, gate, up, expert_bytes, x16, (uint32_t)used, plan_rows, plan_bounds,
                             plan_tiles, n_tiles, d->route_w, kSwigluLimit, f16_down ? (void*)mid16 : (void*)d->mid6,
                             f16_down, DS41_N_FF_EXP, kDim, gate_table, up_table))
       return false;
@@ -1126,7 +1153,7 @@ bool moe(ds41_decoder* d, uint32_t il, uint32_t n) {
       return false;
   }
   /* The routed rows (down6) and the shared output (sd) are summed by block()'s hc expand. */
-  return d->engine->expert_store || shared_moe(d, l, n);
+  return d->engine->expert_store || shared_moe(d, l, n, shared_x16);
 }
 
 /* Tokens from which block() fuses the batched state passes. */
