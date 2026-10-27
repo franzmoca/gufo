@@ -40,7 +40,10 @@ the histogram sidecar reach 664.7–669.6 tok/s prefill and 14.99–15.08 tok/s
 decode without a drafter, and 17.92–17.96 tok/s with the Lucebox DSpark
 drafter (same 110 drafted / 71 accepted and the same token hash as the
 previous build; the DSpark prefill runs spread 494–628 tok/s with the page
-cache, so the AR prefill pair is the retained number). At the native
+cache, so the AR prefill pair is the retained number). The retuned expert
+decode kernels of October 27 raise decode to 16.57–16.94 tok/s without a
+drafter and 19.34 tok/s with DSpark, bit-identical outputs, with resident
+`IQ1_M` tg128 at 23.86–24.38 tok/s (control 23.36–23.55). At the native
 1M-context budget the streamed model peaks at 106.4 GiB RSS with 8.7 GiB
 still available.
 

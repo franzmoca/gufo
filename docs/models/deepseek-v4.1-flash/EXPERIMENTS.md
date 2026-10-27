@@ -73,11 +73,12 @@ teacher-forced score against the oracle's perplexity 6.309
   dense decode projections run at 207-221 GB/s on the large shapes; decode
   spends 42.6 ms of GPU time per token at 2K (47.2 ms wall).
 - Routed expert matvecs: a plain read of the same six DRAM-cold 2.3 MB
-  experts streams at 230-238 GB/s (58 µs); the expert GEMV reaches 160-175
-  GB/s on IQ1 (79-96 µs) and mmvq 145-170 GB/s. Both are bound by the
-  texture addresser (`TA_BUSY` ~92% of active cycles): every 32-value
-  sub-block costs four 2-byte weight loads and eight activation loads per
-  lane.
+  experts streams at 230-238 GB/s (58 µs); the pre-October-27 expert GEMV
+  reached 160-175 GB/s on IQ1 and 121-134 GB/s on IQ2, and mmvq 145-170
+  GB/s, bound by the texture addresser (`TA_BUSY` ~92% of active cycles):
+  every 32-value sub-block cost four 2-byte weight loads and eight
+  activation loads per lane. The retuned kernels below decode at 162-205
+  GB/s, the dense GEMV's level for these shapes.
 | Batched IQ1_S routed experts on the FP16 matrix cores (`ds41_routed_f16.hip.cpp`): FP16 activations (one conversion per layer; the gate/up pass stores the SwiGLU rows in FP16 for an IQ1_S down pass), each weight decoded to FP16 with its sub-block scale folded in from an LDS table of the codebook's FP16 high bytes, host-built 64-slot tiles per expert, weight rows as the B operand. Each half-wave decodes one of the two 8-value groups of a K16 step and takes the other with `permlanex16`; half 1 holds the step with its groups swapped and reads its activation fragment swapped to match (each half of the wave uses its own operand copy) | Retained. `ds41_mmq_bench --type 19` on recorded 2K-prefill expert counts: gate/up+SwiGLU 37.5 → 22.8 ms, down 21.4 → 12.2 ms per layer (MMQ). Max error against the FP32-activation expert GEMV 0.18% of the largest SwiGLU row value and 0.05% for down, against 3.5% and 1.2% for MMQ's Q8_1 inputs. 2K batch 5220 → 4680 ms, 952-token batch 2714 → 2348 ms; batched 3K perplexity 6.326 → 6.311 (oracle 6.309), agreement 95.1 → 95.9%. Steps that measured: ordinary instead of nontemporal weight loads 30.5 → 23.8 ms (nontemporal loads refetched the partly used lines; L2 misses 39 → 31 M); FP16 instead of FP32 activation staging 32.2 → 30.5 ms; the group split 23.8 → 22.8 ms. No gain: 16-byte instead of 4-byte weight loads, weights two blocks ahead (32.7 → 32.2 ms), occupancy hints. The 4-byte nibble codebook with the 1024-magic decode instead of the FP16 byte table: 23.8 → 25.7 ms. |
 | The FP16 routed kernel for IQ1_M and IQ2_XXS too (a format trait per type: IQ1_M takes its 3-bit scale per 16 values and its delta per group, from the block's spread f16 scale; IQ2_XXS reads each codebook entry as eight FP16 magnitudes and each sign index as eight FP16 sign bits from LDS, then one XOR and one multiply per pair) | Retained. `ds41_mmq_bench` against MMQ, gate/up+SwiGLU and down per layer: IQ1_M 49.8 → 24.2 and 28.0 → 12.7 ms, IQ2_XXS 39.3 → 27.2 and 22.8 → 14.1 ms (IQ2_S stays on MMQ). 2K batch 4680 → 4337 ms (472 tok/s), 952-token batch 2348 → 2154 ms; batched 3K perplexity 6.316, agreement 96.2%; 18.5K prefill 48.5 → 39.6 s, perplexity 6.279 (unchanged, oracle 6.267), agreement 95.8 → 96.0%. |
 | Batched dense Q5_K projections (q_b, the grouped output LoRA, o_b, shared expert) on the FP16 matrix cores (`ds41_dense_f16.hip.cpp`): 128 rows x 128 tokens per workgroup, 16 rows per wave against eight 16-token tiles, each lane loading only the half-blocks its half-wave decodes (no LDS for weights), FP32 activations prefetched in registers one 64-value stage ahead and rounded to FP16 into LDS, each half-wave reading eight values of an activation fragment and taking the other eight with `permlanex16` | Retained; replaces MMQ and its Q8_1 passes for 9 tokens and up. `ds41_mmq_bench --dense` at 2048 tokens, MMQ (with its quantization) → FP16: q_b 3.52 → 2.51 ms, output LoRA (8 groups) 4.04 → 3.90 ms, o_b 6.95 → 5.30 ms, shared gate 2.26 → 1.84 ms, shared down 2.00 → 1.44 ms; faster from 16 tokens up. Relative error 3.5e-4 against the FP32-activation GEMV. 2K batch 4337 → 3977 ms (515 tok/s), 952-token batch 2154 → 2102 ms, 18.5K prefill 39.6 → 37.2 s; batched 3K perplexity 6.285 (oracle 6.309), agreement 95.9%; 18.5K 6.269 (oracle 6.267), 96.0%. Steps: FP16 activations from a separate conversion pass were slower than staging FP32 in the kernel; staging loads issued one at a time (no register prefetch) and a branch-free full-tile variant (the compiler hoisted it into 256 VGPRs and 760 spills) both lost; the fragment exchange instead of two 16-byte LDS reads per lane took o_b 7.01 → 6.29 ms (it measured slower in the routed kernel, whose fragments feed two products). |
@@ -122,6 +123,25 @@ check pass; the native-context probe peaks at 106.4 GiB RSS with 8.7 GiB
 available at 1M context; the tools, conversation, sampling-defaults and
 batch HTTP suites pass against `gufo serve` with the Lucebox drafter.
 [Logs](artifacts/m3-streaming/bench-iq2-tables-ar1.log).
+
+## Expert GEMV decode retune (2026-10-27)
+
+The IQ2 expert decode kernels ran at 121-134 GB/s, half the dense GEMV's
+207-221. Two limiters, found with `tools/prof/isa_mix.py`: the IQ2 decode
+cast each `uint64_t` grid entry's extracted byte straight to float, which
+lowered to a quarter-rate `v_ldexp_f32` (129 per loop) plus 64-bit shifts,
+and the sign ternary emitted a compare/select pair per element; the loads
+were also fragmented (five 2-byte weight loads and 16 activation loads per
+32-value task in the SwiGLU pass). External references agree on the failure
+mode: the sanssushi and MBufo Gufo forks measure 102-118 GB/s on their
+per-lane grid-LUT IQ2 decode against a 214 GB/s Q2_0 kernel at the same
+216 GB/s peak.
+
+| Experiment | Decision / evidence |
+| --- | --- |
+| Retuned all five formats in `ds41_expert_gemv.hip.cpp`: task payloads as whole-word loads (memcpy from the 2-byte-aligned blocks), IQ2 grids and signs staged in LDS as u32 word pairs, the IQ2 decode on the entry's u32 halves with signs applied by flipping the float sign bit, and the fused gate/up pass loading x once per block into registers (AccR); U=2 for IQ1_S and the IQ2 formats | Retained, bit-exact by construction and by measurement. Standalone `tools/bench/ds41_expert_gemv_tune.hip` (production TU included, rotating DRAM-cold experts): IQ2_XXS gate/up 143.0 -> 194.9 GB/s, down 123.9 -> 189.4; IQ2_XS 148.9 -> 205.1 / 133.5 -> 189.9; IQ2_S down 143.5 -> 200.7; IQ1_M gate/up 171.5 -> 194.5; IQ1_S down 153.3 -> 162.1 (its gate/up already streamed at 200.3). `ds41_gemv_bench`: fp32 162-201 GB/s, table mode bit-identical; `ds41.mmq_typed` and `ds41.expert_store` pass; 0 VGPR spills (grouped kCols=16 peaks at 218 VGPRs). |
+| Fast-math contraction context in the IQ1_M tail | A pragma-free re-expression of `acc + fmaf(s1, d01, s2*(d23))` reproduces the production bits; freezing it with `#pragma clang fp reassociate(off)` does not (production's own emission reassociates). The port keeps the source expression verbatim; the tune bench's replica variant guards it. |
+| Alternating matched `gufo bench` pairs (gpu-test binaries, seed 19, two controls and two candidates interleaved) | Streamed IQ2_XXS AR tg128 15.90/16.06 -> 16.57/16.94 tok/s and DSpark 18.54 -> 19.34 (71 accepted and token hash 04842be7… unchanged; 110 -> 107 drafted under the timing-adaptive drafter); decode host wait 5.4-6.5 -> 5.2-5.6 ms/token; resident IQ1_M tg128 23.55/23.36 -> 23.86/24.38 (hash 70d5a48a… unchanged). Prefill untouched (routed_f16 path). |
 
 ## Post-M6 resident optimization pass (2026-10-26)
 

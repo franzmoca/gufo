@@ -206,8 +206,8 @@ text); full tables and charts are on the
 
 Production target is Strix Halo `gfx1151` on Linux, like the rest of Gufo.
 `IQ2_XXS` expert streaming is qualified for evaluation: with the built-in
-expert ranking it prefills at 666-670 tok/s and decodes at 15.0 tok/s
-(17.9 with DSpark) on `gufo bench` pp2048/tg128, with outputs bit-identical
+expert ranking it prefills at 666-670 tok/s and decodes at 16.6-16.9 tok/s
+(19.3 with DSpark) on `gufo bench` pp2048/tg128, with outputs bit-identical
 to the staged build and the serving suites passing. The remaining streaming
 work (prefetch sweeps, router-predicted decode prefetch) is in the
 [backlog](docs/models/deepseek-v4.1-flash/BACKLOG.md). Development history
