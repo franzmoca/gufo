@@ -357,6 +357,10 @@ int ds41_gpu_set_model_shards(const int* fds, const uint64_t* offsets,
 int ds41_gpu_set_model_map_range(const void* model_map, uint64_t model_size,
                                  uint64_t map_offset, uint64_t map_size,
                                  uint64_t max_tensor_bytes);
+/* Bytes of weights the next load uploads to the device, which decide their
+ * placement; 0 takes the whole registered mapping. Streamed experts and
+ * disk-read tensors are not uploaded. */
+void ds41_gpu_set_resident_weight_bytes(uint64_t bytes);
 int ds41_gpu_shared_down_hc_expand_q8_0_tensor(
     ds41_gpu_tensor* out_hc, ds41_gpu_tensor* shared_out, const void* model_map,
     uint64_t model_size, uint64_t weight_offset, uint64_t in_dim,

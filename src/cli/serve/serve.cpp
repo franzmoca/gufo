@@ -602,6 +602,8 @@ void PrintServeHelp(std::string_view program_name,
     std::string draft_policy;
     std::uint32_t prefill_batch = 0;
     bool exact_prefill = false;
+    bool stream_experts = false;
+    std::size_t expert_cache_bytes = 0;
     std::string dspark_model_path;
     std::string mtp_model_path;
     std::string vision_model_path;
@@ -651,6 +653,19 @@ void PrintServeHelp(std::string_view program_name,
         "token instead of only each prompt's last 140 (decoder SWA bounded "
         "replay; about twice the prefill time)",
         "Model", &exact_prefill);
+    parser.AddFlag(
+        "", "--stream-experts",
+        "DeepSeek V4.1 Flash: keep dense weights resident and stream routed "
+        "experts from the SSD through a bounded cache; needed for IQ2_XXS, "
+        "and runs IQ1_M in less memory, more slowly. Without it, a model "
+        "that does not fit available memory fails to load",
+        "Model", &stream_experts);
+    parser.AddOption(
+        "", "--expert-cache-bytes", "N",
+        "DeepSeek V4.1 Flash with --stream-experts: streamed expert cache "
+        "bytes; smaller leaves more memory free and reads more from the SSD "
+        "(default: 0 = available memory minus 4 GiB)",
+        "Model", &expert_cache_bytes);
     parser.AddOption("", "--served-model-name", "ID",
                      "Model identifier exposed by the OpenAI API (repeatable; "
                      "the first is primary)",
@@ -1229,6 +1244,8 @@ int RunServe(std::span<const char* const> args) {
     std::string draft_policy;
     std::uint32_t prefill_batch = 0;
     bool exact_prefill = false;
+    bool stream_experts = false;
+    std::size_t expert_cache_bytes = 0;
     std::string dspark_model_path;
     std::string mtp_model_path;
     std::string vision_model_path;
@@ -1277,6 +1294,19 @@ int RunServe(std::span<const char* const> args) {
         "token instead of only each prompt's last 140 (decoder SWA bounded "
         "replay; about twice the prefill time)",
         "Model", &exact_prefill);
+    llm_parser.AddFlag(
+        "", "--stream-experts",
+        "DeepSeek V4.1 Flash: keep dense weights resident and stream routed "
+        "experts from the SSD through a bounded cache; needed for IQ2_XXS, "
+        "and runs IQ1_M in less memory, more slowly. Without it, a model "
+        "that does not fit available memory fails to load",
+        "Model", &stream_experts);
+    llm_parser.AddOption(
+        "", "--expert-cache-bytes", "N",
+        "DeepSeek V4.1 Flash with --stream-experts: streamed expert cache "
+        "bytes; smaller leaves more memory free and reads more from the SSD "
+        "(default: 0 = available memory minus 4 GiB)",
+        "Model", &expert_cache_bytes);
     llm_parser.AddCustomOption(
         "", "--served-model-name", "ID",
         "Model identifier exposed by the OpenAI API (repeatable; the first "
@@ -1537,6 +1567,7 @@ int RunServe(std::span<const char* const> args) {
     server::LoadingResponder loading(host, port);
     backend->set_deepseek_prefill_batch(prefill_batch);
     backend->set_deepseek_exact_prefill(exact_prefill);
+    backend->set_deepseek_expert_streaming(stream_experts, expert_cache_bytes);
     const bool load_ok = backend->load(
         model, &err, max_context, session_count,
         server::TextPrefillPolicy{

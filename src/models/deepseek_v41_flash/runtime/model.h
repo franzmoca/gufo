@@ -33,6 +33,13 @@ struct ds41_engine_options {
   /* Prefill runs every decoder layer over every prompt token instead of the
    * decoder SWA bounded replay (ds41_decoder_eval_prompt). */
   bool exact_prefill;
+  /* Keep only dense weights resident and stream routed experts from the
+   * SSD through a bounded cache. Without it, a model that does not fit
+   * available memory fails to load. */
+  bool stream_experts;
+  /* Streamed expert cache bytes; 0 sizes it from available memory. Requires
+   * stream_experts. */
+  uint64_t expert_cache_bytes;
 };
 
 inline constexpr uint32_t DS41_MIN_PREFILL_BATCH = 16;

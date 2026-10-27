@@ -66,10 +66,17 @@ std::shared_ptr<Model> Model::Load(const std::string& model_path,
     return nullptr;
   }
 
+  if (options.expert_cache_bytes != 0 && !options.stream_experts) {
+    AssignError(error_msg, "--expert-cache-bytes requires --stream-experts");
+    return nullptr;
+  }
+
   ds41_engine_options engine_options{};
   engine_options.model_path = model_path.c_str();
   engine_options.prefill_batch = options.prefill_batch;
   engine_options.exact_prefill = options.exact_prefill;
+  engine_options.stream_experts = options.stream_experts;
+  engine_options.expert_cache_bytes = options.expert_cache_bytes;
   engine_options.dspark_model_path = options.dspark_model_path.empty()
                                          ? nullptr
                                          : options.dspark_model_path.c_str();

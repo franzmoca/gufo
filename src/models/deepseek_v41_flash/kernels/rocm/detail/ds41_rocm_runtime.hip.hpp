@@ -1,5 +1,8 @@
 static const void* g_model_host_base;
 static uint64_t g_model_registered_size;
+/* Weights this load uploads (ds41_gpu_set_resident_weight_bytes); 0 means
+ * the whole registered mapping. */
+static uint64_t g_model_resident_weight_bytes;
 /* Placement for this model load, decided once from the registered weight size
  * against the device heap; see gufo::hip::WeightAllocator. */
 static std::unique_ptr<gufo::hip::WeightAllocator> g_model_weight_alloc;
@@ -705,10 +708,19 @@ static void hip_model_staging_release(void) {
  * gufo::hip::WeightAllocator makes the decision and allocates coarse-grain
  * managed memory, so the GPU caches weight pages the way it caches hipMalloc
  * memory. */
+static uint64_t hip_model_weight_bytes(void) {
+  return g_model_resident_weight_bytes ? g_model_resident_weight_bytes
+                                       : g_model_registered_size;
+}
+
+extern "C" void ds41_gpu_set_resident_weight_bytes(uint64_t bytes) {
+  g_model_resident_weight_bytes = bytes;
+}
+
 static gufo::hip::WeightAllocator* hip_model_weight_allocator(void) {
   if (!g_model_weight_alloc) {
     g_model_weight_alloc =
-        std::make_unique<gufo::hip::WeightAllocator>(g_model_registered_size);
+        std::make_unique<gufo::hip::WeightAllocator>(hip_model_weight_bytes());
     if (g_model_weight_alloc->placement() == gufo::hip::Placement::kManaged) {
       // A heap far below system memory usually means the GTT limit kept its
       // default of half the RAM. Managed weights are pageable system memory:
@@ -725,7 +737,7 @@ static gufo::hip::WeightAllocator* hip_model_weight_allocator(void) {
           "system memory: kernel parameters ttm.pages_limit=32505856 "
           "(amdttm.pages_limit with AMD's DKMS driver) and "
           "amdgpu.gttsize=126976 on a 128 GB Strix Halo",
-          (double)g_model_registered_size / 1073741824.0,
+          (double)hip_model_weight_bytes() / 1073741824.0,
           (double)free_b / 1073741824.0, (double)total_b / 1073741824.0,
           (double)gufo::hip::kDispatchReserve / 1073741824.0);
     }
@@ -900,6 +912,7 @@ extern "C" void ds41_gpu_cleanup(void) {
   hip_model_staging_release();
   g_model_host_base = NULL;
   g_model_registered_size = 0;
+  g_model_resident_weight_bytes = 0;
   g_model_weight_alloc.reset();
   g_model_fd = -1;
   g_model_shards.clear();
