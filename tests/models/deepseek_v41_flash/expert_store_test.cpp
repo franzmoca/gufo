@@ -116,11 +116,11 @@ int main() {
   ds41_expert_store* store =
       ds41_expert_store_create(&f.model, &f.weights, 4 * kSlot);
   int32_t* routes = nullptr;
-  if (!store || hipMalloc(&routes, 32 * 6 * sizeof(int32_t)) != hipSuccess)
+  if (!store || hipMalloc(&routes, 1024 * 6 * sizeof(int32_t)) != hipSuccess)
     return 1;
   std::array<const void*, 3> stage{};
   const auto run = [&](uint32_t layer, const std::vector<int32_t>& ids) {
-    if (ids.empty() || ids.size() % 6 || ids.size() > 32 * 6 ||
+    if (ids.empty() || ids.size() % 6 || ids.size() > 1024 * 6 ||
         hipMemcpy(routes, ids.data(), ids.size() * sizeof(int32_t),
                   hipMemcpyHostToDevice) != hipSuccess)
       return false;
@@ -224,6 +224,85 @@ int main() {
   check(run(6, {100, 100, 100, 100, 100, 100}), "one-use stage bytes");
   after = ds41_expert_store_get_stats(store);
   check(after.hits == before.hits, "scan-resistant admission");
+  ds41_expert_store_destroy(store);
+  // Background prefetch: the listed experts stage without a prepare, the
+  // next prepare of that layer adopts them without re-reading, and any other
+  // layer drops the job and reads its own experts again.
+  store = ds41_expert_store_create(&f.model, &f.weights, 4 * kSlot);
+  check(store && run(0, {0, 1, 2, 3, 1, 2}), "prefetch setup stage bytes");
+  const auto sweep_base = ds41_expert_store_get_stats(store);
+  const auto idle = [](const ds41_expert_store* s) {
+    for (int i = 0; i < 2000 && !ds41_expert_store_prefetch_idle(s); ++i)
+      usleep(1000);
+    return ds41_expert_store_prefetch_idle(s);
+  };
+  const int32_t none[]{7};
+  const int32_t first[]{5, 9};
+  const int32_t second[]{7, 8};
+  check(ds41_expert_store_prefetch(store, 3, none, 1) == false,
+        "prefetch before the layer is expected");
+  check(ds41_expert_store_prefetch(store, 1, first, 2) && idle(store),
+        "prefetch submits and drains");
+  auto stats = ds41_expert_store_get_stats(store);
+  check(stats.bytes_read == sweep_base.bytes_read,
+        "drained prefetch not folded yet");
+  check(run(1, {5, 9, 5, 9, 5, 9}), "adopted prefetch stage bytes");
+  stats = ds41_expert_store_get_stats(store);
+  check(stats.bytes_read - sweep_base.bytes_read == 2 * kSlot &&
+            stats.prefetch_bytes - sweep_base.prefetch_bytes == 2 * kSlot,
+        "adoption reads each expert once");
+  check(run(2, {30, 30, 30, 30, 30, 30}), "unrelated layer stage bytes");
+  stats = ds41_expert_store_get_stats(store);
+  const uint64_t after_two = stats.bytes_read;
+  check(ds41_expert_store_prefetch(store, 3, second, 2) && idle(store),
+        "second prefetch submits and drains");
+  check(run(4, {11, 11, 11, 11, 11, 11}), "overtaking layer stage bytes");
+  stats = ds41_expert_store_get_stats(store);
+  check(stats.prefetch_dropped_bytes == 2 * kSlot &&
+            stats.bytes_read - after_two == 2 * kSlot + kSlot,
+        "overtaken prefetch dropped and reread");
+  check(run(3, {7, 7, 7, 7, 7, 7}), "dropped prefetch expert stage bytes");
+  stats = ds41_expert_store_get_stats(store);
+  check(stats.prefetch_dropped_bytes == 2 * kSlot &&
+            stats.prefetch_bytes == 2 * kSlot,
+        "dropped bytes never counted as consumed");
+  ds41_expert_store_destroy(store);
+  // A prefill-scale (wide) prefetch stages a large expert set that a
+  // batch-scale prepare adopts without rereading; a small batch drops it.
+  store = ds41_expert_store_create(&f.model, &f.weights, 4 * kSlot);
+  {
+    std::vector<int32_t> all(DS41_N_EXPERT);
+    for (uint32_t e = 0; e < DS41_N_EXPERT; ++e)
+      all[e] = static_cast<int32_t>(e);
+    std::vector<int32_t> scan(1024 * 6);
+    for (uint32_t i = 0; i < scan.size(); ++i)
+      scan[i] = static_cast<int32_t>(i % 8);
+    check(store && run(0, scan), "wide source layer stage bytes");
+    check(
+        ds41_expert_store_prefetch(store, 1, all.data(), DS41_N_EXPERT, true) &&
+            idle(store),
+        "wide prefetch submits and drains");
+    stats = ds41_expert_store_get_stats(store);
+    const uint64_t demand_only = stats.bytes_read;
+    check(run(1, scan), "wide adoption stage bytes");
+    stats = ds41_expert_store_get_stats(store);
+    check(stats.bytes_read - demand_only == 384 * kSlot &&
+              stats.prefetch_bytes == 384 * kSlot,
+          "batch-scale prepare adopts the wide prefetch");
+    check(run(2, scan), "wide drop source layer stage bytes");
+    check(
+        ds41_expert_store_prefetch(store, 3, all.data(), DS41_N_EXPERT, true) &&
+            idle(store),
+        "second wide prefetch submits and drains");
+    stats = ds41_expert_store_get_stats(store);
+    const uint64_t reswept = stats.bytes_read;
+    const std::vector<int32_t> one{40, 40, 40, 40, 40, 40};
+    check(run(3, one), "small batch after wide stage bytes");
+    stats = ds41_expert_store_get_stats(store);
+    check(stats.bytes_read == reswept + kSlot + 384 * kSlot &&
+              stats.prefetch_dropped_bytes == 384 * kSlot,
+          "small batch drops the wide prefetch");
+  }
   ds41_expert_store_destroy(store);
   store = ds41_expert_store_create(&f.model, &f.weights, 4 * kSlot);
   char histogram_path[] = "/tmp/gufo-ds41-histogram-XXXXXX";

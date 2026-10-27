@@ -50,6 +50,10 @@ constexpr uint32_t kIndexCodeBytes = DS41_N_INDEXER_HEAD_DIM / 2, kIndexScaleByt
 constexpr uint64_t kEngramRowsPerThread = 4;
 constexpr float kSwigluLimit = DS41_SWIGLU_CLAMP_EXP;
 constexpr uint32_t kDecodeRows = 8;  // see ds41_decoder::decode_rows
+/* Batches of at least this many tokens predict the next layer's routed
+ * experts and prefetch them during this layer's compute (the store's
+ * adoption gate mirrors this threshold); single tokens predict for decode. */
+constexpr uint32_t kPrefillPredictTokens = 1024;
 
 float half_to_float(uint16_t h) {
   const uint32_t sign = (uint32_t)(h & 0x8000u) << 16;
@@ -281,6 +285,15 @@ struct ds41_decoder : Activations {
   uint32_t logits_row0 = 0;  // their first row there
   uint64_t logits_gen = 0;   // the evaluation that left them
   void* sample_scratch = nullptr;
+  /* Streamed-expert prefetch (expert_store.h): the next layer's router is
+   * evaluated one layer early on this layer's FFN input, and the store's
+   * thread submits a background read when each prediction's ids land. The
+   * per-layer pinned rows and events keep concurrent predictions valid. */
+  int32_t* pred_ids = nullptr;    // device [capacity][DS41_N_EXPERT_USED]
+  float* pred_w = nullptr;        // device [capacity][DS41_N_EXPERT_USED]
+  int32_t* pred_pinned = nullptr;  // pinned [DS41_N_LAYER][capacity][DS41_N_EXPERT_USED]
+  hipEvent_t pred_events[DS41_N_LAYER] = {};
+  bool pred_ok = true;
   /* Batches of up to this many rows take the decode paths (FP32 GEMV,
    * grouped experts, per-row state mixes), where each row sees the
    * arithmetic of a single-token evaluation; up to
@@ -817,6 +830,32 @@ bool shared_moe(ds41_decoder* d, const ds41_layer_weights* l, uint32_t n) {
   return linear(d, l->ffn_down_shexp, d->sm, d->sd, n);
 }
 
+/* Enqueues the next layer's router on this layer's FFN input (one layer
+ * stale) and records the prediction; the store's thread turns the landed
+ * ids into a background read the next layer's prepare adopts. Called from
+ * the read overlap, so the extra matvec hides in the read stall. */
+void predict_next_layer(ds41_decoder* d, uint32_t il, uint32_t n) {
+  if (!d->engine->expert_store || !d->pred_ok || il + 1 >= DS41_N_LAYER)
+    return;
+  if (n < kPrefillPredictTokens)
+    return;
+  const ds41_layer_weights* nl = &d->engine->weights->layer[il + 1];
+  const uint32_t used = DS41_N_EXPERT_USED;
+  const uint64_t rows = (uint64_t)d->capacity * DS41_N_EXPERT_USED;
+  int32_t* ids = d->pred_pinned + (size_t)(il + 1) * rows;
+  if (!linear(d, nl->ffn_gate_inp, d->xn, d->router, n) ||
+      ds41_v41_route(d->router, f32(d, nl->ffn_exp_probs_b), d->pred_ids, d->pred_w,
+                     DS41_N_EXPERT, used, DS41_EXPERT_WEIGHT_SCALE, n) ||
+      hipMemcpyAsync(ids, d->pred_ids, (size_t)n * used * sizeof(int32_t),
+                     hipMemcpyDeviceToHost, nullptr) != hipSuccess ||
+      hipEventRecord(d->pred_events[il + 1], nullptr) != hipSuccess)
+    d->pred_ok = false;
+  else
+    (void)ds41_expert_store_predict(d->engine->expert_store, il + 1,
+                                    d->pred_events[il + 1], ids, n * used,
+                                    n >= kPrefillPredictTokens);
+}
+
 bool moe(ds41_decoder* d, uint32_t il, uint32_t n) {
   const ds41_layer_weights* l = &d->engine->weights->layer[il];
   const int used = (int)DS41_N_EXPERT_USED;
@@ -854,19 +893,20 @@ bool moe(ds41_decoder* d, uint32_t il, uint32_t n) {
   struct StreamWork {
     ds41_decoder* d;
     const ds41_layer_weights* layer;
-    uint32_t n, rows, used;
+    uint32_t il, n, rows, used;
     int gate_type;
     int32_t* plan_hit;
     bool fused;
     bool gate_up_done = false;
     ds41_expert_overlap info{};
   };
-  StreamWork work{d,       l,          n,         (uint32_t)rows, (uint32_t)used, gate_type,
+  StreamWork work{d,       l,          il,        n,         (uint32_t)rows, (uint32_t)used, gate_type,
                   d->expert_plan_split[0], fused_pair};
   const auto streamed_overlap = [](void* context, const ds41_expert_overlap* info) {
     StreamWork& w = *static_cast<StreamWork*>(context);
     if (!shared_moe(w.d, w.layer, w.n))
       return false;
+    predict_next_layer(w.d, w.il, w.n);
     if (!info || !info->hit_ids || info->miss_rows == 0 || info->miss_rows == info->rows || !w.fused)
       return true;
     w.info = *info;
@@ -1315,6 +1355,18 @@ ds41_decoder* ds41_decoder_create(ds41_engine* engine, uint32_t context) {
     return nullptr;
   }
   static_cast<Activations&>(*d) = d->shared->views;
+  if (engine->expert_store) {
+    const uint64_t rows = d->capacity;
+    d->pred_ids = alloc<int32_t>(d->allocations, rows * DS41_N_EXPERT_USED);
+    d->pred_w = alloc<float>(d->allocations, rows * DS41_N_EXPERT_USED);
+    ok = d->pred_ids && d->pred_w &&
+         hipHostMalloc(&d->pred_pinned,
+                       (size_t)DS41_N_LAYER * rows * DS41_N_EXPERT_USED *
+                           sizeof(int32_t)) == hipSuccess;
+    for (uint32_t l = 0; ok && l < DS41_N_LAYER; ++l)
+      ok = hipEventCreateWithFlags(&d->pred_events[l],
+                                   hipEventDisableTiming) == hipSuccess;
+  }
   d->host_h.resize(std::max<uint64_t>((uint64_t)d->capacity * kDim, (uint64_t)kHc * kDim));
   d->host_ids.resize(DS41_N_EXPERT_USED);
   return d;
@@ -1322,6 +1374,13 @@ ds41_decoder* ds41_decoder_create(ds41_engine* engine, uint32_t context) {
 
 void ds41_decoder_destroy(ds41_decoder* d) {
   if (!d) return;
+  if (d->pred_pinned && d->engine && d->engine->expert_store)
+    ds41_expert_store_predict_flush(d->engine->expert_store);
+  for (hipEvent_t event : d->pred_events)
+    if (event)
+      (void)hipEventDestroy(event);
+  if (d->pred_pinned)
+    (void)hipHostFree(d->pred_pinned);
   for (void* p : d->allocations) (void)hipFree(p);
   delete d;
 }

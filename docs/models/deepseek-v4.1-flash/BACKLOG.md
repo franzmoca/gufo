@@ -193,17 +193,31 @@ back to AR rows when that leaves no draft.
 
 ### 11. Streamed prefill: read the next layer's experts during this layer
 
-At prefill scale a layer routes to nearly every expert, so the next layer's
-uncached experts can be read without waiting for its router. ds4 fills two
-whole-layer stage buffers in layer parity with a dedicated loader thread
-(prefill ≥1024 tokens); kyojin's model puts router-free next-layer prefetch
-at 49% → 97% of resident prefill speed. Our stage buffers are already
-whole-layer sized, so a ping-pong pair costs ~3.6 GiB of cache capacity.
-After the October 27 overlap work, pp2048 is 666–670 tok/s with about 3.2 s
-of reads per batch against ~2 s of compute, so the ceiling is roughly
-max(reads, compute): pipelining should recover most of the compute half.
-Requires an async submit/priority path in the read pool (demand reads of the
-current layer must preempt the sweep).
+Done (2026-10-27), with the design adapted by measurement; see
+[STREAMING.md](STREAMING.md#prefill-read-pipelining-with-router-predictions-2026-10-27).
+The read pool now runs one background job between demand phases; the next
+prepare of its layer adopts its un-run, routed tasks, a later prepare parks
+it and an earlier one drops it. Two whole-layer stage sets in layer parity
+keep a job's writes disjoint from the compute in flight, and a router
+prediction (the next layer's router on the current FFN input, submitted by
+a store thread when its ids land) supplies the expert set. The router-free
+whole-layer sweep the original item proposed was measured at 3.6x the
+demand read volume on this model's skewed routing and rejected (pp2048 fell
+to 390 tok/s). Prefill gains 19–21%; the second stage set costs ~3.6 GiB of
+cache, which decode pays as 4–6% until the compact set below lands.
+
+### 11a. Compact the prefetch stage set
+
+The ping-pong prefetch set is whole-layer sized (~3.6 GiB) only because
+rows are indexed by expert id. Predicted jobs touch at most the routed set
+(~70 experts at pp2048, 6 at decode) plus the layer's demand misses, so a
+96–128 row set with a job-relative row assignment would free ~2.5 GiB of
+cache and recover most of decode's 4–6%. Requires the adopting prepare to
+extend the job's row assignment for its uncovered misses (a pool peek at
+table-build time), a spill path for oversized batches (pp4096 can exceed
+128 routed+missed experts; the odd layers' demand can spill into the even
+set, which their compute no longer reads), and re-reads into job rows when
+a job fails adoption.
 
 ### 12. Streamed decode: router-predicted expert prefetch
 
