@@ -34,8 +34,9 @@ struct ds41_expert_overlap {
   uint32_t layer;
   uint32_t rows;            // n_tokens * DS41_N_EXPERT_USED route rows
   uint32_t miss_rows;       // rows served by reads this call
-  const int32_t* hit_ids;   // device rows; null when rows exceeds the buffer
-  const int32_t* miss_ids;  // device rows; null when rows exceeds the buffer
+  const int32_t* hit_ids;   // device rows; null unless the batch both hits and
+                            // misses within the buffer
+  const int32_t* miss_ids;  // as hit_ids
   const void* table[3];     // device [DS41_N_EXPERT] weight bases
 };
 
