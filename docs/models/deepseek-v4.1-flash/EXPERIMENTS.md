@@ -1111,11 +1111,15 @@ indexer scores grew 4 → 227 ms and the top-k 1 → 270 ms by ~115K, while
 attention, projections and mHC stayed flat. Both kernels serve the streamed
 `IQ2_XXS` model unchanged. [Record](artifacts/2026-10-27-indexer-depth/summary.txt).
 
-| Depth | Base | E19 | E19 + E20 |
-| ---: | ---: | ---: | ---: |
-| 32K | 1,133 | 1,161 | 1,182 |
-| 64K | 1,017 | 1,109 | 1,155 |
-| 128K | 838 | 1,003 | 1,098 |
+| Depth | Base | E19 | E19 + E20 | E19–E21 |
+| ---: | ---: | ---: | ---: | ---: |
+| 32K | 1,133 | 1,161 | 1,182 | 1,217 |
+| 64K | 1,017 | 1,109 | 1,155 | 1,185 |
+| 128K | 838 | 1,003 | 1,098 | 1,126 |
+
+Depth 0 is the first test of each process and reads low in this harness
+(1,126, 1,161, 980 and 1,122 across the four builds); a matched d0 A/B of
+E19 + E20 against the base sat inside the runs' own spread.
 
 ### E19: two-pass indexer top-k (retained)
 
@@ -1145,4 +1149,30 @@ changes the odd rows' summation order; the raw-builtin kernel mirrors that
 addresses) and stays byte-identical. Per layer at 128K: 84.5 → 39.9 ms
 (13.1 → 27.8 TFLOP/s); 2× at every depth. Rejected variants: 512-row blocks
 (45.7 ms), two 16-token tiles per block (50.4), interleaved head pairs
-(56.2, register pressure), head weights from LDS (42.5).
+(56.2, register pressure), head weights from LDS (42.5), ReLU as a
+compare-select (no change), a second pre-swapped query copy in LDS for the
+upper half-wave (40.9: twice the LDS reads), two 16-row tiles per wave with
+8 or 16 waves (47.7, 44.3).
+
+### E21: prefill attention staging (retained)
+
+`attention_f16_kernel` (20 layers, ~207 ms per 2K batch at any depth past a
+few thousand tokens) read each compressed row's index from global memory
+right before that row's bytes, a chain of dependent loads per 16-row tile;
+branched on window versus compressed rows once per row; and addressed rows
+with 64-bit per-lane arithmetic. The token's indices now sit in shared
+memory, the branch is taken once per tile, and rows are 32-bit offsets from
+uniform bases (compressed rows stay below 2^24 at any supported context).
+Per layer (2,048 tokens at 128K, `ds41_attention_test --bench`): 10.52 →
+10.03 → 9.20 → 8.48 ms, and 12–13% at depth 0, ratio 1 and the 140-row
+decoder replay. Outputs byte-identical to the base kernel on four shapes
+(ratios 2, 1 and 0). Rejected: the two head groups of a token adjacent in
+the grid (no change), the rows' scale bytes staged in shared memory
+(10.3 ms), skipping unit softmax rescales (9.8).
+
+Also measured on the shared FP16 projection kernels and rejected: dense
+Q5_K activation fragments read twice from LDS instead of exchanged with
+`permlanex16` (33 → 28 TFLOP/s, LDS-bound); the dense kernel without its
+per-tile guard on full tiles (spills, as its comment warns); routed
+activations prefetched a stage ahead in registers (IQ1_S and IQ2_XXS both
+~5% slower).
