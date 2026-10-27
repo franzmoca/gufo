@@ -8,6 +8,7 @@
 
 struct ds41_dspark_model;
 struct ds41_engram_tables;
+struct ds41_expert_store;
 struct ds41_dspark_request_state;
 struct ds41_model;
 struct ds41_rocm_graph;
@@ -82,6 +83,7 @@ struct ds41_engine {
   ds41_weights* weights;
   ds41_dspark_model* dspark;
   ds41_engram_tables* engram;
+  ds41_expert_store* expert_store;
   ds41_rocm_graph* batch_workspace;
   bool rocm_ready;
   uint32_t prefill_batch;  // most tokens per prefill batch

@@ -132,6 +132,8 @@ int main() {
       {"iq1m_down", 29, 56, 5120, 2304, true},
       {"iq2xxs_up", 16, 66, 2304, 5120, false},
       {"iq2xxs_down", 16, 66, 5120, 2304, true},
+      {"iq2xs_up", 17, 74, 2304, 5120, false},
+      {"iq2xs_down", 17, 74, 5120, 2304, true},
       {"iq2s_down", 22, 82, 5120, 2304, true},
   };
   constexpr int kExperts = 384;
@@ -153,52 +155,84 @@ int main() {
     void* w = nullptr;
     float *x = nullptr, *y = nullptr;
     int32_t* ids = nullptr;
+    void* table = nullptr;
     (void)hipMalloc(&w, host.size());
     (void)hipMalloc(&x, xh.size() * sizeof(float));
     (void)hipMalloc(&y, static_cast<std::size_t>(e.m) * 6 * sizeof(float));
     (void)hipMalloc(&ids, idh.size() * sizeof(int32_t));
+    (void)hipMalloc(&table, kExperts * sizeof(void*));
+    std::vector<const void*> table_host(kExperts);
+    for (int expert = 0; expert < kExperts; ++expert)
+      table_host[expert] = static_cast<const uint8_t*>(w) +
+                           static_cast<std::size_t>(expert) * per_expert;
+    (void)hipMemcpy(table, table_host.data(), table_host.size() * sizeof(void*),
+                    hipMemcpyHostToDevice);
     (void)hipMemcpy(w, host.data(), host.size(), hipMemcpyHostToDevice);
     (void)hipMemcpy(x, xh.data(), xh.size() * sizeof(float),
                     hipMemcpyHostToDevice);
     (void)hipMemcpy(ids, idh.data(), idh.size() * sizeof(int32_t),
                     hipMemcpyHostToDevice);
-    auto launch = [&](int r, bool fp32) {
-      if (fp32)
+    // 0 = mmvq, 1 = FP32 GEMV, 2 = FP32 GEMV over the per-expert pointer
+    // table (the streamed store's layout); 2 must match 1 bit for bit.
+    auto launch = [&](int r, int mode) {
+      if (mode == 0) {
+        if (e.per_slot)
+          ds41_mmq_moe_vec_typed(e.type, w, x, ids + r * 6, y, e.m, e.k, 6,
+                                 kExperts, 1, 0);
+        else
+          ds41_mmq_moe_vec_typed(e.type, w, x, ids + r * 6, y, e.m, e.k, 1,
+                                 kExperts, 6, 0);
+      } else if (mode == 1)
         ds41_v41_gemv_experts(e.type, w, per_expert, ids + r * 6, 6, x,
                               e.per_slot ? e.k : 0, 1, y, e.m, e.k);
-      else if (e.per_slot)
-        ds41_mmq_moe_vec_typed(e.type, w, x, ids + r * 6, y, e.m, e.k, 6,
-                               kExperts, 1, 0);
       else
-        ds41_mmq_moe_vec_typed(e.type, w, x, ids + r * 6, y, e.m, e.k, 1,
-                               kExperts, 6, 0);
+        ds41_v41_gemv_experts(e.type, w, per_expert, ids + r * 6, 6, x,
+                              e.per_slot ? e.k : 0, 1, y, e.m, e.k,
+                              static_cast<const void* const*>(table), 1);
     };
     std::printf("%-12s %5dx%-5d x6 %5.1f MB", e.name, e.m, e.k,
                 6.0 * per_expert / 1e6);
-    for (const bool fp32 : {false, true}) {
+    std::vector<float> reference;
+    for (int mode = 0; mode < 3; ++mode) {
+      const char* label = mode == 0 ? "mmvq" : mode == 1 ? "fp32" : "table";
       hipEvent_t a, b;
       (void)hipEventCreate(&a);
       (void)hipEventCreate(&b);
       for (int r = 0; r < 8; ++r)
-        launch(r, fp32);
+        launch(r, mode);
       (void)hipEventRecord(a, 0);
       for (int r = 0; r < kRounds; ++r)
-        launch(r, fp32);
+        launch(r, mode);
       (void)hipEventRecord(b, 0);
       (void)hipEventSynchronize(b);
       float ms = 0;
       (void)hipEventElapsedTime(&ms, a, b);
       const double us = ms * 1000.0 / kRounds;
-      std::printf("  %s %6.1f us %5.1f GB/s", fp32 ? "fp32" : "mmvq", us,
+      std::printf("  %s %6.1f us %5.1f GB/s", label, us,
                   6.0 * per_expert / us / 1e3);
       (void)hipEventDestroy(a);
       (void)hipEventDestroy(b);
+      /* Random blocks can hold NaN scale bits, so compare bit patterns. */
+      if (mode == 1)
+        reference.resize(static_cast<std::size_t>(e.m) * 6),
+            (void)hipMemcpy(reference.data(), y,
+                            reference.size() * sizeof(float),
+                            hipMemcpyDeviceToHost);
+      if (mode == 2) {
+        std::vector<float> table_y(static_cast<std::size_t>(e.m) * 6);
+        (void)hipMemcpy(table_y.data(), y, table_y.size() * sizeof(float),
+                        hipMemcpyDeviceToHost);
+        if (memcmp(table_y.data(), reference.data(),
+                   table_y.size() * sizeof(float)) != 0)
+          std::printf(" TABLE MISMATCH");
+      }
     }
     std::printf("\n");
     (void)hipFree(w);
     (void)hipFree(x);
     (void)hipFree(y);
     (void)hipFree(ids);
+    (void)hipFree(table);
   }
   ds41_mmq_cleanup();
   return 0;
