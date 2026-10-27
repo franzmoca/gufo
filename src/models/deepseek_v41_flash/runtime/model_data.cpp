@@ -1736,6 +1736,10 @@ int ds41_engine_open(ds41_engine** out, const ds41_engine_options* opt) {
             DS41_MAX_PREFILL_BATCH);
     return 1;
   }
+  if (opt->expert_cache_bytes && !opt->stream_experts) {
+    fprintf(stderr, "ds41: an expert cache size needs expert streaming\n");
+    return 1;
+  }
   static std::mutex load_mutex;
   const std::lock_guard lock(load_mutex);
   if (g_ds41_lock_fd >= 0) {
@@ -1796,16 +1800,33 @@ int ds41_engine_open(ds41_engine** out, const ds41_engine_options* opt) {
       return 1;
     }
 
+    /* Streaming is opt-in: a silent fallback would turn a misconfigured host
+     * (a small GTT limit, free CMA) into a much slower server. */
+    const bool streaming = opt->stream_experts;
     const uint64_t available = ds41_expert_available_memory();
-    const uint64_t needed = model_resident_bytes(e->model) + dspark_resident_bytes(e->dspark) + (2ull << 30);
-    const bool streaming = available != 0 && needed > available;
+    const uint64_t resident = model_resident_bytes(e->model, e->weights, streaming);
+    const uint64_t needed = resident + dspark_resident_bytes(e->dspark) + (2ull << 30);
+    if (!streaming && available != 0 && needed > available) {
+      char drafter[48] = "";
+      if (e->dspark)
+        snprintf(drafter, sizeof(drafter), ", %.2f GiB drafter", (double)dspark_resident_bytes(e->dspark) / 1073741824.0);
+      fprintf(stderr,
+              "ds41: the model needs %.2f GiB (%.2f GiB weights%s, 2 GiB for sessions) but %.2f GiB of memory "
+              "is available, excluding free CMA. Free memory, check the GTT limit and CMA (README_DEEPSEEK.md, "
+              "host setup), or pass --stream-experts to stream routed experts from the SSD, more slowly\n",
+              (double)needed / 1073741824.0, (double)resident / 1073741824.0, drafter,
+              (double)available / 1073741824.0);
+      ds41_engine_close(e);
+      *out = NULL;
+      return 1;
+    }
     if (streaming) {
       gufo::server::Logger::LogFormatted(
           gufo::server::LogLevel::kInfo, "ds41",
           "streaming routed experts: %.2f GiB dense weights, %.2f GiB available unified memory",
-          (double)model_resident_bytes(e->model, e->weights, true) / 1073741824.0,
-          (double)available / 1073741824.0);
+          (double)resident / 1073741824.0, (double)available / 1073741824.0);
     }
+    ds41_gpu_set_resident_weight_bytes(resident);
     (void)ds41_gpu_set_model_shards(e->model->shard_fd, e->model->shard_offset,
                                     e->model->shard_size, e->model->n_shards);
     if (!ds41_gpu_set_model_map_range(
@@ -1840,7 +1861,7 @@ int ds41_engine_open(ds41_engine** out, const ds41_engine_options* opt) {
     }
 
     if (streaming) {
-      e->expert_store = ds41_expert_store_create(e->model, e->weights);
+      e->expert_store = ds41_expert_store_create(e->model, e->weights, opt->expert_cache_bytes);
       if (!e->expert_store) {
         fprintf(stderr, "ds41: failed to initialize the streamed expert store\n");
         ds41_engine_close(e);

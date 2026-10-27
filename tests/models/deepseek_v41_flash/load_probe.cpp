@@ -667,6 +667,8 @@ int main(int argc, char** argv) {
   bool dspark_sweep = false;
   uint32_t replay_check = 0;
   bool exact_prefill = false;
+  bool stream_experts = false;
+  uint64_t expert_cache_bytes = 0;
   for (int i = 1; i < argc; ++i) {
     if (std::strcmp(argv[i], "--engram") == 0 && i + 1 < argc) {
       engram = argv[++i];
@@ -720,6 +722,11 @@ int main(int argc, char** argv) {
       upload = true;
     } else if (std::strcmp(argv[i], "--exact-prefill") == 0) {
       exact_prefill = true;
+    } else if (std::strcmp(argv[i], "--stream-experts") == 0) {
+      stream_experts = true;
+    } else if (std::strcmp(argv[i], "--expert-cache-bytes") == 0 &&
+               i + 1 < argc) {
+      expert_cache_bytes = std::strtoull(argv[++i], nullptr, 10);
     } else if (std::strcmp(argv[i], "--rendered") == 0) {
       rendered = true;
     } else if (std::strcmp(argv[i], "--upload") == 0) {
@@ -738,6 +745,7 @@ int main(int argc, char** argv) {
         "[--tokenize TEXTS [--rendered]] [--decode IDS [--generate N] "
         "[--score] [--batch] [--context N] [--prefill-batch N] "
         "[--out DIR]] [--replay-check ROWS] [--exact-prefill] "
+        "[--stream-experts [--expert-cache-bytes N]] "
         "[--spec-check CYCLES [--spec-width W] | --spec-bench N | "
         "--joint-check SESSIONS [--joint-cycles N] [--joint-rows N] | "
         "--dspark FILE "
@@ -755,6 +763,8 @@ int main(int argc, char** argv) {
   options.validate_only = !upload;
   options.prefill_batch = prefill_batch;
   options.exact_prefill = exact_prefill;
+  options.stream_experts = stream_experts;
+  options.expert_cache_bytes = expert_cache_bytes;
   options.dspark_model_path = dspark;
   if (ds41_engine_open(&engine, &options) != 0)
     return 1;

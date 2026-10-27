@@ -105,6 +105,12 @@ public:
   void set_deepseek_exact_prefill(bool exact) {
     deepseek_exact_prefill_ = exact;
   }
+  /// DeepSeek V4.1 Flash --stream-experts and --expert-cache-bytes for the
+  /// next load.
+  void set_deepseek_expert_streaming(bool enabled, std::uint64_t cache_bytes) {
+    deepseek_stream_experts_ = enabled;
+    deepseek_expert_cache_bytes_ = cache_bytes;
+  }
   void set_deepseek_prefill_batch(std::uint32_t tokens) {
     deepseek_prefill_batch_ = tokens;
   }
@@ -262,6 +268,8 @@ private:
   std::string gemma_prefill_weights_;
   std::uint32_t deepseek_prefill_batch_ = 0;
   bool deepseek_exact_prefill_ = false;
+  bool deepseek_stream_experts_ = false;
+  std::uint64_t deepseek_expert_cache_bytes_ = 0;
 };
 
 }  // namespace gufo::server

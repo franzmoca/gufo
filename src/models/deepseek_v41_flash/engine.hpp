@@ -25,6 +25,11 @@ struct ModelOptions {
   /// SWA bounded replay over each prompt's last 140 tokens (about half the
   /// prefill time).
   bool exact_prefill = false;
+  /// Keep dense weights resident and stream routed experts from the SSD;
+  /// without it, a model that does not fit available memory fails to load.
+  bool stream_experts = false;
+  /// Streamed expert cache bytes (0 sizes it from available memory).
+  std::uint64_t expert_cache_bytes = 0;
   /// Optional DSpark support model. Empty leaves speculative decoding off.
   std::string dspark_model_path;
 };
