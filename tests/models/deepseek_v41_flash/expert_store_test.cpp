@@ -344,6 +344,29 @@ int main() {
   after = ds41_expert_store_get_stats(store);
   check(after.hits == before.hits, "seed leaves a slot for request experts");
   ds41_expert_store_destroy(store);
+  // Experts the ranking leaves out fill the rest of the seed, interleaved
+  // across layers: expert 0 of layers 0 and 1 after the one ranked expert.
+  store = ds41_expert_store_create(&f.model, &f.weights, 4 * kSlot);
+  char partial_path[] = "/tmp/gufo-ds41-histogram-XXXXXX";
+  const int partial = mkstemp(partial_path);
+  const char partial_data[] = "DS41_EXPERT_HISTOGRAM_V1\n4 12 50\n";
+  check(
+      partial >= 0 && write(partial, partial_data, sizeof(partial_data) - 1) ==
+                          sizeof(partial_data) - 1,
+      "write partial histogram");
+  if (partial >= 0)
+    (void)close(partial);
+  check(store && ds41_expert_store_seed(store, partial_path),
+        "seed partial histogram");
+  (void)unlink(partial_path);
+  before = ds41_expert_store_get_stats(store);
+  check(run(4, {12, 12, 12, 12, 12, 12}) && run(0, {0, 0, 0, 0, 0, 0}) &&
+            run(1, {0, 0, 0, 0, 0, 0}),
+        "unranked seeded stage bytes");
+  after = ds41_expert_store_get_stats(store);
+  check(after.hits - before.hits == 18 && after.bytes_read == before.bytes_read,
+        "seed fills the cache past the ranking");
+  ds41_expert_store_destroy(store);
   store = ds41_expert_store_create(&f.model, &f.weights, 4 * kSlot);
   check(store && ds41_expert_store_seed_default(store),
         "seed built-in ranking");
@@ -396,6 +419,30 @@ int main() {
         "mixed wide prefetch of the smaller next layer");
     check(CheckStage(2, adopted, stage, true),
           "next layer's prefetch keeps the adopted rows");
+    ds41_expert_store_destroy(store);
+    // Half-size experts take half-size slots (1,280 bytes after alignment):
+    // the cache of four large experts holds seven of them, and a large
+    // expert never takes a small slot.
+    store = ds41_expert_store_create(&m.model, &m.weights, 4 * kSlot);
+    const std::vector<int32_t> seven{0, 1, 2, 3, 4, 5, 6, 0, 1, 2, 3, 4};
+    check(store && prepare(1, seven) && CheckStage(1, seven, stage, true),
+          "small experts cold");
+    auto sized = ds41_expert_store_get_stats(store);
+    check(prepare(1, seven) && CheckStage(1, seven, stage, true),
+          "small experts warm");
+    auto resized = ds41_expert_store_get_stats(store);
+    check(resized.hits - sized.hits == seven.size() &&
+              resized.bytes_read == sized.bytes_read &&
+              resized.cache_bytes == 7 * 1280,
+          "small slots hold more experts");
+    const std::vector<int32_t> large{0, 0, 0, 0, 0, 0};
+    check(prepare(0, large) && prepare(0, large) &&
+              CheckStage(0, large, stage, true),
+          "large expert stage bytes");
+    sized = resized;
+    resized = ds41_expert_store_get_stats(store);
+    check(resized.hits == sized.hits && resized.cache_bytes == 7 * 1280,
+          "large expert streams instead of taking a small slot");
     ds41_expert_store_destroy(store);
   }
   (void)hipFree(routes);

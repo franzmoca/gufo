@@ -45,7 +45,9 @@ constexpr uint64_t kReserve = 4 * kGiB;
  * whole-layer set measured 3.6 GiB; jobs touch only the predicted experts
  * (~70 at pp2048, 6 at decode) plus slack for cold caches. */
 constexpr uint32_t kPrefetchStageRows = 192;
-constexpr uint64_t kChunkBytes = 512ull << 20;
+/* Each slot size class grows by its own chunks, so a smaller chunk bounds
+ * the capacity a class can strand in a part-used chunk. */
+constexpr uint64_t kChunkBytes = 128ull << 20;
 constexpr uint64_t kReadBytes = 32ull << 20;
 constexpr uint64_t kDirectAlign = 4096;
 constexpr uint32_t kReadWorkers = 4;
@@ -60,7 +62,7 @@ constexpr uint32_t kSweepTokens = 1024;
 constexpr uint32_t kSeedPerLayer = DS41_N_EXPERT;
 constexpr uint32_t kNoSlot = std::numeric_limits<uint32_t>::max();
 constexpr uint32_t kNoLayer = std::numeric_limits<uint32_t>::max();
-constexpr std::array<uint16_t, 10240> kDefaultExpertRank = {
+constexpr std::array<uint16_t, DS41_N_LAYER * DS41_N_EXPERT> kDefaultExpertRank = {
 #include "expert_rank.inc"
 };
 constexpr bool valid_default_rank() {
@@ -84,6 +86,7 @@ struct Entry {
 
 struct Slot {
   uint8_t* data = nullptr;
+  uint32_t size_class = 0;  // capacity is the class's bytes
   uint32_t layer = kNoSlot;
   uint32_t expert = kNoSlot;
 };
@@ -559,13 +562,17 @@ struct ds41_expert_store {
     return fds;
   }();
   std::vector<Slot> slots;
-  std::vector<uint32_t> free_slots;
+  /* Slot sizes: the distinct per-layer expert sizes, ascending. The builds
+   * mix block types, so one largest-expert slot size wasted 14-16% of the
+   * cache. A slot holds any expert up to its class's size. */
+  std::vector<uint64_t> class_bytes;
+  std::array<uint32_t, DS41_N_LAYER> layer_class{};
+  std::vector<std::vector<uint32_t>> free_slots;  // per class
+  std::vector<uint64_t> grow_failure;             // tick, per class
   std::array<uint8_t*, kReadWorkers> read_buffers{};
   std::unique_ptr<ReadPool> readers;
-  uint64_t slot_bytes = 0;
   uint64_t cache_limit = 0;
   uint64_t tick = 0;
-  uint64_t last_grow_failure = 0;
   uint64_t logged_tokens = 0;
   ds41_expert_store_stats stats;
   ds41_expert_store_stats logged_stats;
@@ -604,7 +611,7 @@ struct ds41_expert_store {
       (void)hipFree(split_miss);
   }
 
-  bool grow() {
+  bool grow(uint32_t size_class) {
     const uint64_t free_bytes = ds41_expert_available_memory();
     if (free_bytes <= kReserve)
       return false;
@@ -612,6 +619,7 @@ struct ds41_expert_store {
     if (stats.cache_bytes >= cache_limit)
       return false;
     available = std::min(available, cache_limit - stats.cache_bytes);
+    const uint64_t slot_bytes = class_bytes[size_class];
     const uint64_t count = std::min(available, kChunkBytes) / slot_bytes;
     if (!count)
       return false;
@@ -622,28 +630,31 @@ struct ds41_expert_store {
     chunks.push_back(allocation);
     stats.cache_bytes += bytes;
     for (uint64_t i = 0; i < count; ++i) {
-      free_slots.push_back(static_cast<uint32_t>(slots.size()));
+      free_slots[size_class].push_back(static_cast<uint32_t>(slots.size()));
       slots.push_back({static_cast<uint8_t*>(allocation) + i * slot_bytes,
-                       kNoSlot, kNoSlot});
+                       size_class, kNoSlot, kNoSlot});
     }
     return true;
   }
 
   uint32_t acquire(uint32_t layer, uint32_t expert, bool allow_evict) {
-    if (free_slots.empty() && last_grow_failure != tick && !grow())
-      last_grow_failure = tick;
-    if (!free_slots.empty()) {
-      const uint32_t slot = free_slots.back();
-      free_slots.pop_back();
-      return slot;
-    }
+    const uint32_t own = layer_class[layer];
+    if (free_slots[own].empty() && grow_failure[own] != tick && !grow(own))
+      grow_failure[own] = tick;
+    // Once the cache stops growing, the smallest larger free slot serves.
+    for (uint32_t c = own; c < free_slots.size(); ++c)
+      if (!free_slots[c].empty()) {
+        const uint32_t slot = free_slots[c].back();
+        free_slots[c].pop_back();
+        return slot;
+      }
     if (!allow_evict)
       return kNoSlot;
     uint32_t victim = kNoSlot;
     double lowest = std::numeric_limits<double>::infinity();
     for (uint32_t i = 0; i < slots.size(); ++i) {
       const Slot& s = slots[i];
-      if (s.layer == kNoSlot)
+      if (s.layer == kNoSlot || s.size_class < own)
         continue;
       const double score = decayed(entries[s.layer][s.expert], tick);
       if (score < lowest) {
@@ -656,6 +667,12 @@ struct ds41_expert_store {
     Slot& s = slots[victim];
     entries[s.layer][s.expert].slot = kNoSlot;
     return victim;
+  }
+
+  void release(uint32_t slot_id) {
+    Slot& slot = slots[slot_id];
+    slot.layer = slot.expert = kNoSlot;
+    free_slots[slot.size_class].push_back(slot_id);
   }
 };
 
@@ -704,9 +721,25 @@ ds41_expert_store* ds41_expert_store_create(const ds41_model* model,
         return nullptr;
       }
     }
-    store->slot_bytes = std::max(store->slot_bytes, combined);
+    // Slot bases stay 256-byte aligned, as the chunk allocations are.
+    combined = (combined + 255) / 256 * 256;
+    if (std::find(store->class_bytes.begin(), store->class_bytes.end(),
+                  combined) == store->class_bytes.end())
+      store->class_bytes.push_back(combined);
   }
-  store->slot_bytes = (store->slot_bytes + 255) / 256 * 256;
+  std::sort(store->class_bytes.begin(), store->class_bytes.end());
+  for (uint32_t layer = 0; layer < DS41_N_LAYER; ++layer) {
+    uint64_t combined = 0;
+    for (const Source& src : store->source[layer])
+      combined += src.bytes;
+    combined = (combined + 255) / 256 * 256;
+    store->layer_class[layer] = static_cast<uint32_t>(
+        std::lower_bound(store->class_bytes.begin(), store->class_bytes.end(),
+                         combined) -
+        store->class_bytes.begin());
+  }
+  store->free_slots.resize(store->class_bytes.size());
+  store->grow_failure.assign(store->class_bytes.size(), ~0ull);
   bool ok = true;
   for (uint32_t i = 0; i < kReadWorkers && ok; ++i)
     ok = hipHostMalloc(&store->read_buffers[i],
@@ -764,18 +797,30 @@ struct SeedItem {
   uint64_t count;
 };
 
-bool seed_ranked(ds41_expert_store* store, const std::vector<SeedItem>& ranked,
+bool seed_ranked(ds41_expert_store* store, std::vector<SeedItem> ranked,
                  const char* source) {
+  /* Experts a histogram leaves out follow it, interleaved across layers, so
+   * a cache larger than the traced set does not start part empty. The
+   * built-in ranking orders all of them. */
+  const size_t ranked_count = ranked.size();
+  std::array<std::array<bool, DS41_N_EXPERT>, DS41_N_LAYER> ranked_set{};
+  for (const SeedItem& item : ranked)
+    ranked_set[item.layer][item.expert] = true;
+  for (uint32_t e = 0; e < DS41_N_EXPERT; ++e)
+    for (uint32_t l = 0; l < DS41_N_LAYER; ++l)
+      if (!ranked_set[l][e])
+        ranked.push_back({l, e, 0});
   const uint64_t available = ds41_expert_available_memory();
   const uint64_t free_budget = available > kReserve ? available - kReserve : 0;
-  const uint64_t slots = std::min<uint64_t>(
-      DS41_N_LAYER * DS41_N_EXPERT,
-      std::min(store->cache_limit, free_budget) / store->slot_bytes);
   // Leave capacity for session allocations and for experts learned from the
   // actual request. At startup the slots are otherwise all free.
-  const size_t target =
-      std::min<size_t>({ranked.size(), kDefaultExpertRank.size(),
-                        static_cast<size_t>(slots * 15 / 16)});
+  const uint64_t budget = std::min(store->cache_limit, free_budget) / 16 * 15;
+  size_t target = 0;
+  for (uint64_t used = 0; target < ranked.size(); ++target) {
+    used += store->class_bytes[store->layer_class[ranked[target].layer]];
+    if (used > budget)
+      break;
+  }
   if (!target)
     return true;
   int32_t* device_ids = nullptr;
@@ -828,9 +873,10 @@ bool seed_ranked(ds41_expert_store* store, const std::vector<SeedItem>& ranked,
             .count();
     gufo::server::Logger::LogFormatted(
         gufo::server::LogLevel::kInfo, "ds41",
-        "expert seed (%s): cached %u of %zu ranked experts from %.2f GiB in "
-        "%.2f s",
-        source, resident, target, static_cast<double>(bytes) / kGiB, seconds);
+        "expert seed (%s): cached %u of %zu experts (%zu ranked) from %.2f GiB "
+        "in %.2f s",
+        source, resident, target, std::min(target, ranked_count),
+        static_cast<double>(bytes) / kGiB, seconds);
   }
   return ok;
 }
@@ -847,7 +893,7 @@ bool ds41_expert_store_seed_default(ds41_expert_store* store) {
     ranked.push_back({index / DS41_N_EXPERT, index % DS41_N_EXPERT,
                       static_cast<uint64_t>(kDefaultExpertRank.size() - i)});
   }
-  return seed_ranked(store, ranked, "built-in V4.1 ranking");
+  return seed_ranked(store, std::move(ranked), "built-in V4.1 ranking");
 }
 
 bool ds41_expert_store_seed(ds41_expert_store* store, const char* path) {
@@ -881,7 +927,7 @@ bool ds41_expert_store_seed(ds41_expert_store* store, const char* path) {
           return a.count > b.count;
         return a.layer != b.layer ? a.layer < b.layer : a.expert < b.expert;
       });
-  return seed_ranked(store, ranked, path);
+  return seed_ranked(store, std::move(ranked), path);
 }
 
 namespace {
@@ -1199,8 +1245,7 @@ bool ds41_expert_store_prepare(ds41_expert_store* store, uint32_t layer,
     for (uint32_t p = 0; p < 3; ++p) {
       if (hipMemcpyAsync(dst, store->table_host[p][e], src[p].bytes,
                          hipMemcpyDeviceToDevice, nullptr) != hipSuccess) {
-        slot.layer = slot.expert = kNoSlot;
-        store->free_slots.push_back(slot_id);
+        store->release(slot_id);
         return false;
       }
       dst += src[p].bytes;
