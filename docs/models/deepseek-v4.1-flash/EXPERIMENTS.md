@@ -1176,3 +1176,87 @@ Q5_K activation fragments read twice from LDS instead of exchanged with
 per-tile guard on full tiles (spills, as its comment warns); routed
 activations prefetched a stage ahead in registers (IQ1_S and IQ2_XXS both
 ~5% slower).
+
+### E22: the FFN's closing expand fused with the next state pass (retained)
+
+Each batched block ended with `hc_expand_sum` (the six routed rows, the
+shared output and the residual into the next state) and the next block began with a state pass that read that state
+again for its attention mixes and collapse. `hc_state_pass` now also takes
+the rows to sum, so a block whose successor runs on the same rows (no Engram
+add or replay boundary between them) closes with the successor's attention
+state pass. Per layer at 2,048 tokens (4,096 channels in the
+microbenchmark): 3.40 → 2.71 ms, byte-identical state,
+mixes and collapse (also 1,904 and 17 rows). With bounded replay most
+batches run only the 20 encoder layers: pp2048 at d16384 1,225.6 → 1,229.1
+tok/s (two alternating runs each), greedy text identical with and without
+`--exact-prefill`.
+
+Rejected on the indexer scores (E20's kernel, 39.9 ms per layer at 128K):
+two or four heads' queries staged per barrier (48.7 / 44.5 ms), the head
+weights loaded one head ahead (42.7), and, as an upper bound, the upper
+half-wave's B operand without its swap (41.1, and not byte-identical). The
+time is linear in heads: about 6 ms fixed (writing the scores, decoding the
+keys) plus 1.05 ms per head (33 TFLOP/s in the head loop).
+
+### E23: FP16 inputs for the dense FP16 projections (retained)
+
+Measured per launch at 2,048 tokens (`tools/bench/ds41_dense_f16_tune.hip`,
+whose `wo_a` shape was 8× too large before: it is 1,024 rows × 4,096 per
+group, 8 groups): `wo_a` 5.50 ms (25 TFLOP/s) and the shared expert's
+2,304-row gate and up 1.75 ms each (28) against 33–34 for `q_b`, `o_b`
+and the shared down. A flat 8,192-row matrix over the same 4,096-wide input
+takes 4.27 ms: the grouped input (268 MB of FP32, re-read by each 256-row
+block) is what costs. Dropping the activation loads takes `wo_a` to 3.96 ms
+and the per-superblock weight loads to 4.39.
+
+The kernel already rounds its activations to FP16 as it stages them, so FP16
+inputs give the same products. A first FP16-input build was 15–20% slower on
+every shape: its two-entry `uint4` prefetch arrays went to scratch memory (80
+bytes per lane, 38 scratch accesses per kernel). As `ext_vector_type` arrays
+they stay in registers, and FP16 rows (half the registers) run four 64-value
+stages ahead instead of two:
+
+| Shape | FP32 input | FP16 input |
+| --- | ---: | ---: |
+| `q_b` 32,768 × 1,280 | 5.13 ms | 4.95 ms |
+| `o_b` 5,120 × 8,192 | 5.04 | 4.66 |
+| shared gate 2,304 × 5,120 | 1.72 | 1.44 |
+| shared down 5,120 × 2,304 | 1.41 | 1.37 |
+| `wo_a` 8 × 1,024 × 4,096 | 5.32 | 4.25 |
+
+The producers now write FP16 where the dense kernel is the only reader: the
+matrix-core attention stores its FP8-rounded output as FP16 rows for `wo_a`,
+`wo_a` stores FP16 for `o_b`, and the shared expert's gate/up read the FP16
+FFN input the routed FP16 kernels already convert (now converted before the
+streamed store's overlap, which runs the shared expert). Every path is
+bit-identical: `ds41.mmq_typed` checks the three FP16 modes against the FP32
+launch and `ds41.attention` the FP16 attention output against the rounded
+FP32 one; the 3,000-position batched score (`ds41_load_probe --batch
+--score`) gives the same argmax and NLL at every position. pp2048 at d16384:
+1,234.4 → 1,281.4 tok/s (+3.8%, two alternating runs each). Streamed
+IQ2_XXS gives the same 3,000-position scores before and after (perplexity
+6.004 against the oracle's 6.028, argmax agreement 95.6%) and batches 2,048
+tokens in 4,252 instead of 4,901 ms.
+
+Rejected on the way: 128- and 512-row dense blocks (every shape slower,
+`wo_a` 6.23 / 5.88 ms), neighbouring lanes on neighbouring 16-byte chunks of
+a token's activation row (no change), and Gemma 4's binary16 K-quant GEMM,
+which runs these shapes 10–30% faster with FP16 inputs but sums the upper
+half-wave's products in a different order.
+
+Profile of the 128K chunk afterwards: GPU time per 2,048-token chunk 1,481
+→ 1,380 ms; routed experts 488 ms (35%), dense FP16 projections 393 (28%),
+attention 163, the state passes 106, indexer scores 61, MMQ (Q8_0 `q_a`/kv)
+50, the BF16 matmuls 49.
+
+Also measured and rejected: the routed FP16 kernel's activations prefetched
+a stage ahead in vector registers (IQ1_S gate+up 21.6 → 22.3 ms, IQ2_XXS
+25.0 → 24.9; its arrays never went to scratch). Ablations of that kernel
+(`ds41_mmq_bench --f16 1`, 2,048 tokens): without the matrix-core products
+gate+up takes 11.5 ms for both types, without the weight decode 20.5
+(IQ1_S) and 18.9 (IQ2_XXS): the products and the rest barely overlap, and
+IQ2_XXS's two table lookups per eight weights cost about a quarter. The BF16
+matmul (`matmul_bf16_wmma_kernel`, three BF16 terms per activation, 19–24
+TFLOP/s counting all three) with the next K step's operands loaded during
+the current one: bit-identical, router 1.27 → 1.67 ms, and 1.46 with
+LDS-only barriers.
