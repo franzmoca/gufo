@@ -442,3 +442,26 @@ Alternated `gufo bench` (pp2048/tg128, `-r 2`): tg128 20.23/20.40 →
 first-repetition spread. Streamed IQ2_XXS decode scores are bit-identical
 on 256 positions with the automatic cache and with a 16 GiB cache (71%
 route hits, so most layers split).
+
+## DSpark on streamed IQ2_XXS (2026-10-27)
+
+`gufo bench` pp512/tg512 with the Lucebox Q2_K/Q4_K drafter: 33.5 tok/s
+against 21.3 plain (+58%). Route hits settle at ~99.3% either way, but
+verification reads are never predicted (0% prefetched), so ~13 MiB/token
+of misses remain. A rocprofv3 trace of the second half of a DSpark tg512
+splits the span into routed experts 44% (36% the 8-row verification
+groups: ~36 distinct experts per layer at ~32 µs each, the single-token
+per-expert cost, so bandwidth-bound), dense GEMV 31% (8-row launches at
+1.4-1.8× the single-token time), other kernels 11%, idle 10% (about half
+of it miss reads) and the drafter 4%.
+
+The multi-token dense GEMV now runs one wave per Q5_K task with scalar
+activation loads and the slices split across workgroups (EXPERIMENTS.md):
+8-row verification steps 129.7 → 118.8 ms on resident IQ1_M, bit-identical
+rows. Streamed DSpark tg512 stayed inside its cache-warming spread
+(33.17-34.14 → 33.15-34.73 tok/s over three alternating pairs).
+
+Left for streamed DSpark: every verification row pays for its own experts
+(~2.5 of 8 rows accepted per step), and verification batches predict no
+next-layer experts.
+
