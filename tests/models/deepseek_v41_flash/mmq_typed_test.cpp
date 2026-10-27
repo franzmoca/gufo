@@ -279,7 +279,7 @@ bool GemvTokensCase(const TypeCase& t, int M, int K, int rows_per_x, int n,
     const auto hb = Host(b, out);
     return std::memcmp(ha.data(), hb.data(), out * sizeof(float)) == 0;
   };
-  for (const int slices : {1, 4, 8}) {
+  for (const int slices : {1, 2, 4, 8}) {
     bool launched = ds41_v41_gemv(t.type, dw, dx, batched, M, K, rows_per_x,
                                   slices, n, x_stride, M) == 0;
     for (int c = 0; c < n && launched; ++c)
