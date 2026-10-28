@@ -29,6 +29,7 @@
 #include "src/core/gguf_reader.hpp"
 #include "src/core/json.hpp"
 #include "src/core/sampling.hpp"
+#include "src/models/deepseek_v41_flash/artifact_hint.hpp"
 #include "src/models/qwen/chat_template.hpp"
 #include "src/models/qwen/control_tokens.hpp"
 #include "src/models/qwen/generator.hpp"
@@ -3459,7 +3460,9 @@ bool InferenceBackend::load(const std::string& model_path, std::string* error,
   std::string load_error;
   auto reader_owner = core::GgufReader::OpenFile(model_path, &load_error);
   if (reader_owner == nullptr) {
-    SetError(error, "Failed to open GGUF: " + load_error);
+    SetError(error, "Failed to open GGUF: " + load_error +
+                        models::deepseek_v41_flash::MissingEngramShardHint(
+                            model_path));
     return false;
   }
   const std::shared_ptr<const core::GgufReader> reader(std::move(reader_owner));
