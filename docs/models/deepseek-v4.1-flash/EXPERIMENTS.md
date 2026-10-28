@@ -1313,3 +1313,45 @@ two LDS reads in place of the fragment permutes were 25% slower on every
 shape (it is bound by fragment reads), and waves of 32 rows × 64 tokens
 (two B operands, half the fragment reads per product) were 5–10% slower
 (238 registers, 6 instead of 8 waves per SIMD, twice the decode).
+
+### E26: Engram staging, FP16 `q_b` rows and 128-row BF16 tiles (retained)
+
+A 128K-depth profile after E25 (1,342 ms of GPU time per 2,048-token chunk)
+left 18.8% of the wall span idle. Timing `eval_rows` showed 16 ms per chunk
+before the first launch, spent allocating and zero-filling three host
+vectors for the Engram rows (`n × 6,144` floats per Engram layer) that then
+went up with synchronous pageable copies, draining the queue at each Engram
+layer. The pinned Engram staging now holds a full batch (capacity rows), so
+every batch's rows are read straight into it and uploaded asynchronously:
+pp2048 at d16384 1,325.4 → 1,347.9 tok/s (+1.7%), byte-identical scores.
+Between chunks only the embedding step remains (host dequantization and a
+synchronous upload, 5–8 ms).
+
+`q_kv_norm` also stores `qr` as FP16 rows (in the attention output buffer,
+idle until the attention writes it) for the dense `q_b` projection, which
+rounded them the same way when staging; the BF16 indexer projection keeps
+the FP32 rows. `ds41.attention` checks the FP16 copy bit for bit. pp2048 at
+d16384: 1,352.6 → 1,357.1 tok/s.
+
+The batched BF16 matmul takes 128 weight rows per workgroup when the row
+count allows (8 waves of 16 rows × 64 tokens), so each activation step is
+split into its three BF16 terms once per 128 rows instead of 64. Every
+output keeps the same products and sums (identical output hashes):
+
+| Shape (2,048 tokens) | 64-row tiles | 128-row tiles |
+| --- | ---: | ---: |
+| router 384 × 5,120 | 1.25 ms | 0.98 ms |
+| compressor 512 × 5,120 | 1.52 | 1.51 |
+| compressor 1,024 × 5,120 | 2.70 | 2.54 |
+| indexer `q_b` 4,096 × 1,280 | 2.56 | 2.21 |
+
+In the model the BF16 matmuls of three d4096 chunks took 163 → 139 ms
+(total GPU time −0.65%), below the end-to-end noise of pp2048.
+
+Rejected: 32-token BF16 tiles (twice the workgroups, every shape 17–30%
+slower), and skipping the attention output's softmax rescale when every
+factor of a wave is exactly 1 (a uniform branch around the multiplies:
+8.36 → 9.2 ms; interleaved with the products they cost nothing). Also
+measured: the Engram projection is 25,600 × 6,144 (17.8 ms per call, 36
+TFLOP/s; the tune bench had a 1,280-wide input), and FP16 rows would save
+0.8 ms of it.
