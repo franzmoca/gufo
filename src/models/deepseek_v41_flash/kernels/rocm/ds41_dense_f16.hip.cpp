@@ -98,6 +98,15 @@ __device__ __forceinline__ void q5_decode8(const Q5Lane& q, int j, int part, uin
     out[i] = __builtin_bit_cast(uint32_t, (__builtin_bit_cast(half2_t, p[i]) + magic) * scale + bias);
 }
 
+/* Lane L's word from lane L ^ 16. With fetch-inactive and bound-control set
+ * the instruction does not keep its destination's old value (every lane is
+ * active here anyway), so the compiler no longer copies or zeroes a
+ * register for it before each permute: about a fifth of the kernel's
+ * vector instructions were those moves. */
+__device__ __forceinline__ uint32_t other_half(uint32_t v) {
+  return __builtin_amdgcn_permlanex16(v, v, 0x76543210u, 0xfedcba98u, true, true);
+}
+
 /* A barrier that waits only for LDS traffic: __syncthreads also waits for
  * every outstanding global load, which would wait for the weight and
  * activation prefetches at once. */
@@ -190,7 +199,7 @@ __global__ __launch_bounds__(kThreads) void dense_q5k_f16_kernel(const uint8_t* 
           q5_decode8(q, j, e, affine, words);
 #pragma unroll
           for (int i = 0; i < 4; ++i)
-            words[4 + i] = __builtin_amdgcn_permlanex16(words[i], words[i], 0x76543210u, 0xfedcba98u, false, false);
+            words[4 + i] = other_half(words[i]);
           const half16 b = __builtin_bit_cast(half16, words);
           const int kk = jj * 32 + e * 16;
           /* Half h reads values 8 h .. 8 h + 7 of its token row and takes
@@ -201,7 +210,7 @@ __global__ __launch_bounds__(kThreads) void dense_q5k_f16_kernel(const uint8_t* 
             uint32_t v[8] = {own.x, own.y, own.z, own.w};
 #pragma unroll
             for (int i = 0; i < 4; ++i)
-              v[4 + i] = __builtin_amdgcn_permlanex16(v[i], v[i], 0x76543210u, 0xfedcba98u, false, false);
+              v[4 + i] = other_half(v[i]);
             return __builtin_bit_cast(half16, v);
           };
 #pragma unroll

@@ -265,6 +265,13 @@ struct Format<17> {
   }
 };
 
+/* Lane L's word from lane L ^ 16, without the destination's old value
+ * (fetch-inactive and bound-control set; every lane is active here), so no
+ * register is copied for it before each permute. */
+__device__ __forceinline__ uint32_t other_half(uint32_t v) {
+  return __builtin_amdgcn_permlanex16(v, v, 0x76543210u, 0xfedcba98u, true, true);
+}
+
 __device__ __forceinline__ float finite_or_zero(float v) { return __builtin_isfinite(v) ? v : 0.0f; }
 
 template <int kType, bool kPair, bool kHalfOut>
@@ -339,7 +346,7 @@ __global__ __launch_bounds__(256) void routed_f16_kernel(
     Block blk[2];
 #pragma unroll
     for (int i = 0; i < F::kWords; ++i) {
-      const uint32_t other = __builtin_amdgcn_permlanex16(mine.w[i], mine.w[i], 0x76543210u, 0xfedcba98u, false, false);
+      const uint32_t other = other_half(mine.w[i]);
       blk[0].w[i] = h ? other : mine.w[i];
       blk[1].w[i] = h ? mine.w[i] : other;
     }
@@ -380,7 +387,7 @@ __global__ __launch_bounds__(256) void routed_f16_kernel(
             F::decode(sub[p], 2 * e2 + h, tables, words);
 #pragma unroll
             for (int i = 0; i < 4; ++i)
-              words[4 + i] = __builtin_amdgcn_permlanex16(words[i], words[i], 0x76543210u, 0xfedcba98u, false, false);
+              words[4 + i] = other_half(words[i]);
             b[p] = __builtin_bit_cast(half16, words);
           }
           const int kk = jj * 32 + e2 * 16;
