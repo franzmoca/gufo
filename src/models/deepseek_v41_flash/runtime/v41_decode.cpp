@@ -43,7 +43,7 @@ constexpr uint32_t kGroupDim = DS41_N_HEAD_DIM * (DS41_N_HEAD / DS41_N_OUT_GROUP
 constexpr uint32_t kMixes = 2 * kHc + kHc * kHc;
 constexpr uint32_t kEngramIn = DS41_ENGRAM_COLS * DS41_ENGRAM_HEAD_DIM;
 constexpr uint32_t kEngramOut = kDim * (kHc + 1);
-constexpr uint32_t kEngramPinnedTokens = 16;
+constexpr uint32_t kMinCapacity = 16;  // the smallest batch capacity
 /* Bytes per FP4 compressed row (ds41_fp4_rows): KV block 16, index-K block 32. */
 constexpr uint32_t kCompCodeBytes = kHeadDim / 2, kCompScaleBytes = kHeadDim / 16;
 constexpr uint32_t kIndexCodeBytes = DS41_N_INDEXER_HEAD_DIM / 2, kIndexScaleBytes = DS41_N_INDEXER_HEAD_DIM / 32;
@@ -224,10 +224,10 @@ struct Activations {
   float *g6 = nullptr, *u6 = nullptr, *mid6 = nullptr, *down6 = nullptr;
   float *sg = nullptr, *su = nullptr, *sm = nullptr, *sd = nullptr;
   float *engram_in = nullptr, *engram_kv = nullptr, *logits = nullptr;
-  /* Pinned staging for the Engram rows of batches up to kEngramPinnedTokens,
-   * per Engram layer, so the upload does not wait for the queue to drain.
-   * Each evaluation ends with a device synchronize, so the next one finds
-   * the buffers idle. */
+  /* Pinned staging for the Engram rows of a batch (capacity rows), per
+   * Engram layer, so the upload does not wait for the queue to drain and no
+   * evaluation allocates host rows. Each evaluation ends with a device
+   * synchronize, so the next one finds the buffers idle. */
   float* engram_pinned[DS41_N_ENGRAM_LAYER] = {};
 };
 
@@ -493,10 +493,7 @@ bool engram_read(const ds41_decoder* d, uint32_t il, const int64_t* rows, uint32
 bool engram(ds41_decoder* d, uint32_t il, const float* rows, uint32_t n) {
   const ds41_layer_weights* l = &d->engine->weights->layer[il];
   const uint64_t bytes = (uint64_t)n * DS41_ENGRAM_COLS * DS41_ENGRAM_HEAD_DIM * sizeof(float);
-  const hipError_t err = n <= kEngramPinnedTokens
-                             ? hipMemcpyAsync(d->engram_in, rows, bytes, hipMemcpyHostToDevice, 0)
-                             : hipMemcpy(d->engram_in, rows, bytes, hipMemcpyHostToDevice);
-  if (err != hipSuccess) return false;
+  if (hipMemcpyAsync(d->engram_in, rows, bytes, hipMemcpyHostToDevice, 0) != hipSuccess) return false;
   if (!linear(d, l->engram_wkv, d->engram_in, d->engram_kv, n)) return false;
   return ds41_v41_engram_gate(d->h, d->engram_kv, (const uint16_t*)dev(d, l->engram_q),
                               (const uint16_t*)dev(d, l->engram_k), kHc, kDim, DS41_RMS_EPS, n) == 0;
@@ -1321,7 +1318,8 @@ std::shared_ptr<SharedActivations> make_activations(ds41_engine* engine, uint32_
   size_t free_bytes = 0, total_bytes = 0;
   bool ok = hipMemGetInfo(&free_bytes, &total_bytes) == hipSuccess;
   const uint64_t budget = free_bytes > kDeviceReserve + fixed ? free_bytes - kDeviceReserve - fixed : 0;
-  a.capacity = (uint32_t)std::clamp<uint64_t>(budget / per_token / 16 * 16, 16, engine->prefill_batch / 16 * 16);
+  a.capacity = (uint32_t)std::clamp<uint64_t>(budget / per_token / 16 * 16, kMinCapacity,
+                                                     engine->prefill_batch / 16 * 16);
   a.score_rows = std::min(rows, a.capacity);
   const uint64_t cap = a.capacity;
   uint64_t region_floats = 0;
@@ -1353,8 +1351,7 @@ std::shared_ptr<SharedActivations> make_activations(ds41_engine* engine, uint32_
          a.expert_plan && a.expert_plan_split[0] && a.expert_plan_split[1];
   }
   for (uint32_t slot = 0; slot < DS41_N_ENGRAM_LAYER && ok; slot++)
-    ok = hipHostMalloc(&a.engram_pinned[slot], (uint64_t)kEngramPinnedTokens * kEngramIn * sizeof(float)) ==
-         hipSuccess;
+    ok = hipHostMalloc(&a.engram_pinned[slot], cap * kEngramIn * sizeof(float)) == hipSuccess;
   return ok ? sh : nullptr;
 }
 
@@ -1678,19 +1675,12 @@ int eval_rows(ds41_decoder* d, const int* tokens, uint32_t n, uint32_t keep_from
   }
 
   /* Every Engram layer's rows are read while the GPU runs the layers before it. */
-  std::vector<float> engram_host[DS41_N_ENGRAM_LAYER];
-  float* engram_out[DS41_N_ENGRAM_LAYER];
   std::future<bool> engram_reads[DS41_N_ENGRAM_LAYER];
   for (uint32_t il = 0; il < DS41_N_LAYER; il++) {
     const int slot = ds41_layer_engram_slot(il);
     if (slot < 0) continue;
-    engram_out[slot] = d->engram_pinned[slot];
-    if (n > kEngramPinnedTokens) {
-      engram_host[slot].resize((uint64_t)n * DS41_ENGRAM_COLS * DS41_ENGRAM_HEAD_DIM);
-      engram_out[slot] = engram_host[slot].data();
-    }
     engram_reads[slot] = std::async(std::launch::async, engram_read, d, il,
-                                    &engram_rows[(uint64_t)slot * n * DS41_ENGRAM_COLS], n, engram_out[slot]);
+                                    &engram_rows[(uint64_t)slot * n * DS41_ENGRAM_COLS], n, d->engram_pinned[slot]);
   }
 
   /* Embedding, replicated over the hc residual streams; layer 0 pre-mix is one-hot. */
@@ -1731,7 +1721,7 @@ int eval_rows(ds41_decoder* d, const int* tokens, uint32_t n, uint32_t keep_from
       if (!ok || !kept) break;
     }
     const int slot = ds41_layer_engram_slot(il);
-    if (slot >= 0) ok = engram_reads[slot].get() && engram(d, il, engram_out[slot], n);
+    if (slot >= 0) ok = engram_reads[slot].get() && engram(d, il, d->engram_pinned[slot], n);
     if (d->features) {
       for (uint32_t f = 0; f < DS41_DSPARK_TARGET_LAYERS && ok; f++)
         if (il == DS41_DSPARK_TARGET_LAYER[f])
@@ -1815,7 +1805,7 @@ int ds41_decoder_eval_speculative(ds41_decoder* d, const int* tokens, uint32_t n
 
 int ds41_decoder_eval_joint(ds41_decoder* const* ds, const int* const* tokens, const uint32_t* ns, uint32_t count,
                             float* const* logits) {
-  static_assert(DS41_DECODER_MAX_JOINT <= DS41_V41_GEMV_MAX_TOKENS && DS41_DECODER_MAX_JOINT <= kEngramPinnedTokens &&
+  static_assert(DS41_DECODER_MAX_JOINT <= DS41_V41_GEMV_MAX_TOKENS && DS41_DECODER_MAX_JOINT <= kMinCapacity &&
                 DS41_DECODER_MAX_JOINT <= kLogitRows && DS41_DECODER_MAX_JOINT <= DS41_V41_ATTN_SPLIT_MAX_TOKENS);
   if (!ds || !tokens || !ns || !logits || count == 0) return 1;
   ds41_decoder* lead = ds[0];
