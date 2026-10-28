@@ -1761,12 +1761,14 @@ __device__ __forceinline__ attn_half16 lds_half16(const _Float16* p) {
   return __builtin_bit_cast(attn_half16, w);
 }
 
-/* The opposite half-wave's copy of a fragment. */
+/* The opposite half-wave's copy of a fragment. Fetch-inactive and
+ * bound-control are set so the permute keeps no old destination value (every
+ * lane is active here) and needs no register copied for it. */
 __device__ __forceinline__ attn_half16 swap_halves(attn_half16 v) {
   uint32_t w[8];
   __builtin_memcpy(w, &v, sizeof(w));
 #pragma unroll
-  for (int i = 0; i < 8; i++) w[i] = __builtin_amdgcn_permlanex16(w[i], w[i], 0x76543210u, 0xfedcba98u, false, false);
+  for (int i = 0; i < 8; i++) w[i] = __builtin_amdgcn_permlanex16(w[i], w[i], 0x76543210u, 0xfedcba98u, true, true);
   return __builtin_bit_cast(attn_half16, w);
 }
 
