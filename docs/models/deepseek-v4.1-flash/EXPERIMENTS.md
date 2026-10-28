@@ -1273,3 +1273,43 @@ faster per shape, routed FP16 gate/up/down 0.5–3%, and the matrix-core
 attention 8.47 → 8.34 ms at 2,048 tokens. The 3,000-position batched scores
 are byte-identical for IQ1_M and streamed IQ2_XXS. pp2048 at d16384:
 1,284.9 → 1,307.6 tok/s (+1.8%, two alternating runs each).
+
+### E25: routed FP16 staging and LDS lookups (retained)
+
+Ablations of the routed FP16 gate+up (`ds41_mmq_bench --f16 1`, 2,048
+tokens, 32 or 48 slots per expert) split IQ1_M's 21.8 ms into the
+matrix-core skeleton (14.7 ms: block fields, fragment reads, products), the
+weight loads (+1.0), the activation staging and its two barriers per stage
+(+1.7; +4.9 for IQ2_XXS) and the weight decode with its permutes (+4.4).
+Making the codebook lookups conflict-free (every lane reading the same entry)
+took IQ2_XXS from 24.5 to 20.4 ms and IQ1_M from 21.2 to 20.2: random
+16-byte LDS rows cost about 2 ms per IQ2_XXS table.
+
+Retained, each byte-identical on the 3,000-position batched scores of IQ1_M
+and streamed IQ2_XXS:
+
+- Double-buffered 64-value activation stages, the next one loaded before the
+  current stage's products and stored after them, one barrier per stage:
+  gate+up 21.84 → 21.09 ms (IQ1_M), 25.07 → 24.42 (IQ2_XXS), 21.50 → 20.79
+  (IQ1_S), down 4–5% faster. 128-value buffers were neutral (51 KB of LDS
+  took IQ1 from 6 to 4 waves per SIMD); 32-value stages gained 1.5% on IQ1
+  and lost 2.5% on IQ2_XXS. IQ1_M pp2048 at d16384: 1,310.0 → 1,317.2 tok/s.
+- IQ2 sign indices as eight bytes (0x80 per negative weight) placed by one
+  `v_perm` per word instead of 16-byte FP16 masks: IQ2_XXS gate+up 24.46 →
+  22.72 ms, IQ2_XS 24.82 → 23.21. IQ1 keeps the raw 4-byte codebook entries
+  and maps their nibbles to FP16 high bytes with a `v_perm` lookup (half the
+  table): gate+up unchanged, down 1–5% faster. Streamed IQ2_XXS pp2048 at
+  d16384: 1,268.3 → 1,281.9 tok/s.
+- For the IQ2 formats, each half-wave reads its own 16 bytes of an
+  activation fragment and permutes the other half across lanes (the dense
+  kernel's scheme): IQ2_XXS 22.82 → 21.93 ms, IQ2_XS 23.23 → 22.45. It costs
+  the VALU-bound IQ1 formats 3–7%, which keep two LDS reads. Streamed
+  IQ2_XXS pp2048 at d16384: 1,284.4 → 1,292.7 tok/s.
+
+Rejected: the fragments of all four tiles read before the decode
+(IQ1_M 21.2 → 25.8 ms: dead tiles' reads cost LDS bandwidth), and only live
+tiles' fragments read before the decode (22.6). In the dense FP16 kernel,
+two LDS reads in place of the fragment permutes were 25% slower on every
+shape (it is bound by fragment reads), and waves of 32 rows × 64 tokens
+(two B operands, half the fragment reads per product) were 5–10% slower
+(238 registers, 6 instead of 8 waves per SIMD, twice the decode).
