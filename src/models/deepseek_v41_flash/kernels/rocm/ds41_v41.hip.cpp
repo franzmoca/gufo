@@ -406,7 +406,8 @@ __global__ void rope_fp8_kernel(float* x, uint32_t blocks, uint32_t row_dim, uin
 constexpr uint32_t kQkvThreads = 256;
 constexpr uint32_t kQkvMaxKv = 1024;
 __global__ void __launch_bounds__(kQkvThreads)
-    q_kv_norm_kernel(const float* qa, const float* q_weight, float* qr, uint32_t q_dim, const float* kv,
+    q_kv_norm_kernel(const float* qa, const float* q_weight, float* qr, _Float16* qr_half, uint32_t q_dim,
+                     const float* kv,
                      const float* kv_weight, float* kvn, uint32_t kv_dim, uint32_t rope_dim, const float* inv_freq,
                      uint32_t pos0, float eps) {
   const uint32_t token = blockIdx.y;
@@ -419,7 +420,12 @@ __global__ void __launch_bounds__(kQkvThreads)
   const float scale = rsqrtf(block_sum(ss) / (float)n + eps);
   if (!is_kv) {
     float* o = qr + (uint64_t)token * n;
-    for (uint32_t i = threadIdx.x; i < n; i += blockDim.x) o[i] = weight[i] * (r[i] * scale);
+    _Float16* oh = qr_half ? qr_half + (uint64_t)token * n : nullptr;
+    for (uint32_t i = threadIdx.x; i < n; i += blockDim.x) {
+      const float v = weight[i] * (r[i] * scale);
+      o[i] = v;
+      if (oh) oh[i] = static_cast<_Float16>(v);
+    }
     return;
   }
   __shared__ float row[kQkvMaxKv];
@@ -2638,13 +2644,14 @@ extern "C" int ds41_v41_rope_fp8(float* x, uint32_t rows, uint32_t row_dim, uint
   return launch_ok("rope fp8 quant");
 }
 
-extern "C" int ds41_v41_q_kv_norm(const float* qa, const float* q_weight, float* qr, uint32_t q_dim, const float* kv,
+extern "C" int ds41_v41_q_kv_norm(const float* qa, const float* q_weight, float* qr, uint16_t* qr_half, uint32_t q_dim,
+                                  const float* kv,
                                   const float* kv_weight, float* kvn, uint32_t kv_dim, uint32_t rope_dim,
                                   const float* inv_freq, uint32_t pos0, uint32_t n, float eps) {
   if (kv_dim > kQkvMaxKv || kv_dim % 32 != 0 || rope_dim % 32 != 0 || rope_dim > kv_dim)
     return 1;
   if (n == 0) return 0;
-  q_kv_norm_kernel<<<dim3(2, n), kQkvThreads>>>(qa, q_weight, qr, q_dim, kv, kv_weight, kvn, kv_dim, rope_dim,
+  q_kv_norm_kernel<<<dim3(2, n), kQkvThreads>>>(qa, q_weight, qr, reinterpret_cast<_Float16*>(qr_half), q_dim, kv, kv_weight, kvn, kv_dim, rope_dim,
                                                 inv_freq, pos0, eps);
   return launch_ok("q kv norm");
 }

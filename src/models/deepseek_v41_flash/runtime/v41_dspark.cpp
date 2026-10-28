@@ -162,7 +162,7 @@ bool attention(const ds41_dspark_stage& st, ds41_dspark_scratch& s, const float*
   const uint32_t n = kRows;
   const float eps = DS41_RMS_EPS;
   if (!lin(st.q_a, s.xn, s.qa, n) || !lin(st.kv, s.xn, s.kv, n) ||
-      ds41_v41_q_kv_norm(s.qa, f32(st.q_a_norm), s.qr, DS41_N_LORA_Q, s.kv, f32(st.kv_a_norm), s.kvn, kHeadDim,
+      ds41_v41_q_kv_norm(s.qa, f32(st.q_a_norm), s.qr, nullptr, DS41_N_LORA_Q, s.kv, f32(st.kv_a_norm), s.kvn, kHeadDim,
                          kRot, freq, pos, n, eps) ||
       !lin(st.q_b, s.qr, s.q, n) ||
       ds41_v41_rope_tail(s.q, n * DS41_N_HEAD, kHeadDim, kRot, freq, pos, DS41_N_HEAD, 1, 0) ||
