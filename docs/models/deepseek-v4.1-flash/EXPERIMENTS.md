@@ -1260,3 +1260,16 @@ matmul (`matmul_bf16_wmma_kernel`, three BF16 terms per activation, 19–24
 TFLOP/s counting all three) with the next K step's operands loaded during
 the current one: bit-identical, router 1.27 → 1.67 ms, and 1.46 with
 LDS-only barriers.
+
+### E24: half-wave permutes without register copies (retained)
+
+The FP16 kernels' `v_permlanex16` swaps between half-waves passed
+`fetch_inactive` and `bound_ctrl` false. The instruction's `old` operand is
+then tied to the destination, so the compiler copied (or zeroed) a register
+before every permute. With both flags set, the instruction reads its source
+lanes directly and the copies go away. Every lane is active in these
+kernels, so the results do not change. Dense FP16 projections got 4–5%
+faster per shape, routed FP16 gate/up/down 0.5–3%, and the matrix-core
+attention 8.47 → 8.34 ms at 2,048 tokens. The 3,000-position batched scores
+are byte-identical for IQ1_M and streamed IQ2_XXS. pp2048 at d16384:
+1,284.9 → 1,307.6 tok/s (+1.8%, two alternating runs each).
