@@ -25,7 +25,9 @@ typedef _Float16 half16 __attribute__((ext_vector_type(16)));
 typedef float float8 __attribute__((ext_vector_type(8)));
 
 constexpr int kSlots = 64;              // slots per tile
-constexpr int kStageK = 128;            // activation values per LDS stage
+constexpr int kStageK = 64;             // activation values per LDS stage
+constexpr int kStages = 256 / kStageK;  // stages per weight block
+constexpr int kVec = kStageK / 32;      // 16-byte words staged per thread
 constexpr int kActPitch = kStageK + 8;  // halves; rows land on distinct banks
 
 typedef _Float16 half2_t __attribute__((ext_vector_type(2)));
@@ -284,7 +286,7 @@ __global__ __launch_bounds__(256) void routed_f16_kernel(
   using F = Format<kType>;
   using Block = Raw<F::kWords>;
   __shared__ typename F::Tables tables;
-  __shared__ __attribute__((aligned(16))) _Float16 act[kSlots * kActPitch];
+  __shared__ __attribute__((aligned(16))) _Float16 act[2][kSlots * kActPitch];
   __shared__ int32_t slot_of[kSlots];
   const int tile = tiles[blockIdx.y];
   if (tile < 0) return;  // unused entries in a bounded device-planned grid
@@ -320,12 +322,21 @@ __global__ __launch_bounds__(256) void routed_f16_kernel(
     for (int t = 0; t < 4; ++t) acc[p][t] = float8{};
 
   /* Activation staging: a quarter of the stage (32 values) of one slot per
-   * thread, consecutive slots in consecutive lanes. */
+   * thread, consecutive slots in consecutive lanes. Stage `half` of each
+   * block lives in buffer `half`; the next stage is loaded before the
+   * current one's products and stored after them, so one barrier per stage
+   * separates the writes from both buffers' reads. */
   const int st = tid % kSlots, sq = tid / kSlots;
   __syncthreads();
   const int32_t s_slot = slot_of[st];
-  const uint16_t* xs = s_slot >= 0 ? x + (uint64_t)(s_slot / (int)x_div) * k + 32 * sq : nullptr;
-  _Float16* as = act + st * kActPitch + 32 * sq;
+  const uint16_t* xs = s_slot >= 0 ? x + (uint64_t)(s_slot / (int)x_div) * k + kStageK / 4 * sq : nullptr;
+  const int as = st * kActPitch + kStageK / 4 * sq;
+  u32x4 next[kVec];
+  if (xs) {
+#pragma unroll
+    for (int c = 0; c < kVec; ++c) reinterpret_cast<u32x4*>(act[0] + as)[c] = reinterpret_cast<const u32x4*>(xs)[c];
+  }
+  __syncthreads();
 
   /* Weights: half-wave h loads the blocks of projection h (gate or up, or
    * the second 16 rows) two blocks ahead; the halves swap their words across
@@ -356,21 +367,17 @@ __global__ __launch_bounds__(256) void routed_f16_kernel(
         blk[p] = realign(blk[p], (reinterpret_cast<uintptr_t>(wp[p]) + sb * F::kBytes) & 3);
     }
 #pragma unroll
-    for (int half = 0; half < 2; ++half) {
-      const uint32_t k0 = sb * 256 + half * kStageK;
-      __syncthreads();
-      if (xs) {
-        const uint4* src = reinterpret_cast<const uint4*>(xs + k0);
-        uint4 v[4];
+    for (int stage = 0; stage < kStages; ++stage) {
+      const uint32_t k_next = sb * 256 + (stage + 1) * kStageK;
+      const bool more = xs && k_next < k;
+      if (more) {
 #pragma unroll
-        for (int c = 0; c < 4; ++c) v[c] = src[c];
-#pragma unroll
-        for (int c = 0; c < 4; ++c) reinterpret_cast<uint4*>(as)[c] = v[c];
+        for (int c = 0; c < kVec; ++c) next[c] = reinterpret_cast<const u32x4*>(xs + k_next)[c];
       }
-      __syncthreads();
+      const _Float16* cur = act[stage % 2];
 #pragma unroll
-      for (int jj = 0; jj < 4; ++jj) {
-        const int ib = half * 4 + jj;
+      for (int jj = 0; jj < kStageK / 32; ++jj) {
+        const int ib = stage * (kStageK / 32) + jj;
         typename F::Sub sub[2];
 #pragma unroll
         for (int p = 0; p < 2; ++p) sub[p] = F::sub(blk[p], ib);
@@ -394,7 +401,7 @@ __global__ __launch_bounds__(256) void routed_f16_kernel(
 #pragma unroll
           for (int t = 0; t < 4; ++t) {
             if (t < live) {
-              const _Float16* ar = act + (t * 16 + lane % 16) * kActPitch + kk;
+              const _Float16* ar = cur + (t * 16 + lane % 16) * kActPitch + kk;
               typedef _Float16 half8 __attribute__((ext_vector_type(8)));
               const half8 a0 = *reinterpret_cast<const half8*>(ar + 8 * h);
               const half8 a1 = *reinterpret_cast<const half8*>(ar + 8 - 8 * h);
@@ -406,6 +413,11 @@ __global__ __launch_bounds__(256) void routed_f16_kernel(
           }
         }
       }
+      if (more) {
+#pragma unroll
+        for (int c = 0; c < kVec; ++c) reinterpret_cast<u32x4*>(act[1 - stage % 2] + as)[c] = next[c];
+      }
+      __syncthreads();
     }
   }
 
