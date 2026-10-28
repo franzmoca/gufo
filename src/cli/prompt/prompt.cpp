@@ -22,6 +22,7 @@
 #include "src/core/crypto/sha256.hpp"
 #include "src/core/gguf_reader.hpp"
 #include "src/core/image.hpp"
+#include "src/models/deepseek_v41_flash/artifact_hint.hpp"
 #include "src/models/deepseek_v41_flash/chat_template.hpp"
 #include "src/models/deepseek_v41_flash/dspark_sampler.hpp"
 #include "src/models/deepseek_v41_flash/engine.hpp"
@@ -1126,6 +1127,8 @@ int RunPrompt(std::span<const char* const> args) {
   auto reader_owner = gufo::core::GgufReader::OpenFile(opt.model_path, &err);
   if (!reader_owner) {
     std::cerr << "Error loading GGUF model '" << opt.model_path << "': " << err
+              << models::deepseek_v41_flash::MissingEngramShardHint(
+                     opt.model_path)
               << "\n";
     PrintModelLoadTime(model_load_start, false);
     return 1;
@@ -1360,6 +1363,8 @@ int RunChat(std::span<const char* const> args) {
   auto reader_owner = gufo::core::GgufReader::OpenFile(opt.model_path, &err);
   if (!reader_owner) {
     std::cerr << "Error loading GGUF model '" << opt.model_path << "': " << err
+              << models::deepseek_v41_flash::MissingEngramShardHint(
+                     opt.model_path)
               << "\n";
     PrintModelLoadTime(model_load_start, false);
     return 1;
