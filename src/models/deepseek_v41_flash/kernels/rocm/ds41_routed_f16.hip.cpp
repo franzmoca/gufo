@@ -99,7 +99,11 @@ __device__ __forceinline__ void iq1_decode8(uint2 bytes, uint32_t affine, uint32
 
 /* Weight formats. Each gives its block size, the words loaded per block
  * (kAligned: blocks start on words), the LDS tables, the fields of one
- * 32-value sub-block (Sub) and the eight FP16 weights of group l of it. */
+ * 32-value sub-block (Sub) and the eight FP16 weights of group l of it.
+ * kShareActivations: each half-wave reads its own 16 bytes of an activation
+ * fragment and takes the other half's across lanes, trading LDS reads for
+ * permutes; it pays for the IQ2 formats, whose 16-byte random codebook reads
+ * load LDS, and costs the VALU-bound IQ1 ones. */
 template <int kType>
 struct Format;
 
@@ -111,6 +115,7 @@ template <>
 struct Format<19> {
   static constexpr int kBytes = 50, kWords = 13;
   static constexpr bool kAligned = false;
+  static constexpr bool kShareActivations = false;
   struct Tables {
     uint32_t grid[NGRID_IQ1S];
   };
@@ -142,6 +147,7 @@ template <>
 struct Format<29> {
   static constexpr int kBytes = 56, kWords = 14;
   static constexpr bool kAligned = true;
+  static constexpr bool kShareActivations = false;
   using Tables = Format<19>::Tables;
   static __device__ void fill(Tables& t, int tid) { Format<19>::fill(t, tid); }
   struct Sub {
@@ -174,6 +180,7 @@ template <>
 struct Format<16> {
   static constexpr int kBytes = 66, kWords = 17;
   static constexpr bool kAligned = false;
+  static constexpr bool kShareActivations = true;
   struct Tables {
     uint4 grid[256];
     uint2 signs[128];
@@ -236,6 +243,7 @@ template <>
 struct Format<17> {
   static constexpr int kBytes = 74, kWords = 19;
   static constexpr bool kAligned = false;
+  static constexpr bool kShareActivations = true;
   struct Tables {
     uint4 grid[512];
     uint2 signs[128];
@@ -399,9 +407,13 @@ __global__ __launch_bounds__(256) void routed_f16_kernel(
             if (t < live) {
               const _Float16* ar = cur + (t * 16 + lane % 16) * kActPitch + kk;
               typedef _Float16 half8 __attribute__((ext_vector_type(8)));
-              const half8 a0 = *reinterpret_cast<const half8*>(ar + 8 * h);
-              const half8 a1 = *reinterpret_cast<const half8*>(ar + 8 - 8 * h);
-              const half16 a = __builtin_shufflevector(a0, a1, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15);
+              const u32x4 a0 = *reinterpret_cast<const u32x4*>(ar + 8 * h);
+              u32x4 a1;
+              if constexpr (F::kShareActivations)
+                a1 = u32x4{other_half(a0.x), other_half(a0.y), other_half(a0.z), other_half(a0.w)};
+              else
+                a1 = *reinterpret_cast<const u32x4*>(ar + 8 - 8 * h);
+              const half16 a = __builtin_bit_cast(half16, __builtin_shufflevector(a0, a1, 0, 1, 2, 3, 4, 5, 6, 7));
 #pragma unroll
               for (int p = 0; p < 2; ++p)
                 acc[p][t] = __builtin_amdgcn_wmma_f32_16x16x16_f16_w32(a, b[p], acc[p][t]);
