@@ -241,32 +241,37 @@ __global__ void matmul_bf16_vec8_kernel(const uint16_t* w, const float* x, float
  * relative over k = 5120), so each K step of 32 starts from zero, takes the
  * three terms smallest first, and is added to FP32 registers: about 8e-7
  * relative to the largest output, against 2.5e-7 for the FP32 kernel. Block
- * tile 64 weight rows x 64 tokens, 8 waves of 16 x 32; rows a multiple of
- * 64 and k of 32. */
+ * tile kRowTile (128 or 64) weight rows x 64 tokens, 8 waves of 16 rows x
+ * (kRowTile / 2) tokens; rows a multiple of kRowTile and k of 32. The wider
+ * tile splits each activation step once per 128 rows (router 1.25 -> 0.98
+ * ms at 2,048 tokens); every output keeps the same products and sums. */
 constexpr uint32_t kBf16Tile = 64, kBf16K = 32, kBf16Pitch = kBf16K + 8;
 __device__ __forceinline__ uint32_t bf16_rn_bits(float x) {
   const uint32_t u = __float_as_uint(x);
   return (u + 0x7fffu + ((u >> 16) & 1u)) >> 16;
 }
+template <uint32_t kRowTile>
 __global__ __launch_bounds__(256) void matmul_bf16_wmma_kernel(const uint16_t* w, const float* x, float* out,
                                                                uint32_t rows, uint32_t k, uint32_t n) {
-  __shared__ uint16_t w_sh[kBf16Tile * kBf16Pitch];
+  constexpr int kFr = kRowTile / 32;  // 16-token fragments per wave
+  __shared__ uint16_t w_sh[kRowTile * kBf16Pitch];
   __shared__ uint16_t x_sh[3][kBf16Tile * kBf16Pitch];
   const uint32_t tid = threadIdx.x, wave = tid / 32, lane = tid % 32;
-  const uint32_t r0 = blockIdx.x * kBf16Tile, t0 = blockIdx.y * kBf16Tile;
-  /* Wave tile: weight rows wr .. wr + 15, tokens wt .. wt + 31. */
-  const uint32_t wr = (wave % 4) * 16, wt = (wave / 4) * 32;
+  const uint32_t r0 = blockIdx.x * kRowTile, t0 = blockIdx.y * kBf16Tile;
+  /* Wave tile: weight rows wr .. wr + 15, tokens wt .. wt + 16 kFr - 1. */
+  const uint32_t wr = (wave % (kRowTile / 16)) * 16, wt = (wave / (kRowTile / 16)) * 16 * kFr;
   using frag_a = rocwmma::fragment<rocwmma::matrix_a, 16, 16, 16, hip_bfloat16, rocwmma::row_major>;
   using frag_b = rocwmma::fragment<rocwmma::matrix_b, 16, 16, 16, hip_bfloat16, rocwmma::col_major>;
   using frag_c = rocwmma::fragment<rocwmma::accumulator, 16, 16, 16, float>;
-  float s0[8] = {}, s1[8] = {};
+  float s[kFr][8] = {};
   for (uint32_t k0 = 0; k0 < k; k0 += kBf16K) {
-    frag_c c0, c1;
-    rocwmma::fill_fragment(c0, 0.0f);
-    rocwmma::fill_fragment(c1, 0.0f);
-    {
-      /* 64 rows x 32 values of W: one uint4 (8 values) per thread. */
-      const uint32_t r = tid / 4, c = (tid % 4) * 8;
+    frag_c c[kFr];
+#pragma unroll
+    for (int f = 0; f < kFr; f++) rocwmma::fill_fragment(c[f], 0.0f);
+    /* kRowTile rows x 32 values of W: uint4s (8 values) per thread. */
+#pragma unroll
+    for (uint32_t r = tid / 4; r < kRowTile; r += 64) {
+      const uint32_t c = (tid % 4) * 8;
       *reinterpret_cast<uint4*>(&w_sh[r * kBf16Pitch + c]) =
           *reinterpret_cast<const uint4*>(w + (uint64_t)(r0 + r) * k + k0 + c);
     }
@@ -295,29 +300,30 @@ __global__ __launch_bounds__(256) void matmul_bf16_wmma_kernel(const uint16_t* w
       rocwmma::load_matrix_sync(a, reinterpret_cast<const hip_bfloat16*>(w_sh + wr * kBf16Pitch + kk), kBf16Pitch);
 #pragma unroll
       for (int part = 2; part >= 0; part--) {
-        frag_b b0, b1;
-        rocwmma::load_matrix_sync(b0, reinterpret_cast<const hip_bfloat16*>(x_sh[part] + wt * kBf16Pitch + kk),
-                                  kBf16Pitch);
-        rocwmma::load_matrix_sync(b1, reinterpret_cast<const hip_bfloat16*>(x_sh[part] + (wt + 16) * kBf16Pitch + kk),
-                                  kBf16Pitch);
-        rocwmma::mma_sync(c0, a, b0, c0);
-        rocwmma::mma_sync(c1, a, b1, c1);
+#pragma unroll
+        for (int f = 0; f < kFr; f++) {
+          frag_b b;
+          rocwmma::load_matrix_sync(
+              b, reinterpret_cast<const hip_bfloat16*>(x_sh[part] + (wt + 16 * f) * kBf16Pitch + kk), kBf16Pitch);
+          rocwmma::mma_sync(c[f], a, b, c[f]);
+        }
       }
     }
 #pragma unroll
-    for (uint32_t e = 0; e < 8; e++) {
-      s0[e] += c0.x[e];
-      s1[e] += c1.x[e];
-    }
+    for (uint32_t e = 0; e < 8; e++)
+#pragma unroll
+      for (int f = 0; f < kFr; f++) s[f][e] += c[f].x[e];
     __syncthreads();
   }
   /* Accumulator element e of a lane is (row 2 * e + lane / 16, token lane % 16). */
 #pragma unroll
   for (uint32_t e = 0; e < 8; e++) {
     const uint32_t row = r0 + wr + 2 * e + lane / 16;
-    const uint32_t ta = t0 + wt + lane % 16, tb = ta + 16;
-    if (ta < n) out[(uint64_t)ta * rows + row] = s0[e];
-    if (tb < n) out[(uint64_t)tb * rows + row] = s1[e];
+#pragma unroll
+    for (int f = 0; f < kFr; f++) {
+      const uint32_t t = t0 + wt + 16 * f + lane % 16;
+      if (t < n) out[(uint64_t)t * rows + row] = s[f][e];
+    }
   }
 }
 
@@ -2584,7 +2590,11 @@ extern "C" int ds41_v41_matmul_bf16(const uint16_t* w, const float* x, float* ou
   const dim3 grid((rows + rows_per_block - 1) / rows_per_block, (n + kTokenTile - 1) / kTokenTile);
   if (n >= kBf16Tile / 4 && rows % kBf16Tile == 0 && k % kBf16K == 0 && (uintptr_t)w % 16 == 0 &&
       (uintptr_t)x % 16 == 0) {
-    matmul_bf16_wmma_kernel<<<dim3(rows / kBf16Tile, (n + kBf16Tile - 1) / kBf16Tile), 256>>>(w, x, out, rows, k, n);
+    const dim3 tiles(1, (n + kBf16Tile - 1) / kBf16Tile);
+    if (rows % 128 == 0)
+      matmul_bf16_wmma_kernel<128><<<dim3(rows / 128, tiles.y), 256>>>(w, x, out, rows, k, n);
+    else
+      matmul_bf16_wmma_kernel<64><<<dim3(rows / 64, tiles.y), 256>>>(w, x, out, rows, k, n);
     return launch_ok("bf16 matmul");
   }
   if (k % 256 == 0 && (uintptr_t)w % 16 == 0 && (uintptr_t)x % 16 == 0)
