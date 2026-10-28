@@ -616,11 +616,21 @@ bool attention(ds41_decoder* d, uint32_t il, uint32_t n, const Joint* joint) {
   } else if (!linear_pair(d, wqa, d->qa, wkv, d->kv, d->xn, n)) {
     return false;
   }
+  /* A single batch on the matrix cores also gets qr as FP16 rows for q_b
+   * (rounded as the dense kernel would stage them), in o: idle until the
+   * attention writes it. */
+  const ds41_tensor* wqb = l->attn_q_b;
+  const uint32_t qb_k = (uint32_t)wqb->dim[0], qb_rows = (uint32_t)(wqb->elements / qb_k);
+  uint16_t* qr16 =
+      !joint && n > d->decode_rows && dense_f16(wqb->type, qb_rows, qb_k, n) ? reinterpret_cast<uint16_t*>(d->o) : nullptr;
   if (!each([&](ds41_decoder* e, uint32_t m) {
-        return ds41_v41_q_kv_norm(e->qa, f32(e, l->attn_q_a_norm), e->qr, DS41_N_LORA_Q, e->kv,
+        return ds41_v41_q_kv_norm(e->qa, f32(e, l->attn_q_a_norm), e->qr, qr16, DS41_N_LORA_Q, e->kv,
                                   f32(e, l->attn_kv_a_norm), e->kvn, kHeadDim, kRot, freq, e->pos, m, eps) == 0;
-      }) ||
-      !linear(d, l->attn_q_b, d->qr, d->q, n))
+      }))
+    return false;
+  if (qr16 ? !dev(d, wqb) || ds41_v41_dense_f16((int)wqb->type, dev(d, wqb), qr16, d->q, qb_rows, n, qb_k, 1,
+                                                DS41_V41_DENSE_X_HALF)
+           : !linear(d, wqb, d->qr, d->q, n))
     return false;
 
   if (ratio && ds41_layer_is_kv_source(il)) {

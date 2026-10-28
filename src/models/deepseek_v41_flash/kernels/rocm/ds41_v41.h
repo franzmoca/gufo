@@ -156,8 +156,10 @@ typedef struct ds41_fp4_rows {
  * returns the quantized floats); x is kept. */
 int ds41_v41_fp4_store(const float* x, uint8_t* codes, uint8_t* scales, uint32_t n, uint32_t block, int e4m3_scale);
 /* qr = RMSNorm(qa) * q_weight, and kvn = RMSNorm(kv) * kv_weight followed by
- * ds41_v41_rope_fp8 (token t at pos0 + t), for n tokens in one launch. */
-int ds41_v41_q_kv_norm(const float* qa, const float* q_weight, float* qr, uint32_t q_dim, const float* kv,
+ * ds41_v41_rope_fp8 (token t at pos0 + t), for n tokens in one launch. With
+ * qr_half set, qr is also stored there rounded to FP16 (q_dim per token). */
+int ds41_v41_q_kv_norm(const float* qa, const float* q_weight, float* qr, uint16_t* qr_half, uint32_t q_dim,
+                       const float* kv,
                        const float* kv_weight, float* kvn, uint32_t kv_dim, uint32_t rope_dim, const float* inv_freq,
                        uint32_t pos0, uint32_t n, float eps);
 
