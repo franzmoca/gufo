@@ -21,8 +21,6 @@ struct ds41_engine_options {
   /* Optional DSpark support model. NULL leaves speculative decoding off and
    * the engine byte-for-byte identical to a non-speculative build. */
   const char* dspark_model_path;
-  /* Engram GGUF. NULL opens deepseek41.engram.file beside the first shard. */
-  const char* engram_path;
   /* Parse, validate and bind the artifacts without uploading any weights. */
   bool validate_only;
   /* Most prompt tokens per prefill batch, DS41_MIN_PREFILL_BATCH to
@@ -179,12 +177,12 @@ void ds41_session_begin_request(ds41_session* session);
 void ds41_session_prepare_batch_execution(ds41_session* session);
 bool ds41_engine_has_dspark(const ds41_engine* engine);
 bool ds41_engine_exact_prefill(const ds41_engine* engine);
-/* Uploads the MoE gates' image routing bias, [40][384] host floats; NULL
- * removes it. With it, every position holding DS41_IMAGE_TOKEN is an image
- * position, as the official image mask: it takes no part in an Engram
- * n-gram and receives no Engram term, and its experts are selected with the
- * image bias. Set it before creating sessions. */
-int ds41_engine_set_image_bias(ds41_engine* engine, const float* bias);
+/* Uploads the MoE gates' image routing bias (blk.N.exp_probs_b_vl). Then
+ * every position holding DS41_IMAGE_TOKEN is an image position, as the
+ * official image mask: it takes no part in an Engram n-gram and receives no
+ * Engram term, and its experts are selected with the image bias. Enable it
+ * before creating sessions. */
+int ds41_engine_enable_image_routing(ds41_engine* engine);
 bool ds41_engine_has_image_bias(const ds41_engine* engine);
 int ds41_sessions_dspark_step_batch(const ds41_session_dspark_batch_item* items,
                                     size_t item_count, char* error,

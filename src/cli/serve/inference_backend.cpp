@@ -4819,7 +4819,7 @@ bool InferenceBackend::LoadDeepSeek(
     if constexpr (Ds::kVision) {
       if (vision) {
         std::string bias_error;
-        if (!model->SetImageRoutingBias(vision->RoutingBias(), &bias_error)) {
+        if (!model->EnableImageRouting(&bias_error)) {
           SetError(error, bias_error);
           return false;
         }

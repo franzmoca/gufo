@@ -428,10 +428,10 @@ bool is_image(const ds41_decoder* d, int token) { return d->engine->image_bias &
  * whose look-back stops at image positions. */
 void engram_hash(ds41_decoder* d, int token, int64_t (*rows)[DS41_ENGRAM_COLS]) {
   const ds41_weights* w = d->engine->weights;
-  const int32_t* token_map = (const int32_t*)host(d, w->engram_token_map);
-  const int64_t* primes = (const int64_t*)host(d, w->engram_primes);
-  const int64_t* offsets = (const int64_t*)host(d, w->engram_offsets);
-  const int64_t* multipliers = (const int64_t*)host(d, w->engram_multipliers);
+  const int32_t* token_map = w->engram_token_map;
+  const int64_t* primes = w->engram_head_vocab;
+  const int64_t* offsets = w->engram_head_offsets;
+  const int64_t* multipliers = w->engram_multipliers;
   const int64_t pad = token_map[DS41_ENGRAM_PAD_TOKEN];
   d->engram_history.push_back(is_image(d, token) ? kEngramDead : token_map[token]);
   const int64_t p = (int64_t)d->engram_history.size() - 1;
@@ -454,15 +454,14 @@ void engram_hash(ds41_decoder* d, int token, int64_t (*rows)[DS41_ENGRAM_COLS]) 
   }
 }
 
-/* Reads and dequantizes the n * DS41_ENGRAM_COLS table rows of layer il into
+/* Reads and dequantizes the n * DS41_ENGRAM_COLS table rows of a layer into
  * out; a negative row id (an image position) reads zeros, whose Engram term
  * is exactly zero, as the official masked gate. Reads run on parallel threads: each is a small random read, so
  * throughput comes from queue depth. Touches only immutable engine state, so
  * it can run while the GPU works on earlier layers. */
-bool engram_read(const ds41_decoder* d, uint32_t il, const int64_t* rows, uint32_t n, float* out) {
-  const ds41_layer_weights* l = &d->engine->weights->layer[il];
+bool engram_read(const ds41_decoder* d, const int64_t* rows, uint32_t n, float* out) {
   const ds41_engram_tables* e = d->engine->engram;
-  const ds41_tensor* table = l->engram_embd;
+  const ds41_tensor* table = e->table;
   const uint64_t base = table->abs_offset - e->file.shard_offset[0];
   const uint64_t count = (uint64_t)n * DS41_ENGRAM_COLS;
   std::atomic<uint64_t> next{0};
@@ -494,9 +493,8 @@ bool engram(ds41_decoder* d, uint32_t il, const float* rows, uint32_t n) {
   const ds41_layer_weights* l = &d->engine->weights->layer[il];
   const uint64_t bytes = (uint64_t)n * DS41_ENGRAM_COLS * DS41_ENGRAM_HEAD_DIM * sizeof(float);
   if (hipMemcpyAsync(d->engram_in, rows, bytes, hipMemcpyHostToDevice, 0) != hipSuccess) return false;
-  if (!linear(d, l->engram_wkv, d->engram_in, d->engram_kv, n)) return false;
-  return ds41_v41_engram_gate(d->h, d->engram_kv, (const uint16_t*)dev(d, l->engram_q),
-                              (const uint16_t*)dev(d, l->engram_k), kHc, kDim, DS41_RMS_EPS, n) == 0;
+  if (!linear(d, l->engram_kv, d->engram_in, d->engram_kv, n)) return false;
+  return ds41_v41_engram_gate(d->h, d->engram_kv, f32(d, l->engram_gate), kHc, kDim, DS41_RMS_EPS, n) == 0;
 }
 
 bool hc_mix(ds41_decoder* d, const ds41_tensor* fn, const ds41_tensor* scale, const ds41_tensor* base,
@@ -1577,7 +1575,7 @@ void* ds41_decoder_state_part(ds41_decoder* d, uint32_t layer, int part, uint64_
 
 int ds41_decoder_adopt(ds41_decoder* d, const int* tokens, uint32_t n) {
   if (!d || n > d->context || (n && !tokens)) return 1;
-  const int32_t* token_map = (const int32_t*)host(d, d->engine->weights->engram_token_map);
+  const int32_t* token_map = d->engine->weights->engram_token_map;
   d->engram_history.resize(n);
   for (uint32_t i = 0; i < n; i++) {
     if (tokens[i] < 0 || tokens[i] >= DS41_N_VOCAB) return 1;
@@ -1689,7 +1687,7 @@ int eval_rows(ds41_decoder* d, const int* tokens, uint32_t n, uint32_t keep_from
   for (uint32_t il = 0; il < DS41_N_LAYER; il++) {
     const int slot = ds41_layer_engram_slot(il);
     if (slot < 0) continue;
-    engram_reads[slot] = std::async(std::launch::async, engram_read, d, il,
+    engram_reads[slot] = std::async(std::launch::async, engram_read, d,
                                     &engram_rows[(uint64_t)slot * n * DS41_ENGRAM_COLS], n, d->engram_pinned[slot]);
   }
 
@@ -1857,7 +1855,7 @@ int ds41_decoder_eval_joint(ds41_decoder* const* ds, const int* const* tokens, c
   for (uint32_t il = 0; il < DS41_N_LAYER; il++) {
     const int slot = ds41_layer_engram_slot(il);
     if (slot >= 0)
-      engram_reads[slot] = std::async(std::launch::async, engram_read, lead, il,
+      engram_reads[slot] = std::async(std::launch::async, engram_read, lead,
                                       &engram_rows[(uint64_t)slot * total * DS41_ENGRAM_COLS], total,
                                       lead->engram_pinned[slot]);
   }

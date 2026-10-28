@@ -412,12 +412,16 @@ static ds41_kv* model_find_kv(const ds41_model* m, const char* key) {
   return nullptr;
 }
 
+/* A u32 value; a non-negative int32 also qualifies (llama.cpp writes layer
+ * ids that way). */
 static bool model_get_u32(const ds41_model* m, const char* key, uint32_t* out) {
   ds41_kv* kv = model_find_kv(m, key);
-  if (!kv || kv->type != GGUF_VALUE_UINT32)
+  if (!kv || (kv->type != GGUF_VALUE_UINT32 && kv->type != GGUF_VALUE_INT32))
     return false;
   ds41_cursor c = cursor_at(m, kv->value_pos);
-  return cursor_u32(&c, out);
+  if (!cursor_u32(&c, out))
+    return false;
+  return kv->type == GGUF_VALUE_UINT32 || (int32_t)*out >= 0;
 }
 
 static bool model_get_u64(const ds41_model* m, const char* key, uint64_t* out) {
@@ -674,10 +678,9 @@ static std::vector<std::string> model_shard_paths(const char* path) {
 
 /* Open every shard and map them back to back into one reserved range. A
  * 2 MiB gap separates shards so merged upload spans never cross a file. */
-static void model_open(ds41_model* m, const char* path) {
+static void model_open(ds41_model* m, const std::vector<std::string>& paths) {
   memset(m, 0, sizeof(*m));
   m->fd = -1;
-  const std::vector<std::string> paths = model_shard_paths(path);
   static constexpr uint64_t kShardGap = 2ull << 20;
 
   uint64_t total = 0;
@@ -1054,13 +1057,6 @@ static void weights_validate_layout(const ds41_weights* w) {
   tensor_expect_dense(w->token_embd, 2, DS41_N_EMBD, DS41_N_VOCAB);
   tensor_expect(w->output_norm, DS41_TENSOR_F32, 1, DS41_N_EMBD);
   tensor_expect_dense(w->output, 2, DS41_N_EMBD, DS41_N_VOCAB);
-  tensor_expect(w->engram_token_map, DS41_TENSOR_I32, 1, DS41_N_VOCAB);
-  tensor_expect(w->engram_primes, DS41_TENSOR_I64, 2, DS41_ENGRAM_COLS,
-                DS41_N_ENGRAM_LAYER);
-  tensor_expect(w->engram_offsets, DS41_TENSOR_I64, 2, DS41_ENGRAM_COLS,
-                DS41_N_ENGRAM_LAYER);
-  tensor_expect(w->engram_multipliers, DS41_TENSOR_I64, 2,
-                DS41_ENGRAM_MAX_NGRAM, DS41_N_ENGRAM_LAYER);
 
   for (uint32_t il = 0; il < DS41_N_LAYER; il++) {
     const ds41_layer_weights* l = &w->layer[il];
@@ -1076,8 +1072,7 @@ static void weights_validate_layout(const ds41_weights* w) {
     tensor_expect_dense(l->attn_kv, 2, DS41_N_EMBD, DS41_N_HEAD_DIM);
     tensor_expect(l->attn_kv_a_norm, DS41_TENSOR_F32, 1, DS41_N_HEAD_DIM);
     tensor_expect(l->attn_sinks, DS41_TENSOR_F32, 1, DS41_N_HEAD);
-    tensor_expect_dense(l->attn_output_a, 3, group_dim, DS41_N_LORA_O,
-                        DS41_N_OUT_GROUP);
+    tensor_expect_dense(l->attn_output_a, 2, group_dim, out_low_dim);
     tensor_expect_dense(l->attn_output_b, 2, out_low_dim, DS41_N_EMBD);
 
     if (ds41_layer_is_kv_source(il)) {
@@ -1104,9 +1099,9 @@ static void weights_validate_layout(const ds41_weights* w) {
                     DS41_N_INDEXER_HEAD);
     }
     if (ds41_layer_engram_slot(il) >= 0) {
-      tensor_expect(l->engram_q, DS41_TENSOR_BF16, 2, DS41_N_EMBD, DS41_N_HC);
-      tensor_expect(l->engram_k, DS41_TENSOR_BF16, 2, DS41_N_EMBD, DS41_N_HC);
-      tensor_expect_dense(l->engram_wkv, 2, engram_in, engram_out);
+      tensor_expect(l->engram_gate, DS41_TENSOR_F32, 2, DS41_N_EMBD,
+                    DS41_N_HC);
+      tensor_expect_dense(l->engram_kv, 2, engram_in, engram_out);
     }
 
     tensor_expect(l->hc_ffn_fn, DS41_TENSOR_F32, 2, hc_dim, hc_mix_dim);
@@ -1116,6 +1111,7 @@ static void weights_validate_layout(const ds41_weights* w) {
     tensor_expect(l->ffn_gate_inp, DS41_TENSOR_BF16, 2, DS41_N_EMBD,
                   DS41_N_EXPERT);
     tensor_expect(l->ffn_exp_probs_b, DS41_TENSOR_F32, 1, DS41_N_EXPERT);
+    tensor_expect(l->ffn_exp_probs_b_vl, DS41_TENSOR_F32, 1, DS41_N_EXPERT);
     tensor_expect_routed_expert(l->ffn_gate_exps, DS41_N_EMBD, DS41_N_FF_EXP);
     tensor_expect_routed_expert(l->ffn_up_exps, DS41_N_EMBD, DS41_N_FF_EXP);
     tensor_expect_routed_expert(l->ffn_down_exps, DS41_N_FF_EXP, DS41_N_EMBD);
@@ -1263,32 +1259,29 @@ static void config_validate_model(const ds41_model* m) {
       {"deepseek41.attention.indexer.head_count", DS41_N_INDEXER_HEAD},
       {"deepseek41.attention.indexer.key_length", DS41_N_INDEXER_HEAD_DIM},
       {"deepseek41.attention.indexer.top_k", DS41_N_INDEXER_TOP_K},
-      {"deepseek41.attention.candidate_block_size", DS41_CANDIDATE_BLOCK_SIZE},
-      {"deepseek41.attention.candidate_topk_blocks",
+      {"deepseek41.attention.indexer.candidate_block_size",
+       DS41_CANDIDATE_BLOCK_SIZE},
+      {"deepseek41.attention.indexer.candidate_top_k_blocks",
        DS41_CANDIDATE_TOPK_BLOCKS},
-      {"deepseek41.attention.candidate_source_layer_id",
+      {"deepseek41.attention.indexer.candidate_source_layer",
        DS41_CANDIDATE_SOURCE_LAYER},
       {"deepseek41.hyper_connection.count", DS41_N_HC},
       {"deepseek41.hyper_connection.sinkhorn_iterations",
        DS41_N_HC_SINKHORN_ITER},
-      {"deepseek41.engram_head_dim", DS41_ENGRAM_HEAD_DIM},
-      {"deepseek41.engram_n_heads", DS41_ENGRAM_HEADS},
-      {"deepseek41.engram_max_ngram_size", DS41_ENGRAM_MAX_NGRAM},
-      {"deepseek41.engram_compressed_vocab_size", DS41_ENGRAM_COMPRESSED_VOCAB},
-      {"deepseek41.engram_pad_token_id", DS41_ENGRAM_PAD_TOKEN},
+      {"deepseek41.embedding_length_per_layer_input", DS41_ENGRAM_HEAD_DIM},
+      {"deepseek41.ple.heads_per_ngram", DS41_ENGRAM_HEADS},
+      {"deepseek41.ple.ngram_size", DS41_ENGRAM_MAX_NGRAM},
+      {"deepseek41.engram.pad_token_id", DS41_ENGRAM_PAD_TOKEN},
+      /* sqrtsoftplus scoring (llama.cpp's LLAMA_EXPERT_GATING_FUNC_TYPE). */
+      {"deepseek41.expert_gating_func", 4},
   };
   for (const U32Key& k : kU32)
     config_expect_u32(k.key, required_u32(m, k.key), k.want);
   uint32_t groups = 0;
   model_get_u32(m, "deepseek41.expert_group_count", &groups);
   config_expect_u32("expert_group_count", groups, 0);
-  if (required_string(m, "deepseek41.expert_scoring_func") != "sqrtsoftplus") {
-    ds41_die("deepseek41.expert_scoring_func must be sqrtsoftplus");
-  }
   config_expect_bool("expert_weights_norm",
                      required_bool(m, "deepseek41.expert_weights_norm"), true);
-  config_expect_bool("engram.present",
-                     required_bool(m, "deepseek41.engram.present"), true);
 
   uint64_t ratios[DS41_N_LAYER];
   for (uint32_t il = 0; il < DS41_N_LAYER; il++)
@@ -1298,15 +1291,15 @@ static void config_validate_model(const ds41_model* m) {
   uint64_t list[DS41_N_INDEX_SOURCE];
   for (uint32_t i = 0; i < DS41_N_KV_SOURCE; i++)
     list[i] = DS41_KV_SOURCE_LAYERS[i];
-  config_expect_int_array(m, "deepseek41.kv_source_layer_ids", list,
+  config_expect_int_array(m, "deepseek41.attention.kv_source_layers", list,
                           DS41_N_KV_SOURCE, false);
   for (uint32_t i = 0; i < DS41_N_INDEX_SOURCE; i++)
     list[i] = DS41_INDEX_SOURCE_LAYERS[i];
-  config_expect_int_array(m, "deepseek41.index_source_layer_ids", list,
-                          DS41_N_INDEX_SOURCE, false);
+  config_expect_int_array(m, "deepseek41.attention.indexer.source_layers",
+                          list, DS41_N_INDEX_SOURCE, false);
   for (uint32_t i = 0; i < DS41_N_ENGRAM_LAYER; i++)
     list[i] = DS41_ENGRAM_LAYERS[i];
-  config_expect_int_array(m, "deepseek41.engram.layer_ids", list,
+  config_expect_int_array(m, "deepseek41.ple.layers", list,
                           DS41_N_ENGRAM_LAYER, false);
   config_expect_f32_array(m, "deepseek41.swiglu_clamp_exp",
                           DS41_SWIGLU_CLAMP_EXP);
@@ -1346,16 +1339,72 @@ static void config_validate_model(const ds41_model* m) {
                     DS41_HC_EPS);
 }
 
+/* Read an integer array metadata value of exactly `count` entries. */
+static void required_int_array(const ds41_model* m, const char* key,
+                               int64_t* out, uint64_t count) {
+  ds41_array_ref arr;
+  const bool found = model_get_array(m, key, &arr);
+  const uint64_t width = found ? scalar_value_size(arr.type) : 0;
+  if (width == 0 || arr.type == GGUF_VALUE_FLOAT32 ||
+      arr.type == GGUF_VALUE_FLOAT64 || arr.len != count) {
+    fprintf(
+        stderr,
+        "ds41: integer array metadata %s is missing or has the wrong length\n",
+        key);
+    throw std::runtime_error("incompatible or invalid DeepSeek V4.1 artifact");
+  }
+  ds41_cursor c = cursor_at(m, arr.data_pos);
+  for (uint64_t i = 0; i < count; i++) {
+    uint64_t raw = 0;
+    if (!cursor_read(&c, &raw, width))
+      ds41_die(c.error);
+    out[i] = arr.type == GGUF_VALUE_INT32 ? (int64_t)(int32_t)raw : (int64_t)raw;
+  }
+}
+
+/* The Engram n-gram hash constants: token map, per-head bucket counts and
+ * absolute table offsets, and the per-layer odd multipliers. */
+static void engram_constants_load(ds41_weights* w, const ds41_model* m) {
+  static_assert(DS41_N_ENGRAM_LAYER * DS41_ENGRAM_COLS >=
+                DS41_N_ENGRAM_LAYER * DS41_ENGRAM_MAX_NGRAM);
+  std::vector<int64_t> values(DS41_N_VOCAB);
+  required_int_array(m, "deepseek41.engram.token_map", values.data(),
+                     DS41_N_VOCAB);
+  int64_t top = -1;
+  for (uint32_t i = 0; i < DS41_N_VOCAB; i++) {
+    if (values[i] < 0 || values[i] >= DS41_ENGRAM_COMPRESSED_VOCAB)
+      ds41_die("deepseek41.engram.token_map is outside the compressed vocabulary");
+    w->engram_token_map[i] = (int32_t)values[i];
+    top = std::max(top, values[i]);
+  }
+  if (top + 1 != DS41_ENGRAM_COMPRESSED_VOCAB)
+    ds41_die("deepseek41.engram.token_map does not cover the compressed vocabulary");
+
+  constexpr uint32_t heads = DS41_N_ENGRAM_LAYER * DS41_ENGRAM_COLS;
+  required_int_array(m, "deepseek41.ple.head_vocab_sizes", w->engram_head_vocab,
+                     heads);
+  required_int_array(m, "deepseek41.ple.head_offsets", w->engram_head_offsets,
+                     heads);
+  int64_t row = 0;
+  for (uint32_t i = 0; i < heads; i++) {
+    if (w->engram_head_vocab[i] <= 0 || w->engram_head_offsets[i] != row)
+      ds41_die("deepseek41.ple.head_offsets do not follow head_vocab_sizes");
+    row += w->engram_head_vocab[i];
+  }
+  required_int_array(m, "deepseek41.ple.layer_multipliers",
+                     w->engram_multipliers,
+                     DS41_N_ENGRAM_LAYER * DS41_ENGRAM_MAX_NGRAM);
+  for (int64_t multiplier : w->engram_multipliers)
+    if (multiplier <= 0 || multiplier % 2 == 0)
+      ds41_die("deepseek41.ple.layer_multipliers must be odd and positive");
+}
+
 /* Bind tensor names once into the fixed V4.1 layer layout. */
 static void weights_bind(ds41_weights* w, const ds41_model* m) {
   memset(w, 0, sizeof(*w));
   w->token_embd = required_tensor(m, "token_embd.weight");
   w->output_norm = required_tensor(m, "output_norm.weight");
   w->output = required_tensor(m, "output.weight");
-  w->engram_token_map = required_tensor(m, "engram_token_map.weight");
-  w->engram_primes = required_tensor(m, "engram_primes.weight");
-  w->engram_offsets = required_tensor(m, "engram_offsets.weight");
-  w->engram_multipliers = required_tensor(m, "engram_multipliers.weight");
 
   for (uint32_t il = 0; il < DS41_N_LAYER; il++) {
     ds41_layer_weights* l = &w->layer[il];
@@ -1389,9 +1438,8 @@ static void weights_bind(ds41_weights* w, const ds41_model* m) {
       l->indexer_proj = required_tensorf(m, "blk.%u.indexer.proj.weight", il);
     }
     if (ds41_layer_engram_slot(il) >= 0) {
-      l->engram_q = required_tensorf(m, "blk.%u.engram_q.weight", il);
-      l->engram_k = required_tensorf(m, "blk.%u.engram_k.weight", il);
-      l->engram_wkv = required_tensorf(m, "blk.%u.engram_wkv.weight", il);
+      l->engram_gate = required_tensorf(m, "blk.%u.engram_gate.weight", il);
+      l->engram_kv = required_tensorf(m, "blk.%u.engram_kv.weight", il);
     }
     l->hc_ffn_fn = required_tensorf(m, "blk.%u.hc_ffn_fn.weight", il);
     l->hc_ffn_scale = required_tensorf(m, "blk.%u.hc_ffn_scale.weight", il);
@@ -1399,6 +1447,8 @@ static void weights_bind(ds41_weights* w, const ds41_model* m) {
     l->ffn_norm = required_tensorf(m, "blk.%u.ffn_norm.weight", il);
     l->ffn_gate_inp = required_tensorf(m, "blk.%u.ffn_gate_inp.weight", il);
     l->ffn_exp_probs_b = required_tensorf(m, "blk.%u.exp_probs_b.bias", il);
+    l->ffn_exp_probs_b_vl =
+        required_tensorf(m, "blk.%u.exp_probs_b_vl.bias", il);
     l->ffn_gate_exps = required_tensorf(m, "blk.%u.ffn_gate_exps.weight", il);
     l->ffn_up_exps = required_tensorf(m, "blk.%u.ffn_up_exps.weight", il);
     l->ffn_down_exps = required_tensorf(m, "blk.%u.ffn_down_exps.weight", il);
@@ -1407,6 +1457,7 @@ static void weights_bind(ds41_weights* w, const ds41_model* m) {
     l->ffn_down_shexp = required_tensorf(m, "blk.%u.ffn_down_shexp.weight", il);
   }
   weights_validate_layout(w);
+  engram_constants_load(w, m);
 }
 
 static void weights_free(ds41_weights* w) {
@@ -1440,7 +1491,7 @@ static void dspark_bind(ds41_dspark_model* d, ds41_dspark_tensor* dst,
 
 static void dspark_open(ds41_dspark_model* d, const char* path) {
   ds41_model* m = &d->file;
-  model_open(m, path);
+  model_open(m, model_shard_paths(path));
   const std::string arch = required_string(m, "general.architecture");
   const bool lucebox = arch == "deepseek41-dflash-draft";
   if (arch != "dflash" && !lucebox)
@@ -1575,61 +1626,47 @@ static void warn_free_cma(void) {
  * access pattern is random so read-ahead does not fill memory.
  */
 
-static std::string engram_default_path(const ds41_model* m,
-                                       const char* model_path) {
-  const std::string file = required_string(m, "deepseek41.engram.file");
-  if (file.find('/') != std::string::npos)
-    ds41_die("deepseek41.engram.file must be a bare file name");
-  const std::string first(model_path);
-  const size_t slash = first.rfind('/');
-  return slash == std::string::npos ? file : first.substr(0, slash + 1) + file;
-}
-
-static void engram_open(ds41_engram_tables* e, ds41_weights* w,
-                        const ds41_model* backbone, const char* path) {
-  model_open(&e->file, path);
+static void engram_open(ds41_engram_tables* e, const ds41_weights* w,
+                        const ds41_model* backbone, const std::string& path) {
+  model_open(&e->file, {path});
   const ds41_model* m = &e->file;
-  if (required_string(m, "general.architecture") != "deepseek41-engram") {
-    ds41_die("Engram file architecture is not deepseek41-engram");
+  /* The Engram file has no architecture of its own; it belongs to the build
+   * through the split bookkeeping and the bucket counts of the hash. */
+  if (m->n_tensors != 1 ||
+      required_u32(m, "split.tensors.count") !=
+          required_u32(backbone, "split.tensors.count")) {
+    fprintf(stderr, "ds41: %s is not the Engram shard of this build\n",
+            path.c_str());
+    throw std::runtime_error("incompatible or invalid DeepSeek V4.1 artifact");
   }
-  if (required_string(m, "deepseek41.engram.source") !=
-      required_string(backbone, "deepseek41.engram.source")) {
-    ds41_die(
-        "Engram file does not match the backbone (deepseek41.engram.source "
-        "differs)");
-  }
-  uint64_t rows[DS41_N_ENGRAM_LAYER];
-  {
-    ds41_array_ref arr;
-    if (!model_get_array(backbone, "deepseek41.engram.num_embeddings", &arr) ||
-        arr.len != DS41_N_ENGRAM_LAYER || scalar_value_size(arr.type) == 0) {
-      ds41_die("deepseek41.engram.num_embeddings is missing");
-    }
-    ds41_cursor c = cursor_at(backbone, arr.data_pos);
-    for (uint32_t i = 0; i < DS41_N_ENGRAM_LAYER; i++) {
-      rows[i] = 0;
-      if (!cursor_read(&c, &rows[i], scalar_value_size(arr.type)))
-        ds41_die(c.error);
-    }
-  }
-  for (uint32_t i = 0; i < DS41_N_ENGRAM_LAYER; i++) {
-    const uint32_t il = DS41_ENGRAM_LAYERS[i];
-    ds41_tensor* t = required_tensorf(m, "blk.%u.engram_embd.weight", il);
-    tensor_expect_dims(t, 2, DS41_ENGRAM_HEAD_DIM, rows[i], 0);
-    if (t->type != DS41_TENSOR_IQ4_NL && t->type != DS41_TENSOR_Q8_0) {
-      tensor_reject(t, "has an unsupported Engram row type");
-    }
-    w->layer[il].engram_embd = t;
-    const uint64_t row_bytes = t->bytes / rows[i];
-    if (i > 0 && row_bytes != e->row_bytes)
-      ds41_die("Engram tables use different row sizes");
-    e->row_bytes = row_bytes;
-  }
+  int64_t rows = 0;
+  for (int64_t n : w->engram_head_vocab)
+    rows += n;
+  ds41_tensor* t = required_tensor(m, "per_layer_token_embd.weight");
+  tensor_expect_dims(t, 2, DS41_ENGRAM_HEAD_DIM, (uint64_t)rows, 0);
+  if (t->type != DS41_TENSOR_IQ4_NL && t->type != DS41_TENSOR_Q8_0)
+    tensor_reject(t, "has an unsupported Engram row type");
+  e->table = t;
+  e->row_bytes = t->bytes / (uint64_t)rows;
   for (uint32_t i = 0; i < m->n_shards; i++) {
     (void)posix_fadvise(m->shard_fd[i], 0, 0, POSIX_FADV_RANDOM);
     (void)madvise((void*)(m->map + m->shard_offset[i]),
                   (size_t)m->shard_size[i], MADV_RANDOM);
   }
+}
+
+/* Builds published before the llama.cpp layout name the Engram file in
+ * their metadata and use the old key names. */
+static void require_current_layout(const ds41_model* m, const char* path) {
+  if (model_find_kv(m, "deepseek41.engram.file") == nullptr &&
+      model_find_kv(m, "deepseek41.attention.kv_source_layers") != nullptr)
+    return;
+  fprintf(stderr,
+          "ds41: %s uses the GGUF layout ISTA-DASLab published before "
+          "2026-10-27. Convert it with convert_ds41_upstream.py from the model "
+          "repository (README_DEEPSEEK.md)\n",
+          path);
+  throw std::runtime_error("incompatible or invalid DeepSeek V4.1 artifact");
 }
 
 static void engram_close(ds41_engram_tables* e) {
@@ -1759,18 +1796,22 @@ int ds41_engine_open(ds41_engine** out, const ds41_engine_options* opt) {
     e->weights =
         static_cast<ds41_weights*>(ds41_xcalloc(1, sizeof(ds41_weights)));
 
-    model_open(e->model, opt->model_path);
+    /* The last shard of a build is the Engram file all builds share. */
+    std::vector<std::string> shards = model_shard_paths(opt->model_path);
+    const std::string engram_path = shards.back();
+    if (shards.size() > 1)
+      shards.pop_back();
+    model_open(e->model, shards);
+    require_current_layout(e->model, opt->model_path);
+    if (shards.size() == 1 && engram_path == shards[0])
+      ds41_die("the model path must be the first shard of a split build");
     e->vocab = ds41_vocab_create(e->model);
     config_validate_model(e->model);
     weights_bind(e->weights, e->model);
     {
-      const std::string engram_path =
-          opt->engram_path && opt->engram_path[0]
-              ? std::string(opt->engram_path)
-              : engram_default_path(e->model, opt->model_path);
       e->engram = static_cast<ds41_engram_tables*>(
           ds41_xcalloc(1, sizeof(ds41_engram_tables)));
-      engram_open(e->engram, e->weights, e->model, engram_path.c_str());
+      engram_open(e->engram, e->weights, e->model, engram_path);
       gufo::server::Logger::LogFormatted(
           gufo::server::LogLevel::kInfo, "ds41",
           "%s: %u backbone shard(s), %.2f GiB device-eligible weights; Engram %s "
@@ -1894,23 +1935,24 @@ bool ds41_engine_exact_prefill(const ds41_engine* e) {
     return e && e->exact_prefill;
 }
 
-int ds41_engine_set_image_bias(ds41_engine* e, const float* bias) {
+int ds41_engine_enable_image_routing(ds41_engine* e) {
     if (!e || !e->rocm_ready)
         return 1;
-    if (e->image_bias) {
-        (void)hipFree(e->image_bias);
-        e->image_bias = NULL;
-    }
-    if (!bias)
+    if (e->image_bias)
         return 0;
-    for (uint64_t i = 0; i < (uint64_t)DS41_N_LAYER * DS41_N_EXPERT; i++)
-        if (!std::isfinite(bias[i]))
+    std::vector<float> bias((uint64_t)DS41_N_LAYER * DS41_N_EXPERT);
+    for (uint32_t il = 0; il < DS41_N_LAYER; il++)
+        memcpy(bias.data() + (uint64_t)il * DS41_N_EXPERT,
+               e->model->map + e->weights->layer[il].ffn_exp_probs_b_vl->abs_offset,
+               DS41_N_EXPERT * sizeof(float));
+    for (float value : bias)
+        if (!std::isfinite(value))
             return 1;
-    const uint64_t bytes = (uint64_t)DS41_N_LAYER * DS41_N_EXPERT * sizeof(float);
+    const uint64_t bytes = bias.size() * sizeof(float);
     void* p = NULL;
     if (hipMalloc(&p, bytes) != hipSuccess)
         return 1;
-    if (hipMemcpy(p, bias, bytes, hipMemcpyHostToDevice) != hipSuccess) {
+    if (hipMemcpy(p, bias.data(), bytes, hipMemcpyHostToDevice) != hipSuccess) {
         (void)hipFree(p);
         return 1;
     }

@@ -35,7 +35,7 @@ constexpr unsigned kMergeDim = kHidden * kDownsample * kDownsample;
 /// Rotary frequencies per axis: half of the head's rotated half.
 constexpr unsigned kRopeFreqs = kHeadDim / 4;
 constexpr unsigned kThreads = 256;
-constexpr unsigned kTensors = 298 + kRoutingLayers;
+constexpr unsigned kTensors = 298;
 
 void Check(hipError_t error) {
   if (error != hipSuccess)
@@ -456,7 +456,6 @@ struct Encoder::Impl {
   std::unique_ptr<core::GgufReader> reader;
   std::string identity;
   std::once_flag identity_once;
-  std::vector<float> routing_bias;
   std::atomic<std::size_t> resident_bytes{0};
   std::unordered_map<std::string, Allocation> weights;
   Allocation inv_freq;
@@ -502,10 +501,10 @@ struct Encoder::Impl {
       if (!array || *array != std::vector<double>{0.5, 0.5, 0.5})
         throw std::invalid_argument("unsupported DeepSeek V4.1 normalization");
     }
-    if (!reader->GetMetadataString("deepseek41v.image_routing_bias.source")) {
+    if (reader->GetMetadataString("deepseek41v.image_routing_bias.source")) {
       throw std::invalid_argument(
-          "vision sidecar lacks the image routing bias; build it with "
-          "tools/ds41/vision_sidecar.py");
+          "this vision sidecar carries the image routing bias, which the "
+          "model now provides; pass the mmproj itself");
     }
     const auto require = [&](const std::string& name,
                              std::initializer_list<std::uint64_t> shape,
@@ -555,18 +554,6 @@ struct Encoder::Impl {
     for (const auto* name : {"v.token_embd.img_start", "v.token_embd.img_end",
                              "v.image_newline"})
       require(name, {kEmbeddingWidth}, kF32);
-    routing_bias.resize(std::size_t{kRoutingLayers} * kRoutingExperts);
-    for (unsigned layer = 0; layer < kRoutingLayers; ++layer) {
-      const auto name = "blk." + std::to_string(layer) + ".exp_probs_b_vl.bias";
-      require(name, {kRoutingExperts}, kF32);
-      std::memcpy(routing_bias.data() + std::size_t{layer} * kRoutingExperts,
-                  reader->FindTensor(name)->data,
-                  kRoutingExperts * sizeof(float));
-    }
-    if (!std::all_of(routing_bias.begin(), routing_bias.end(),
-                     [](float value) { return std::isfinite(value); }))
-      throw std::invalid_argument("DeepSeek V4.1 image routing bias is not "
-                                  "finite");
     if (reader->GetTensorCount() != kTensors) {
       throw std::invalid_argument(
           "unexpected tensors in DeepSeek V4.1 vision sidecar");
@@ -599,10 +586,7 @@ struct Encoder::Impl {
     std::size_t bytes_uploaded = 0;
     PinnedUpload upload(stream);
     for (const auto& tensor : reader->GetTensors()) {
-      // The routing bias belongs to the language model; the patch embedding
-      // is converted below.
-      if (!tensor.name.starts_with("v.") && !tensor.name.starts_with("mm."))
-        continue;
+      // The patch embedding is converted below.
       if (tensor.name == "v.patch_embd.weight")
         continue;
       const std::size_t bytes =
@@ -682,10 +666,6 @@ const std::string& Encoder::identity() const {
     }
   });
   return impl_->identity;
-}
-
-std::span<const float> Encoder::RoutingBias() const {
-  return impl_->routing_bias;
 }
 
 std::size_t Encoder::ResidentBytes() const noexcept {

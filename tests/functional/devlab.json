@@ -68,18 +68,22 @@
     },
     "deepseek41": {
       "repo": "ISTA-DASLab/DeepSeek-V4.1-Flash-1017-GSQ-RCO-GGUF",
-      "revision": "cb02422c900df489cea5833e8a92171224059b3c",
+      "revision": "a419d74cd28d5b9f8c5e2b9077d11a609c17bc32",
       "patterns": [
         "DeepSeek-V4.1-Flash-1017-GSQ-RCO-IQ1_M-*.gguf",
         "DeepSeek-V4.1-Flash-Engram-IQ4_NL.gguf"
       ],
       "required": [
-        "DeepSeek-V4.1-Flash-1017-GSQ-RCO-IQ1_M-00001-of-00004.gguf",
-        "DeepSeek-V4.1-Flash-1017-GSQ-RCO-IQ1_M-00002-of-00004.gguf",
-        "DeepSeek-V4.1-Flash-1017-GSQ-RCO-IQ1_M-00003-of-00004.gguf",
-        "DeepSeek-V4.1-Flash-1017-GSQ-RCO-IQ1_M-00004-of-00004.gguf",
+        "DeepSeek-V4.1-Flash-1017-GSQ-RCO-IQ1_M-00001-of-00006.gguf",
+        "DeepSeek-V4.1-Flash-1017-GSQ-RCO-IQ1_M-00002-of-00006.gguf",
+        "DeepSeek-V4.1-Flash-1017-GSQ-RCO-IQ1_M-00003-of-00006.gguf",
+        "DeepSeek-V4.1-Flash-1017-GSQ-RCO-IQ1_M-00004-of-00006.gguf",
+        "DeepSeek-V4.1-Flash-1017-GSQ-RCO-IQ1_M-00005-of-00006.gguf",
         "DeepSeek-V4.1-Flash-Engram-IQ4_NL.gguf"
-      ]
+      ],
+      "links": {
+        "DeepSeek-V4.1-Flash-1017-GSQ-RCO-IQ1_M-00006-of-00006.gguf": "DeepSeek-V4.1-Flash-Engram-IQ4_NL.gguf"
+      }
     },
     "embedding": {
       "repo": "google/embeddinggemma-2",
@@ -210,7 +214,7 @@
       "title": "DeepSeek V4.1 Flash",
       "category": "llm",
       "asset": "deepseek41",
-      "target": "DeepSeek-V4.1-Flash-1017-GSQ-RCO-IQ1_M-00001-of-00004.gguf",
+      "target": "DeepSeek-V4.1-Flash-1017-GSQ-RCO-IQ1_M-00001-of-00006.gguf",
       "mode": "off",
       "sampling": "deepseek41"
     },

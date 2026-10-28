@@ -6,8 +6,10 @@ dequantizes the same GGUF and keeps the official KV fake quantization
 (FP8 window, FP4 compressed and indexer KV). Parity therefore measures the
 engine, not the quantization.
 
-Artifact: ISTA-DASLab GSQ-RCO `IQ1_M` (4 shards) with
+Artifact: ISTA-DASLab GSQ-RCO `IQ1_M` with
 `DeepSeek-V4.1-Flash-Engram-IQ4_NL.gguf`. Hardware: one Strix Halo (gfx1151).
+Results before the section on the llama.cpp layout used ISTA's earlier
+four-shard files; their quantized weights are the same bytes.
 
 ## Token parity
 
@@ -441,6 +443,30 @@ preserves all 2,999 argmax and NLL records (six-decimal NLL output), perplexity
 6.319756; production tg128 token hashes also match. This is not a new full-logit
 bitwise claim. No quantization, expert accumulation or route weights changed.
 [Evidence](artifacts/2026-10-26-device-route-plan/summary.json).
+
+## llama.cpp GGUF layout (2026-10-27 republication)
+
+ISTA-DASLab republished the GSQ-RCO files in llama.cpp's `deepseek41` layout,
+converted locally with the repository's `convert_ds41_upstream.py`. The
+converter copies every quantized tensor byte for byte (checked again here for
+all tensors under 50M elements of IQ1_M) and folds the BF16 Engram `q` and `k`
+into the F32 `engram_gate`, bit-for-bit equal to their product.
+
+With the Engram gate fed the old BF16 `q`/`k` and the old product order, the
+new loader reproduces the previous 3K score files byte for byte: IQ1_M
+resident and IQ2_XXS streamed. That covers the metadata hash constants, the
+absolute rows of the shared Engram table, the shard split and the streamed
+expert reads. Production reads the folded gate. The old kernel's fast-math
+evaluated `((h·q)·key)·k`; the folded weight gives `(h·(q·k))·key`, the
+official `h * weight * key`. That rounding change moves the scores:
+
+| Build | Perplexity, old / new | GPU argmax changed | Target top-1, old / new | Agreement with IQ2 oracle, old / new |
+| --- | ---: | ---: | ---: | ---: |
+| IQ1_M resident | 6.320 / 6.296 | 120 of 2,999 | 57.7% / 58.0% | — |
+| IQ2_XXS streamed | 6.004 / 6.022 | 136 of 2,999 | 58.8% / 58.5% | 95.63% / 95.30% |
+
+The IQ2_XXS oracle scores 6.028; mean \|ΔNLL\| to it is 0.0825 before and
+0.0844 after. Neither order is closer to the oracle on both measures.
 
 ## Streamed IQ2_XXS (M3, preliminary)
 

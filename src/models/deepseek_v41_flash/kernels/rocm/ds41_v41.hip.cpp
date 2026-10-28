@@ -2551,8 +2551,8 @@ __global__ void swiglu_kernel(const float* gate, const float* up, const float* w
 }
 
 /* Block (copy, token). */
-__global__ void engram_gate_kernel(float* h, const float* kv, const uint16_t* q, const uint16_t* k, uint32_t dim,
-                                   uint32_t hc, float eps) {
+__global__ void engram_gate_kernel(float* h, const float* kv, const float* weight, uint32_t dim, uint32_t hc,
+                                   float eps) {
   const uint32_t c = blockIdx.x;
   const uint64_t t = blockIdx.y;
   float* hc_row = h + (t * hc + c) * dim;
@@ -2563,7 +2563,7 @@ __global__ void engram_gate_kernel(float* h, const float* kv, const uint16_t* q,
   float kk = 0.0f;
   float dot = 0.0f;
   for (uint32_t i = threadIdx.x; i < dim; i += blockDim.x) {
-    const float w = bf16_to_f32(q[(uint64_t)c * dim + i]) * bf16_to_f32(k[(uint64_t)c * dim + i]);
+    const float w = weight[(uint64_t)c * dim + i];
     hh += hc_row[i] * hc_row[i];
     kk += key[i] * key[i];
     dot += hc_row[i] * w * key[i];
@@ -2900,9 +2900,9 @@ extern "C" int ds41_v41_swiglu(const float* gate, const float* up, const float* 
   return launch_ok("swiglu");
 }
 
-extern "C" int ds41_v41_engram_gate(float* h, const float* kv, const uint16_t* q, const uint16_t* k, uint32_t hc,
-                                    uint32_t dim, float eps, uint32_t n) {
-  engram_gate_kernel<<<dim3(hc, n), 1024>>>(h, kv, q, k, dim, hc, eps);
+extern "C" int ds41_v41_engram_gate(float* h, const float* kv, const float* weight, uint32_t hc, uint32_t dim,
+                                    float eps, uint32_t n) {
+  engram_gate_kernel<<<dim3(hc, n), 1024>>>(h, kv, weight, dim, hc, eps);
   return launch_ok("engram gate");
 }
 

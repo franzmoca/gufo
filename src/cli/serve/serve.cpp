@@ -655,7 +655,7 @@ void PrintServeHelp(std::string_view program_name,
     parser.AddOption("", "--mmproj", "PATH",
                      "BF16 vision sidecar for Qwen3.8 or Gemma 4 "
                      "(auto-discovered beside model), or DeepSeek V4.1 "
-                     "(opt-in; tools/ds41/vision_sidecar.py)",
+                     "(opt-in)",
                      "Model", &vision_model_path);
     parser.AddOption(
         "", "--prefill-weights", "MODE",
@@ -1319,7 +1319,7 @@ int RunServe(std::span<const char* const> args) {
     llm_parser.AddOption("", "--mmproj", "PATH",
                          "BF16 vision sidecar for Qwen3.8 or Gemma 4 "
                          "(auto-discovered beside model), or DeepSeek V4.1 "
-                         "(opt-in; tools/ds41/vision_sidecar.py)",
+                         "(opt-in)",
                          "Model", &vision_model_path);
     llm_parser.AddOption(
         "", "--prefill-weights", "MODE",

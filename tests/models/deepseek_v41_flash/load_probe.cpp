@@ -644,7 +644,6 @@ int ReplayProbe(ds41_engine* engine, const std::vector<int>& ids,
 
 int main(int argc, char** argv) {
   const char* model = nullptr;
-  const char* engram = nullptr;
   const char* tokenize = nullptr;
   const char* decode = nullptr;
   const char* out_dir = nullptr;
@@ -670,9 +669,7 @@ int main(int argc, char** argv) {
   bool stream_experts = false;
   uint64_t expert_cache_bytes = 0;
   for (int i = 1; i < argc; ++i) {
-    if (std::strcmp(argv[i], "--engram") == 0 && i + 1 < argc) {
-      engram = argv[++i];
-    } else if (std::strcmp(argv[i], "--tokenize") == 0 && i + 1 < argc) {
+    if (std::strcmp(argv[i], "--tokenize") == 0 && i + 1 < argc) {
       tokenize = argv[++i];
     } else if (std::strcmp(argv[i], "--decode") == 0 && i + 1 < argc) {
       decode = argv[++i];
@@ -741,7 +738,7 @@ int main(int argc, char** argv) {
   if (!model) {
     std::fprintf(
         stderr,
-        "usage: %s MODEL-00001-of-N.gguf [--engram FILE] [--upload] "
+        "usage: %s MODEL-00001-of-N.gguf [--upload] "
         "[--tokenize TEXTS [--rendered]] [--decode IDS [--generate N] "
         "[--score] [--batch] [--context N] [--prefill-batch N] "
         "[--out DIR]] [--replay-check ROWS] [--exact-prefill] "
@@ -759,7 +756,6 @@ int main(int argc, char** argv) {
   ds41_engine* engine = nullptr;
   ds41_engine_options options{};
   options.model_path = model;
-  options.engram_path = engram;
   options.validate_only = !upload;
   options.prefill_batch = prefill_batch;
   options.exact_prefill = exact_prefill;

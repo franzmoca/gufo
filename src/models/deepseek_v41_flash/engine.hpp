@@ -99,10 +99,9 @@ public:
   [[nodiscard]] std::uint32_t MaxContext() const noexcept;
   [[nodiscard]] bool HasDspark() const;
   [[nodiscard]] bool ExactPrefill() const;
-  /// The MoE gates' image routing bias, [40][384] (vision::Encoder::
-  /// RoutingBias), for image prompts; set it before creating sessions.
-  [[nodiscard]] bool SetImageRoutingBias(std::span<const float> bias,
-                                         std::string* error_msg = nullptr);
+  /// Routes image positions with the MoE gates' image bias, for image
+  /// prompts; enable it before creating sessions.
+  [[nodiscard]] bool EnableImageRouting(std::string* error_msg = nullptr);
 
 private:
   Model(ds41_engine* engine, ModelOptions options);
@@ -129,7 +128,7 @@ public:
   // bounds the decoder layers' replay to its last tokens; a state synced to
   // a shorter part only continues to that same end. `images` hold the input
   // embeddings of the image spans (the positions holding DS41_IMAGE_TOKEN)
-  // that this part evaluates; they need SetImageRoutingBias.
+  // that this part evaluates; they need EnableImageRouting.
   [[nodiscard]] bool Sync(std::span<const int> prompt,
                           std::string* error_msg = nullptr,
                           std::size_t prompt_end = 0,

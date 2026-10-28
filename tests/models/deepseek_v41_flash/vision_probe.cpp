@@ -3,7 +3,7 @@
 //   ds41_vision_probe --image IMAGE [--pixels OUT.rgb]
 //     decodes, plans and pads like the prompt builder; prints the grid and
 //     writes the padded RGB8 pixels.
-//   ds41_vision_probe --image IMAGE --mmproj SIDECAR --output SPAN.f32
+//   ds41_vision_probe --image IMAGE --mmproj MMPROJ --output SPAN.f32
 //                     [--repeat N]
 //     also encodes the image on the GPU and writes the span's FP32 rows
 //     (tools/ds41/vision_reference.py --compare reads them).
@@ -44,7 +44,7 @@ int main(int argc, char** argv) {
   }
   if (image_path.empty()) {
     std::cerr << "usage: ds41_vision_probe --image IMAGE [--pixels OUT.rgb] "
-                 "[--mmproj SIDECAR --output SPAN.f32 [--repeat N]]\n";
+                 "[--mmproj MMPROJ --output SPAN.f32 [--repeat N]]\n";
     return 2;
   }
   try {
