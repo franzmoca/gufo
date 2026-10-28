@@ -119,20 +119,27 @@ dispatch measures faster.
 
 ### 6. Routed FP16 kernel: weight decode per slot
 
-`kernels/rocm/ds41_routed_f16.hip.cpp`. Without the weight decode (timing
-only) IQ1_S gate/up drops 22.6 → 17.0 ms per layer and IQ2_XXS 26.0 →
-17.5 ms. A decoded fragment feeds at most four 16-slot tiles, on average 2.3.
-128-slot tiles for large experts would cut decode work by 13–24% but need
-128 accumulator VGPRs and twice the activation LDS. IQ2_S stays on MMQ.
+`kernels/rocm/ds41_routed_f16.hip.cpp`, after E25: IQ1_M gate+up takes about
+21 ms per 2,048-token layer, of which the weight decode and its permutes are
+~4.4 ms and the matrix-core skeleton (block fields, fragment reads,
+products) ~14.7 ms, at 39 of the measured 55 TFLOP/s. A decoded fragment
+feeds at most four 16-slot tiles, on average 2.3. 128-slot tiles for large
+experts would cut decode work by 13–24% but need 128 accumulator VGPRs and
+twice the activation LDS. IQ2_XXS's 16-byte random codebook reads still
+cost ~2 ms; 8-byte state entries would need ~12 more VALU per decode.
+IQ2_S stays on MMQ.
 
 ### 7. Remaining prefill glue
 
-The FFN-end routed sum and expand (`hc_expand_sum`, 115 ms per 2K batch)
-could feed the next layer's state pass except before the Engram layers
-(~30 ms); Q8_0 projections still go through MMQ and its Q8_1 pass (77 ms);
-the shared-expert SwiGLU (9 ms) could use the dense up pass's store. These
-figures predate bounded replay; decoder layers now run 140 prompt rows, so
-re-profile before choosing.
+Per 2,048-token chunk at 128K of depth (2026-10-28 profile, 1,342 ms of GPU
+time): the Q8_0 projections still go through MMQ (30 ms) and its Q8_1 pass
+(9.5 ms); the BF16 matmuls take 49 ms (the 384-row router at ~5 TFLOP/s);
+the routed rows' closing expand before Engram layers and replay boundaries
+8 ms; the shared-expert SwiGLU 5 ms and the routed input's FP16 conversion
+4 ms. Between chunks the host still dequantizes the 2,048 embedding rows and
+uploads them with a synchronous pageable copy (5–8 ms with the GPU idle);
+a pinned buffer or a device gather would hide most of it. `q_b` and the
+Engram projection still read FP32 inputs (E23: ~4% per launch with FP16).
 
 ### 8. Small-batch evaluation cost
 
@@ -223,6 +230,9 @@ read and wait times, since rows grow up to 3.6×, which interacts with item 11.
 - **Encoder SWA replay on a frontier miss.** Approximate; needs its own
   cache and quality contract.
 - **`gufo diagnose`** does not report the streaming statistics.
+- **Decode expert GEMV spills.** Several `expert_group_kernel` variants
+  use 256 VGPRs and still spill 80–540 bytes per lane to scratch; check
+  whether fewer columns per lane or `ext_vector_type` arrays remove them.
 
 ## Memory
 
