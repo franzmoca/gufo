@@ -77,15 +77,12 @@ __device__ __forceinline__ float half_bits(uint32_t bits) {
 }
 
 /* High bytes of the FP16 values of the IQ1 codebook (0, 1 and 2; the low
- * bytes are zero), one byte per weight in element order. */
+ * bytes are zero), one byte per weight in element order: each grid nibble
+ * selects its byte from 0x00, 0x3c, 0x40. */
 __device__ __forceinline__ uint2 iq1_high_bytes(uint32_t grid) {
-  uint32_t out[2] = {0, 0};
-#pragma unroll
-  for (int i = 0; i < 8; ++i) {
-    const uint32_t n = (grid >> (8 * (i % 4) + 4 * (i / 4))) & 0xfu;
-    out[i / 4] |= (n == 0 ? 0x00u : n == 1 ? 0x3cu : 0x40u) << (8 * (i % 4));
-  }
-  return make_uint2(out[0], out[1]);
+  constexpr uint32_t kHigh = 0x00403c00u;
+  return make_uint2(__builtin_amdgcn_perm(0u, kHigh, grid & 0x0f0f0f0fu),
+                    __builtin_amdgcn_perm(0u, kHigh, (grid >> 4) & 0x0f0f0f0fu));
 }
 
 /* Eight IQ1 weights as four half2: the codebook values n from their high
@@ -115,10 +112,10 @@ struct Format<19> {
   static constexpr int kBytes = 50, kWords = 13;
   static constexpr bool kAligned = false;
   struct Tables {
-    uint2 grid[NGRID_IQ1S];
+    uint32_t grid[NGRID_IQ1S];
   };
   static __device__ void fill(Tables& t, int tid) {
-    for (int i = tid; i < NGRID_IQ1S; i += 256) t.grid[i] = iq1_high_bytes(iq1s_grid_gpu[i]);
+    for (int i = tid; i < NGRID_IQ1S; i += 256) t.grid[i] = iq1s_grid_gpu[i];
   }
   struct Sub {
     uint32_t qs, qh, affine;
@@ -132,7 +129,7 @@ struct Format<19> {
   }
   static __device__ __forceinline__ void decode(const Sub& s, int l, const Tables& t, uint32_t* out) {
     const uint32_t idx = ((s.qs >> (8 * l)) & 0xffu) | (((s.qh >> (3 * l)) & 7u) << 8);
-    iq1_decode8(t.grid[idx], s.affine, out);
+    iq1_decode8(iq1_high_bytes(t.grid[idx]), s.affine, out);
   }
 };
 
@@ -163,7 +160,7 @@ struct Format<29> {
     const uint32_t idx = ((s.qs >> (8 * l)) & 0xffu) | ((nibble & 7u) << 8);
     const float scale = s.d * static_cast<float>(2 * ((s.sc >> (3 * (l / 2))) & 7) + 1);
     const float delta = (nibble & 8u) ? -1.0f - IQ1M_DELTA : -1.0f + IQ1M_DELTA;
-    iq1_decode8(t.grid[idx], pack_half2(scale, scale * delta), out);
+    iq1_decode8(iq1_high_bytes(t.grid[idx]), pack_half2(scale, scale * delta), out);
   }
 };
 
@@ -171,31 +168,51 @@ struct Format<29> {
  * bytes (group l's eight magnitudes) and a word of four 7-bit sign indices
  * plus a 4-bit scale: weight = d (1/2 + s) / 4 * +-magnitude. The LDS tables
  * hold each codebook entry as eight FP16 magnitudes and each sign index as
- * its eight FP16 sign bits. */
+ * eight bytes (8 B, half the random-row LDS traffic of FP16 masks; one
+ * v_perm per word places them on the sign bits). */
 template <>
 struct Format<16> {
   static constexpr int kBytes = 66, kWords = 17;
   static constexpr bool kAligned = false;
   struct Tables {
     uint4 grid[256];
-    uint4 signs[128];
+    uint2 signs[128];
   };
-  static __device__ void fill(Tables& t, int tid) {
-    for (int i = tid; i < 256 + 128; i += 256) {
+  /* Codebook entries as eight FP16 magnitudes. */
+  static __device__ void fill_grid(uint4* grid, const uint64_t* src, int n, int tid) {
+    for (int i = tid; i < n; i += 256) {
+      const uint64_t g = src[i];
       uint32_t w[4];
 #pragma unroll
-      for (int j = 0; j < 4; ++j) {
-        if (i < 256) {
-          const uint64_t g = iq2xxs_grid[i];
-          w[j] = pack_half2(static_cast<float>((g >> (16 * j)) & 0xffu),
-                            static_cast<float>((g >> (16 * j + 8)) & 0xffu));
-        } else {
-          const uint32_t signs = ksigns_iq2xs[i - 256];
-          w[j] = ((signs >> (2 * j)) & 1u) << 15 | ((signs >> (2 * j + 1)) & 1u) << 31;
-        }
-      }
-      (i < 256 ? t.grid[i] : t.signs[i - 256]) = make_uint4(w[0], w[1], w[2], w[3]);
+      for (int j = 0; j < 4; ++j)
+        w[j] = pack_half2(static_cast<float>((g >> (16 * j)) & 0xffu), static_cast<float>((g >> (16 * j + 8)) & 0xffu));
+      grid[i] = make_uint4(w[0], w[1], w[2], w[3]);
     }
+  }
+  /* Sign indices as eight bytes, 0x80 for a negative weight. */
+  static __device__ void fill_signs(uint2* signs, int tid) {
+    if (tid < 128) {
+      const uint32_t bits = ksigns_iq2xs[tid];
+      uint32_t w[2] = {0, 0};
+#pragma unroll
+      for (int j = 0; j < 8; ++j) w[j / 4] |= ((bits >> j) & 1u) << (8 * (j % 4) + 7);
+      signs[tid] = make_uint2(w[0], w[1]);
+    }
+  }
+  static __device__ void fill(Tables& t, int tid) {
+    fill_grid(t.grid, iq2xxs_grid, 256, tid);
+    fill_signs(t.signs, tid);
+  }
+  /* Eight weights: the magnitudes with sign bytes 2 i and 2 i + 1 moved onto
+   * the sign bits of word i's halves, times the half2 scale. */
+  static __device__ __forceinline__ void apply(uint4 g, uint2 sg, uint32_t scale_bits, uint32_t* out) {
+    const half2_t scale = __builtin_bit_cast(half2_t, scale_bits);
+    const uint32_t gw[4] = {g.x ^ __builtin_amdgcn_perm(sg.y, sg.x, 0x010c000cu),
+                            g.y ^ __builtin_amdgcn_perm(sg.y, sg.x, 0x030c020cu),
+                            g.z ^ __builtin_amdgcn_perm(sg.y, sg.x, 0x050c040cu),
+                            g.w ^ __builtin_amdgcn_perm(sg.y, sg.x, 0x070c060cu)};
+#pragma unroll
+    for (int i = 0; i < 4; ++i) out[i] = __builtin_bit_cast(uint32_t, __builtin_bit_cast(half2_t, gw[i]) * scale);
   }
   struct Sub {
     uint32_t idx, aux;
@@ -208,11 +225,7 @@ struct Format<16> {
   }
   static __device__ __forceinline__ void decode(const Sub& s, int l, const Tables& t, uint32_t* out) {
     const uint4 g = t.grid[(s.idx >> (8 * l)) & 0xffu];
-    const uint4 sg = t.signs[(s.aux >> (7 * l)) & 127u];
-    const half2_t scale = __builtin_bit_cast(half2_t, s.scale);
-    const uint32_t gw[4] = {g.x ^ sg.x, g.y ^ sg.y, g.z ^ sg.z, g.w ^ sg.w};
-#pragma unroll
-    for (int i = 0; i < 4; ++i) out[i] = __builtin_bit_cast(uint32_t, __builtin_bit_cast(half2_t, gw[i]) * scale);
+    apply(g, t.signs[(s.aux >> (7 * l)) & 127u], s.scale, out);
   }
 };
 
@@ -225,24 +238,11 @@ struct Format<17> {
   static constexpr bool kAligned = false;
   struct Tables {
     uint4 grid[512];
-    uint4 signs[128];
+    uint2 signs[128];
   };
   static __device__ void fill(Tables& t, int tid) {
-    for (int i = tid; i < 512 + 128; i += 256) {
-      uint32_t w[4];
-#pragma unroll
-      for (int j = 0; j < 4; ++j) {
-        if (i < 512) {
-          const uint64_t g = iq2xs_grid[i];
-          w[j] = pack_half2(static_cast<float>((g >> (16 * j)) & 0xffu),
-                            static_cast<float>((g >> (16 * j + 8)) & 0xffu));
-        } else {
-          const uint32_t signs = ksigns_iq2xs[i - 512];
-          w[j] = ((signs >> (2 * j)) & 1u) << 15 | ((signs >> (2 * j + 1)) & 1u) << 31;
-        }
-      }
-      (i < 512 ? t.grid[i] : t.signs[i - 512]) = make_uint4(w[0], w[1], w[2], w[3]);
-    }
+    Format<16>::fill_grid(t.grid, iq2xs_grid, 512, tid);
+    Format<16>::fill_signs(t.signs, tid);
   }
   struct Sub {
     uint32_t qs[2], scale[2];
@@ -259,11 +259,7 @@ struct Format<17> {
   static __device__ __forceinline__ void decode(const Sub& s, int l, const Tables& t, uint32_t* out) {
     const uint32_t q = (s.qs[l / 2] >> (16 * (l % 2))) & 0xffffu;
     const uint4 g = t.grid[q & 511u];
-    const uint4 sg = t.signs[q >> 9];
-    const half2_t scale = __builtin_bit_cast(half2_t, s.scale[l / 2]);
-    const uint32_t gw[4] = {g.x ^ sg.x, g.y ^ sg.y, g.z ^ sg.z, g.w ^ sg.w};
-#pragma unroll
-    for (int i = 0; i < 4; ++i) out[i] = __builtin_bit_cast(uint32_t, __builtin_bit_cast(half2_t, gw[i]) * scale);
+    Format<16>::apply(g, t.signs[q >> 9], s.scale[l / 2], out);
   }
 };
 
