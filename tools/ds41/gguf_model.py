@@ -1,4 +1,4 @@
-"""Memory-mapped access to a split DeepSeek V4.1 GGUF and its separate Engram file."""
+"""Memory-mapped access to a split DeepSeek V4.1 GGUF; its last shard is the shared Engram file."""
 from __future__ import annotations
 
 import mmap
@@ -49,9 +49,9 @@ class Tensor:
 
 
 class Model:
-    """All shards of one build plus the Engram tables named by ``deepseek41.engram.file``."""
+    """All shards of one build, the Engram table (``per_layer_token_embd.weight``) included."""
 
-    def __init__(self, first_shard: Path, engram: Path | None = None):
+    def __init__(self, first_shard: Path):
         first_shard = Path(first_shard)
         match = re.match(r"(.*)-00001-of-(\d{5})\.gguf$", first_shard.name)
         paths = [first_shard]
@@ -62,6 +62,9 @@ class Model:
         self.kv = self.files[0].kv
         if self.kv.get("general.architecture") != "deepseek41":
             raise ValueError(f"{first_shard}: architecture {self.kv.get('general.architecture')!r} is not deepseek41")
+        if "deepseek41.engram.file" in self.kv:
+            raise ValueError(f"{first_shard}: the layout published before 2026-10-27; convert it with "
+                             "convert_ds41_upstream.py from the model repository")
         self.tensors: dict[str, Tensor] = {}
         for source in self.files:
             for record in source.info["tensors"]:
@@ -69,13 +72,6 @@ class Model:
         expected = self.kv.get("split.tensors.count")
         if expected is not None and expected != len(self.tensors):
             raise ValueError(f"expected {expected} tensors across shards, found {len(self.tensors)}")
-        if self.kv.get("deepseek41.engram.present"):
-            engram = Path(engram) if engram else first_shard.with_name(self.kv["deepseek41.engram.file"])
-            table = TensorFile(engram)
-            if table.kv.get("deepseek41.engram.source") != self.kv.get("deepseek41.engram.source"):
-                raise ValueError(f"{engram}: Engram source does not match the backbone")
-            for record in table.info["tensors"]:
-                self.tensors[record["name"]] = Tensor(table, record)
 
     def __getitem__(self, name: str) -> Tensor:
         return self.tensors[name]

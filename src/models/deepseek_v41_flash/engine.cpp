@@ -278,10 +278,8 @@ bool Model::ExactPrefill() const {
   return ds41_engine_exact_prefill(engine_);
 }
 
-bool Model::SetImageRoutingBias(std::span<const float> bias,
-                                std::string* error_msg) {
-  if (bias.size() != std::size_t{DS41_N_LAYER} * DS41_N_EXPERT ||
-      ds41_engine_set_image_bias(engine_, bias.data()) != 0) {
+bool Model::EnableImageRouting(std::string* error_msg) {
+  if (ds41_engine_enable_image_routing(engine_) != 0) {
     AssignError(error_msg, "cannot set the DeepSeek V4.1 image routing bias");
     return false;
   }

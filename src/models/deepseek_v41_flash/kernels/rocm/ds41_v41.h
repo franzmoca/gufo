@@ -262,9 +262,10 @@ int ds41_v41_swiglu(const float* gate, const float* up, const float* weight, flo
                     uint32_t n, float limit);
 
 /* Engram: kv[t] holds hc keys then one value of `dim` each. Per copy c,
- * h[t, c] += sigmoid(signed_sqrt(dot)) * value. q/k are BF16 [hc, dim]. */
-int ds41_v41_engram_gate(float* h, const float* kv, const uint16_t* q, const uint16_t* k, uint32_t hc,
-                         uint32_t dim, float eps, uint32_t n);
+ * h[t, c] += sigmoid(signed_sqrt(dot)) * value. weight is F32 [hc, dim], the
+ * checkpoint's q * k. */
+int ds41_v41_engram_gate(float* h, const float* kv, const float* weight, uint32_t hc, uint32_t dim, float eps,
+                         uint32_t n);
 
 /* DSpark block attention: each of the n_block queries attends the ring rows
  * of positions first .. first + n_ring - 1 (slot pos % window) and all

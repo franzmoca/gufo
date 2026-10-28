@@ -15,13 +15,10 @@
 namespace gufo::models::deepseek_v41_flash::vision {
 
 inline constexpr std::uint32_t kEmbeddingWidth = 5120;
-inline constexpr std::uint32_t kRoutingLayers = 40;
-inline constexpr std::uint32_t kRoutingExperts = 384;
 
 /// DeepSeek V4.1 Flash vision tower and aligner on the GPU (official
 /// inference/vision.py): BF16 weights, activations rounded to BF16 where the
-/// official BF16 forward rounds them, FP32 accumulation. The sidecar also
-/// carries each MoE gate's image routing bias (tools/ds41/vision_sidecar.py).
+/// official BF16 forward rounds them, FP32 accumulation.
 class Encoder {
 public:
   /// Device rows [rows][kEmbeddingWidth] of FP32 language-model input
@@ -53,8 +50,6 @@ public:
 
   /// SHA-256 of the whole sidecar, computed once.
   [[nodiscard]] const std::string& identity() const;
-  /// The MoE gates' image routing bias, [kRoutingLayers][kRoutingExperts].
-  [[nodiscard]] std::span<const float> RoutingBias() const;
   [[nodiscard]] std::size_t ResidentBytes() const noexcept;
   /// Upload the weights now instead of in the first Encode. Repeated calls
   /// keep the existing upload.

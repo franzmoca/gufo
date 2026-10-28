@@ -3,13 +3,13 @@
 
 A torch port of the official inference/image_processor.py (plan_image_grid,
 load_image), vision.py (ViT, Aligner) and Transformer.merge_image_embeddings,
-in the official BF16 default dtype, reading the weights from the vision
-sidecar (tools/ds41/vision_sidecar.py). Writes the padded RGB8 pixels and the
+in the official BF16 default dtype, reading the weights from the mmproj.
+Writes the padded RGB8 pixels and the
 image span's input embeddings, [IMAGE_START] + ([IMAGE] * w + [IMAGE_NEW_LINE])
 * h + [IMAGE_END], as FP32 rows; with --compare, reports how closely a GPU
 span (ds41_vision_probe --output) matches.
 
-    python3 -I tools/ds41/vision_reference.py --mmproj SIDECAR.gguf \\
+    python3 -I tools/ds41/vision_reference.py --mmproj MMPROJ.gguf \\
         --image IMAGE --out DIR [--compare SPAN.f32]
 """
 from __future__ import annotations

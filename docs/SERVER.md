@@ -292,17 +292,14 @@ The startup line `event=vision_prepared` reports `resident_bytes`,
 encoding scratch is still allocated per image.
 
 DeepSeek V4.1 Flash loads its vision tower only with an explicit `--mmproj`
-(0.90 GiB; never discovered). The sidecar is unsloth's `mmproj-BF16.gguf`
-extended with each MoE gate's image routing bias, which the ISTA GGUFs and the
-mmproj files lack. `tools/ds41/vision_sidecar.py` reads the bias from the
-official checkpoint (`--checkpoint DIR` for a local copy, otherwise HTTP range
-requests):
+(0.90 GiB; never discovered): ISTA-DASLab's
+`mmproj-DeepSeek-V4.1-Flash-1017-BF16.gguf` or unsloth's `mmproj-BF16.gguf`.
+Image positions select experts with each MoE gate's image routing bias, which
+the backbone GGUF carries:
 
 ```sh
-python3 -I tools/ds41/vision_sidecar.py --mmproj mmproj-BF16.gguf \
-  --out mmproj-ds41-BF16.gguf
-gufo serve llm --model DeepSeek-V4.1-Flash-1017-GSQ-RCO-IQ1_M-00001-of-00004.gguf \
-  --mmproj mmproj-ds41-BF16.gguf
+gufo serve llm --model DeepSeek-V4.1-Flash-1017-GSQ-RCO-IQ1_M-00001-of-00006.gguf \
+  --mmproj mmproj-DeepSeek-V4.1-Flash-1017-BF16.gguf
 ```
 
 Image input works over HTTP; `gufo prompt` does not take images for this
