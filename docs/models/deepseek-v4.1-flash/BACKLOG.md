@@ -138,8 +138,10 @@ the routed rows' closing expand before Engram layers and replay boundaries
 8 ms; the shared-expert SwiGLU 5 ms and the routed input's FP16 conversion
 4 ms. Between chunks the host still dequantizes the 2,048 embedding rows and
 uploads them with a synchronous pageable copy (5–8 ms with the GPU idle);
-a pinned buffer or a device gather would hide most of it. `q_b` and the
-Engram projection still read FP32 inputs (E23: ~4% per launch with FP16).
+a pinned buffer or a device gather would hide most of it. The Engram
+projection (25,600 × 6,144, 17.8 ms per call, two per chunk) still reads
+FP32 rows; FP16 rows from the host reader would save 0.8 ms per call and
+half the upload, and the shared down projection's SwiGLU input 0.04 ms.
 
 ### 8. Small-batch evaluation cost
 
