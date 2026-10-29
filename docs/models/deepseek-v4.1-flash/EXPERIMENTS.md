@@ -1753,3 +1753,16 @@ per-slot launch. Single-user DSpark greedy trace: drafter expert kernels
 39.93 / 39.76 tok/s (the first run's timing-based widths drafted 211
 instead of 220 rows), seeded sampled 40.26 / 40.19 -> 40.24 / 40.32 with
 identical text, drafts and acceptance.
+
+### E49: collapse-norm folded into the hyper-connection mix (rejected)
+
+With shifted mHC the collapse before attention and the FFN reads the
+previous pre-mix, so it does not wait for the mix that precedes it: an
+extra 256-thread block of `hc_mix_small_kernel` can run it, reproducing the
+1,024-thread kernel's reduction (thread x holds threads x + 256 q, which
+share its lane; bit-identical at 1-16 tokens). Standalone with warm caches
+the pair took 12.9 -> 8.4 us at one token. In the model it lost: the
+collapse block (128 loads per thread) outlasted the mix with cold weights,
+the fused kernel took 22.1 us against 13.7 + 4.3, and VGPRs rose 48 -> 72.
+Single-user AR 24.35 -> 24.22 tok/s (collapse block first; 24.12 with it
+last).
