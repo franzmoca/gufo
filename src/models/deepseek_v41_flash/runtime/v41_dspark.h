@@ -25,6 +25,8 @@ struct ds41_dspark_sampler;
 
 inline constexpr uint32_t DS41_DSPARK_STAGES = 3;
 inline constexpr uint32_t DS41_DSPARK_BLOCK = 5;
+/* Sessions one ds41_dspark_draft_batch takes. */
+inline constexpr uint32_t DS41_DSPARK_MAX_BATCH = 8;
 inline constexpr uint32_t DS41_DSPARK_TARGET_LAYERS = 3;
 inline constexpr uint32_t DS41_DSPARK_EXPERTS = 128;
 inline constexpr uint32_t DS41_DSPARK_EXPERTS_USED = 3;
@@ -93,13 +95,32 @@ bool ds41_dspark_inject(ds41_dspark_state* s, uint32_t pos0, uint32_t rows);
 bool ds41_dspark_draft(ds41_dspark_state* s, int anchor, int32_t* drafts, uint32_t count,
                        const ds41_dspark_sampler* sampler = nullptr, float* top = nullptr,
                        float* confidence = nullptr);
+/* One session's ds41_dspark_draft in a batch; `drafted` reports whether it
+ * drafted (false where ds41_dspark_draft would return false). */
+struct ds41_dspark_draft_request {
+  ds41_dspark_state* state = nullptr;
+  int anchor = -1;
+  int32_t* drafts = nullptr;
+  uint32_t count = 0;
+  const ds41_dspark_sampler* sampler = nullptr;
+  float* top = nullptr;
+  float* confidence = nullptr;
+  bool drafted = false;
+};
+/* ds41_dspark_draft for up to DS41_DSPARK_MAX_BATCH distinct sessions of one
+ * engine in one drafter pass: each session's drafts, proposals, top and
+ * confidence are those of its own ds41_dspark_draft. False on a device
+ * failure. */
+bool ds41_dspark_draft_batch(ds41_dspark_draft_request* requests, uint32_t n);
 /* The session's last sampled draft's device proposals, one per drafted row. */
 const ds41_v41_proposal* ds41_dspark_proposals(const ds41_dspark_state* s);
 /* Whether the drafter has a usable learned acceptance head; without one,
  * ds41_dspark_draft writes -1 confidences. */
 bool ds41_dspark_has_confidence(const ds41_dspark_model* m);
-/* The last draft's target-head logits before the Markov bias, DS41_DSPARK_BLOCK rows (tests). */
-bool ds41_dspark_copy_logits(const ds41_engine* engine, float* out);
+/* The last draft's target-head logits before the Markov bias (tests): rows
+ * row0 .. row0 + rows - 1, the drafted rows of a batch's sessions in turn. */
+bool ds41_dspark_copy_logits(const ds41_engine* engine, float* out, uint32_t row0 = 0,
+                             uint32_t rows = DS41_DSPARK_BLOCK);
 /* Ring bytes, and their copy to/from host memory (with ring_start/end). */
 uint64_t ds41_dspark_state_bytes(const ds41_dspark_state* s);
 bool ds41_dspark_state_save(const ds41_dspark_state* s, std::vector<uint8_t>* out);

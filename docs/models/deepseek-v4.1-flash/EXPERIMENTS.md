@@ -1628,3 +1628,26 @@ launches): 6 rows 2,553 -> 2,147 us, 8 rows 2,918 -> 2,190 (1 row 1,920).
 Server, IQ1_M, distinct prompts: C8 62.69 / 62.70 -> 63.08 / 63.00 tok/s,
 C4 unchanged; single-user DSpark (256 tokens) 39.25 / 39.04 -> 40.36 /
 39.32, AR unchanged. All completions and token traces identical.
+
+### E42: one drafter pass for concurrent DSpark sessions (retained)
+
+Each drafting session in a joint step ran its own drafter forward. The
+drafter now runs once over all drafting sessions' blocks (up to 8 x 5
+rows): projections, router, routed and shared experts and the output head
+take every row together, while attention, ring state, Markov selection
+and sampling stay per session. Q4_K projections take the multi-token GEMV
+in chunks of at most 16 rows, the hyperconnection mix in chunks of 16 (its
+small kernel ends at 16 rows; wider launches change rounding), and each
+row keeps its single-session arithmetic. A load probe compares a session
+drafted first and last in a two-session batch against its solo draft:
+head logits and drafts are identical. Seeded sampled traces at C1/C4/C8
+and the greedy single-user trace are unchanged.
+
+Server, IQ1_M, distinct prompts, DSpark (two alternations): C4 51.66 /
+51.14 -> 54.13 / 53.13 tok/s (+4.3%), C8 54.67 / 55.84 -> 60.06 / 58.50
+(+7.3%); C1 unchanged. AR remains ahead at C4/C8 (55.5 / 63.0).
+Functional `batch` and `sampling-defaults` (DSpark, four sessions) pass
+with outputs matching the previous build. C4 `batch` timings stay
+inconclusive: the request that waits behind its peer's prefill swaps
+between runs, and two unchanged-build controls flag as many timings as
+the candidate (no request is flagged in every candidate run but no control).

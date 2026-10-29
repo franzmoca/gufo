@@ -392,6 +392,10 @@ struct Cycle {
   size_t copy_start = 0;
   bool plain = false;        // the drafter's policy chose a plain step
   bool speculative = false;  // the block's rows wait in spec_logits for the commit
+  /* A drafter pass this cycle waits for (draft), its learned width policy
+   * and the drafter's outputs. */
+  bool draft = false, learned = false;
+  float top[DS41_DSPARK_BLOCK] = {}, confidence[DS41_DSPARK_BLOCK] = {};
   std::chrono::steady_clock::time_point t0, t1;
 };
 
@@ -457,32 +461,51 @@ int prepare(Cycle& c, char* error, size_t capacity) {
       }
     }
   }
-  /* Without a copy, the drafter (if any) proposes the block. */
+  /* Without a copy, the drafter (if any) proposes the block: c.tail rows,
+   * drafted with the batch's other cycles (finish_draft). */
   c.tail = c.copied;
   if (c.copied == 0 && s->dspark) {
     /* Sampled proposals keep their own width: the draws a block consumes
      * depend on it, and seeded outputs must not depend on the batch. */
     const uint32_t limit =
         std::min({(uint32_t)DS41_DSPARK_BLOCK, item.max_draft_tokens, room, c.stochastic ? UINT32_MAX : c.cap});
-    const bool learned = !c.stochastic && ds41_dspark_has_confidence(s->engine->dspark);
-    c.tail = c.stochastic || learned ? limit : draft_width(s, limit);
+    c.learned = !c.stochastic && ds41_dspark_has_confidence(s->engine->dspark);
+    c.tail = c.stochastic || c.learned ? limit : draft_width(s, limit);
     c.plain = c.tail == 0;
-    float top[DS41_DSPARK_BLOCK] = {}, confidence[DS41_DSPARK_BLOCK] = {};
-    if (c.tail != 0 &&
-        (ds41_dspark_state_end(s->dspark) != c.first ||
-         !ds41_dspark_draft(s->dspark, anchor, c.block + 1, c.tail, sampler, top, learned ? confidence : nullptr)))
-      c.tail = 0;
-    if (learned) {
-      c.tail = best_width(s, confidence, c.tail);
-    } else if (c.stochastic) {
-      uint32_t confident = 0;
-      while (confident < c.tail && top[confident] >= ds41_session::kConfidentDraft) ++confident;
-      c.tail = confident;
-    }
+    if (c.tail != 0 && ds41_dspark_state_end(s->dspark) != c.first) c.tail = 0;
+    c.draft = c.tail != 0;
+  }
+  c.m = c.tail + 1;
+  if (!c.draft) c.t1 = std::chrono::steady_clock::now();
+  return 0;
+}
+
+/* The drafter's request for a cycle that drafts. */
+ds41_dspark_draft_request draft_request(Cycle& c) {
+  ds41_dspark_draft_request r;
+  r.state = c.item->session->dspark;
+  r.anchor = c.block[0];
+  r.drafts = c.block + 1;
+  r.count = c.tail;
+  r.sampler = c.item->sampler;
+  r.top = c.top;
+  r.confidence = c.learned ? c.confidence : nullptr;
+  return r;
+}
+
+/* After the drafter pass: the cycle's width from its drafts. */
+void finish_draft(Cycle& c, bool drafted) {
+  ds41_session* s = c.item->session;
+  if (!drafted) c.tail = 0;
+  if (c.learned) {
+    c.tail = best_width(s, c.confidence, c.tail);
+  } else if (c.stochastic) {
+    uint32_t confident = 0;
+    while (confident < c.tail && c.top[confident] >= ds41_session::kConfidentDraft) ++confident;
+    c.tail = confident;
   }
   c.m = c.tail + 1;
   c.t1 = std::chrono::steady_clock::now();
-  return 0;
 }
 
 /* Evaluates one cycle's block on its own. */
@@ -655,6 +678,19 @@ int ds41_sessions_dspark_step_batch(const ds41_session_dspark_batch_item* items,
     }
     if (prepare(c, error, capacity) != 0) return 1;
     if (!c.done) taken += c.m;
+  }
+  /* One drafter pass for the drafting cycles (their full widths count
+   * against the later cycles' shares above). */
+  std::vector<Cycle*> drafting;
+  for (Cycle& c : cycles)
+    if (!c.done && c.draft) drafting.push_back(&c);
+  for (size_t i = 0; i < drafting.size(); i += DS41_DSPARK_MAX_BATCH) {
+    const uint32_t n = (uint32_t)std::min<size_t>(DS41_DSPARK_MAX_BATCH, drafting.size() - i);
+    ds41_dspark_draft_request requests[DS41_DSPARK_MAX_BATCH];
+    for (uint32_t j = 0; j < n; j++) requests[j] = draft_request(*drafting[i + j]);
+    /* A failed pass leaves its cycles plain, as a failed draft did. */
+    const bool ok = ds41_dspark_draft_batch(requests, n);
+    for (uint32_t j = 0; j < n; j++) finish_draft(*drafting[i + j], ok && requests[j].drafted);
   }
   Cycle* group[DS41_DECODER_MAX_JOINT];
   uint32_t grouped = 0, rows = 0;
