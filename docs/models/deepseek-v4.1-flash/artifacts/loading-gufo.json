@@ -14,15 +14,15 @@
       "gpuName": "AMD Radeon 8060S Graphics",
       "gpuPciId": "1002:1586",
       "kernelRelease": "7.2.11-200.fc44.x86_64",
-      "memoryTotalBytes": 133610627072,
+      "memoryTotalBytes": 133616861184,
       "memoryType": "LPDDR5X (Unified)",
       "rocmVersion": "7.2.3",
       "schemaVersion": "1.0.0"
     },
-    "fingerprintId": "c417b34339ea58710ce198ef0ee6f27a76d44bf6b893aa8a6e0c76d606b0d302",
+    "fingerprintId": "d19fe457f2791c2dec2f2de6cd1c21607a1d51ce20c58e0d686637de1fa0d0a1",
     "schemaVersion": "1.0.0"
   },
-  "measuredOn": "2026-10-26",
+  "measuredOn": "2026-10-29",
   "mode": "dspark",
   "model": {
     "id": "DeepSeek-V4.1-Flash-1017",
@@ -35,8 +35,14 @@
   "referenceName": "reference",
   "rows": {
     "default": {
-      "command": "gufo serve --port 52503 --sessions 1 llm --model DeepSeek-V4.1-Flash-1017-GSQ-RCO-IQ1_M-00001-of-00004.gguf --context 262144 --served-model-name bench --think off --max-pending-per-client 8 --speculative dspark --dspark-model DeepSeek-V4.1-Flash-1017-DSpark-draft-Q2K-Q4K.gguf",
-      "ready_s": 18.626,
+      "command": "gufo serve --port 52927 --sessions 1 llm --model DeepSeek-V4.1-Flash-1017-GSQ-RCO-IQ1_M-00001-of-00006.gguf --context 262144 --served-model-name bench --think off --max-pending-per-client 8 --speculative dspark --dspark-model DeepSeek-V4.1-Flash-1017-DSpark-draft-Q2K-Q4K.gguf",
+      "ready_s": 19.672,
+      "ready_s_sd": null,
+      "samples": 1
+    },
+    "iq2xxs": {
+      "command": "gufo serve --port 50725 --sessions 1 llm --model DeepSeek-V4.1-Flash-1017-GSQ-RCO-IQ2_XXS-00001-of-00006.gguf --context 262144 --served-model-name bench --think off --max-pending-per-client 8 --stream-experts --speculative dspark --dspark-model DeepSeek-V4.1-Flash-1017-DSpark-draft-Q2K-Q4K.gguf",
+      "ready_s": 22.514,
       "ready_s_sd": null,
       "samples": 1
     }
@@ -47,12 +53,12 @@
       "gufo",
       "serve",
       "--port",
-      "52503",
+      "50725",
       "--sessions",
       "1",
       "llm",
       "--model",
-      "DeepSeek-V4.1-Flash-1017-GSQ-RCO-IQ1_M-00001-of-00004.gguf",
+      "DeepSeek-V4.1-Flash-1017-GSQ-RCO-IQ2_XXS-00001-of-00006.gguf",
       "--context",
       "262144",
       "--served-model-name",
@@ -61,6 +67,7 @@
       "off",
       "--max-pending-per-client",
       "8",
+      "--stream-experts",
       "--speculative",
       "dspark",
       "--dspark-model",
@@ -70,7 +77,7 @@
   "source": {
     "buildMode": "nix-release",
     "dirty": true,
-    "revision": "9e30a186e1674242f9f1c6f206c59927932ad868"
+    "revision": "cd8b92c18ac999f9b87d85f83be431aed0d572f1"
   },
   "table": "loading",
   "target": "gufo"

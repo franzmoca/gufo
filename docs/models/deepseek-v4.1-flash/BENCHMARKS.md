@@ -1,52 +1,25 @@
 # DeepSeek V4.1 Flash benchmarks
 
-AMD Strix Halo `gfx1151`, 128 GB unified memory. ISTA-DASLab GSQ-RCO `IQ1_M`
-backbone resident (112.43 GiB), `IQ4_NL` Engram tables read from disk, Lucebox
-Q2_K/Q4_K DSpark drafter. Gufo only: no other engine runs DeepSeek V4.1 Flash
-on this machine, so the tables carry no reference columns. HTTP through
-`gufo serve`, greedy, thinking off; measured October 26, 2026 on the production
-`nix build` of `73bdd03b`. Prefill rates are the server's own prompt timings
-for real chat text; see [native prefill](#native-prefill) for `gufo bench`.
-[Method and quality](QUALITY.md) · [Experiments](EXPERIMENTS.md)
+AMD Strix Halo `gfx1151`, 128 GB unified memory. ISTA-DASLab GSQ-RCO
+backbones: `IQ1_M` resident (first table of each section) and `IQ2_XXS` with
+streamed routed experts (second table, after the rule); `IQ4_NL` Engram
+tables read from disk, Lucebox Q2_K/Q4_K DSpark drafter. Gufo only: no other
+engine runs DeepSeek V4.1 Flash on this machine, so the tables carry no
+reference columns. HTTP through `gufo serve`, greedy, thinking off; measured
+October 29, 2026 on the production `nix build` of `cd8b92c1`. Prefill rates
+are the server's own prompt timings for real chat text; see
+[native prefill](#native-prefill) for `gufo bench`.
+[Method and quality](QUALITY.md) · [Experiments](EXPERIMENTS.md) ·
+[Streaming design](STREAMING.md)
 
-## Streamed IQ2_XXS, preliminary native measurements
-
-On the same 128 GB Strix Halo with a Samsung 990 PRO, the 128.75 GiB
-`IQ2_XXS` backbone streams its routed experts and keeps the dense weights
-resident. These are native `gufo bench` pp2048/tg128 measurements with
-synthetic tokens and no drafter, not the HTTP prose workload in the tables
-below. Each process starts with empty expert slots; before each run only the
-model and Engram files' clean page-cache entries are evicted. The tg test
-follows the prefill test in the same process, so its expert cache is partly
-warm. Each range contains the two retained matched runs.
-
-| Reader and kernels | Prefill tok/s | Decode tok/s |
-| --- | ---: | ---: |
-| One buffered reader | 144.5–144.8 | 5.77–6.01 |
-| Four buffered readers | 172.6–172.9 | 6.80–7.16 |
-| Four direct readers | 213.8–214.1 | 8.97–8.98 |
-| Direct reads, IQ2_XS FP16 kernel and shared-expert overlap | 219.6–219.8 | 9.02 |
-
-For a repeated identical prompt and generation in the same process, the
-second prefill reached 937 tok/s and the second decode 13.44 tok/s with both
-buffered and direct reads. Real sessions, cache history and speculative
-acceptance can give different rates. The raw comparisons and filesystem
-controls are in [EXPERIMENTS.md](EXPERIMENTS.md#storage-reads); the design and
-other engines' configurations are in [STREAMING.md](STREAMING.md).
-
-With the built-in ranking preloading 10,240 experts at startup and the
-overlapped staging of October 27 (per-expert weight tables, split hit/miss
-launches, per-reader upload streams), the same pp2048/tg128 measurements with
-the histogram sidecar reach 664.7–669.6 tok/s prefill and 14.99–15.08 tok/s
-decode without a drafter, and 17.92–17.96 tok/s with the Lucebox DSpark
-drafter (same 110 drafted / 71 accepted and the same token hash as the
-previous build; the DSpark prefill runs spread 494–628 tok/s with the page
-cache, so the AR prefill pair is the retained number). The retuned expert
-decode kernels of October 27 raise decode to 16.57–16.94 tok/s without a
-drafter and 19.34 tok/s with DSpark, bit-identical outputs, with resident
-`IQ1_M` tg128 at 23.86–24.38 tok/s (control 23.36–23.55). At the native
-1M-context budget the streamed model peaks at 106.4 GiB RSS with 8.7 GiB
-still available.
+**Streamed `IQ2_XXS`.** The 128.75 GiB model keeps its dense weights
+resident and reads routed experts from a Samsung 990 PRO (PCIe 4.0 NVMe)
+into an expert cache that fills the free memory (`--stream-experts`,
+defaults). Its speed depends on the disk: a slower SSD costs time on every
+expert-cache miss, and misses are most frequent in a new server's first
+requests. Each depth sweep and concurrency level starts a
+new server, so these rows include that warm-up; a server that has served
+similar text decodes faster.
 
 ## Single user, autoregressive
 
@@ -55,17 +28,34 @@ pp2048 / tg128; depth is the cached prefix in tokens.
 <!-- bench:single-ar -->
 | DS4.1 Flash IQ1_M AR<br>Depth (tokens) | Gufo pp (tok/s) | Gufo tg (tok/s) |
 | ---: | ---: | ---: |
-| 0 | 1076.84 | 23.33 |
-| 4,096 | 973.70 | 23.24 |
-| 8,192 | 948.54 | 23.16 |
-| 12,288 | 1030.20 | 23.09 |
-| 16,384 | 1022.83 | 22.93 |
-| 32,768 | 992.66 | 22.85 |
-| 65,536 | 830.18 | 22.34 |
-| 131,072 | 699.62 | 21.69 |
+| 0 | 1228.01 | 24.54 |
+| 4,096 | 1214.32 | 24.43 |
+| 8,192 | 1185.75 | 24.32 |
+| 12,288 | 1195.52 | 24.25 |
+| 16,384 | 1187.16 | 24.15 |
+| 32,768 | 1176.89 | 24.05 |
+| 65,536 | 1048.32 | 23.68 |
+| 131,072 | 1044.74 | 23.14 |
 <!-- /bench -->
 
 ![Single user, autoregressive](artifacts/charts/single-ar.svg)
+
+---
+
+<!-- bench:single-ar-iq2xxs -->
+| DS4.1 Flash IQ2_XXS streamed AR<br>Depth (tokens) | Gufo pp (tok/s) | Gufo tg (tok/s) |
+| ---: | ---: | ---: |
+| 0 | 1063.71 | 20.81 |
+| 4,096 | 1088.58 | 22.15 |
+| 8,192 | 1083.61 | 22.23 |
+| 12,288 | 1091.82 | 22.43 |
+| 16,384 | 1032.80 | 22.72 |
+| 32,768 | 898.79 | 22.60 |
+| 65,536 | 912.15 | 21.17 |
+| 131,072 | 991.65 | 21.65 |
+<!-- /bench -->
+
+![Single user, autoregressive](artifacts/charts/single-ar-iq2xxs.svg)
 
 ## Single user, DSpark
 
@@ -77,17 +67,34 @@ at a time. Greedy output is identical to plain decoding.
 <!-- bench:single-dspark -->
 | DS4.1 Flash IQ1_M DSpark<br>Depth (tokens) | Gufo pp (tok/s) | Gufo tg mixed (tok/s) | Gufo tg repetitive (tok/s) |
 | ---: | ---: | ---: | ---: |
-| 0 | 1108.62 | 28.03 | 65.29 |
-| 4,096 | 1045.03 | 26.82 | 61.48 |
-| 8,192 | 1034.19 | 27.91 | 61.65 |
-| 12,288 | 1025.00 | 29.44 | 61.15 |
-| 16,384 | 959.91 | 27.62 | 58.61 |
-| 32,768 | 981.24 | 30.08 | 59.58 |
-| 65,536 | 840.16 | 24.84 | 56.24 |
-| 131,072 | 751.62 | 27.22 | 55.19 |
+| 0 | 1221.84 | 30.66 | 73.62 |
+| 4,096 | 1177.91 | 32.47 | 70.95 |
+| 8,192 | 1170.21 | 31.85 | 72.27 |
+| 12,288 | 1169.49 | 30.39 | 70.41 |
+| 16,384 | 1114.13 | 30.07 | 66.62 |
+| 32,768 | 1055.01 | 29.80 | 66.63 |
+| 65,536 | 1042.21 | 26.76 | 64.51 |
+| 131,072 | 1030.02 | 29.88 | 64.35 |
 <!-- /bench -->
 
 ![Single user, DSpark](artifacts/charts/single-dspark.svg)
+
+---
+
+<!-- bench:single-dspark-iq2xxs -->
+| DS4.1 Flash IQ2_XXS streamed DSpark<br>Depth (tokens) | Gufo pp (tok/s) | Gufo tg mixed (tok/s) | Gufo tg repetitive (tok/s) |
+| ---: | ---: | ---: | ---: |
+| 0 | 990.59 | 23.25 | 54.86 |
+| 4,096 | 1066.41 | 24.17 | 61.87 |
+| 8,192 | 1048.14 | 27.74 | 64.41 |
+| 12,288 | 958.21 | 26.56 | 62.47 |
+| 16,384 | 946.82 | 28.79 | 54.14 |
+| 32,768 | 998.75 | 27.67 | 63.70 |
+| 65,536 | 907.80 | 22.07 | 58.65 |
+| 131,072 | 974.73 | 24.90 | 59.59 |
+<!-- /bench -->
+
+![Single user, DSpark](artifacts/charts/single-dspark-iq2xxs.svg)
 
 ## Multiple users, autoregressive
 
@@ -99,35 +106,60 @@ in one forward; every output matches its isolated C1 reference.
 <!-- bench:multi-ar -->
 | DS4.1 Flash IQ1_M AR<br>Users | Gufo AR (tok/s) |
 | ---: | ---: |
-| 1 | 23.78 |
-| 2 | 39.61 |
-| 4 | 60.35 |
-| 6 | 71.33 |
-| 8 | 78.46 |
+| 1 | 24.21 |
+| 2 | 41.33 |
+| 4 | 64.48 |
+| 6 | 76.55 |
+| 8 | 86.05 |
 <!-- /bench -->
 
 ![Multiple users, autoregressive](artifacts/charts/multi-ar.svg)
+
+---
+
+<!-- bench:multi-ar-iq2xxs -->
+| DS4.1 Flash IQ2_XXS streamed AR<br>Users | Gufo AR (tok/s) |
+| ---: | ---: |
+| 1 | 20.22 |
+| 2 | 35.61 |
+| 4 | 59.42 |
+| 6 | 72.05 |
+| 8 | 81.52 |
+<!-- /bench -->
+
+![Multiple users, autoregressive](artifacts/charts/multi-ar-iq2xxs.svg)
 
 ## Multiple users, DSpark
 
 Same pp2048 mixed/repetitive prompts as single-user d0, tg128, context 4096
 per user. Concurrent sessions verify their blocks jointly in batches of up to
-16 rows; every output matches its isolated AR reference. These rows predate
-E27, which fits the sessions' drafts into one 16-row pass (C4–C8 mixed +21–29%
-on this workload, see [EXPERIMENTS.md](EXPERIMENTS.md)); they will be
-refreshed with the card.
+16 rows; every output matches its isolated AR reference.
 
 <!-- bench:multi-dspark -->
 | DS4.1 Flash IQ1_M DSpark<br>Users | Gufo mixed (tok/s) | Gufo repetitive (tok/s) |
 | ---: | ---: | ---: |
-| 1 | 27.63 | 65.40 |
-| 2 | 40.49 | 69.41 |
-| 4 | 51.22 | 71.82 |
-| 6 | 52.42 | 71.53 |
-| 8 | 55.93 | 71.21 |
+| 1 | 31.03 | 73.57 |
+| 2 | 45.00 | 86.97 |
+| 4 | 58.30 | 92.64 |
+| 6 | 64.94 | 106.55 |
+| 8 | 73.77 | 97.32 |
 <!-- /bench -->
 
 ![Multiple users, DSpark](artifacts/charts/multi-dspark.svg)
+
+---
+
+<!-- bench:multi-dspark-iq2xxs -->
+| DS4.1 Flash IQ2_XXS streamed DSpark<br>Users | Gufo mixed (tok/s) | Gufo repetitive (tok/s) |
+| ---: | ---: | ---: |
+| 1 | 22.70 | 53.00 |
+| 2 | 36.09 | 73.41 |
+| 4 | 51.63 | 84.76 |
+| 6 | 59.04 | 97.04 |
+| 8 | 69.13 | 94.42 |
+<!-- /bench -->
+
+![Multiple users, DSpark](artifacts/charts/multi-dspark-iq2xxs.svg)
 
 ## Prompt lookup
 
@@ -172,12 +204,15 @@ answered in 4.1 s. The sidecar adds 0.90 GiB of device memory.
 ## Loading time
 
 C1, capacity 262144, DSpark. Page cache dropped before the start, to HTTP
-readiness; the weights upload from the files directly.
+readiness; the weights upload from the files directly. Streamed `IQ2_XXS`
+uploads its dense weights and preloads its built-in ranking of frequently
+routed experts before it is ready.
 
 <!-- bench:loading -->
-| DS4.1 Flash IQ1_M<br>Target | Gufo ready (s) |
+| DS4.1 Flash<br>Target | Gufo ready (s) |
 | --- | ---: |
-| IQ1_M | 18.63 |
+| IQ1_M | 19.67 |
+| IQ2_XXS streamed | 22.51 |
 <!-- /bench -->
 
 ![Loading time](artifacts/charts/loading.svg)
@@ -185,17 +220,30 @@ readiness; the weights upload from the files directly.
 ## Memory occupation
 
 Capacity 262144 tokens, AR. Device total minus free, which on this unified
-memory APU tracks system-wide use (3.02 GiB idle before the server starts);
-it includes the prompt cache's retained checkpoints.
+memory APU tracks system-wide use (3.01 GiB idle before the server starts);
+it includes the prompt cache's retained checkpoints. Streamed `IQ2_XXS`
+fills the memory left after its 4 GiB reserve with its expert cache, so its
+row shows the cache's size, not a requirement.
 
 <!-- bench:memory -->
 | DS4.1 Flash IQ1_M AR<br>Workload | Gufo GiB |
 | --- | ---: |
-| pp2048 + tg128 | 119.36 |
-| 16K prefix, pp4096 + tg128 | 119.51 |
+| pp2048 + tg128 | 119.57 |
+| 16K prefix, pp4096 + tg128 | 119.72 |
 <!-- /bench -->
 
 ![Memory occupation](artifacts/charts/memory.svg)
+
+---
+
+<!-- bench:memory-iq2xxs -->
+| DS4.1 Flash IQ2_XXS streamed AR<br>Workload | Gufo GiB |
+| --- | ---: |
+| pp2048 + tg128 | 120.87 |
+| 16K prefix, pp4096 + tg128 | 121.00 |
+<!-- /bench -->
+
+![Memory occupation](artifacts/charts/memory-iq2xxs.svg)
 
 Resident components (`ds41_load_probe --upload` and `gufo serve`):
 
