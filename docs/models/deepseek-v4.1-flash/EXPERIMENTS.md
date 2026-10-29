@@ -1501,3 +1501,19 @@ twice the activation LDS, two staged quarters per thread), `ds41_mmq_bench
 
 Even the most skewed layer gains under 1% on IQ1_M gate+up, so 128-slot
 tiles only for the large experts have no room either.
+
+### E36: fused SwiGLU and Q8_0 pairs through the split GEMV (retained)
+
+BACKLOG item 2: the task-major split GEMV now also takes the shared
+expert's fused gate/up + SwiGLU (Q5_K, both matrices in one pass, their
+slice results side by side) and the Q8_0 `q_a`/KV pair (rows from 1,280 on
+come from the second matrix; the split needs it at a multiple of 32 rows).
+Below 6 (SwiGLU) and 4 (pair) tokens the lane layout stays, as fast or
+faster there. Per launch at the model's shapes (µs, 1 / 2 / 4 / 6 / 8 / 12
+/ 16 tokens): SwiGLU 79 / 84 / 93 / 106 / 125 / 179 / 210 →
+79 / 84 / 93 / 100 / 106 / 134 / 155; pair 47 / 48 / 53 / 59 / 73 / 92 /
+105 → 47 / 48 / 50 / 53 / 59 / 74 / 83. `ds41_mmq_typed_test` keeps every
+token bit-identical to single-token launches (a 320-row pair case now
+covers the split). `--joint-check 4` (16 rows): joint pass 177.7 / 177.4 →
+174.4 / 175.5 ms, 164 rows bit-identical. `gufo bench` DSpark tg128
+(about 8 verification rows) moved within noise.
