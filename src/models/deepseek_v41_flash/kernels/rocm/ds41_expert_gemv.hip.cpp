@@ -440,7 +440,7 @@ __device__ __forceinline__ const uint64_t* Iq2GridTable() {
 /* Row sums of one expert matrix; with kSwiGLU, a wave takes the same rows
  * of the gate (w) and up (w_up) matrices and stores
  * route_w[slot] * silu(min(gate, limit)) * clamp(up, +-limit). */
-template <int kType, int U, bool kSwiGLU, bool kTable>
+template <int kType, int U, bool kSwiGLU, bool kTable, bool kPair = false>
 __global__ void __launch_bounds__(kWave* kWaves)
     expert_gemv_kernel(const uint8_t* __restrict__ w, const uint8_t* __restrict__ w_up,
                        const uint8_t* const* __restrict__ w_table, const uint8_t* const* __restrict__ w_up_table,
@@ -448,7 +448,10 @@ __global__ void __launch_bounds__(kWave* kWaves)
                        float* __restrict__ y, uint32_t m, uint32_t k, const int32_t* __restrict__ ids,
                        uint64_t expert_bytes, uint32_t x_slot, uint32_t slots_per_x, int zero_dropped) {
   using F = Format<kType>;
-  constexpr uint32_t kRows = 4 * kWaves;
+  /* kPair: a lane group takes rows r and r + 4 of one matrix through the
+   * fused pass's second stream, so x loads once for both. */
+  constexpr bool kTwo = kSwiGLU || kPair;
+  constexpr uint32_t kRows = (kPair ? 8 : 4) * kWaves;
   __shared__ uint32_t grid[F::kIq1Grid ? NGRID_IQ1S : 1];
   __shared__ uint32_t iq2_words[F::kIq2Words ? F::kIq2Words : 1];
   __shared__ uint8_t iq2_signs[F::kIq2Words ? 128 : 1];
@@ -478,7 +481,7 @@ __global__ void __launch_bounds__(kWave* kWaves)
   const int lane = threadIdx.x % kWave;
   const int wave = threadIdx.x / kWave;
   const int t = lane % 8;
-  const uint32_t row = blockIdx.x * kRows + wave * 4 + lane / 8;
+  const uint32_t row = blockIdx.x * kRows + wave * (kPair ? 8 : 4) + lane / 8;
   if (row >= m) return;
   const float* xt = x + (uint64_t)(blockIdx.y / slots_per_x) * x_slot + 32 * t;
   const uint32_t blocks_per_row = k / 256;
@@ -487,23 +490,24 @@ __global__ void __launch_bounds__(kWave* kWaves)
   const uint64_t row_bytes = (uint64_t)row * blocks_per_row * F::kBlockBytes;
   const uint64_t offset = (uint64_t)id * expert_bytes + row_bytes;
   const uint8_t* base = kTable ? w_table[id] + row_bytes : w + offset;
-  const uint8_t* base_up =
-      kSwiGLU ? (kTable ? w_up_table[id] + row_bytes : w_up + offset) : nullptr;
+  const uint8_t* base_up = kSwiGLU ? (kTable ? w_up_table[id] + row_bytes : w_up + offset)
+                           : kPair  ? base + (uint64_t)4 * blocks_per_row * F::kBlockBytes
+                                    : nullptr;
   float acc = 0.0f;
   float acc_up = 0.0f;
   uint32_t blk = 0;
   for (; blk + U <= blocks_per_row; blk += U) {
     typename F::Raw raw[U];
-    typename F::Raw raw_up[kSwiGLU ? U : 1];
+    typename F::Raw raw_up[kTwo ? U : 1];
 #pragma unroll
     for (int u = 0; u < U; ++u) {
       raw[u] = F::Load(base + (uint64_t)(blk + u) * F::kBlockBytes, t);
-      if constexpr (kSwiGLU) raw_up[u] = F::Load(base_up + (uint64_t)(blk + u) * F::kBlockBytes, t);
+      if constexpr (kTwo) raw_up[u] = F::Load(base_up + (uint64_t)(blk + u) * F::kBlockBytes, t);
     }
 #pragma unroll
     for (int u = 0; u < U; ++u) {
       const float* xb = xt + (blk + u) * 256;
-      if constexpr (kSwiGLU && F::kXReg) {
+      if constexpr (kTwo && F::kXReg) {
         /* x loads once per block, feeding the gate and up accumulations. */
         float xr[32];
 #pragma unroll
@@ -518,16 +522,16 @@ __global__ void __launch_bounds__(kWave* kWaves)
         acc_up = F::AccR(acc_up, raw_up[u], t, xr, grid, tab);
       } else {
         acc = F::Acc(acc, raw[u], t, xb, grid, tab);
-        if constexpr (kSwiGLU) acc_up = F::Acc(acc_up, raw_up[u], t, xb, grid, tab);
+        if constexpr (kTwo) acc_up = F::Acc(acc_up, raw_up[u], t, xb, grid, tab);
       }
     }
   }
   for (; blk < blocks_per_row; ++blk) {
     const typename F::Raw raw = F::Load(base + (uint64_t)blk * F::kBlockBytes, t);
     typename F::Raw raw_up{};
-    if constexpr (kSwiGLU) raw_up = F::Load(base_up + (uint64_t)blk * F::kBlockBytes, t);
+    if constexpr (kTwo) raw_up = F::Load(base_up + (uint64_t)blk * F::kBlockBytes, t);
     const float* xb = xt + blk * 256;
-    if constexpr (kSwiGLU && F::kXReg) {
+    if constexpr (kTwo && F::kXReg) {
       float xr[32];
 #pragma unroll
       for (int i = 0; i < 32; i += 4) {
@@ -541,16 +545,19 @@ __global__ void __launch_bounds__(kWave* kWaves)
       acc_up = F::AccR(acc_up, raw_up, t, xr, grid, tab);
     } else {
       acc = F::Acc(acc, raw, t, xb, grid, tab);
-      if constexpr (kSwiGLU) acc_up = F::Acc(acc_up, raw_up, t, xb, grid, tab);
+      if constexpr (kTwo) acc_up = F::Acc(acc_up, raw_up, t, xb, grid, tab);
     }
   }
 #pragma unroll
   for (int offset = 4; offset > 0; offset >>= 1) {
     acc += __shfl_xor(acc, offset, kWave);
-    if constexpr (kSwiGLU) acc_up += __shfl_xor(acc_up, offset, kWave);
+    if constexpr (kTwo) acc_up += __shfl_xor(acc_up, offset, kWave);
   }
   if (t != 0) return;
-  if constexpr (kSwiGLU) {
+  if constexpr (kPair) {
+    y[row] = acc;
+    y[row + 4] = acc_up;
+  } else if constexpr (kSwiGLU) {
     float g = acc;
     float u = acc_up;
     if (limit > 0.0f) {
@@ -842,12 +849,13 @@ int dispatch_group(const void* w, const void* w_up, const void* const* w_table, 
                                            x, x_slot, slots_per_x, y, m, k, zero_dropped, 3);
 }
 
-template <int kType, int U, bool kTable>
+template <int kType, int U, bool kTable, bool kPair = false>
 int launch(const void* w, const void* w_up, const void* const* w_table, const void* const* w_up_table,
            const float* route_w, float limit, uint64_t expert_bytes, const int32_t* ids, uint32_t slots,
            const float* x, uint32_t x_slot, uint32_t slots_per_x, float* y, uint32_t m, uint32_t k,
            int zero_dropped) {
-  constexpr uint32_t kRows = 4 * kWaves;
+  if (kPair && (w_up || m % (8 * kWaves) != 0)) return 1;
+  constexpr uint32_t kRows = (kPair ? 8 : 4) * kWaves;
   const dim3 blocks((m + kRows - 1) / kRows, slots);
   const auto* table = reinterpret_cast<const uint8_t* const*>(w_table);
   const auto* table_up = reinterpret_cast<const uint8_t* const*>(w_up_table);
@@ -856,7 +864,7 @@ int launch(const void* w, const void* w_up, const void* const* w_table, const vo
         static_cast<const uint8_t*>(w), static_cast<const uint8_t*>(w_up), table, table_up, route_w, limit, x, y, m,
         k, ids, expert_bytes, x_slot, slots_per_x, zero_dropped);
   else
-    expert_gemv_kernel<kType, U, false, kTable><<<blocks, kWave * kWaves>>>(
+    expert_gemv_kernel<kType, U, false, kTable, kPair><<<blocks, kWave * kWaves>>>(
             static_cast<const uint8_t*>(w), nullptr, table, table_up, nullptr, 0.0f, x, y, m, k, ids, expert_bytes, x_slot,
             slots_per_x, zero_dropped);
   const hipError_t err = hipGetLastError();
@@ -870,6 +878,17 @@ int launch(const void* w, const void* w_up, const void* const* w_table, const vo
            const float* route_w, float limit, uint64_t expert_bytes, const int32_t* ids, uint32_t slots,
            const float* x, uint32_t x_slot, uint32_t slots_per_x, float* y, uint32_t m, uint32_t k,
            int zero_dropped) {
+  /* IQ1 down projections pair rows, loading x once for two (IQ1_S 86 -> 78
+   * us, IQ1_M 92 -> 87); the IQ2 formats lose with it. */
+  if constexpr (kType == 19 || kType == 29) {
+    if (!w_up && m % (8 * kWaves) == 0) {
+      if (w_table)
+        return launch<kType, U, true, true>(w, w_up, w_table, w_up_table, route_w, limit, expert_bytes, ids, slots, x,
+                                            x_slot, slots_per_x, y, m, k, zero_dropped);
+      return launch<kType, U, false, true>(w, w_up, w_table, w_up_table, route_w, limit, expert_bytes, ids, slots, x,
+                                           x_slot, slots_per_x, y, m, k, zero_dropped);
+    }
+  }
   if (w_table)
     return launch<kType, U, true>(w, w_up, w_table, w_up_table, route_w, limit, expert_bytes, ids, slots, x, x_slot,
                                   slots_per_x, y, m, k, zero_dropped);
