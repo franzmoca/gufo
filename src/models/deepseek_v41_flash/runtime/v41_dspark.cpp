@@ -68,6 +68,7 @@ struct ds41_dspark_scratch {
   float *qa = nullptr, *qr = nullptr, *q = nullptr, *kv = nullptr, *kvn = nullptr, *o = nullptr, *oa = nullptr;
   float *attn_out = nullptr, *router = nullptr, *route_w = nullptr;
   int32_t* route_ids = nullptr;
+  int32_t* expert_plan = nullptr;  // ds41_v41_expert_plan groups of a block's slots
   float *g = nullptr, *u = nullptr, *mid = nullptr, *down = nullptr, *sg = nullptr, *su = nullptr, *sm = nullptr;
   float *sd = nullptr, *logits = nullptr, *markov_x = nullptr, *bias = nullptr;
   int32_t *tokens = nullptr, *candidate_ids = nullptr;
@@ -155,7 +156,8 @@ bool alloc_scratch(ds41_dspark_scratch& s) {
          s.alloc(&s.kvn, r * kHeadDim) && s.alloc(&s.o, r * kQDim) &&
          s.alloc(&s.oa, r * DS41_N_OUT_GROUP * DS41_N_LORA_O) && s.alloc(&s.attn_out, r * kDim) &&
          s.alloc(&s.router, r * DS41_DSPARK_EXPERTS) && s.alloc(&s.route_w, r * kRouted) &&
-         s.alloc(&s.route_ids, r * kRouted) && s.alloc(&s.g, r * kRouted * DS41_N_FF_EXP) &&
+         s.alloc(&s.route_ids, r * kRouted) &&
+         s.alloc(&s.expert_plan, DS41_V41_EXPERT_PLAN_INTS(DS41_V41_EXPERT_PLAN_COLS * kRouted)) && s.alloc(&s.g, r * kRouted * DS41_N_FF_EXP) &&
          s.alloc(&s.u, r * kRouted * DS41_N_FF_EXP) && s.alloc(&s.mid, r * kRouted * DS41_N_FF_EXP) &&
          s.alloc(&s.down, r * kRouted * kDim) && s.alloc(&s.sg, r * DS41_N_FF_EXP) &&
          s.alloc(&s.su, r * DS41_N_FF_EXP) && s.alloc(&s.sm, r * DS41_N_FF_EXP) && s.alloc(&s.sd, r * kDim) &&
@@ -249,7 +251,18 @@ bool moe(const ds41_dspark_stage& st, ds41_dspark_scratch& s, uint32_t n) {
       ds41_v41_route(s.router, f32(st.probs_b), s.route_ids, s.route_w, DS41_DSPARK_EXPERTS, kRouted,
                      DS41_EXPERT_WEIGHT_SCALE, n))
     return false;
-  if (gemv_experts) {
+  /* Up to 16 rows read each routed expert once for all its slots. */
+  const uint32_t slots = n * kRouted;
+  if (gemv_experts && n > 1 && n <= DS41_V41_EXPERT_PLAN_COLS) {
+    if (ds41_v41_expert_plan(s.route_ids, slots, s.expert_plan) ||
+        ds41_v41_gemv_experts_grouped(gu_type, st.gate_exps.p, st.up_exps.p, s.route_w, kSwigluLimit, gu_bytes,
+                                      s.expert_plan, slots, n, s.xn, kDim, kRouted, s.mid, DS41_N_FF_EXP, kDim,
+                                      nullptr, nullptr, 1) ||
+        ds41_v41_gemv_experts_grouped((int)st.down_exps.type, st.down_exps.p, nullptr, nullptr, 0.0f, down_bytes,
+                                      s.expert_plan, slots, n, s.mid, DS41_N_FF_EXP, 1, s.down, kDim,
+                                      DS41_N_FF_EXP, nullptr, nullptr, 1))
+      return false;
+  } else if (gemv_experts) {
     if (ds41_v41_gemv_experts_swiglu(gu_type, st.gate_exps.p, st.up_exps.p, gu_bytes, s.route_ids, n * kRouted,
                                      s.xn, kDim, kRouted, s.route_w, kSwigluLimit, s.mid, DS41_N_FF_EXP, kDim,
                                      nullptr, nullptr, 1) ||
