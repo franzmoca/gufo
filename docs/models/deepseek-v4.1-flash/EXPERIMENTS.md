@@ -1551,3 +1551,33 @@ distinct`, AR, 128 tokens, two alternations): C8 57.04 / 56.97 → 60.71 /
 columns keep one launch). All 22 completions identical between builds in
 both alternations. Single-user DSpark greedy (256 tokens): 38.13 / 37.92 →
 38.41 / 38.08 tok/s, token trace identical.
+
+### E38: whole-row prefetch for grouped down projections (retained)
+
+The routed down projection's 2,304-value rows are 9 blocks; the grouped
+kernel loaded 2 blocks ahead (1 for IQ1_M) and read IQ1_S at ~142 GB/s for
+every group width. Its grouped launches now load a whole row at once
+(`UDown = 9` for IQ1_S, IQ1_M and IQ2_XXS). The single-slot kernel kept its
+depth: 9 blocks ahead slowed it from 85 to 242 µs (IQ1_S). IQ1_S's fused
+SwiGLU also splits 3- and 4-column launches by group size (E37's two passes),
+which loses 1-5% for the other types and projections and stays with them on
+one launch. Slots keep their arithmetic (`ds41.mmq_typed` and the standalone
+check against the ungrouped launch are bit-identical).
+
+Standalone with production flags, 384-expert matrices in managed memory,
+best of 3 (µs), distinct routing, rows 2 / 4 / 8:
+
+| Type | down before | after | gate+up before | after |
+| --- | --- | --- | --- | --- |
+| IQ1_S | 192 / 383 / 746 | 152 / 297 / 582 | 288 / 686 / 1079 | 288 / 561 / 1080 |
+| IQ1_M | 174 / 334 / 680 | 172 / 327 / 655 | - | - |
+| IQ2_XXS | 186 / 365 / 713 | 186 / 354 / 702 | - | - |
+
+With every row on the same experts the down projection improves too
+(IQ1_S 4 rows 212 → 170 µs); IQ1_S's split SwiGLU costs 2% there.
+
+Server, IQ1_M, distinct prompts (AR, 128 tokens, two alternations): C4
+51.84 / 51.91 → 54.97 / 54.87 tok/s (+5.9%), C8 60.60 / 60.56 → 61.83 /
+61.82 (+2.0%). All 22 completions identical between builds in both
+alternations. Single-user DSpark greedy (256 tokens): 38.29 / 38.56 →
+38.41 / 39.69 tok/s, token trace identical.
