@@ -163,16 +163,13 @@ invasive). Gemma's generation-prompt lookahead is the local precedent. The
 policy is shared (`src/cache/retention.cpp`), so other models' reuse must
 hold.
 
-### 10. Concurrent drafter forwards
+### 10. Batch-level draft width
 
-Concurrent sessions now share one 16-row verification (E27), but each
-drafting session still runs its own drafter forward, one after another
-(~9 ms each, ~34 ms per step at C4). With different prompts per user DSpark
-matches AR at C4 (47.6 against 46.0 tok/s) and trails it at C8 (51.5
-against 54.6). One drafter forward over all drafting sessions, as Gemma's
-`DraftChains` does, removes most of that time. E27's v3 (a batch plan that
-skips drafting when it does not pay) is the fallback if batching is not
-possible.
+Concurrent DSpark sessions share one drafter pass (E42) and one 16-row
+verification (E27), but with different prompts per user DSpark still
+trails AR at C4 (53.6 against 55.5 tok/s) and C8 (59.3 against 63.0).
+E27's v3, a batch plan that narrows or skips drafting when the joint step
+does not pay, is the next lever.
 
 ### 13. Route bias toward cached experts (quality-affecting, optional)
 

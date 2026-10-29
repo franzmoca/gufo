@@ -536,6 +536,96 @@ int DsparkDump(ds41_engine* engine, const std::vector<int>& prompt,
       "draft prefixes/logits 1..5 identical; output tails untouched; invalid "
       "widths "
       "rejected\n");
+  /* The same draft in batches: sessions over shorter prefixes of the prompt
+   * draft with it, before and after it, and its drafts and head logits must
+   * match its own draft's. */
+  constexpr uint32_t kOthers = 1;
+  std::fprintf(stderr, "batched draft check\n");
+  std::vector<ds41_decoder*> od;
+  std::vector<ds41_dspark_state*> os;
+  std::vector<int> anchors;
+  for (uint32_t o = 0; o < kOthers; o++) {
+    const uint32_t len = (uint32_t)prompt.size() - 3 * (o + 1);
+    ds41_decoder* dd = ds41_decoder_create(engine, len + 16);
+    ds41_dspark_state* ss = dd ? ds41_dspark_state_create(engine, dd) : nullptr;
+    if (!ss) {
+      std::fprintf(stderr, "batched draft: session %u not created\n", o);
+      return 1;
+    }
+    for (uint32_t at = 0; at < len;) {
+      const uint32_t n = std::min<uint32_t>(cap, len - at);
+      uint32_t fp = 0, fr = 0;
+      const int rc = ds41_decoder_eval(dd, prompt.data() + at, n, logits.data(),
+                                       1, nullptr, nullptr);
+      if (rc != 0 || !ds41_decoder_features(dd, &fp, &fr)) {
+        std::fprintf(stderr,
+                     "batched draft: session %u prefill failed (rc %d, at %u "
+                     "of %u)\n",
+                     o, rc, at, len);
+        return 1;
+      }
+      ds41_dspark_state_reset(ss, fp);
+      if (!ds41_dspark_inject(ss, fp, fr)) {
+        std::fprintf(stderr, "batched draft: session %u inject failed\n", o);
+        return 1;
+      }
+      at += n;
+    }
+    od.push_back(dd);
+    os.push_back(ss);
+    anchors.push_back(Argmax(logits.data(), logits.size()));
+  }
+  for (const bool last : {false, true}) {
+    ds41_dspark_draft_request req[kOthers + 1];
+    int32_t out[kOthers + 1][DS41_DSPARK_BLOCK];
+    const uint32_t mine = last ? kOthers : 0;
+    for (uint32_t i = 0, o = 0; i <= kOthers; i++) {
+      req[i].drafts = out[i];
+      req[i].count = DS41_DSPARK_BLOCK;
+      if (i == mine) {
+        req[i].state = s;
+        req[i].anchor = anchor;
+      } else {
+        req[i].state = os[o];
+        req[i].anchor = anchors[o++];
+      }
+    }
+    if (!ds41_dspark_draft_batch(req, kOthers + 1) || !req[mine].drafted) {
+      std::fprintf(stderr, "batched draft failed\n");
+      return 1;
+    }
+    std::vector<float> batch_logits(draft_logits.size());
+    if (!ds41_dspark_copy_logits(engine, batch_logits.data(),
+                                 mine * DS41_DSPARK_BLOCK, DS41_DSPARK_BLOCK)) {
+      std::fprintf(stderr, "batched draft logits not copied\n");
+      return 1;
+    }
+    for (uint32_t r = 0; r < DS41_DSPARK_BLOCK; r++) {
+      const std::size_t v = logits.size();
+      if (std::memcmp(batch_logits.data() + r * v, draft_logits.data() + r * v,
+                      v * sizeof(float)) != 0) {
+        float diff = 0.0f;
+        for (std::size_t i = 0; i < v; i++)
+          diff = std::max(diff, std::fabs(batch_logits[r * v + i] -
+                                          draft_logits[r * v + i]));
+        std::fprintf(stderr,
+                     "batched draft (%s) head logits differ at row %u: max "
+                     "%g\n",
+                     last ? "last" : "first", r, diff);
+        return 1;
+      }
+      if (out[mine][r] != drafts[r]) {
+        std::fprintf(stderr, "batched draft (%s) differs at slot %u\n",
+                     last ? "last" : "first", r);
+        return 1;
+      }
+    }
+  }
+  std::printf("batched drafts (first and last of %u) identical\n", kOthers + 1);
+  for (ds41_dspark_state* ss : os)
+    ds41_dspark_state_destroy(ss);
+  for (ds41_decoder* dd : od)
+    ds41_decoder_destroy(dd);
   ds41_dspark_state_destroy(s);
   ds41_decoder_destroy(d);
   return 0;
