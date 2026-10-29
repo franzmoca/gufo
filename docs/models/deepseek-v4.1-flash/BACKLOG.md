@@ -118,9 +118,9 @@ causal partial blocks and the emitted row order.
 21 ms per 2,048-token layer, of which the weight decode and its permutes are
 ~4.4 ms and the matrix-core skeleton (block fields, fragment reads,
 products) ~14.7 ms, at 39 of the measured 55 TFLOP/s. A decoded fragment
-feeds at most four 16-slot tiles, on average 2.3. 128-slot tiles for large
-experts would cut decode work by 13–24% but need 128 accumulator VGPRs and
-twice the activation LDS. IQ2_XXS's 16-byte random codebook reads still
+feeds at most four 16-slot tiles, on average 2.3. 128-slot tiles cut the
+recorded prefill layers' weight decodes by 19% but ran no faster (E35).
+IQ2_XXS's 16-byte random codebook reads still
 cost ~2 ms; 8-byte state entries would need ~12 more VALU per decode.
 IQ2_S stays on MMQ.
 
