@@ -1705,3 +1705,26 @@ Server, IQ1_M, distinct prompts, tok/s (two alternations):
 | DSpark C8 | 54.53 / 53.82 | 58.14 / 55.43 |
 | AR C1 | 31.54 / 31.55 | 31.56 / 31.56 |
 | DSpark C1 | 43.59 / 43.79 | 43.58 / 43.53 |
+
+### E46: paired rows for single-token IQ1 down projections (retained)
+
+The single-token routed down projection (5,120 rows of 2,304) read IQ1_S at
+160 GB/s against 198 for the fused gate+up pass, which loads each x block
+once into registers for its two matrices; down lanes reloaded 128 B of x
+per 50 B weight block. A lane group of the down pass now takes rows r and
+r + 4 through that second stream (64 rows per block) and stores both sums.
+Each row keeps its FMA order (standalone outputs bit-identical). Standalone
+with production flags, 384 managed-memory experts, six distinct slots (µs):
+
+| Down projection | before | paired |
+| --- | --- | --- |
+| IQ1_S | 86.0 | 78.0 |
+| IQ1_M | 91.9 | 86.6 |
+| IQ2_S | 112.4 | 113.0 (not used) |
+| IQ2_XXS | 94.7 | 102.6 (not used) |
+
+More rows per block with one codebook staging (2-8 tiles of 32 rows) was
+slower for every type but IQ1_S down (86 -> 82 µs) and is not used.
+Single-user AR greedy (`gufo prompt`, 256 tokens, three alternations):
+24.25 / 24.24 / 24.24 -> 24.37 / 24.36 / 24.36 tok/s (+0.5%); DSpark
+39.44 / 39.64 -> 39.66 / 39.58. Generated text identical in every run.
