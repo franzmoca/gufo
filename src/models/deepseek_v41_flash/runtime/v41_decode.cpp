@@ -50,6 +50,9 @@ constexpr uint32_t kIndexCodeBytes = DS41_N_INDEXER_HEAD_DIM / 2, kIndexScaleByt
 constexpr uint64_t kEngramRowsPerThread = 4;
 constexpr float kSwigluLimit = DS41_SWIGLU_CLAMP_EXP;
 constexpr uint32_t kDecodeRows = 8;  // see ds41_decoder::decode_rows
+/* Prompt batches need no single-token arithmetic: from 7 rows the batched
+ * paths are faster (7 rows 108 -> 99 ms, 8 rows 122 -> 99 ms). */
+constexpr uint32_t kPromptDecodeRows = 6;
 /* Batches of at least this many tokens predict the next layer's routed
  * experts and prefetch them during this layer's compute (the store's
  * adoption gate mirrors this threshold); single tokens predict for decode. */
@@ -1794,7 +1797,10 @@ int ds41_decoder_eval_prompt(ds41_decoder* d, const int* tokens, uint32_t n, uin
                              uint32_t logit_rows) {
   if (!d || prompt_end < d->pos + n) return 1;
   const uint32_t keep_from = prompt_end > DS41_DECODER_REPLAY_ROWS ? prompt_end - DS41_DECODER_REPLAY_ROWS : 0;
-  return eval_rows(d, tokens, n, keep_from, logits, logit_rows, nullptr, nullptr);
+  d->decode_rows = kPromptDecodeRows;
+  const int rc = eval_rows(d, tokens, n, keep_from, logits, logit_rows, nullptr, nullptr);
+  d->decode_rows = kDecodeRows;
+  return rc;
 }
 
 int ds41_decoder_eval_speculative(ds41_decoder* d, const int* tokens, uint32_t n, float* logits) {

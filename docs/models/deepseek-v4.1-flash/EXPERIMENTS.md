@@ -1448,3 +1448,15 @@ alternating, tok/s): the first test 45.21 / 43.71 → 46.77 / 46.66
 (+3.5% / +6.7%), the second 50.52 / 52.26 → 49.73 / 50.82, warm tests 3–6
 53.9 / 53.2 → 53.6 / 53.0 (within noise). The gain is while the cache still
 misses; charging rows their own miss bytes stays open.
+
+### E32: batched paths for 7- and 8-token prompt batches (retained)
+
+BACKLOG item 8: small prompt batches were not monotonic in cost, because up
+to 8 rows took the per-row decode paths (`gufo bench`, IQ1_M, ms): pp6 91.3,
+pp7 107.7, pp8 121.8, pp9 ~98 once warm. Prompt evaluations need no
+single-token arithmetic, so they now switch to the batched paths above 6
+rows; decode, verification and joint evaluations keep theirs. pp7 107.7 →
+~99, pp8 121.8 → ~99 ms (five repetitions, two alternations), pp2–pp6 and
+pp9+ unchanged. The first batch of a new batched shape in a process costs
+~20% more once, in both builds. `cache-edits` and `long-context` pass; the
+DS4.1 GPU tests pass.
