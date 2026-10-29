@@ -1517,3 +1517,37 @@ token bit-identical to single-token launches (a 320-row pair case now
 covers the split). `--joint-check 4` (16 rows): joint pass 177.7 / 177.4 →
 174.4 / 175.5 ms, 164 rows bit-identical. `gufo bench` DSpark tg128
 (about 8 verification rows) moved within noise.
+
+### E37: grouped expert launches split by group size (retained)
+
+A C8 AR server trace with distinct prompts (2026-10-29) put 70.7 of a
+step's 114.9 ms of kernels in the grouped expert GEMV: 8 rows route to ~42
+distinct experts per layer, so almost every group holds one or two slots,
+yet the launch took the 8-column kernel, whose fused SwiGLU spilled (540
+bytes of scratch for IQ1_S, 444 for IQ2_XXS, 256 VGPRs) and read at 172 and
+148 GB/s. Launches for more than 4 columns now run in two passes over the
+same plan: groups of one or two slots take the 2-column kernel, larger
+groups the 16-column one (no spills) for the fused SwiGLU, or the 6/8-column
+kernel for the down projection and IQ1_M's SwiGLU, which do not spill.
+Every slot keeps the ungrouped kernel's arithmetic (`ds41_mmq_typed_test`
+and a standalone check against the ungrouped launch are bit-identical).
+
+Standalone, 384-expert matrices in managed memory, best of 3 (µs), distinct
+routing, rows 6 / 8 / 16:
+
+| Type | gate+up before | after | down before | after |
+| --- | --- | --- | --- | --- |
+| IQ1_S | 987 / 1286 / 2622 | 847 / 1095 / 2085 | 563 / 675 / 1564 | 562 / 750 / 1432 |
+| IQ2_XXS | 1200 / 1826 / 2983 | 1027 / 1343 / 2560 | 571 / 804 / 1846 | 575 / 759 / 1454 |
+| IQ1_M | 1073 / 1401 / 3263 | 1077 / 1401 / 2630 | 717 / 1068 / 2025 | 579 / 773 / 1492 |
+
+With every row on the same experts (lockstep prompts) the IQ1_S and
+IQ2_XXS gate+up at 8 rows take 2,209 → 598 and 2,108 → 568 µs; the second
+launch costs the other shapes 2-7%.
+
+Server, IQ1_M, distinct prompts (`serving_bench.py --corpus-layout
+distinct`, AR, 128 tokens, two alternations): C8 57.04 / 56.97 → 60.71 /
+60.58 tok/s (+6.4%), C4 51.92 / 51.97 → 51.88 / 52.22 (unchanged: up to 4
+columns keep one launch). All 22 completions identical between builds in
+both alternations. Single-user DSpark greedy (256 tokens): 38.13 / 37.92 →
+38.41 / 38.08 tok/s, token trace identical.

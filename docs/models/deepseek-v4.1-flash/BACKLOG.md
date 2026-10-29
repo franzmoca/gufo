@@ -74,12 +74,11 @@ pp2048 runs 1,182 tok/s at 32K, 1,155 at 64K and 1,098 at 128K.
 | 13 | Route bias toward cached experts (changes outputs) | Streamed decode | Opt-in approximation | Low |
 | 14 | Higher-precision Engram tables | Quality | Unmeasured | — |
 | 15 | Smaller items | Various | Small | — |
-| 16 | Multi-user AR decode below the 2026-10-26 card | Serving decode | C8 51.8 against 78.5 tok/s | Medium |
+| 16 | Multi-user AR decode below the 2026-10-26 card | Serving decode | Distinct-prompt C8 60.6 tok/s against a ~93 tok/s read ceiling | Medium |
 | 17 | Single-row routed expert GEMV bandwidth | Decode | ~1.7 ms/token (~4% AR) | Medium |
 | 18 | Small decode kernels: hyper-connections, router, routing | Decode | ~1–1.5 ms of ~4 ms/token | Medium |
 | 19 | DSpark host round trips | Speculative decode | ~1.5 ms per step | Medium |
 | 20 | `markov_select` | Drafter | Part of 1.6 ms per step | Medium |
-| 21 | Spills in the 6- and 16-column grouped expert kernels | Verification | Unmeasured | Low |
 | 22 | Split GEMV scratch for 5–8-row output heads | Verification | ~0.33 ms per 5–6-row head, ~0.5% DSpark | High |
 
 ### 3. Expert reads for rejected verification rows
@@ -216,13 +215,14 @@ read and wait times, since rows grow up to 3.6× (E28 measured the current reads
 
 ### 16. Multi-user AR decode below the card
 
-Today's build decodes C4 / C6 / C8 AR at 62.9 / 60.0 / 51.8 tok/s against
-the card's 60.4 / 71.3 / 78.5 (2026-10-26, 4-shard layout, which can no
-longer be loaded for a direct A/B). The joint evaluation itself is not
-slower (`--joint-check 8 --joint-rows 8`: 129.5 ms on a 1,096-token prompt),
-so the time is in the serving path around it. The card's multi-user tables
-also give every user the same prompt, which keeps sessions in lockstep and
-lets a joint pass share experts (E27); refresh them with distinct prompts.
+The card's multi-user tables give every user the same prompt, which keeps
+sessions in lockstep and lets a joint pass share experts (E27); with
+distinct prompts (2026-10-29, after E37) IQ1_M AR decodes C1 / C4 / C8 at
+24.5 / 52.0 / 60.6 tok/s. A C8 step (8 rows, ~42 distinct experts per
+layer) takes ~115 ms of kernels and ~10 ms of host time against ~86 ms of
+reads: the grouped expert GEMV now reads at ~190-205 GB/s for IQ1_S and
+IQ2_XXS gate+up, the down projections at 135-180. Refresh the card's
+multi-user tables with distinct prompts.
 
 ### 17. Single-row routed expert GEMV bandwidth
 
@@ -253,13 +253,6 @@ device.
 
 `markov_select_kernel<1u>` takes 301 µs per call, 5.3 calls and 1.6 ms per
 step, more than the drafter's attention (0.66 ms).
-
-### 21. Spills in wide grouped expert kernels
-
-`expert_group_kernel` with 6 columns uses 256 VGPRs and 192 (IQ1_S) or 96
-(IQ2_XXS) bytes of scratch; 16 columns 80 bytes. The 6-column gate+up still
-reads at ~210 GB/s, so the gain is bounded; measure the 16-column
-verification first.
 
 ### 22. Split GEMV scratch for 5–8-row output heads
 

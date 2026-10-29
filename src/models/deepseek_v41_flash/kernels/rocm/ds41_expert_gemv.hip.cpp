@@ -624,7 +624,8 @@ __global__ void __launch_bounds__(kWave* kWaves)
                         const uint8_t* const* __restrict__ w_table, const uint8_t* const* __restrict__ w_up_table,
                         const float* __restrict__ route_w, float limit, const float* __restrict__ x,
                         float* __restrict__ y, uint32_t m, uint32_t k, const int32_t* __restrict__ plan,
-                        uint64_t expert_bytes, uint32_t x_slot, uint32_t slots_per_x, int zero_dropped) {
+                        uint64_t expert_bytes, uint32_t x_slot, uint32_t slots_per_x, int zero_dropped,
+                        int32_t min_count) {
   using F = Format<kType>;
   constexpr uint32_t kRows = 4 * kWaves;
   __shared__ uint32_t grid[F::kIq1Grid ? NGRID_IQ1S : 1];
@@ -633,6 +634,8 @@ __global__ void __launch_bounds__(kWave* kWaves)
   if ((int32_t)blockIdx.y >= plan[0]) return;
   const int32_t* g = plan + 1 + blockIdx.y * kPlanGroup;
   const int32_t id = g[0];
+  /* A split launch: this pass takes the groups of min_count to kCols slots. */
+  if (min_count > 0 && (g[1] < min_count || g[1] > kCols || (id < 0 && min_count > 1))) return;
   const int cols = g[1] < kCols ? g[1] : kCols;
   int32_t slot[kCols];
 #pragma unroll
@@ -767,7 +770,7 @@ template <int kType, int U, int kCols, bool kTable>
 int launch_group(const void* w, const void* w_up, const void* const* w_table, const void* const* w_up_table,
                  const float* route_w, float limit, uint64_t expert_bytes, const int32_t* plan, uint32_t groups,
                  const float* x, uint32_t x_slot, uint32_t slots_per_x, float* y, uint32_t m, uint32_t k,
-                 int zero_dropped) {
+                 int zero_dropped, int32_t min_count) {
   constexpr uint32_t kRows = 4 * kWaves;
   const dim3 blocks((m + kRows - 1) / kRows, groups);
   const auto* table = reinterpret_cast<const uint8_t* const*>(w_table);
@@ -775,11 +778,11 @@ int launch_group(const void* w, const void* w_up, const void* const* w_table, co
   if (w_up)
     expert_group_kernel<kType, U, true, kCols, kTable><<<blocks, kWave * kWaves>>>(
         static_cast<const uint8_t*>(w), static_cast<const uint8_t*>(w_up), table, table_up, route_w, limit, x, y, m,
-        k, plan, expert_bytes, x_slot, slots_per_x, zero_dropped);
+        k, plan, expert_bytes, x_slot, slots_per_x, zero_dropped, min_count);
   else
     expert_group_kernel<kType, U, false, kCols, kTable><<<blocks, kWave * kWaves>>>(
         static_cast<const uint8_t*>(w), nullptr, table, table_up, nullptr, 0.0f, x, y, m, k, plan, expert_bytes,
-        x_slot, slots_per_x, zero_dropped);
+        x_slot, slots_per_x, zero_dropped, min_count);
   const hipError_t err = hipGetLastError();
   if (err == hipSuccess) return 0;
   fprintf(stderr, "ds41: grouped expert gemv launch failed: %s\n", hipGetErrorString(err));
@@ -790,12 +793,12 @@ template <int kType, int U, int kCols>
 int launch_group(const void* w, const void* w_up, const void* const* w_table, const void* const* w_up_table,
                  const float* route_w, float limit, uint64_t expert_bytes, const int32_t* plan, uint32_t groups,
                  const float* x, uint32_t x_slot, uint32_t slots_per_x, float* y, uint32_t m, uint32_t k,
-                 int zero_dropped) {
+                 int zero_dropped, int32_t min_count = 0) {
   if (w_table)
     return launch_group<kType, U, kCols, true>(w, w_up, w_table, w_up_table, route_w, limit, expert_bytes, plan,
-                                               groups, x, x_slot, slots_per_x, y, m, k, zero_dropped);
+                                               groups, x, x_slot, slots_per_x, y, m, k, zero_dropped, min_count);
   return launch_group<kType, U, kCols, false>(w, w_up, w_table, w_up_table, route_w, limit, expert_bytes, plan,
-                                              groups, x, x_slot, slots_per_x, y, m, k, zero_dropped);
+                                              groups, x, x_slot, slots_per_x, y, m, k, zero_dropped, min_count);
 }
 
 template <int kType, int U>
@@ -809,14 +812,22 @@ int dispatch_group(const void* w, const void* w_up, const void* const* w_table, 
   if (cols <= 4)
     return launch_group<kType, U, 4>(w, w_up, w_table, w_up_table, route_w, limit, expert_bytes, plan, groups, x,
                                      x_slot, slots_per_x, y, m, k, zero_dropped);
-  if (cols <= 6)
+  /* Wider launches: groups of one or two slots (most of them when sessions
+   * route apart) take the 2-column kernel and the rest a wider one. The
+   * fused SwiGLU's 6- and 8-column kernels spill registers for every type
+   * but IQ1_M, so those wider groups take the 16-column kernel. */
+  if (launch_group<kType, U, 2>(w, w_up, w_table, w_up_table, route_w, limit, expert_bytes, plan, groups, x, x_slot,
+                                slots_per_x, y, m, k, zero_dropped, 1))
+    return 1;
+  const bool narrow = !w_up || kType == 29;
+  if (narrow && cols <= 6)
     return launch_group<kType, U, 6>(w, w_up, w_table, w_up_table, route_w, limit, expert_bytes, plan, groups, x,
-                                     x_slot, slots_per_x, y, m, k, zero_dropped);
-  if (cols <= 8)
+                                     x_slot, slots_per_x, y, m, k, zero_dropped, 3);
+  if (narrow && cols <= 8)
     return launch_group<kType, U, 8>(w, w_up, w_table, w_up_table, route_w, limit, expert_bytes, plan, groups, x,
-                                     x_slot, slots_per_x, y, m, k, zero_dropped);
+                                     x_slot, slots_per_x, y, m, k, zero_dropped, 3);
   return launch_group<kType, U, kPlanCols>(w, w_up, w_table, w_up_table, route_w, limit, expert_bytes, plan, groups,
-                                           x, x_slot, slots_per_x, y, m, k, zero_dropped);
+                                           x, x_slot, slots_per_x, y, m, k, zero_dropped, 3);
 }
 
 template <int kType, int U, bool kTable>
