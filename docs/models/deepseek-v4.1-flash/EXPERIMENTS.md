@@ -1473,3 +1473,14 @@ device synchronize): ~6.0 → ~4.5 ms (dequantization 2.0 → 1.2 ms, upload
 ~2.5 → ~1 ms); the remaining ~2 ms are the device copies into the residual
 streams. pp2048 / pp8192 throughput moves within noise (~0.1%). Greedy
 output is identical, and `--joint-check 4` keeps all 164 rows bit-identical.
+
+
+### E34: dense rescoring left on the bounded replay (measured, not changed)
+
+BACKLOG item 5: prefill batches rescore the masked decoder index layers
+(24, 28, 32, 36; compression ratio 1) over the full history before masking.
+With bounded replay those layers run only on a prompt's last 140 rows.
+`ds41_indexer_bench` with 144 rows at ratio 1 (best of 5): 0.73 / 0.08 ms
+(scores / top-k) at 16K, 2.82 / 0.36 at 64K and 5.59 / 0.70 at 128K, about
+25 ms per 128K prompt over the four layers (~0.03% of its prefill).
+Compact rescoring would matter only under `--exact-prefill`.
