@@ -4,10 +4,10 @@
   "model": {
     "id": "DeepSeek-V4.1-Flash-1017",
     "docs": "deepseek-v4.1-flash",
-    "label": "DS4.1 Flash IQ1_M"
+    "label": "DS4.1 Flash"
   },
   "files": {
-    "gguf": "DeepSeek-V4.1-Flash-1017-GSQ-RCO-IQ1_M-00001-of-00004.gguf (first shard; the Engram file sits beside it)",
+    "gguf": "first GGUF shard of GSQ-RCO IQ1_M (resident) or IQ2_XXS (streamed); the Engram file sits beside it",
     "dspark": "DeepSeek-V4.1-Flash-1017-DSpark-draft-Q2K-Q4K.gguf"
   },
   "variants": {
@@ -15,6 +15,15 @@
       "label": "IQ1_M",
       "requires": [
         "gguf"
+      ]
+    },
+    "iq2xxs": {
+      "label": "IQ2_XXS streamed",
+      "requires": [
+        "gguf"
+      ],
+      "gufo_args": [
+        "--stream-experts"
       ]
     }
   },
@@ -35,7 +44,7 @@
   "tables": {
     "single-ar": {
       "title": "Single user, autoregressive",
-      "per_variant": false,
+      "per_variant": true,
       "prompt_tokens": 2048,
       "output_tokens": 128,
       "depths": [
@@ -63,7 +72,7 @@
     },
     "single-dspark": {
       "title": "Single user, DSpark",
-      "per_variant": false,
+      "per_variant": true,
       "speculative": true,
       "prompt_tokens": 2048,
       "output_tokens": 128,
@@ -111,7 +120,7 @@
     },
     "multi-ar": {
       "title": "Multiple users, autoregressive",
-      "per_variant": false,
+      "per_variant": true,
       "modes": [
         "ar"
       ],
@@ -136,7 +145,7 @@
     },
     "multi-dspark": {
       "title": "Multiple users, DSpark",
-      "per_variant": false,
+      "per_variant": true,
       "modes": [
         "dspark"
       ],
@@ -181,7 +190,7 @@
     },
     "memory": {
       "title": "Memory occupation",
-      "per_variant": false,
+      "per_variant": true,
       "context": 262144,
       "workloads": [
         {

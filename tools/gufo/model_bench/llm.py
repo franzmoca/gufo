@@ -118,7 +118,8 @@ class Session:
         llm_args = list(cfg.data["gufo"].get("llm", []))
         command = [str(self.gufo_binary), "serve", "--port", str(port), "--sessions", str(sessions),
                    *cfg.data["gufo"].get("serve", []), "llm", "--model", str(gguf),
-                   "--context", str(context), "--served-model-name", MODEL_ALIAS, *llm_args]
+                   "--context", str(context), "--served-model-name", MODEL_ALIAS, *llm_args,
+                   *cfg.variants[table.variant or "default"].get("gufo_args", [])]
         if table.kind == "image-encoder":
             command += ["--mmproj", str(cfg.file("mmproj", table.variant)), "--max-request-bytes", str(64 << 20)]
         if mode and mode != "ar":
