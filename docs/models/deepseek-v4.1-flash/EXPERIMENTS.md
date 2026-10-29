@@ -1484,3 +1484,20 @@ With bounded replay those layers run only on a prompt's last 140 rows.
 (scores / top-k) at 16K, 2.82 / 0.36 at 64K and 5.59 / 0.70 at 128K, about
 25 ms per 128K prompt over the four layers (~0.03% of its prefill).
 Compact rescoring would matter only under `--exact-prefill`.
+
+### E35: 128-slot routed FP16 tiles (rejected)
+
+BACKLOG item 6: on 80 recorded 2,048-token prefill layers (384 experts,
+up to 1,116 slots per expert, 50 above 64 in the first), 128-slot tiles
+would decode each expert's weights 19% fewer times than 64-slot tiles. The
+kernel with 128-slot tiles (eight 16-slot accumulator tiles per projection,
+twice the activation LDS, two staged quarters per thread), `ds41_mmq_bench
+--f16 1` on recorded lines 0/20/40/60, best of 5, ms:
+
+| Type | 64-slot gate+up | 128-slot gate+up | 64-slot down | 128-slot down |
+| --- | --- | --- | --- | --- |
+| IQ1_M | 21.51 / 20.68 / 22.16 / 20.19 | 22.04 / 20.52 / 22.43 / 20.02 | 10.92 / 10.47 / 11.23 / 10.24 | 11.46 / 10.84 / 11.78 / 10.51 |
+| IQ2_XXS | 22.33 / 21.28 / 23.06 / 20.71 | 23.83 / 22.30 / 24.48 / 21.64 | 11.29 / 10.78 / 11.71 / 10.50 | 12.24 / 11.45 / 12.61 / 11.09 |
+
+Even the most skewed layer gains under 1% on IQ1_M gate+up, so 128-slot
+tiles only for the large experts have no room either.
