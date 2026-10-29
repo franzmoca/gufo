@@ -58,7 +58,6 @@ pp2048 runs 1,182 tok/s at 32K, 1,155 at 64K and 1,098 at 128K.
 | 8 | Small-batch evaluation cost | Short turns | ~15 ms per follow-up turn | Low |
 | 9 | Stable-boundary prefill pass per chat request | Serving | ~65 ms per request | Medium |
 | 10 | Concurrent drafter forwards | Serving decode | ~9 ms per drafting session per step; DSpark 5% under AR at C8 | Medium |
-| 11 | Engram row reads under cache pressure | Streamed prefill | ~0.35 s of device reads per pp2048 batch | Medium |
 | 12 | Rank-major expert-contiguous repack | Streaming | Reads from 5.7 GiB/s toward 8.2 GB/s | Medium |
 | 13 | Route bias toward cached experts (changes outputs) | Streamed decode | Opt-in approximation | Low |
 | 14 | Higher-precision Engram tables | Quality | Unmeasured | — |
@@ -178,19 +177,6 @@ against 54.6). One drafter forward over all drafting sessions, as Gemma's
 skips drafting when it does not pay) is the fallback if batching is not
 possible.
 
-### 11. Engram row reads under cache pressure
-
-`engram_read` issues one buffered 144 B `pread` per row; once the expert
-cache has grown the page cache holds none of them (`rchar == read_bytes` for
-whole runs), so each row is a 4 KiB IO: ~98,000 per pp2048 batch, ~0.35 s of
-device time taking queue depth from the expert reads. This is the likely
-cause of streamed prefill getting slower as the cache fills (88.3% hits →
-787, 95.3% → 742 tok/s) and of the remaining streamed prefill spread. In
-order: deduplicate repeated rows within a batch, sort by file offset so
-same-page rows share a read, then evaluate a bounded hot-row cache (2–4 GiB
-pinned) after recording a real row-id trace to size its hit rate. A second
-fast NVMe would also work; the slower KIOXIA did not.
-
 ### 12. Rank-major expert-contiguous repack
 
 The GGUF stores each layer's experts as three projection-major ~1 GiB
@@ -216,7 +202,7 @@ Measure speed and quality of Engram tables above IQ4_NL (144 B rows).
 tables (512 B rows, ~366 GiB) would come from the official checkpoint.
 Quality: teacher-forced perplexity and agreement against the oracle at 3K
 and 18.5K tokens. Speed: prefill and decode at the card depths plus Engram
-read and wait times, since rows grow up to 3.6×, which interacts with item 11.
+read and wait times, since rows grow up to 3.6× (E28 measured the current reads at under 1% of warm streamed prefill).
 
 ### 15. Smaller items
 
