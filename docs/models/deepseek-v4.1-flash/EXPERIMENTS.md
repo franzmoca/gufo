@@ -1436,3 +1436,15 @@ gain (+36%); a rank-ordered file would give those only when a batch misses
 many rank-adjacent experts, mainly a cold first prefill, while decode
 misses a few random experts and warm prefill waits ~0 on reads. Not worth
 a second model conversion for users.
+
+### E31: next-layer prediction for verification batches (retained)
+
+BACKLOG item 3: verification and joint batches (2–16 rows) predicted no
+next-layer experts, so a streamed DSpark step read every missed expert on
+demand. They now predict, like single tokens, when the current layer waited
+on reads. Reads only; outputs are unchanged. `gufo bench` (`IQ2_XXS`,
+`--stream-experts`, DSpark Q2K/Q4K, pp512 then six tg128 tests per process,
+alternating, tok/s): the first test 45.21 / 43.71 → 46.77 / 46.66
+(+3.5% / +6.7%), the second 50.52 / 52.26 → 49.73 / 50.82, warm tests 3–6
+53.9 / 53.2 → 53.6 / 53.0 (within noise). The gain is while the cache still
+misses; charging rows their own miss bytes stays open.

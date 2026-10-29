@@ -76,8 +76,9 @@ On streamed DSpark every verification row pays for its own experts, and
 verification batches predict no next-layer experts. The verified prefix
 already weighs the head's per-row acceptance against measured cycle time
 ([E18](EXPERIMENTS.md#e18-cost-aware-draft-prefix-retained)), which prices
-misses only on average. Open: predict the anchor row's next-layer experts,
-or charge a row the miss bytes of its own routes. Route bias is a separate,
+misses only on average. Verification batches now predict next-layer
+experts when a layer misses (E31: +3.5–6.7% on a cold cache, neutral warm).
+Open: charge a row the miss bytes of its own routes. Route bias is a separate,
 output-changing item (13).
 
 ### 4. Launch gaps between decode kernels

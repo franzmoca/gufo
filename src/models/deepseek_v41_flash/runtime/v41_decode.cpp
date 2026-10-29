@@ -863,15 +863,16 @@ bool shared_moe(ds41_decoder* d, const ds41_layer_weights* l, uint32_t n, const 
  * stale) and records the prediction; the store's thread turns the landed
  * ids into a background read the next layer's prepare adopts, skipping the
  * experts the batch does not route. Called from the read overlap, where the
- * extra matvec hides in the read stall. Single tokens predict only when
- * this layer waited on reads: misses cluster in neighbouring layers, and a
- * prediction without a stall to hide it costs more than the read it saves. */
+ * extra matvec hides in the read stall. Single tokens and verification or
+ * joint batches predict only when this layer waited on reads: misses
+ * cluster in neighbouring layers, and a prediction without a stall to hide
+ * it costs more than the read it saves. */
 void predict_next_layer(ds41_decoder* d, uint32_t il, uint32_t n, bool misses_now) {
   if (!d->engine->expert_store || !d->pred_ok || il + 1 >= DS41_N_LAYER)
     return;
-  if (n != 1 && n < kPrefillPredictTokens)
+  if (n > DS41_DECODER_MAX_JOINT && n < kPrefillPredictTokens)
     return;
-  if (n == 1 && !misses_now)
+  if (n <= DS41_DECODER_MAX_JOINT && !misses_now)
     return;
   const ds41_layer_weights* nl = &d->engine->weights->layer[il + 1];
   const uint32_t used = DS41_N_EXPERT_USED;
