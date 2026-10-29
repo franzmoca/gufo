@@ -801,15 +801,24 @@ int launch_group(const void* w, const void* w_up, const void* const* w_table, co
                                               groups, x, x_slot, slots_per_x, y, m, k, zero_dropped, min_count);
 }
 
-template <int kType, int U>
+/* UDown: blocks loaded ahead by the down projection. Its 2,304-value rows
+ * are 9 blocks; loading a whole row at once measured faster for every group
+ * width (the single-slot kernel was slower with it). */
+template <int kType, int U, int UDown = U>
 int dispatch_group(const void* w, const void* w_up, const void* const* w_table, const void* const* w_up_table,
                    const float* route_w, float limit, uint64_t expert_bytes, const int32_t* plan, uint32_t groups,
                    uint32_t cols, const float* x, uint32_t x_slot, uint32_t slots_per_x, float* y, uint32_t m,
                    uint32_t k, int zero_dropped) {
+  if constexpr (UDown != U)
+    if (!w_up)
+      return dispatch_group<kType, UDown>(w, w_up, w_table, w_up_table, route_w, limit, expert_bytes, plan, groups,
+                                          cols, x, x_slot, slots_per_x, y, m, k, zero_dropped);
   if (cols <= 2)
     return launch_group<kType, U, 2>(w, w_up, w_table, w_up_table, route_w, limit, expert_bytes, plan, groups, x,
                                      x_slot, slots_per_x, y, m, k, zero_dropped);
-  if (cols <= 4)
+  /* IQ1_S's fused SwiGLU also splits 3- and 4-column launches. */
+  const bool split4 = kType == 19 && w_up;
+  if (cols <= 4 && !split4)
     return launch_group<kType, U, 4>(w, w_up, w_table, w_up_table, route_w, limit, expert_bytes, plan, groups, x,
                                      x_slot, slots_per_x, y, m, k, zero_dropped);
   /* Wider launches: groups of one or two slots (most of them when sessions
@@ -819,6 +828,9 @@ int dispatch_group(const void* w, const void* w_up, const void* const* w_table, 
   if (launch_group<kType, U, 2>(w, w_up, w_table, w_up_table, route_w, limit, expert_bytes, plan, groups, x, x_slot,
                                 slots_per_x, y, m, k, zero_dropped, 1))
     return 1;
+  if (cols <= 4)
+    return launch_group<kType, U, 4>(w, w_up, w_table, w_up_table, route_w, limit, expert_bytes, plan, groups, x,
+                                     x_slot, slots_per_x, y, m, k, zero_dropped, 3);
   const bool narrow = !w_up || kType == 29;
   if (narrow && cols <= 6)
     return launch_group<kType, U, 6>(w, w_up, w_table, w_up_table, route_w, limit, expert_bytes, plan, groups, x,
@@ -946,13 +958,13 @@ extern "C" int ds41_v41_gemv_experts_grouped(int type, const void* w, const void
     return dispatch_group<12, 1>(w, w_up, w_table, w_up_table, route_w, limit, expert_bytes, plan, slots, cols, x,
                                  x_slot, slots_per_x, y, m, k, zero_dropped);
   case 19:
-    return dispatch_group<19, 2>(w, w_up, w_table, w_up_table, route_w, limit, expert_bytes, plan, slots, cols, x,
+    return dispatch_group<19, 2, 9>(w, w_up, w_table, w_up_table, route_w, limit, expert_bytes, plan, slots, cols, x,
                                  x_slot, slots_per_x, y, m, k, zero_dropped);
   case 29:
-    return dispatch_group<29, 1>(w, w_up, w_table, w_up_table, route_w, limit, expert_bytes, plan, slots, cols, x,
+    return dispatch_group<29, 1, 9>(w, w_up, w_table, w_up_table, route_w, limit, expert_bytes, plan, slots, cols, x,
                                  x_slot, slots_per_x, y, m, k, zero_dropped);
   case 16:
-    return dispatch_group<16, 2>(w, w_up, w_table, w_up_table, route_w, limit, expert_bytes, plan, slots, cols, x,
+    return dispatch_group<16, 2, 9>(w, w_up, w_table, w_up_table, route_w, limit, expert_bytes, plan, slots, cols, x,
                                  x_slot, slots_per_x, y, m, k, zero_dropped);
   case 17:
     return dispatch_group<17, 2>(w, w_up, w_table, w_up_table, route_w, limit, expert_bytes, plan, slots, cols, x,
