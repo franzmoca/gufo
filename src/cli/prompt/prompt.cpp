@@ -22,6 +22,7 @@
 #include "src/core/crypto/sha256.hpp"
 #include "src/core/gguf_reader.hpp"
 #include "src/core/image.hpp"
+#include "src/models/deepseek_v41_flash/artifact_hint.hpp"
 #include "src/models/deepseek_v41_flash/chat_template.hpp"
 #include "src/models/deepseek_v41_flash/dspark_sampler.hpp"
 #include "src/models/deepseek_v41_flash/engine.hpp"
@@ -118,6 +119,17 @@ static void RegisterTextOptions(ArgParser& parser, PromptOptions& opt,
                  "prompt token instead of only the prompt's last 140 (decoder "
                  "SWA bounded replay; about twice the prefill time)",
                  "Model", &opt.exact_prefill);
+  parser.AddFlag("", "--stream-experts",
+                 "DeepSeek V4.1 Flash: keep dense weights resident and "
+                 "stream routed experts from the SSD through a bounded cache "
+                 "(needed for IQ2_XXS; runs IQ1_M in less memory, more "
+                 "slowly)",
+                 "Model", &opt.stream_experts);
+  parser.AddOption("", "--expert-cache-bytes", "N",
+                   "DeepSeek V4.1 Flash with --stream-experts: streamed "
+                   "expert cache bytes (default: 0 = available memory minus "
+                   "4 GiB)",
+                   "Model", &opt.expert_cache_bytes);
   RegisterImageOptions(parser, opt);
 
   // Prompt & Formatting
@@ -421,6 +433,8 @@ std::shared_ptr<typename Ds::Model> LoadDeepSeekModel(
   if constexpr (requires { model_options.prefill_batch; }) {
     model_options.prefill_batch = opt.prefill_batch;
     model_options.exact_prefill = opt.exact_prefill;
+    model_options.stream_experts = opt.stream_experts;
+    model_options.expert_cache_bytes = opt.expert_cache_bytes;
   }
   std::string error;
   auto model = Ds::Model::Load(opt.model_path, model_options, &error);
@@ -1113,6 +1127,8 @@ int RunPrompt(std::span<const char* const> args) {
   auto reader_owner = gufo::core::GgufReader::OpenFile(opt.model_path, &err);
   if (!reader_owner) {
     std::cerr << "Error loading GGUF model '" << opt.model_path << "': " << err
+              << models::deepseek_v41_flash::MissingEngramShardHint(
+                     opt.model_path)
               << "\n";
     PrintModelLoadTime(model_load_start, false);
     return 1;
@@ -1347,6 +1363,8 @@ int RunChat(std::span<const char* const> args) {
   auto reader_owner = gufo::core::GgufReader::OpenFile(opt.model_path, &err);
   if (!reader_owner) {
     std::cerr << "Error loading GGUF model '" << opt.model_path << "': " << err
+              << models::deepseek_v41_flash::MissingEngramShardHint(
+                     opt.model_path)
               << "\n";
     PrintModelLoadTime(model_load_start, false);
     return 1;

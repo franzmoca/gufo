@@ -1,0 +1,147 @@
+ds41: DSpark pos=53 drafted=5 accepted=4 draft=9.0ms verify=97.6ms all=5 conf=0.998,0.968,0.894,0.972,0.717 tok=2581,1309,3287,16,21017,9487 next=3986
+ds41: DSpark pos=58 drafted=4 accepted=1 draft=9.1ms verify=84.5ms all=5 conf=0.841,0.790,0.881,0.683,0.368 tok=3986,3132,16,21017,23917,16 next=513
+ds41: DSpark pos=60 drafted=4 accepted=3 draft=8.9ms verify=84.4ms all=5 conf=1.000,0.995,0.869,0.701,0.455 tok=513,3132,16,21017,366,16372 next=23917
+ds41: DSpark pos=64 drafted=3 accepted=0 draft=8.9ms verify=72.2ms all=5 conf=0.539,0.519,0.503,0.268,0.455 tok=23917,22206,16,5978,223,27 next=2734
+ds41: DSpark pos=65 drafted=2 accepted=2 draft=8.9ms verify=64.5ms all=5 conf=0.920,0.708,0.348,0.493,0.426 tok=2734,16,33477,223,27,3179 next=9120
+ds41: DSpark pos=68 drafted=5 accepted=4 draft=9.0ms verify=94.3ms all=5 conf=0.776,0.992,0.962,0.781,0.697 tok=9120,223,27,28,1484,14 next=16
+ds41: DSpark pos=73 drafted=5 accepted=1 draft=9.0ms verify=100.2ms all=5 conf=0.844,0.636,0.765,0.732,0.696 tok=16,5978,223,14972,3179,509 next=12085
+ds41: DSpark pos=75 drafted=5 accepted=5 draft=9.2ms verify=94.9ms all=5 conf=0.931,0.984,0.969,0.931,0.816 tok=12085,223,14972,3179,509,223 next=2122
+ds41: DSpark pos=81 drafted=5 accepted=2 draft=9.0ms verify=97.6ms all=5 conf=0.893,0.948,0.537,0.547,0.640 tok=2122,3179,3625,438,223,14972 next=16
+ds41: DSpark pos=84 drafted=5 accepted=2 draft=9.0ms verify=95.2ms all=5 conf=0.879,0.724,0.830,0.856,0.586 tok=16,6982,438,14972,17,2122 next=223
+ds41: DSpark pos=87 drafted=5 accepted=5 draft=9.1ms verify=94.5ms all=5 conf=1.000,0.997,0.997,0.745,0.781 tok=223,14972,17,2122,438,223 next=21
+ds41: DSpark pos=93 drafted=5 accepted=5 draft=9.1ms verify=93.7ms all=5 conf=1.000,1.000,0.827,0.721,0.564 tok=21,16,23,310,438,223 next=21
+ds41: DSpark pos=99 drafted=4 accepted=3 draft=9.2ms verify=87.3ms all=5 conf=0.783,0.898,0.862,0.744,0.266 tok=21,74,1059,16,5715,223 next=37406
+ds41: DSpark pos=103 drafted=5 accepted=0 draft=9.1ms verify=95.4ms all=5 conf=0.813,0.659,0.649,0.786,0.588 tok=37406,505,223,27,28,1484 next=3578
+ds41: DSpark pos=104 drafted=1 accepted=0 draft=9.1ms verify=50.7ms all=5 conf=0.506,0.463,0.587,0.532,0.304 tok=3578,509,223,27,28,1484 next=1561
+ds41: DSpark pos=105 drafted=1 accepted=1 draft=9.2ms verify=50.9ms all=5 conf=0.870,0.497,0.723,0.778,0.741 tok=1561,1257,438,223,27,28 next=438
+ds41: DSpark pos=107 drafted=3 accepted=1 draft=9.0ms verify=75.2ms all=5 conf=0.975,0.557,0.922,0.358,0.493 tok=438,223,736,28,553,16 next=27
+ds41: DSpark pos=109 drafted=5 accepted=3 draft=9.0ms verify=94.9ms all=5 conf=1.000,1.000,0.952,0.867,0.890 tok=27,28,1484,940,223,21 next=21
+ds41: DSpark pos=113 drafted=5 accepted=5 draft=9.0ms verify=96.1ms all=5 conf=0.981,0.999,0.910,0.848,0.961 tok=21,28,1059,438,223,907 next=28
+ds41: DSpark pos=119 drafted=4 accepted=4 draft=9.5ms verify=85.0ms all=5 conf=1.000,0.715,0.554,0.675,0.455 tok=28,553,33,223,27,28 next=28
+ds41: DSpark pos=124 drafted=5 accepted=4 draft=9.1ms verify=97.8ms all=5 conf=1.000,0.809,0.928,0.789,0.649 tok=28,1484,13,21,74,1059 next=31
+ds41: DSpark pos=129 drafted=5 accepted=3 draft=9.2ms verify=96.5ms all=5 conf=0.969,0.982,0.946,0.649,0.774 tok=31,736,28,1484,14,940 next=940
+ds41: DSpark pos=133 drafted=1 accepted=1 draft=9.2ms verify=52.2ms all=5 conf=0.863,0.491,0.825,0.742,0.915 tok=940,1059,79,31,907,28 next=31
+ds41: DSpark pos=135 drafted=5 accepted=5 draft=9.3ms verify=97.8ms all=5 conf=0.998,1.000,0.999,0.795,0.613 tok=31,907,28,553,16,5715 next=26012
+ds41: DSpark pos=141 drafted=3 accepted=3 draft=9.3ms verify=72.7ms all=5 conf=0.977,0.998,0.873,0.462,0.361 tok=26012,223,1069,1550,438,223 next=438
+ds41: DSpark pos=145 drafted=5 accepted=5 draft=9.3ms verify=95.7ms all=5 conf=0.776,0.725,0.819,0.533,0.519 tok=438,223,907,28,1810,16 next=5715
+ds41: DSpark pos=151 drafted=5 accepted=0 draft=9.4ms verify=98.4ms all=5 conf=0.827,0.939,0.894,0.885,0.771 tok=5715,223,7013,3179,509,223 next=15736
+ds41: DSpark pos=152 drafted=5 accepted=5 draft=9.2ms verify=97.8ms all=5 conf=0.997,0.998,0.936,0.974,0.923 tok=15736,223,7013,3179,509,223 next=7163
+ds41: DSpark pos=158 drafted=5 accepted=5 draft=9.4ms verify=97.7ms all=5 conf=0.935,0.984,0.647,0.770,0.683 tok=7163,3179,3625,16,6982,438 next=223
+ds41: DSpark pos=164 drafted=5 accepted=5 draft=9.7ms verify=97.5ms all=5 conf=1.000,1.000,1.000,0.882,0.745 tok=223,7013,17,7163,438,223 next=19
+ds41: DSpark pos=170 drafted=5 accepted=5 draft=9.8ms verify=98.4ms all=5 conf=0.999,0.962,0.560,0.666,0.595 tok=19,16,1069,310,438,223 next=19
+ds41: DSpark pos=176 drafted=3 accepted=3 draft=9.4ms verify=74.1ms all=5 conf=0.996,0.982,0.666,0.480,0.623 tok=19,74,856,16,37406,3578 next=37406
+ds41: DSpark pos=180 drafted=5 accepted=5 draft=9.4ms verify=98.8ms all=5 conf=0.900,0.686,0.836,0.963,0.940 tok=37406,505,438,223,907,28 next=1810
+ds41: DSpark pos=186 drafted=5 accepted=1 draft=9.4ms verify=99.6ms all=5 conf=0.907,0.880,0.889,0.955,0.751 tok=1810,940,223,19,28,856 next=19
+ds41: DSpark pos=188 drafted=5 accepted=3 draft=10.0ms verify=96.9ms all=5 conf=0.993,0.998,0.899,0.813,0.965 tok=19,28,856,438,929,28 next=223
+ds41: DSpark pos=192 drafted=5 accepted=5 draft=9.4ms verify=103.0ms all=5 conf=1.000,1.000,0.997,0.889,0.536 tok=223,929,28,1328,16,21017 next=10796
+ds41: DSpark pos=198 drafted=1 accepted=0 draft=9.3ms verify=55.4ms all=5 conf=0.619,0.304,0.289,0.363,0.287 tok=10796,855,1119,16,23,16 next=3513
+ds41: DSpark pos=199 drafted=1 accepted=0 draft=9.4ms verify=52.9ms all=5 conf=0.512,0.433,0.393,0.444,0.368 tok=3513,26012,509,223,907,16 next=31268
+ds41: DSpark pos=200 drafted=1 accepted=0 draft=9.3ms verify=53.0ms all=5 conf=0.530,0.435,0.497,0.407,0.396 tok=31268,33,223,27,16,8824 next=509
+ds41: DSpark pos=201 drafted=5 accepted=5 draft=9.4ms verify=98.1ms all=5 conf=0.956,0.973,0.961,0.971,0.588 tok=509,223,27,28,1484,16 next=9361
+ds41: DSpark pos=207 drafted=4 accepted=1 draft=9.5ms verify=90.8ms all=5 conf=0.760,0.860,0.714,0.711,0.434 tok=9361,223,929,28,1328,3179 next=20
+ds41: DSpark pos=209 drafted=5 accepted=4 draft=9.5ms verify=99.6ms all=5 conf=0.999,0.986,0.886,0.617,0.653 tok=20,28,1328,4748,16,21017 next=4480
+ds41: DSpark pos=214 drafted=5 accepted=3 draft=9.7ms verify=104.5ms all=5 conf=1.000,0.774,0.782,0.726,0.638 tok=4480,734,13013,47468,16,128822 next=418
+ds41: DSpark pos=218 drafted=3 accepted=3 draft=9.5ms verify=75.3ms all=5 conf=0.680,0.832,0.721,0.433,0.303 tok=418,6531,16,35857,1119,5452 next=1119
+ds41: DSpark pos=222 drafted=2 accepted=2 draft=9.3ms verify=64.4ms all=5 conf=0.645,0.538,0.394,0.374,0.345 tok=1119,54900,28,223,27,16 next=582
+ds41: DSpark pos=225 drafted=2 accepted=2 draft=9.5ms verify=66.1ms all=5 conf=0.535,0.681,0.377,0.391,0.327 tok=582,318,4759,509,223,27 next=362
+ds41: DSpark pos=228 drafted=5 accepted=5 draft=9.5ms verify=99.6ms all=5 conf=1.000,1.000,0.986,0.915,0.616 tok=362,223,1069,4786,4,1561 next=1257
+ds41: DSpark pos=234 drafted=3 accepted=2 draft=9.5ms verify=78.3ms all=5 conf=0.794,0.627,0.556,0.335,0.437 tok=1257,12085,16,19160,16,128822 next=12089
+ds41: plain pos=237 tok=12089 next=5901 ms=50.9
+ds41: DSpark pos=238 drafted=2 accepted=1 draft=9.3ms verify=67.9ms all=5 conf=0.625,0.519,0.448,0.416,0.283 tok=5901,1014,438,223,27,74 next=47157
+ds41: DSpark pos=240 drafted=4 accepted=0 draft=9.3ms verify=88.6ms all=5 conf=0.579,0.715,0.723,0.581,0.419 tok=47157,26012,438,223,21,74 next=6409
+ds41: DSpark pos=241 drafted=4 accepted=3 draft=9.3ms verify=87.1ms all=5 conf=0.835,0.698,0.685,0.555,0.361 tok=6409,438,223,21,28,223 next=16
+ds41: DSpark pos=245 drafted=5 accepted=5 draft=9.4ms verify=97.3ms all=5 conf=0.991,0.881,0.847,0.937,0.739 tok=16,23,13,19,16,1069 next=31
+ds41: DSpark pos=251 drafted=5 accepted=4 draft=9.4ms verify=102.1ms all=5 conf=0.995,0.942,0.947,0.780,0.775 tok=31,22,16,2402,310,16 next=438
+ds41: DSpark pos=256 drafted=4 accepted=2 draft=9.7ms verify=91.5ms all=5 conf=0.759,0.876,0.861,0.725,0.387 tok=438,22,74,856,29,5582 next=1883
+ds41: DSpark pos=259 drafted=5 accepted=0 draft=9.3ms verify=95.8ms all=5 conf=0.827,0.645,0.513,0.581,0.527 tok=1883,29,5582,223,1069,1550 next=16
+ds41: DSpark pos=260 drafted=3 accepted=0 draft=9.5ms verify=74.7ms all=5 conf=0.608,0.526,0.574,0.450,0.344 tok=16,21984,223,1069,74,438 next=33041
+ds41: DSpark pos=261 drafted=3 accepted=3 draft=9.3ms verify=73.0ms all=5 conf=0.764,0.585,0.530,0.397,0.377 tok=33041,223,1069,1550,16,12089 next=3452
+ds41: DSpark pos=265 drafted=4 accepted=0 draft=9.4ms verify=87.9ms all=5 conf=0.557,0.688,0.690,0.561,0.379 tok=3452,223,23,74,397,74 next=71029
+ds41: DSpark pos=266 drafted=4 accepted=0 draft=9.5ms verify=85.3ms all=5 conf=0.684,0.619,0.739,0.569,0.331 tok=71029,438,23,74,397,438 next=223
+ds41: DSpark pos=267 drafted=3 accepted=2 draft=9.4ms verify=73.4ms all=5 conf=0.956,0.965,0.832,0.484,0.448 tok=223,23,74,397,16,11337 next=553
+ds41: DSpark pos=270 drafted=5 accepted=1 draft=9.3ms verify=103.2ms all=5 conf=0.774,0.581,0.641,0.729,0.691 tok=553,16,11337,223,27,28 next=223
+ds41: DSpark pos=272 drafted=5 accepted=5 draft=9.6ms verify=99.0ms all=5 conf=1.000,1.000,1.000,0.872,0.929 tok=223,27,28,1484,13,23 next=28
+ds41: DSpark pos=278 drafted=5 accepted=5 draft=9.3ms verify=98.3ms all=5 conf=1.000,0.919,0.939,0.978,0.884 tok=28,553,31,929,28,1328 next=16
+ds41: DSpark pos=284 drafted=3 accepted=1 draft=9.4ms verify=77.9ms all=5 conf=0.754,0.928,0.755,0.442,0.256 tok=16,9611,339,50249,4087,16 next=16
+ds41: DSpark pos=286 drafted=2 accepted=1 draft=9.3ms verify=66.2ms all=5 conf=0.821,0.759,0.173,0.150,0.277 tok=16,128822,671,1257,16,539 next=19
+ds41: DSpark pos=288 drafted=2 accepted=2 draft=9.3ms verify=65.1ms all=5 conf=0.996,0.521,0.400,0.381,0.379 tok=19,16,5978,12085,28,2619 next=892
+ds41: DSpark pos=291 drafted=4 accepted=3 draft=9.4ms verify=88.1ms all=5 conf=0.891,0.763,0.599,0.704,0.303 tok=892,28,2143,262,565,874 next=16807
+ds41: DSpark pos=295 drafted=5 accepted=5 draft=9.3ms verify=97.1ms all=5 conf=1.000,0.775,0.718,0.736,0.639 tok=16807,201,262,874,4015,93 next=14972
+ds41: DSpark pos=301 drafted=3 accepted=3 draft=9.4ms verify=72.3ms all=5 conf=0.830,0.711,0.519,0.427,0.614 tok=14972,3069,2122,9579,874,2067 next=21
+ds41: DSpark pos=305 drafted=5 accepted=5 draft=9.3ms verify=97.3ms all=5 conf=1.000,1.000,0.957,0.992,0.859 tok=21,16,23,31019,93,4343 next=9579
+ds41: DSpark pos=311 drafted=3 accepted=3 draft=9.5ms verify=74.4ms all=5 conf=0.991,0.882,0.834,0.412,0.556 tok=9579,21,31019,93,310,201 next=310
+ds41: DSpark pos=315 drafted=5 accepted=4 draft=9.4ms verify=100.0ms all=5 conf=0.986,0.971,0.939,0.984,0.767 tok=310,837,1059,31019,93,292 next=1550
+ds41: DSpark pos=320 drafted=5 accepted=5 draft=9.6ms verify=98.3ms all=5 conf=0.962,0.996,1.000,0.991,0.781 tok=1550,1778,262,874,2296,262 next=41548
+ds41: DSpark pos=326 drafted=5 accepted=1 draft=9.6ms verify=101.0ms all=5 conf=0.846,0.853,0.954,0.916,0.870 tok=41548,509,1512,27,28,1484 next=223
+ds41: DSpark pos=328 drafted=4 accepted=4 draft=9.5ms verify=87.0ms all=5 conf=1.000,1.000,1.000,0.891,0.417 tok=223,27,28,1484,14,1561 next=1561
+ds41: DSpark pos=333 drafted=2 accepted=1 draft=9.5ms verify=66.3ms all=5 conf=0.615,0.688,0.433,0.324,0.376 tok=1561,566,1257,4747,28,2143 next=892
+ds41: DSpark pos=335 drafted=5 accepted=0 draft=9.2ms verify=96.8ms all=5 conf=0.597,0.874,0.876,0.730,0.880 tok=892,1137,262,16807,201,361 next=270
+ds41: DSpark pos=336 drafted=5 accepted=2 draft=9.5ms verify=100.6ms all=5 conf=0.853,0.911,0.744,0.874,0.873 tok=270,1014,344,509,223,27 next=1137
+ds41: DSpark pos=339 drafted=5 accepted=5 draft=10.1ms verify=97.2ms all=5 conf=0.993,0.990,0.985,0.985,0.928 tok=1137,262,16807,201,361,27 next=28
+ds41: DSpark pos=345 drafted=5 accepted=5 draft=9.3ms verify=97.7ms all=5 conf=1.000,0.786,0.908,0.883,0.580 tok=28,1484,13,21,28,1059 next=31
+ds41: DSpark pos=351 drafted=5 accepted=5 draft=9.5ms verify=102.2ms all=5 conf=0.983,0.999,0.991,0.799,0.976 tok=31,907,28,553,201,262 next=874
+ds41: DSpark pos=357 drafted=3 accepted=3 draft=9.6ms verify=74.6ms all=5 conf=0.999,0.995,0.997,0.485,0.720 tok=874,1839,20,16,774,4759 next=33041
+ds41: DSpark pos=361 drafted=5 accepted=5 draft=9.5ms verify=101.2ms all=5 conf=0.841,0.759,0.947,0.871,0.570 tok=33041,362,223,1069,4786,1137 next=262
+ds41: DSpark pos=367 drafted=5 accepted=5 draft=9.6ms verify=98.4ms all=5 conf=1.000,1.000,0.989,0.968,0.997 tok=262,16807,201,361,907,28 next=553
+ds41: DSpark pos=373 drafted=1 accepted=1 draft=9.5ms verify=53.0ms all=5 conf=0.997,0.490,0.658,0.495,0.720 tok=553,13,18,28,1069,31 next=1069
+ds41: DSpark pos=375 drafted=4 accepted=3 draft=9.2ms verify=87.3ms all=5 conf=0.728,0.904,0.541,0.594,0.355 tok=1069,31019,93,1550,1810,201 next=9579
+ds41: DSpark pos=379 drafted=5 accepted=5 draft=10.2ms verify=102.4ms all=5 conf=1.000,1.000,0.990,0.964,0.936 tok=9579,907,28,1810,201,262 next=874
+ds41: DSpark pos=385 drafted=5 accepted=5 draft=9.4ms verify=100.9ms all=5 conf=1.000,1.000,1.000,0.930,0.813 tok=874,1839,21,16,8279,892 next=1137
+ds41: DSpark pos=391 drafted=5 accepted=5 draft=9.4ms verify=97.9ms all=5 conf=0.999,1.000,0.999,0.996,0.986 tok=1137,262,16807,201,262,874 next=4015
+ds41: DSpark pos=397 drafted=5 accepted=5 draft=9.4ms verify=99.1ms all=5 conf=1.000,1.000,1.000,0.887,0.871 tok=4015,93,7013,3069,7163,9579 next=19
+ds41: DSpark pos=403 drafted=5 accepted=5 draft=9.6ms verify=98.6ms all=5 conf=1.000,1.000,0.998,0.999,0.950 tok=19,16,1069,31019,93,4343 next=9579
+ds41: DSpark pos=409 drafted=5 accepted=5 draft=9.5ms verify=98.7ms all=5 conf=1.000,0.996,0.996,0.990,0.942 tok=9579,19,31019,93,310,837 next=856
+ds41: DSpark pos=415 drafted=5 accepted=5 draft=10.0ms verify=99.8ms all=5 conf=1.000,1.000,1.000,0.996,0.998 tok=856,31019,93,1550,1778,262 next=874
+ds41: DSpark pos=421 drafted=2 accepted=2 draft=9.4ms verify=65.9ms all=5 conf=0.998,0.977,0.424,0.445,0.835 tok=874,2296,262,5057,1137,262 next=7043
+ds41: plain pos=424 tok=7043 next=566 ms=50.7
+ds41: DSpark pos=425 drafted=4 accepted=4 draft=9.3ms verify=87.9ms all=5 conf=0.638,0.691,0.871,0.889,0.452 tok=566,304,223,907,28,1810 next=1810
+ds41: DSpark pos=430 drafted=5 accepted=5 draft=10.1ms verify=99.8ms all=5 conf=1.000,1.000,1.000,1.000,0.982 tok=1810,1137,262,16807,201,361 next=907
+ds41: DSpark pos=436 drafted=5 accepted=5 draft=9.4ms verify=98.7ms all=5 conf=1.000,1.000,1.000,0.992,0.796 tok=907,28,1810,13,19,28 next=856
+ds41: DSpark pos=442 drafted=5 accepted=5 draft=9.4ms verify=99.8ms all=5 conf=1.000,0.993,0.999,0.933,0.822 tok=856,31,929,28,1328,201 next=262
+ds41: DSpark pos=448 drafted=5 accepted=2 draft=9.4ms verify=99.7ms all=5 conf=0.997,0.998,0.688,0.945,0.950 tok=262,874,1839,7490,201,7490 next=5328
+ds41: DSpark pos=451 drafted=4 accepted=4 draft=9.4ms verify=88.6ms all=5 conf=0.974,0.981,0.986,0.754,0.486 tok=5328,270,9251,44495,509,2619 next=2619
+ds41: DSpark pos=456 drafted=4 accepted=3 draft=10.0ms verify=90.1ms all=5 conf=0.899,0.983,0.947,0.672,0.401 tok=2619,929,28,1328,4748,666 next=13510
+ds41: DSpark pos=460 drafted=5 accepted=4 draft=9.9ms verify=100.8ms all=5 conf=0.771,0.914,0.784,0.931,0.529 tok=13510,469,2619,20,28,2619 next=1328
+ds41: DSpark pos=465 drafted=5 accepted=3 draft=9.4ms verify=105.4ms all=5 conf=0.990,0.855,0.950,0.933,0.983 tok=1328,4748,42499,1,10257,1 next=0
+ds41: plain pos=469 tok=0 next=5 ms=51.2
+ds41: plain pos=470 tok=5 next=19160 ms=50.9
+ds41: DSpark pos=471 drafted=1 accepted=1 draft=9.2ms verify=52.3ms all=5 conf=0.707,0.334,0.223,0.345,0.197 tok=19160,3287,1353,16,21017,3287 next=201
+ds41: DSpark pos=473 drafted=2 accepted=0 draft=9.3ms verify=67.4ms all=5 conf=0.666,0.574,0.440,0.460,0.354 tok=201,671,9251,44495,509,223 next=666
+ds41: DSpark pos=474 drafted=4 accepted=4 draft=9.5ms verify=90.1ms all=5 conf=0.657,0.879,0.930,0.644,0.460 tok=666,20,28,1328,4748,666 next=666
+ds41: DSpark pos=479 drafted=3 accepted=1 draft=9.5ms verify=83.7ms all=5 conf=0.882,0.898,0.646,0.339,0.379 tok=666,1,7117,28,1328,28 next=0
+ds41: plain pos=481 tok=0 next=5 ms=51.0
+ds41: plain pos=482 tok=5 next=19160 ms=50.7
+ds41: DSpark pos=483 drafted=1 accepted=1 draft=9.1ms verify=51.8ms all=5 conf=0.887,0.381,0.517,0.178,0.216 tok=19160,3287,201,671,3287,28 next=201
+ds41: DSpark pos=485 drafted=1 accepted=1 draft=9.4ms verify=52.8ms all=5 conf=0.550,0.398,0.607,0.458,0.488 tok=201,666,20,28,1328,4748 next=20
+ds41: DSpark pos=487 drafted=5 accepted=5 draft=9.4ms verify=99.7ms all=5 conf=1.000,1.000,0.998,0.870,0.833 tok=20,28,1328,4748,666,1 next=0
+ds41: plain pos=505 tok=38835 next=38742 ms=50.9
+ds41: plain pos=506 tok=38742 next=38835 ms=50.7
+ds41: plain pos=507 tok=38835 next=50249 ms=50.8
+ds41: plain pos=508 tok=50249 next=4087 ms=50.7
+ds41: DSpark pos=509 drafted=1 accepted=1 draft=9.0ms verify=51.8ms all=5 conf=0.652,0.474,0.556,0.404,0.268 tok=4087,1353,16,2275,4087,3287 next=33
+ds41: DSpark pos=511 drafted=2 accepted=0 draft=9.1ms verify=69.2ms all=5 conf=0.679,0.503,0.453,0.398,0.420 tok=33,10037,4230,4087,3287,16 next=455
+ds41: DSpark pos=512 drafted=2 accepted=1 draft=9.1ms verify=65.3ms all=5 conf=0.675,0.515,0.437,0.347,0.365 tok=455,12275,4230,4087,3287,16 next=20407
+ds41: DSpark pos=514 drafted=1 accepted=0 draft=9.2ms verify=52.7ms all=5 conf=0.533,0.392,0.620,0.739,0.545 tok=20407,3287,16,1350,588,4087 next=1801
+ds41: DSpark pos=515 drafted=5 accepted=1 draft=9.0ms verify=99.3ms all=5 conf=0.675,0.536,0.665,0.737,0.586 tok=1801,22805,16,1350,588,3052 next=3132
+ds41: DSpark pos=517 drafted=5 accepted=4 draft=9.4ms verify=103.7ms all=5 conf=0.985,0.999,0.934,0.824,0.732 tok=3132,513,3132,16,1350,4006 next=588
+ds41: DSpark pos=522 drafted=4 accepted=1 draft=9.4ms verify=90.4ms all=5 conf=0.748,0.524,0.595,0.670,0.479 tok=588,3052,4087,16,2275,4087 next=16
+ds41: DSpark pos=524 drafted=2 accepted=1 draft=9.2ms verify=66.5ms all=5 conf=0.758,0.527,0.379,0.363,0.475 tok=16,21017,4087,3287,16,128822 next=554
+ds41: DSpark pos=526 drafted=4 accepted=0 draft=9.2ms verify=88.0ms all=5 conf=0.657,0.511,0.618,0.511,0.292 tok=554,1060,4016,16,19160,3287 next=3394
+ds41: DSpark pos=527 drafted=1 accepted=0 draft=9.3ms verify=53.4ms all=5 conf=0.601,0.411,0.439,0.521,0.296 tok=3394,46588,4087,16,19160,3287 next=29005
+ds41: DSpark pos=528 drafted=3 accepted=0 draft=9.2ms verify=74.2ms all=5 conf=0.543,0.534,0.607,0.377,0.331 tok=29005,12529,16,19160,3287,16 next=16
+ds41: DSpark pos=529 drafted=1 accepted=1 draft=9.2ms verify=53.6ms all=5 conf=0.709,0.450,0.400,0.478,0.810 tok=16,19160,3287,16,128822,666 next=3287
+ds41: DSpark pos=531 drafted=4 accepted=0 draft=9.1ms verify=92.7ms all=5 conf=0.786,0.709,0.877,0.939,0.245 tok=3287,16,128822,5718,734,13013 next=418
+ds41: DSpark pos=532 drafted=3 accepted=3 draft=9.3ms verify=76.3ms all=5 conf=0.656,0.812,0.625,0.393,0.303 tok=418,6531,16,35857,1119,6712 next=1119
+ds41: DSpark pos=536 drafted=4 accepted=0 draft=9.3ms verify=91.7ms all=5 conf=0.650,0.674,0.550,0.516,0.227 tok=1119,5452,16,539,20,16 next=582
+ds41: DSpark pos=537 drafted=2 accepted=2 draft=9.4ms verify=66.1ms all=5 conf=0.595,0.558,0.476,0.272,0.250 tok=582,37557,3287,4,10796,16 next=4
+ds41: DSpark pos=540 drafted=2 accepted=1 draft=9.3ms verify=68.9ms all=5 conf=0.801,0.704,0.496,0.596,0.378 tok=4,12529,33,1350,588,2507 next=16
+ds41: DSpark pos=542 drafted=3 accepted=0 draft=9.3ms verify=75.7ms all=5 conf=0.772,0.640,0.867,0.235,0.192 tok=16,539,128822,671,4087,47468 next=128822
+ds41: plain pos=543 tok=128822 next=671 ms=51.0
+ds41: DSpark pos=544 drafted=1 accepted=1 draft=9.3ms verify=53.7ms all=5 conf=0.993,0.435,0.655,0.512,0.301 tok=671,9251,2074,9839,509,2619 next=44495
+ds41: DSpark pos=546 drafted=5 accepted=5 draft=9.5ms verify=101.1ms all=5 conf=0.989,0.867,0.631,0.847,0.853 tok=44495,509,2619,20,28,1328 next=4748
+ds41: DSpark pos=552 drafted=3 accepted=1 draft=9.4ms verify=81.2ms all=5 conf=0.640,0.547,0.563,0.315,0.295 tok=4748,77460,929,28,1328,75477 next=9832
+ds41: DSpark pos=554 drafted=5 accepted=0 draft=9.4ms verify=101.1ms all=5 conf=0.865,0.999,0.858,0.937,0.928 tok=9832,10531,15537,979,19,16 next=513
+ds41: DSpark pos=555 drafted=4 accepted=4 draft=9.5ms verify=88.4ms all=5 conf=1.000,0.961,0.996,0.998,0.464 tok=513,3132,979,19,16,2619 next=5978
+ds41: DSpark pos=560 drafted=3 accepted=3 draft=8.7ms verify=75.8ms all=3 conf=0.657,0.676,0.620,0.000,0.000 tok=5978,12085,28,2143,0,0 next=262
+dspark 512 tokens 13407.1 ms (38.19 tok/s), 135 cycles, drafted 508 accepted 354 (69.7%), 3.79 tokens/cycle, 68 full blocks
+greedy match: 512 of 512 tokens (identical)

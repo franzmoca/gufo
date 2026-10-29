@@ -3,6 +3,7 @@
 #include <hip/hip_runtime.h>
 
 #include <algorithm>
+#include <bit>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
@@ -25,7 +26,8 @@ struct TypeCase {
 
 constexpr TypeCase kTypes[] = {
     {"Q8_0", 8, 34, 32},    {"Q5_K", 13, 176, 256},   {"IQ1_S", 19, 50, 256},
-    {"IQ1_M", 29, 56, 256}, {"IQ2_XXS", 16, 66, 256}, {"IQ2_S", 22, 82, 256},
+    {"IQ1_M", 29, 56, 256}, {"IQ2_XXS", 16, 66, 256}, {"IQ2_XS", 17, 74, 256},
+    {"IQ2_S", 22, 82, 256},
 };
 // The DSpark drafter's dense projections: GEMV cases only.
 constexpr TypeCase kQ4K = {"Q4_K", 12, 144, 256};
@@ -81,6 +83,72 @@ std::vector<float> Host(const float* device, std::size_t n) {
   (void)hipDeviceSynchronize();
   (void)hipMemcpy(out.data(), device, n * sizeof(float), hipMemcpyDeviceToHost);
   return out;
+}
+
+double RelativeError(const std::vector<float>& got,
+                     const std::vector<float>& want);
+
+// IQ2_XS grid entry zero contains eight 8s; sign index zero is all
+// positive and sign index one negates positions 0 and 7. This checks the
+// GPU's indices, signs and both scales against an analytic dot product.
+bool Iq2XsKnownCase() {
+  constexpr int kExperts = 3, M = 33, K = 512, kSlots = 6;
+  constexpr std::size_t kBlock = 74, kExpertBytes = M * (K / 256) * kBlock;
+  std::vector<uint8_t> w(kExperts * kExpertBytes);
+  for (int e = 0; e < kExperts; ++e) {
+    for (int r = 0; r < M; ++r) {
+      for (int b = 0; b < K / 256; ++b) {
+        uint8_t* block =
+            w.data() + e * kExpertBytes + (r * (K / 256) + b) * kBlock;
+        block[0] = 0;
+        block[1] = 0x3c;  // FP16 1.0
+        for (int g = 0; g < 32; ++g) {
+          const uint16_t q = ((e + r + b + g) & 1) ? 512 : 0;
+          std::memcpy(block + 2 + 2 * g, &q, sizeof(q));
+        }
+        for (int g = 0; g < 8; ++g)
+          block[66 + g] = static_cast<uint8_t>((g << 4) | (15 - g));
+      }
+    }
+  }
+  std::vector<float> x(kSlots * K);
+  for (std::size_t i = 0; i < x.size(); ++i)
+    x[i] = static_cast<float>(static_cast<int>(i % 23) - 11) / 13.0f;
+  const std::vector<int32_t> ids{2, 0, 1, 2, -1, 1};
+  std::vector<float> want(kSlots * M);
+  for (int s = 0; s < kSlots; ++s) {
+    if (ids[s] < 0)
+      continue;
+    for (int r = 0; r < M; ++r) {
+      double sum = 0;
+      for (int i = 0; i < K; ++i) {
+        const int b = i / 256, sub = (i % 256) / 32, group = (i % 32) / 8,
+                  j = i % 8;
+        const int scale = group < 2 ? 15 - sub : sub;
+        const bool negative =
+            ((ids[s] + r + b + 4 * sub + group) & 1) && (j == 0 || j == 7);
+        const double value = (negative ? -1.0 : 1.0) * 2.0 * (0.5 + scale);
+        sum += value * x[s * K + i];
+      }
+      want[s * M + r] = static_cast<float>(sum);
+    }
+  }
+  auto* dw = Device(w);
+  auto* dx = Device(x);
+  auto* dids = Device(ids);
+  float* dy = nullptr;
+  bool ok = dw && dx && dids &&
+            hipMalloc(&dy, want.size() * sizeof(float)) == hipSuccess &&
+            ds41_v41_gemv_experts(17, dw, kExpertBytes, dids, kSlots, dx, K, 1,
+                                  dy, M, K) == 0;
+  const double error =
+      ok ? RelativeError(Host(dy, want.size()), want) : INFINITY;
+  std::printf("IQ2_XS analytic expert dot rel_err=%.2e\n", error);
+  for (void* p : {static_cast<void*>(dw), static_cast<void*>(dx),
+                  static_cast<void*>(dids), static_cast<void*>(dy)})
+    if (p)
+      (void)hipFree(p);
+  return error < 1e-5;
 }
 
 /* Relative RMS error of `got` against `want`. */
@@ -212,7 +280,7 @@ bool GemvTokensCase(const TypeCase& t, int M, int K, int rows_per_x, int n,
     const auto hb = Host(b, out);
     return std::memcmp(ha.data(), hb.data(), out * sizeof(float)) == 0;
   };
-  for (const int slices : {1, 4, 8}) {
+  for (const int slices : {1, 2, 4, 8}) {
     bool launched = ds41_v41_gemv(t.type, dw, dx, batched, M, K, rows_per_x,
                                   slices, n, x_stride, M) == 0;
     for (int c = 0; c < n && launched; ++c)
@@ -803,7 +871,41 @@ bool DenseF16Case(const TypeCase& t, int M, int N, int K, int groups,
   (void)hipMalloc(&want, sizeof(float) * n_out);
   const std::size_t matrix_bytes =
       static_cast<std::size_t>(M) * K / t.block_values * t.block_bytes;
-  bool ok = ds41_v41_dense_f16(t.type, dw, dx, got, M, N, K, groups) == 0;
+  bool ok = ds41_v41_dense_f16(t.type, dw, dx, got, M, N, K, groups, 0) == 0;
+  /* FP16 activations (rounded as the staging rounds them) and FP16 outputs
+   * reproduce the FP32 launch bit for bit. */
+  bool same = ok;
+  if (ok) {
+    uint16_t *x16 = nullptr, *y16 = nullptr;
+    float* y = nullptr;
+    (void)hipMalloc(&x16, sizeof(uint16_t) * x.size());
+    (void)hipMalloc(&y16, sizeof(uint16_t) * n_out);
+    (void)hipMalloc(&y, sizeof(float) * n_out);
+    const auto ref = Host(got, n_out);
+    std::vector<uint16_t> ref16(n_out);
+    for (std::size_t i = 0; i < n_out; ++i)
+      ref16[i] = std::bit_cast<uint16_t>(static_cast<_Float16>(ref[i]));
+    const auto half_out = [&]() {
+      std::vector<uint16_t> h(n_out);
+      (void)hipMemcpy(h.data(), y16, h.size() * sizeof(uint16_t),
+                      hipMemcpyDeviceToHost);
+      return h == ref16;
+    };
+    same = ds41_v41_to_half(dx, x16, x.size()) == 0 &&
+           ds41_v41_dense_f16(t.type, dw, x16, y, M, N, K, groups,
+                              DS41_V41_DENSE_X_HALF) == 0 &&
+           Host(y, n_out) == ref &&
+           ds41_v41_dense_f16(t.type, dw, dx, y16, M, N, K, groups,
+                              DS41_V41_DENSE_OUT_HALF) == 0 &&
+           half_out() &&
+           ds41_v41_dense_f16(
+               t.type, dw, x16, y16, M, N, K, groups,
+               DS41_V41_DENSE_X_HALF | DS41_V41_DENSE_OUT_HALF) == 0 &&
+           half_out();
+    (void)hipFree(x16);
+    (void)hipFree(y16);
+    (void)hipFree(y);
+  }
   for (int token = 0; ok && token < N; ++token)
     for (int z = 0; ok && z < groups; ++z)
       ok = ds41_v41_gemv(
@@ -815,13 +917,14 @@ bool DenseF16Case(const TypeCase& t, int M, int N, int K, int groups,
                0, 4, 1, K, M) == 0;
   const double e =
       ok ? RelativeError(Host(got, n_out), Host(want, n_out)) : INFINITY;
-  std::printf("dense f16 %-8s M=%d N=%d K=%d groups=%d rel_err=%.2e\n", t.name,
-              M, N, K, groups, e);
+  std::printf(
+      "dense f16 %-8s M=%d N=%d K=%d groups=%d rel_err=%.2e fp16 io %s\n",
+      t.name, M, N, K, groups, e, same ? "identical" : "DIFFERS");
   (void)hipFree(dw);
   (void)hipFree(dx);
   (void)hipFree(got);
   (void)hipFree(want);
-  return e < 2e-3;
+  return e < 2e-3 && same;
 }
 
 /* The FP16 matrix-core routed kernel against the FP32-activation expert
@@ -999,12 +1102,17 @@ int main(int argc, char** argv) {
     return 1;
   std::mt19937 rng(41);
   bool ok = RoutedPlanCases(rng);
+  ok = Iq2XsKnownCase() && ok;
   if (argc == 2 && std::strcmp(argv[1], "--routed-plan") == 0) {
     for (const auto& t : kTypes) {
-      if (t.type != 19 && t.type != 29 && t.type != 16)
+      if (t.type != 19 && t.type != 29 && t.type != 16 && t.type != 17)
         continue;
       ok = RoutedF16Case(t, 256, 1024, 200, 384, 6, true, rng) && ok;
       ok = RoutedF16Case(t, 512, 2304, 200, 384, 6, false, rng) && ok;
+      if (t.type == 17) {
+        ok = RoutedF16Case(t, 33, 256, 33, 16, 6, true, rng) && ok;
+        ok = RoutedF16Case(t, 33, 256, 33, 16, 6, false, rng) && ok;
+      }
     }
     ds41_mmq_cleanup();
     std::printf("%s\n", ok ? "PASS" : "FAIL");
@@ -1012,7 +1120,7 @@ int main(int argc, char** argv) {
   }
   ok = GemvCase(kQ4K, 300, 1280, 0, rng) && ok;
   ok = GemvCase(kQ4K, 256, 5120, 0, rng) && ok;
-  for (const int n : {2, 3, 5, 8, 12, 16})
+  for (const int n : {2, 3, 5, 6, 7, 8, 12, 16})
     ok = GemvTokensCase(kQ4K, 300, 1280, 0, n, rng) && ok;
   ok = SwigluCase(kQ4K, 2304, 5120, rng) && ok;
   for (const auto& t : kTypes) {
@@ -1026,18 +1134,20 @@ int main(int argc, char** argv) {
     if (t.type == 8 || t.type == 13) {
       ok = GemvCase(t, 300, 1280, 0, rng) && ok;
       ok = GemvCase(t, 256, 4096, 64, rng) && ok;
-      for (const int n : {2, 3, 5, 8, 12, 16}) {
+      for (const int n : {2, 3, 5, 6, 7, 8, 12, 16}) {
         ok = GemvTokensCase(t, 300, 1280, 0, n, rng) && ok;
         ok = GemvTokensCase(t, 256, 4096, 64, n, rng) && ok;
+        // Pairs split at multiples of 32 rows take the task-major kernel.
+        ok = GemvTokensCase(t, 320, 1280, 0, n, rng) && ok;
       }
       ok = SwigluCase(t, 2304, 5120, rng) && ok;
     }
     if (t.type != 8 && t.type != 13) {
       ok = ExpertGemvCase(t, 2304, 5120, false, rng) && ok;
       ok = ExpertGemvCase(t, 512, 2304, true, rng) && ok;
-      for (const int n : {2, 3, 4, 6, 8, 12, 16})
+      for (const int n : {2, 3, 4, 5, 6, 7, 8, 12, 16})
         ok = ExpertTokensCase(t, 512, 2304, n, rng) && ok;
-      if (t.type == 19 || t.type == 29 || t.type == 16)
+      if (t.type == 19 || t.type == 29 || t.type == 16 || t.type == 17)
         ok = SwigluCase(t, 2304, 5120, rng) && ok;
     }
     ok = GroupedCase(t, 128, 1, 1024, 8, rng) && ok;
@@ -1050,10 +1160,14 @@ int main(int argc, char** argv) {
       ok = MoeCase(t, 256, 1024, 200, 384, 6, bounded, rng) && ok;
     }
     ok = MoeSwigluCase(t, 256, 1024, 200, 384, 6, rng) && ok;
-    if (t.type == 19 || t.type == 29 || t.type == 16) {
+    if (t.type == 19 || t.type == 29 || t.type == 16 || t.type == 17) {
       for (const int n_experts : {16, 384}) {
         ok = RoutedF16Case(t, 256, 1024, 200, n_experts, 6, true, rng) && ok;
         ok = RoutedF16Case(t, 512, 2304, 200, n_experts, 6, false, rng) && ok;
+      }
+      if (t.type == 17) {
+        ok = RoutedF16Case(t, 33, 256, 33, 16, 6, true, rng) && ok;
+        ok = RoutedF16Case(t, 33, 256, 33, 16, 6, false, rng) && ok;
       }
     }
     ok = MoeClassCase(t, 256, 1024, 600, 384, 6, rng) && ok;

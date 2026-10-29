@@ -21,7 +21,7 @@ def registry():
     for name, asset in data['assets'].items():
         if not re.fullmatch('[0-9a-f]{40}', asset['revision']):
             raise ValueError('Unpinned asset: ' + name)
-        for path in asset['required']:
+        for path in [*asset['required'], *asset.get('links', {}), *asset.get('links', {}).values()]:
             if PurePosixPath(path).is_absolute() or '..' in PurePosixPath(path).parts:
                 raise ValueError('Invalid asset path: ' + path)
     return data
@@ -55,6 +55,10 @@ def download(plan, cache, data):
                 if attempt == 2:
                     raise
                 time.sleep(2)
+        # Files a build opens under another name, e.g. a shard shared by several builds.
+        for name, target in asset.get('links', {}).items():
+            if not (destination / name).is_symlink():
+                (destination / name).symlink_to(target)
         for name in asset['required']:
             path = destination / name
             if not path.is_file() or not path.stat().st_size:

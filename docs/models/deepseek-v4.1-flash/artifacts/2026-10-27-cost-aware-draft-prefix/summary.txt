@@ -1,0 +1,38 @@
+Cost-aware DSpark draft prefix (E18), 2026-10-27, gfx1151.
+
+Prompts: prompts.txt (p1-p4, rendered chat) plus the first 300 tokens of the
+3K perplexity text (p5). Each run: ds41_load_probe --dspark-generate 512,
+greedy; DSpark output compared with plain decode token by token.
+Drafter: Lucebox DSpark Q2_K/Q4_K. Base d258afc1, candidate 55003291.
+
+Matched A/B, 5 prompts x 2 alternating repetitions, tok/s base -> candidate:
+
+Streamed IQ2_XXS (--stream-experts, warm built-in seed)
+p1 38.83 -> 39.54 (+1.8%)   38.87 -> 39.47 (+1.5%)
+p2 29.59 -> 30.52 (+3.1%)   29.37 -> 30.37 (+3.4%)
+p3 37.53 -> 40.03 (+6.7%)   37.57 -> 39.77 (+5.9%)
+p4 34.51 -> 35.55 (+3.0%)   34.37 -> 35.61 (+3.6%)
+p5 30.04 -> 31.47 (+4.8%)   30.27 -> 31.45 (+3.9%)
+geometric mean +3.76%, 10/10 faster
+
+Resident IQ1_M
+p1 43.64 -> 43.17 (-1.1%)   43.74 -> 43.65 (-0.2%)
+p2 33.59 -> 33.71 (+0.4%)   33.53 -> 33.83 (+0.9%)
+p3 38.16 -> 38.89 (+1.9%)   38.21 -> 38.74 (+1.4%)
+p4 36.54 -> 36.91 (+1.0%)   36.52 -> 36.91 (+1.1%)
+p5 31.15 -> 31.39 (+0.8%)   31.36 -> 31.49 (+0.4%)
+geometric mean +0.65%, 8/10 faster
+
+All 40 runs: 512 of 512 tokens identical to plain decode.
+
+Rejected first version (per-width cycle-time EMA only): streamed +2.91%
+(10/10 faster), resident -1.87% (0/10 faster). The 1- and 3-draft estimates
+never left their priors (69.6, 95.5 ms against ~62 and ~86 ms measured
+resident), so those widths were almost never chosen.
+
+traces/: per-cycle traces of the base build (trace.patch adds the head's
+confidences, all drafted tokens and plain steps to GUFO_DEEPSEEK41_DSPARK_TRACE).
+replay2.py replays cut rules over the traces with fixed costs; sim.py adds
+the runtime's cycle-time estimates (python3 sim.py traces/streamed-*.txt;
+PLAIN=42 for the resident traces). spec-bench.txt: verification time by rows
+(streamed IQ2_XXS first, then resident IQ1_M).

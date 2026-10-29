@@ -47,6 +47,9 @@ struct PromptOptions {
   /// DeepSeek V4.1 Flash prefill batch tokens; 0 is the model default.
   std::uint32_t prefill_batch{0};
   bool exact_prefill{false};
+  /// DeepSeek V4.1 Flash routed expert streaming and its cache bytes.
+  bool stream_experts{false};
+  std::size_t expert_cache_bytes{0};
   // DeepSeek V4 Flash DSpark support model. DSpark is DS4's own drafter and
   // is unrelated to the Qwen DFlash paths above.
   std::string dspark_model_path;

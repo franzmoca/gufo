@@ -25,6 +25,11 @@ struct ModelOptions {
   /// SWA bounded replay over each prompt's last 140 tokens (about half the
   /// prefill time).
   bool exact_prefill = false;
+  /// Keep dense weights resident and stream routed experts from the SSD;
+  /// without it, a model that does not fit available memory fails to load.
+  bool stream_experts = false;
+  /// Streamed expert cache bytes (0 sizes it from available memory).
+  std::uint64_t expert_cache_bytes = 0;
   /// Optional DSpark support model. Empty leaves speculative decoding off.
   std::string dspark_model_path;
 };
@@ -94,10 +99,9 @@ public:
   [[nodiscard]] std::uint32_t MaxContext() const noexcept;
   [[nodiscard]] bool HasDspark() const;
   [[nodiscard]] bool ExactPrefill() const;
-  /// The MoE gates' image routing bias, [40][384] (vision::Encoder::
-  /// RoutingBias), for image prompts; set it before creating sessions.
-  [[nodiscard]] bool SetImageRoutingBias(std::span<const float> bias,
-                                         std::string* error_msg = nullptr);
+  /// Routes image positions with the MoE gates' image bias, for image
+  /// prompts; enable it before creating sessions.
+  [[nodiscard]] bool EnableImageRouting(std::string* error_msg = nullptr);
 
 private:
   Model(ds41_engine* engine, ModelOptions options);
@@ -124,7 +128,7 @@ public:
   // bounds the decoder layers' replay to its last tokens; a state synced to
   // a shorter part only continues to that same end. `images` hold the input
   // embeddings of the image spans (the positions holding DS41_IMAGE_TOKEN)
-  // that this part evaluates; they need SetImageRoutingBias.
+  // that this part evaluates; they need EnableImageRouting.
   [[nodiscard]] bool Sync(std::span<const int> prompt,
                           std::string* error_msg = nullptr,
                           std::size_t prompt_end = 0,

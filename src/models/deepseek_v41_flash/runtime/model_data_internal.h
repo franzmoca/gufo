@@ -140,17 +140,18 @@ struct ds41_layer_weights {
   ds41_tensor* indexer_proj;
   ds41_tensor* indexer_attn_k;
   ds41_tensor* indexer_k_norm;
-  /* Engram layers. engram_embd lives in the separate Engram GGUF. */
-  ds41_tensor* engram_q;
-  ds41_tensor* engram_k;
-  ds41_tensor* engram_wkv;
-  ds41_tensor* engram_embd;
+  /* Engram layers; their table rows live in the Engram GGUF. engram_gate
+   * is the F32 product of the checkpoint's BF16 q and k. */
+  ds41_tensor* engram_gate;
+  ds41_tensor* engram_kv;
   ds41_tensor* hc_ffn_fn;
   ds41_tensor* hc_ffn_scale;
   ds41_tensor* hc_ffn_base;
   ds41_tensor* ffn_norm;
   ds41_tensor* ffn_gate_inp;
   ds41_tensor* ffn_exp_probs_b;
+  /* The gate's bias for image positions (bias_vl). */
+  ds41_tensor* ffn_exp_probs_b_vl;
   ds41_tensor* ffn_gate_exps;
   ds41_tensor* ffn_up_exps;
   ds41_tensor* ffn_down_exps;
@@ -163,16 +164,20 @@ struct ds41_weights {
   ds41_tensor* token_embd;
   ds41_tensor* output_norm;
   ds41_tensor* output;
-  ds41_tensor* engram_token_map;
-  ds41_tensor* engram_primes;
-  ds41_tensor* engram_offsets;
-  ds41_tensor* engram_multipliers;
   ds41_layer_weights layer[DS41_MAX_LAYER];
+  /* Engram n-gram hash constants (metadata). Each head hashes into its own
+   * bucket range of the shared table: head_offsets are absolute rows. */
+  int32_t engram_token_map[DS41_N_VOCAB];
+  int64_t engram_head_vocab[DS41_N_ENGRAM_LAYER * DS41_ENGRAM_COLS];
+  int64_t engram_head_offsets[DS41_N_ENGRAM_LAYER * DS41_ENGRAM_COLS];
+  int64_t engram_multipliers[DS41_N_ENGRAM_LAYER * DS41_ENGRAM_MAX_NGRAM];
 };
 
-/* Separate Engram GGUF: tables stay on disk and are read row by row. */
+/* The Engram GGUF, the last shard of a build: one table of every Engram
+ * layer's rows, kept on disk and read row by row. */
 struct ds41_engram_tables {
   ds41_model file;
+  const ds41_tensor* table;
   uint64_t row_bytes;
 };
 

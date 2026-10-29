@@ -31,6 +31,7 @@
 #include "src/core/gguf_reader.hpp"
 #include "src/core/json.hpp"
 #include "src/core/sampling.hpp"
+#include "src/models/deepseek_v41_flash/artifact_hint.hpp"
 #include "src/models/qwen/chat_template.hpp"
 #include "src/models/qwen/control_tokens.hpp"
 #include "src/models/qwen/generator.hpp"
@@ -4209,7 +4210,9 @@ bool InferenceBackend::load(
   std::string load_error;
   auto reader_owner = core::GgufReader::OpenFile(model_path, &load_error);
   if (reader_owner == nullptr) {
-    SetError(error, "Failed to open GGUF: " + load_error);
+    SetError(error, "Failed to open GGUF: " + load_error +
+                        models::deepseek_v41_flash::MissingEngramShardHint(
+                            model_path));
     return false;
   }
   const std::shared_ptr<const core::GgufReader> reader(std::move(reader_owner));
@@ -4355,6 +4358,8 @@ bool InferenceBackend::load(
             .max_context = max_context,
             .prefill_batch = deepseek_prefill_batch_,
             .exact_prefill = deepseek_exact_prefill_,
+            .stream_experts = deepseek_stream_experts_,
+            .expert_cache_bytes = deepseek_expert_cache_bytes_,
             .dspark_model_path =
                 dspark ? speculative_config.draft_model_path : std::string{}},
         &load_error);
@@ -4817,7 +4822,7 @@ bool InferenceBackend::LoadDeepSeek(
     if constexpr (Ds::kVision) {
       if (vision) {
         std::string bias_error;
-        if (!model->SetImageRoutingBias(vision->RoutingBias(), &bias_error)) {
+        if (!model->EnableImageRouting(&bias_error)) {
           SetError(error, bias_error);
           return false;
         }

@@ -21,8 +21,6 @@ struct ds41_engine_options {
   /* Optional DSpark support model. NULL leaves speculative decoding off and
    * the engine byte-for-byte identical to a non-speculative build. */
   const char* dspark_model_path;
-  /* Engram GGUF. NULL opens deepseek41.engram.file beside the first shard. */
-  const char* engram_path;
   /* Parse, validate and bind the artifacts without uploading any weights. */
   bool validate_only;
   /* Most prompt tokens per prefill batch, DS41_MIN_PREFILL_BATCH to
@@ -33,6 +31,13 @@ struct ds41_engine_options {
   /* Prefill runs every decoder layer over every prompt token instead of the
    * decoder SWA bounded replay (ds41_decoder_eval_prompt). */
   bool exact_prefill;
+  /* Keep only dense weights resident and stream routed experts from the
+   * SSD through a bounded cache. Without it, a model that does not fit
+   * available memory fails to load. */
+  bool stream_experts;
+  /* Streamed expert cache bytes; 0 sizes it from available memory. Requires
+   * stream_experts. */
+  uint64_t expert_cache_bytes;
 };
 
 inline constexpr uint32_t DS41_MIN_PREFILL_BATCH = 16;
@@ -172,12 +177,12 @@ void ds41_session_begin_request(ds41_session* session);
 void ds41_session_prepare_batch_execution(ds41_session* session);
 bool ds41_engine_has_dspark(const ds41_engine* engine);
 bool ds41_engine_exact_prefill(const ds41_engine* engine);
-/* Uploads the MoE gates' image routing bias, [40][384] host floats; NULL
- * removes it. With it, every position holding DS41_IMAGE_TOKEN is an image
- * position, as the official image mask: it takes no part in an Engram
- * n-gram and receives no Engram term, and its experts are selected with the
- * image bias. Set it before creating sessions. */
-int ds41_engine_set_image_bias(ds41_engine* engine, const float* bias);
+/* Uploads the MoE gates' image routing bias (blk.N.exp_probs_b_vl). Then
+ * every position holding DS41_IMAGE_TOKEN is an image position, as the
+ * official image mask: it takes no part in an Engram n-gram and receives no
+ * Engram term, and its experts are selected with the image bias. Enable it
+ * before creating sessions. */
+int ds41_engine_enable_image_routing(ds41_engine* engine);
 bool ds41_engine_has_image_bias(const ds41_engine* engine);
 int ds41_sessions_dspark_step_batch(const ds41_session_dspark_batch_item* items,
                                     size_t item_count, char* error,
@@ -257,14 +262,16 @@ int ds41_decoder_eval_prompt(ds41_decoder* decoder, const int* tokens,
  * the token's embedding. */
 void ds41_decoder_set_images(ds41_decoder* decoder,
                              const ds41_image_span* images, size_t n_images);
-/* Rows a speculative batch may hold. */
+/* Rows a speculative batch may hold. With `argmax`, the evaluations also
+ * leave each row's ds41_sample_argmax there, computed on the device. */
 #define DS41_DECODER_MAX_SPECULATIVE 16
 /* ds41_decoder_eval of `n` tokens (n <= DS41_DECODER_MAX_SPECULATIVE) with
  * logits for every row, whose window rows and compressor inputs stay pending
  * until ds41_decoder_commit keeps a prefix of them. The decoder's position
  * advances by n meanwhile; no other evaluation may run before the commit. */
 int ds41_decoder_eval_speculative(ds41_decoder* decoder, const int* tokens,
-                                  uint32_t n, float* logits);
+                                  uint32_t n, float* logits,
+                                  int32_t* argmax = nullptr);
 /* Rows a joint speculative evaluation may hold in total. */
 #define DS41_DECODER_MAX_JOINT 16
 /* ds41_decoder_eval_speculative of tokens[i] (ns[i] rows) on decoders[i],
@@ -274,7 +281,8 @@ int ds41_decoder_eval_speculative(ds41_decoder* decoder, const int* tokens,
  * does not take (image tokens, other activations, too many rows). */
 int ds41_decoder_eval_joint(ds41_decoder* const* decoders,
                             const int* const* tokens, const uint32_t* ns,
-                            uint32_t count, float* const* logits);
+                            uint32_t count, float* const* logits,
+                            int32_t* const* argmax = nullptr);
 /* Keeps the first `keep` (1 to n) tokens of the pending speculative batch,
  * leaving the state of an evaluation of exactly those tokens. */
 int ds41_decoder_commit(ds41_decoder* decoder, uint32_t keep);

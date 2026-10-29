@@ -1,4 +1,4 @@
-/* Batched routed-expert projections for IQ1_S, IQ1_M and IQ2_XXS weights on
+/* Batched routed-expert projections for IQ1_S, IQ1_M, IQ2_XXS and IQ2_XS weights on
  * the FP16 matrix cores. The activations are rounded to FP16 (11-bit
  * mantissa, against the 8-bit block quantization of MMQ's Q8_1 inputs) and
  * each weight decodes to FP16 with its sub-block scale folded in, so the K
@@ -25,7 +25,9 @@ typedef _Float16 half16 __attribute__((ext_vector_type(16)));
 typedef float float8 __attribute__((ext_vector_type(8)));
 
 constexpr int kSlots = 64;              // slots per tile
-constexpr int kStageK = 128;            // activation values per LDS stage
+constexpr int kStageK = 64;             // activation values per LDS stage
+constexpr int kStages = 256 / kStageK;  // stages per weight block
+constexpr int kVec = kStageK / 32;      // 16-byte words staged per thread
 constexpr int kActPitch = kStageK + 8;  // halves; rows land on distinct banks
 
 typedef _Float16 half2_t __attribute__((ext_vector_type(2)));
@@ -75,15 +77,12 @@ __device__ __forceinline__ float half_bits(uint32_t bits) {
 }
 
 /* High bytes of the FP16 values of the IQ1 codebook (0, 1 and 2; the low
- * bytes are zero), one byte per weight in element order. */
+ * bytes are zero), one byte per weight in element order: each grid nibble
+ * selects its byte from 0x00, 0x3c, 0x40. */
 __device__ __forceinline__ uint2 iq1_high_bytes(uint32_t grid) {
-  uint32_t out[2] = {0, 0};
-#pragma unroll
-  for (int i = 0; i < 8; ++i) {
-    const uint32_t n = (grid >> (8 * (i % 4) + 4 * (i / 4))) & 0xfu;
-    out[i / 4] |= (n == 0 ? 0x00u : n == 1 ? 0x3cu : 0x40u) << (8 * (i % 4));
-  }
-  return make_uint2(out[0], out[1]);
+  constexpr uint32_t kHigh = 0x00403c00u;
+  return make_uint2(__builtin_amdgcn_perm(0u, kHigh, grid & 0x0f0f0f0fu),
+                    __builtin_amdgcn_perm(0u, kHigh, (grid >> 4) & 0x0f0f0f0fu));
 }
 
 /* Eight IQ1 weights as four half2: the codebook values n from their high
@@ -100,7 +99,11 @@ __device__ __forceinline__ void iq1_decode8(uint2 bytes, uint32_t affine, uint32
 
 /* Weight formats. Each gives its block size, the words loaded per block
  * (kAligned: blocks start on words), the LDS tables, the fields of one
- * 32-value sub-block (Sub) and the eight FP16 weights of group l of it. */
+ * 32-value sub-block (Sub) and the eight FP16 weights of group l of it.
+ * kShareActivations: each half-wave reads its own 16 bytes of an activation
+ * fragment and takes the other half's across lanes, trading LDS reads for
+ * permutes; it pays for the IQ2 formats, whose 16-byte random codebook reads
+ * load LDS, and costs the VALU-bound IQ1 ones. */
 template <int kType>
 struct Format;
 
@@ -112,11 +115,12 @@ template <>
 struct Format<19> {
   static constexpr int kBytes = 50, kWords = 13;
   static constexpr bool kAligned = false;
+  static constexpr bool kShareActivations = false;
   struct Tables {
-    uint2 grid[NGRID_IQ1S];
+    uint32_t grid[NGRID_IQ1S];
   };
   static __device__ void fill(Tables& t, int tid) {
-    for (int i = tid; i < NGRID_IQ1S; i += 256) t.grid[i] = iq1_high_bytes(iq1s_grid_gpu[i]);
+    for (int i = tid; i < NGRID_IQ1S; i += 256) t.grid[i] = iq1s_grid_gpu[i];
   }
   struct Sub {
     uint32_t qs, qh, affine;
@@ -130,7 +134,7 @@ struct Format<19> {
   }
   static __device__ __forceinline__ void decode(const Sub& s, int l, const Tables& t, uint32_t* out) {
     const uint32_t idx = ((s.qs >> (8 * l)) & 0xffu) | (((s.qh >> (3 * l)) & 7u) << 8);
-    iq1_decode8(t.grid[idx], s.affine, out);
+    iq1_decode8(iq1_high_bytes(t.grid[idx]), s.affine, out);
   }
 };
 
@@ -143,6 +147,7 @@ template <>
 struct Format<29> {
   static constexpr int kBytes = 56, kWords = 14;
   static constexpr bool kAligned = true;
+  static constexpr bool kShareActivations = false;
   using Tables = Format<19>::Tables;
   static __device__ void fill(Tables& t, int tid) { Format<19>::fill(t, tid); }
   struct Sub {
@@ -161,7 +166,7 @@ struct Format<29> {
     const uint32_t idx = ((s.qs >> (8 * l)) & 0xffu) | ((nibble & 7u) << 8);
     const float scale = s.d * static_cast<float>(2 * ((s.sc >> (3 * (l / 2))) & 7) + 1);
     const float delta = (nibble & 8u) ? -1.0f - IQ1M_DELTA : -1.0f + IQ1M_DELTA;
-    iq1_decode8(t.grid[idx], pack_half2(scale, scale * delta), out);
+    iq1_decode8(iq1_high_bytes(t.grid[idx]), pack_half2(scale, scale * delta), out);
   }
 };
 
@@ -169,31 +174,52 @@ struct Format<29> {
  * bytes (group l's eight magnitudes) and a word of four 7-bit sign indices
  * plus a 4-bit scale: weight = d (1/2 + s) / 4 * +-magnitude. The LDS tables
  * hold each codebook entry as eight FP16 magnitudes and each sign index as
- * its eight FP16 sign bits. */
+ * eight bytes (8 B, half the random-row LDS traffic of FP16 masks; one
+ * v_perm per word places them on the sign bits). */
 template <>
 struct Format<16> {
   static constexpr int kBytes = 66, kWords = 17;
   static constexpr bool kAligned = false;
+  static constexpr bool kShareActivations = true;
   struct Tables {
     uint4 grid[256];
-    uint4 signs[128];
+    uint2 signs[128];
   };
-  static __device__ void fill(Tables& t, int tid) {
-    for (int i = tid; i < 256 + 128; i += 256) {
+  /* Codebook entries as eight FP16 magnitudes. */
+  static __device__ void fill_grid(uint4* grid, const uint64_t* src, int n, int tid) {
+    for (int i = tid; i < n; i += 256) {
+      const uint64_t g = src[i];
       uint32_t w[4];
 #pragma unroll
-      for (int j = 0; j < 4; ++j) {
-        if (i < 256) {
-          const uint64_t g = iq2xxs_grid[i];
-          w[j] = pack_half2(static_cast<float>((g >> (16 * j)) & 0xffu),
-                            static_cast<float>((g >> (16 * j + 8)) & 0xffu));
-        } else {
-          const uint32_t signs = ksigns_iq2xs[i - 256];
-          w[j] = ((signs >> (2 * j)) & 1u) << 15 | ((signs >> (2 * j + 1)) & 1u) << 31;
-        }
-      }
-      (i < 256 ? t.grid[i] : t.signs[i - 256]) = make_uint4(w[0], w[1], w[2], w[3]);
+      for (int j = 0; j < 4; ++j)
+        w[j] = pack_half2(static_cast<float>((g >> (16 * j)) & 0xffu), static_cast<float>((g >> (16 * j + 8)) & 0xffu));
+      grid[i] = make_uint4(w[0], w[1], w[2], w[3]);
     }
+  }
+  /* Sign indices as eight bytes, 0x80 for a negative weight. */
+  static __device__ void fill_signs(uint2* signs, int tid) {
+    if (tid < 128) {
+      const uint32_t bits = ksigns_iq2xs[tid];
+      uint32_t w[2] = {0, 0};
+#pragma unroll
+      for (int j = 0; j < 8; ++j) w[j / 4] |= ((bits >> j) & 1u) << (8 * (j % 4) + 7);
+      signs[tid] = make_uint2(w[0], w[1]);
+    }
+  }
+  static __device__ void fill(Tables& t, int tid) {
+    fill_grid(t.grid, iq2xxs_grid, 256, tid);
+    fill_signs(t.signs, tid);
+  }
+  /* Eight weights: the magnitudes with sign bytes 2 i and 2 i + 1 moved onto
+   * the sign bits of word i's halves, times the half2 scale. */
+  static __device__ __forceinline__ void apply(uint4 g, uint2 sg, uint32_t scale_bits, uint32_t* out) {
+    const half2_t scale = __builtin_bit_cast(half2_t, scale_bits);
+    const uint32_t gw[4] = {g.x ^ __builtin_amdgcn_perm(sg.y, sg.x, 0x010c000cu),
+                            g.y ^ __builtin_amdgcn_perm(sg.y, sg.x, 0x030c020cu),
+                            g.z ^ __builtin_amdgcn_perm(sg.y, sg.x, 0x050c040cu),
+                            g.w ^ __builtin_amdgcn_perm(sg.y, sg.x, 0x070c060cu)};
+#pragma unroll
+    for (int i = 0; i < 4; ++i) out[i] = __builtin_bit_cast(uint32_t, __builtin_bit_cast(half2_t, gw[i]) * scale);
   }
   struct Sub {
     uint32_t idx, aux;
@@ -206,26 +232,65 @@ struct Format<16> {
   }
   static __device__ __forceinline__ void decode(const Sub& s, int l, const Tables& t, uint32_t* out) {
     const uint4 g = t.grid[(s.idx >> (8 * l)) & 0xffu];
-    const uint4 sg = t.signs[(s.aux >> (7 * l)) & 127u];
-    const half2_t scale = __builtin_bit_cast(half2_t, s.scale);
-    const uint32_t gw[4] = {g.x ^ sg.x, g.y ^ sg.y, g.z ^ sg.z, g.w ^ sg.w};
-#pragma unroll
-    for (int i = 0; i < 4; ++i) out[i] = __builtin_bit_cast(uint32_t, __builtin_bit_cast(half2_t, gw[i]) * scale);
+    apply(g, t.signs[(s.aux >> (7 * l)) & 127u], s.scale, out);
   }
 };
+
+/* IQ2_XS (74 bytes): d, qs[32] as u16 and eight scale bytes. Each
+ * 32-value sub-block has four 9-bit codebook indices and four 7-bit sign
+ * indices. The low and high scale nibbles apply to two groups each. */
+template <>
+struct Format<17> {
+  static constexpr int kBytes = 74, kWords = 19;
+  static constexpr bool kAligned = false;
+  static constexpr bool kShareActivations = true;
+  struct Tables {
+    uint4 grid[512];
+    uint2 signs[128];
+  };
+  static __device__ void fill(Tables& t, int tid) {
+    Format<16>::fill_grid(t.grid, iq2xs_grid, 512, tid);
+    Format<16>::fill_signs(t.signs, tid);
+  }
+  struct Sub {
+    uint32_t qs[2], scale[2];
+  };
+  static __device__ __forceinline__ Sub sub(const Raw<kWords>& b, int ib) {
+    const uint32_t sc = (b.w[(66 + ib) / 4] >> (8 * ((66 + ib) % 4))) & 0xffu;
+    const float d = half_bits(b.w[0]) * 0.25f;
+    const float lo = d * (0.5f + static_cast<float>(sc & 15u));
+    const float hi = d * (0.5f + static_cast<float>(sc >> 4));
+    return {{__builtin_amdgcn_alignbyte(b.w[2 * ib + 1], b.w[2 * ib], 2),
+             __builtin_amdgcn_alignbyte(b.w[2 * ib + 2], b.w[2 * ib + 1], 2)},
+            {pack_half2(lo, lo), pack_half2(hi, hi)}};
+  }
+  static __device__ __forceinline__ void decode(const Sub& s, int l, const Tables& t, uint32_t* out) {
+    const uint32_t q = (s.qs[l / 2] >> (16 * (l % 2))) & 0xffffu;
+    const uint4 g = t.grid[q & 511u];
+    Format<16>::apply(g, t.signs[q >> 9], s.scale[l / 2], out);
+  }
+};
+
+/* Lane L's word from lane L ^ 16, without the destination's old value
+ * (fetch-inactive and bound-control set; every lane is active here), so no
+ * register is copied for it before each permute. */
+__device__ __forceinline__ uint32_t other_half(uint32_t v) {
+  return __builtin_amdgcn_permlanex16(v, v, 0x76543210u, 0xfedcba98u, true, true);
+}
 
 __device__ __forceinline__ float finite_or_zero(float v) { return __builtin_isfinite(v) ? v : 0.0f; }
 
 template <int kType, bool kPair, bool kHalfOut>
 __global__ __launch_bounds__(256) void routed_f16_kernel(
-    const uint8_t* __restrict__ w0, const uint8_t* __restrict__ w1, uint64_t expert_bytes,
+    const uint8_t* __restrict__ w0, const uint8_t* __restrict__ w1,
+    const uint8_t* const* __restrict__ w0_table, const uint8_t* const* __restrict__ w1_table, uint64_t expert_bytes,
     const uint16_t* __restrict__ x, uint32_t x_div, const int32_t* __restrict__ rows,
     const int32_t* __restrict__ bounds, const int32_t* __restrict__ tiles, const float* __restrict__ route_w,
     float limit, void* __restrict__ y, uint32_t m, uint32_t k) {
   using F = Format<kType>;
   using Block = Raw<F::kWords>;
   __shared__ typename F::Tables tables;
-  __shared__ __attribute__((aligned(16))) _Float16 act[kSlots * kActPitch];
+  __shared__ __attribute__((aligned(16))) _Float16 act[2][kSlots * kActPitch];
   __shared__ int32_t slot_of[kSlots];
   const int tile = tiles[blockIdx.y];
   if (tile < 0) return;  // unused entries in a bounded device-planned grid
@@ -246,7 +311,11 @@ __global__ __launch_bounds__(256) void routed_f16_kernel(
 #pragma unroll
   for (int p = 0; p < 2; ++p) {
     row[p] = r_wave + (kPair ? 0 : 16 * p) + lane % 16;
-    const uint8_t* base = (kPair && p ? w1 : w0) + (uint64_t)expert * expert_bytes;
+    const uint8_t* base;
+    if (kPair && p)
+      base = w1_table ? w1_table[expert] : w1 + (uint64_t)expert * expert_bytes;
+    else
+      base = w0_table ? w0_table[expert] : w0 + (uint64_t)expert * expert_bytes;
     wp[p] = base + (uint64_t)(row[p] < m ? row[p] : m - 1) * row_bytes;
   }
 
@@ -257,12 +326,21 @@ __global__ __launch_bounds__(256) void routed_f16_kernel(
     for (int t = 0; t < 4; ++t) acc[p][t] = float8{};
 
   /* Activation staging: a quarter of the stage (32 values) of one slot per
-   * thread, consecutive slots in consecutive lanes. */
+   * thread, consecutive slots in consecutive lanes. Stage `half` of each
+   * block lives in buffer `half`; the next stage is loaded before the
+   * current one's products and stored after them, so one barrier per stage
+   * separates the writes from both buffers' reads. */
   const int st = tid % kSlots, sq = tid / kSlots;
   __syncthreads();
   const int32_t s_slot = slot_of[st];
-  const uint16_t* xs = s_slot >= 0 ? x + (uint64_t)(s_slot / (int)x_div) * k + 32 * sq : nullptr;
-  _Float16* as = act + st * kActPitch + 32 * sq;
+  const uint16_t* xs = s_slot >= 0 ? x + (uint64_t)(s_slot / (int)x_div) * k + kStageK / 4 * sq : nullptr;
+  const int as = st * kActPitch + kStageK / 4 * sq;
+  u32x4 next[kVec];
+  if (xs) {
+#pragma unroll
+    for (int c = 0; c < kVec; ++c) reinterpret_cast<u32x4*>(act[0] + as)[c] = reinterpret_cast<const u32x4*>(xs)[c];
+  }
+  __syncthreads();
 
   /* Weights: half-wave h loads the blocks of projection h (gate or up, or
    * the second 16 rows) two blocks ahead; the halves swap their words across
@@ -283,7 +361,7 @@ __global__ __launch_bounds__(256) void routed_f16_kernel(
     Block blk[2];
 #pragma unroll
     for (int i = 0; i < F::kWords; ++i) {
-      const uint32_t other = __builtin_amdgcn_permlanex16(mine.w[i], mine.w[i], 0x76543210u, 0xfedcba98u, false, false);
+      const uint32_t other = other_half(mine.w[i]);
       blk[0].w[i] = h ? other : mine.w[i];
       blk[1].w[i] = h ? mine.w[i] : other;
     }
@@ -293,21 +371,17 @@ __global__ __launch_bounds__(256) void routed_f16_kernel(
         blk[p] = realign(blk[p], (reinterpret_cast<uintptr_t>(wp[p]) + sb * F::kBytes) & 3);
     }
 #pragma unroll
-    for (int half = 0; half < 2; ++half) {
-      const uint32_t k0 = sb * 256 + half * kStageK;
-      __syncthreads();
-      if (xs) {
-        const uint4* src = reinterpret_cast<const uint4*>(xs + k0);
-        uint4 v[4];
+    for (int stage = 0; stage < kStages; ++stage) {
+      const uint32_t k_next = sb * 256 + (stage + 1) * kStageK;
+      const bool more = xs && k_next < k;
+      if (more) {
 #pragma unroll
-        for (int c = 0; c < 4; ++c) v[c] = src[c];
-#pragma unroll
-        for (int c = 0; c < 4; ++c) reinterpret_cast<uint4*>(as)[c] = v[c];
+        for (int c = 0; c < kVec; ++c) next[c] = reinterpret_cast<const u32x4*>(xs + k_next)[c];
       }
-      __syncthreads();
+      const _Float16* cur = act[stage % 2];
 #pragma unroll
-      for (int jj = 0; jj < 4; ++jj) {
-        const int ib = half * 4 + jj;
+      for (int jj = 0; jj < kStageK / 32; ++jj) {
+        const int ib = stage * (kStageK / 32) + jj;
         typename F::Sub sub[2];
 #pragma unroll
         for (int p = 0; p < 2; ++p) sub[p] = F::sub(blk[p], ib);
@@ -324,18 +398,22 @@ __global__ __launch_bounds__(256) void routed_f16_kernel(
             F::decode(sub[p], 2 * e2 + h, tables, words);
 #pragma unroll
             for (int i = 0; i < 4; ++i)
-              words[4 + i] = __builtin_amdgcn_permlanex16(words[i], words[i], 0x76543210u, 0xfedcba98u, false, false);
+              words[4 + i] = other_half(words[i]);
             b[p] = __builtin_bit_cast(half16, words);
           }
           const int kk = jj * 32 + e2 * 16;
 #pragma unroll
           for (int t = 0; t < 4; ++t) {
             if (t < live) {
-              const _Float16* ar = act + (t * 16 + lane % 16) * kActPitch + kk;
+              const _Float16* ar = cur + (t * 16 + lane % 16) * kActPitch + kk;
               typedef _Float16 half8 __attribute__((ext_vector_type(8)));
-              const half8 a0 = *reinterpret_cast<const half8*>(ar + 8 * h);
-              const half8 a1 = *reinterpret_cast<const half8*>(ar + 8 - 8 * h);
-              const half16 a = __builtin_shufflevector(a0, a1, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15);
+              const u32x4 a0 = *reinterpret_cast<const u32x4*>(ar + 8 * h);
+              u32x4 a1;
+              if constexpr (F::kShareActivations)
+                a1 = u32x4{other_half(a0.x), other_half(a0.y), other_half(a0.z), other_half(a0.w)};
+              else
+                a1 = *reinterpret_cast<const u32x4*>(ar + 8 - 8 * h);
+              const half16 a = __builtin_bit_cast(half16, __builtin_shufflevector(a0, a1, 0, 1, 2, 3, 4, 5, 6, 7));
 #pragma unroll
               for (int p = 0; p < 2; ++p)
                 acc[p][t] = __builtin_amdgcn_wmma_f32_16x16x16_f16_w32(a, b[p], acc[p][t]);
@@ -343,6 +421,11 @@ __global__ __launch_bounds__(256) void routed_f16_kernel(
           }
         }
       }
+      if (more) {
+#pragma unroll
+        for (int c = 0; c < kVec; ++c) reinterpret_cast<u32x4*>(act[1 - stage % 2] + as)[c] = next[c];
+      }
+      __syncthreads();
     }
   }
 
@@ -376,18 +459,19 @@ __global__ __launch_bounds__(256) void routed_f16_kernel(
 }
 
 template <int kType>
-void launch_routed(const uint8_t* w, const uint8_t* w_up, uint64_t expert_bytes, const uint16_t* x, uint32_t x_div,
+void launch_routed(const uint8_t* w, const uint8_t* w_up, const uint8_t* const* w_table,
+                   const uint8_t* const* w_up_table, uint64_t expert_bytes, const uint16_t* x, uint32_t x_div,
                    const int32_t* rows, const int32_t* bounds, const int32_t* tiles, uint32_t n_tiles,
                    const float* route_w, float limit, void* y, int y_half, uint32_t m, uint32_t k) {
   if (w_up && y_half)
     routed_f16_kernel<kType, true, true><<<dim3((m + 127) / 128, n_tiles), 256>>>(
-        w, w_up, expert_bytes, x, x_div, rows, bounds, tiles, route_w, limit, y, m, k);
+        w, w_up, w_table, w_up_table, expert_bytes, x, x_div, rows, bounds, tiles, route_w, limit, y, m, k);
   else if (w_up)
     routed_f16_kernel<kType, true, false><<<dim3((m + 127) / 128, n_tiles), 256>>>(
-        w, w_up, expert_bytes, x, x_div, rows, bounds, tiles, route_w, limit, y, m, k);
+        w, w_up, w_table, w_up_table, expert_bytes, x, x_div, rows, bounds, tiles, route_w, limit, y, m, k);
   else
     routed_f16_kernel<kType, false, false><<<dim3((m + 255) / 256, n_tiles), 256>>>(
-        w, nullptr, expert_bytes, x, x_div, rows, bounds, tiles, nullptr, 0.0f, y, m, k);
+        w, nullptr, w_table, w_up_table, expert_bytes, x, x_div, rows, bounds, tiles, nullptr, 0.0f, y, m, k);
 }
 
 }  // namespace
@@ -395,19 +479,29 @@ void launch_routed(const uint8_t* w, const uint8_t* w_up, uint64_t expert_bytes,
 extern "C" int ds41_v41_routed_f16(int type, const void* w, const void* w_up, uint64_t expert_bytes, const uint16_t* x,
                                    uint32_t x_div, const int32_t* rows, const int32_t* bounds, const int32_t* tiles,
                                    uint32_t n_tiles, const float* route_w, float limit, void* y, int y_half,
-                                   uint32_t m, uint32_t k) {
+                                   uint32_t m, uint32_t k, const void* const* w_table,
+                                   const void* const* w_up_table) {
   if (k % 256 != 0 || n_tiles == 0 || x_div == 0) return 1;
   const auto* a = static_cast<const uint8_t*>(w);
   const auto* b = static_cast<const uint8_t*>(w_up);
+  const auto* ta = reinterpret_cast<const uint8_t* const*>(w_table);
+  const auto* tb = reinterpret_cast<const uint8_t* const*>(w_up_table);
   switch (type) {
   case 19:
-    launch_routed<19>(a, b, expert_bytes, x, x_div, rows, bounds, tiles, n_tiles, route_w, limit, y, y_half, m, k);
+    launch_routed<19>(a, b, ta, tb, expert_bytes, x, x_div, rows, bounds, tiles, n_tiles, route_w, limit, y, y_half,
+                      m, k);
     break;
   case 29:
-    launch_routed<29>(a, b, expert_bytes, x, x_div, rows, bounds, tiles, n_tiles, route_w, limit, y, y_half, m, k);
+    launch_routed<29>(a, b, ta, tb, expert_bytes, x, x_div, rows, bounds, tiles, n_tiles, route_w, limit, y, y_half,
+                      m, k);
     break;
   case 16:
-    launch_routed<16>(a, b, expert_bytes, x, x_div, rows, bounds, tiles, n_tiles, route_w, limit, y, y_half, m, k);
+    launch_routed<16>(a, b, ta, tb, expert_bytes, x, x_div, rows, bounds, tiles, n_tiles, route_w, limit, y, y_half,
+                      m, k);
+    break;
+  case 17:
+    launch_routed<17>(a, b, ta, tb, expert_bytes, x, x_div, rows, bounds, tiles, n_tiles, route_w, limit, y, y_half,
+                      m, k);
     break;
   default:
     return 1;

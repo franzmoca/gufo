@@ -6,11 +6,12 @@
  * the caches, so the reads stay DRAM-cold.
  *
  * With --f16 the same passes run through the FP16 matrix-core kernel
- * (IQ1_S, IQ1_M, IQ2_XXS). Either path is checked against the
+ * (IQ1_S, IQ1_M, IQ2_XXS, IQ2_XS). Either path is checked against the
  * FP32-activation expert GEMV on the first slots. --tokens sets the batch
  * (2048 by default).
  *
- *   ds41_mmq_bench [--type 19|29|16|22] [--counts FILE] [--line N] [--reps N]
+ *   ds41_mmq_bench [--type 19|29|16|17|22] [--counts FILE] [--line N] [--reps
+ * N]
  *                  [--f16 1] [--tokens N]
  *   ds41_mmq_bench --type 13|8 --dense M,K[,GROUPS] [--tokens N] [--reps N]
  */
@@ -43,6 +44,8 @@ int BlockBytes(int type) {
       return 56;
     case 16:
       return 66;
+    case 17:
+      return 74;
     case 22:
       return 82;
     default:
@@ -95,7 +98,11 @@ std::vector<unsigned int> Counts(const char* path, int line, int tokens,
     fields >> tag >> n;
     for (auto& c : counts)
       fields >> c;
-    if (tag == "COUNTS" && n == tokens)
+    uint64_t total = 0;
+    for (const auto c : counts)
+      total += c;
+    if (fields && tag == "COUNTS" && n == tokens &&
+        total == static_cast<uint64_t>(tokens) * kUsed)
       return counts;
     std::fprintf(stderr, "bad counts line %d in %s\n", line, path);
     std::exit(1);
@@ -141,9 +148,9 @@ int DenseBench(int type, int m, int k, int groups, int reps, int kTokens) {
       (void)hipEventRecord(e0, 0);
       int rc;
       if (path == 1)
-        rc =
-            ds41_v41_dense_f16(type, dw, static_cast<float*>(dx),
-                               static_cast<float*>(out), m, kTokens, k, groups);
+        rc = ds41_v41_dense_f16(type, dw, static_cast<float*>(dx),
+                                static_cast<float*>(out), m, kTokens, k, groups,
+                                0);
       else if (groups > 1)
         rc = ds41_mmq_dense_grouped_typed(type, dw, static_cast<float*>(dx),
                                           static_cast<float*>(out), m, kTokens,
@@ -207,9 +214,22 @@ int main(int argc, char** argv) {
   const int tokens = dense_tokens;
   std::mt19937 rng(41);
   auto counts = Counts(counts_path, line, counts_path ? 2048 : tokens, rng);
-  if (counts_path)
-    for (auto& c : counts)
-      c = c * (unsigned)tokens / 2048u;
+  if (counts_path) {
+    // Keep a whole number of top-k rows after scaling a recorded histogram.
+    // Give the largest fractional remainders the omitted slots.
+    std::vector<std::pair<unsigned, int>> remainders;
+    unsigned assigned = 0;
+    for (int e = 0; e < kExperts; ++e) {
+      const unsigned scaled = counts[e] * static_cast<unsigned>(tokens);
+      counts[e] = scaled / 2048u;
+      assigned += counts[e];
+      remainders.emplace_back(scaled % 2048u, e);
+    }
+    std::sort(remainders.begin(), remainders.end(), std::greater<>());
+    for (unsigned i = 0; i < static_cast<unsigned>(tokens * kUsed) - assigned;
+         ++i)
+      ++counts[remainders[i].second];
+  }
   /* Slot ids with exactly these counts, spread over the tokens. */
   std::vector<int32_t> ids;
   for (int e = 0; e < kExperts; ++e)

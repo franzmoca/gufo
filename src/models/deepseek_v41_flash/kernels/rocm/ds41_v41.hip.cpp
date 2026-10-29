@@ -8,6 +8,7 @@
 
 #include <rocwmma/rocwmma.hpp>
 
+#include <algorithm>
 #include <cmath>
 #include <cstdio>
 
@@ -197,16 +198,17 @@ __global__ void matmul_kernel(const W* w, const float* x, float* out, uint32_t r
 }
 
 /* BF16 rows with k % 256 == 0: each lane loads eight weights (16 bytes) and
- * the matching eight inputs per step. */
-__global__ void matmul_bf16_vec8_kernel(const uint16_t* w, const float* x, float* out, uint32_t rows, uint32_t k,
-                                        uint32_t n) {
+ * the matching eight inputs per step. A wave takes one row of one token
+ * (blockIdx.y): with a wave per token, more waves keep loads in flight (the
+ * 384-row router took 83.6 -> 39.0 us at 8 tokens, 29.0 -> 22.3 at one). */
+__global__ void matmul_bf16_vec8_kernel(const uint16_t* w, const float* x, float* out, uint32_t rows, uint32_t k) {
   const uint32_t row = blockIdx.x * (blockDim.x / warpSize) + threadIdx.x / warpSize;
   if (row >= rows) return;
   const uint32_t lane = threadIdx.x % warpSize;
-  const uint32_t t0 = blockIdx.y * kTokenTile;
-  const uint32_t tn = min(kTokenTile, n - t0);
+  const uint32_t t = blockIdx.y;
   const uint4* r = reinterpret_cast<const uint4*>(w + (uint64_t)row * k);
-  float acc[kTokenTile] = {};
+  const float4* xt = reinterpret_cast<const float4*>(x + (uint64_t)t * k);
+  float acc = 0.0f;
   for (uint32_t i = lane; i < k / 8; i += warpSize) {
     const uint4 packed = r[i];
     const uint32_t words[4] = {packed.x, packed.y, packed.z, packed.w};
@@ -216,22 +218,12 @@ __global__ void matmul_bf16_vec8_kernel(const uint16_t* w, const float* x, float
       wv[2 * e] = __uint_as_float(words[e] << 16);
       wv[2 * e + 1] = __uint_as_float(words[e] & 0xffff0000u);
     }
-#pragma unroll
-    for (uint32_t j = 0; j < kTokenTile; j++) {
-      if (j < tn) {
-        const float4* xv = reinterpret_cast<const float4*>(x + (uint64_t)(t0 + j) * k) + 2 * i;
-        const float4 a = xv[0], b = xv[1];
-        acc[j] += wv[0] * a.x + wv[1] * a.y + wv[2] * a.z + wv[3] * a.w + wv[4] * b.x + wv[5] * b.y +
-                  wv[6] * b.z + wv[7] * b.w;
-      }
-    }
+    const float4 a = xt[2 * i], b = xt[2 * i + 1];
+    acc += wv[0] * a.x + wv[1] * a.y + wv[2] * a.z + wv[3] * a.w + wv[4] * b.x + wv[5] * b.y + wv[6] * b.z +
+           wv[7] * b.w;
   }
-#pragma unroll
-  for (uint32_t j = 0; j < kTokenTile; j++) {
-    float v = acc[j];
-    for (int o = warpSize / 2; o > 0; o >>= 1) v += __shfl_xor(v, o);
-    if (j < tn && lane == 0) out[(uint64_t)(t0 + j) * rows + row] = v;
-  }
+  for (int o = warpSize / 2; o > 0; o >>= 1) acc += __shfl_xor(acc, o);
+  if (lane == 0) out[(uint64_t)t * rows + row] = acc;
 }
 
 /* Batched BF16 matmul on the matrix cores. Each FP32 activation splits into
@@ -241,32 +233,37 @@ __global__ void matmul_bf16_vec8_kernel(const uint16_t* w, const float* x, float
  * relative over k = 5120), so each K step of 32 starts from zero, takes the
  * three terms smallest first, and is added to FP32 registers: about 8e-7
  * relative to the largest output, against 2.5e-7 for the FP32 kernel. Block
- * tile 64 weight rows x 64 tokens, 8 waves of 16 x 32; rows a multiple of
- * 64 and k of 32. */
+ * tile kRowTile (128 or 64) weight rows x 64 tokens, 8 waves of 16 rows x
+ * (kRowTile / 2) tokens; rows a multiple of kRowTile and k of 32. The wider
+ * tile splits each activation step once per 128 rows (router 1.25 -> 0.98
+ * ms at 2,048 tokens); every output keeps the same products and sums. */
 constexpr uint32_t kBf16Tile = 64, kBf16K = 32, kBf16Pitch = kBf16K + 8;
 __device__ __forceinline__ uint32_t bf16_rn_bits(float x) {
   const uint32_t u = __float_as_uint(x);
   return (u + 0x7fffu + ((u >> 16) & 1u)) >> 16;
 }
+template <uint32_t kRowTile>
 __global__ __launch_bounds__(256) void matmul_bf16_wmma_kernel(const uint16_t* w, const float* x, float* out,
                                                                uint32_t rows, uint32_t k, uint32_t n) {
-  __shared__ uint16_t w_sh[kBf16Tile * kBf16Pitch];
+  constexpr int kFr = kRowTile / 32;  // 16-token fragments per wave
+  __shared__ uint16_t w_sh[kRowTile * kBf16Pitch];
   __shared__ uint16_t x_sh[3][kBf16Tile * kBf16Pitch];
   const uint32_t tid = threadIdx.x, wave = tid / 32, lane = tid % 32;
-  const uint32_t r0 = blockIdx.x * kBf16Tile, t0 = blockIdx.y * kBf16Tile;
-  /* Wave tile: weight rows wr .. wr + 15, tokens wt .. wt + 31. */
-  const uint32_t wr = (wave % 4) * 16, wt = (wave / 4) * 32;
+  const uint32_t r0 = blockIdx.x * kRowTile, t0 = blockIdx.y * kBf16Tile;
+  /* Wave tile: weight rows wr .. wr + 15, tokens wt .. wt + 16 kFr - 1. */
+  const uint32_t wr = (wave % (kRowTile / 16)) * 16, wt = (wave / (kRowTile / 16)) * 16 * kFr;
   using frag_a = rocwmma::fragment<rocwmma::matrix_a, 16, 16, 16, hip_bfloat16, rocwmma::row_major>;
   using frag_b = rocwmma::fragment<rocwmma::matrix_b, 16, 16, 16, hip_bfloat16, rocwmma::col_major>;
   using frag_c = rocwmma::fragment<rocwmma::accumulator, 16, 16, 16, float>;
-  float s0[8] = {}, s1[8] = {};
+  float s[kFr][8] = {};
   for (uint32_t k0 = 0; k0 < k; k0 += kBf16K) {
-    frag_c c0, c1;
-    rocwmma::fill_fragment(c0, 0.0f);
-    rocwmma::fill_fragment(c1, 0.0f);
-    {
-      /* 64 rows x 32 values of W: one uint4 (8 values) per thread. */
-      const uint32_t r = tid / 4, c = (tid % 4) * 8;
+    frag_c c[kFr];
+#pragma unroll
+    for (int f = 0; f < kFr; f++) rocwmma::fill_fragment(c[f], 0.0f);
+    /* kRowTile rows x 32 values of W: uint4s (8 values) per thread. */
+#pragma unroll
+    for (uint32_t r = tid / 4; r < kRowTile; r += 64) {
+      const uint32_t c = (tid % 4) * 8;
       *reinterpret_cast<uint4*>(&w_sh[r * kBf16Pitch + c]) =
           *reinterpret_cast<const uint4*>(w + (uint64_t)(r0 + r) * k + k0 + c);
     }
@@ -295,29 +292,30 @@ __global__ __launch_bounds__(256) void matmul_bf16_wmma_kernel(const uint16_t* w
       rocwmma::load_matrix_sync(a, reinterpret_cast<const hip_bfloat16*>(w_sh + wr * kBf16Pitch + kk), kBf16Pitch);
 #pragma unroll
       for (int part = 2; part >= 0; part--) {
-        frag_b b0, b1;
-        rocwmma::load_matrix_sync(b0, reinterpret_cast<const hip_bfloat16*>(x_sh[part] + wt * kBf16Pitch + kk),
-                                  kBf16Pitch);
-        rocwmma::load_matrix_sync(b1, reinterpret_cast<const hip_bfloat16*>(x_sh[part] + (wt + 16) * kBf16Pitch + kk),
-                                  kBf16Pitch);
-        rocwmma::mma_sync(c0, a, b0, c0);
-        rocwmma::mma_sync(c1, a, b1, c1);
+#pragma unroll
+        for (int f = 0; f < kFr; f++) {
+          frag_b b;
+          rocwmma::load_matrix_sync(
+              b, reinterpret_cast<const hip_bfloat16*>(x_sh[part] + (wt + 16 * f) * kBf16Pitch + kk), kBf16Pitch);
+          rocwmma::mma_sync(c[f], a, b, c[f]);
+        }
       }
     }
 #pragma unroll
-    for (uint32_t e = 0; e < 8; e++) {
-      s0[e] += c0.x[e];
-      s1[e] += c1.x[e];
-    }
+    for (uint32_t e = 0; e < 8; e++)
+#pragma unroll
+      for (int f = 0; f < kFr; f++) s[f][e] += c[f].x[e];
     __syncthreads();
   }
   /* Accumulator element e of a lane is (row 2 * e + lane / 16, token lane % 16). */
 #pragma unroll
   for (uint32_t e = 0; e < 8; e++) {
     const uint32_t row = r0 + wr + 2 * e + lane / 16;
-    const uint32_t ta = t0 + wt + lane % 16, tb = ta + 16;
-    if (ta < n) out[(uint64_t)ta * rows + row] = s0[e];
-    if (tb < n) out[(uint64_t)tb * rows + row] = s1[e];
+#pragma unroll
+    for (int f = 0; f < kFr; f++) {
+      const uint32_t t = t0 + wt + 16 * f + lane % 16;
+      if (t < n) out[(uint64_t)t * rows + row] = s[f][e];
+    }
   }
 }
 
@@ -326,6 +324,14 @@ __global__ void copy_rows_kernel(float* dst, uint64_t dst_stride, const float* s
   const float* s = src + (uint64_t)blockIdx.x * src_stride;
   float* d = dst + (uint64_t)blockIdx.x * dst_stride;
   for (uint32_t i = threadIdx.x; i < cols; i += blockDim.x) d[i] = s[i];
+}
+
+/* Copy blockIdx.y of the list; values move as bits. */
+__global__ void copy_list_kernel(ds41_v41_copy_list list) {
+  const ds41_v41_copy c = list.copy[blockIdx.y];
+  const uint32_t* s = reinterpret_cast<const uint32_t*>(c.src);
+  uint32_t* d = reinterpret_cast<uint32_t*>(c.dst);
+  for (uint32_t i = blockIdx.x * blockDim.x + threadIdx.x; i < c.count; i += gridDim.x * blockDim.x) d[i] = s[i];
 }
 
 __global__ void rms_norm_kernel(const float* x, const float* weight, float* out, uint32_t n, float eps) {
@@ -406,7 +412,8 @@ __global__ void rope_fp8_kernel(float* x, uint32_t blocks, uint32_t row_dim, uin
 constexpr uint32_t kQkvThreads = 256;
 constexpr uint32_t kQkvMaxKv = 1024;
 __global__ void __launch_bounds__(kQkvThreads)
-    q_kv_norm_kernel(const float* qa, const float* q_weight, float* qr, uint32_t q_dim, const float* kv,
+    q_kv_norm_kernel(const float* qa, const float* q_weight, float* qr, _Float16* qr_half, uint32_t q_dim,
+                     const float* kv,
                      const float* kv_weight, float* kvn, uint32_t kv_dim, uint32_t rope_dim, const float* inv_freq,
                      uint32_t pos0, float eps) {
   const uint32_t token = blockIdx.y;
@@ -419,7 +426,12 @@ __global__ void __launch_bounds__(kQkvThreads)
   const float scale = rsqrtf(block_sum(ss) / (float)n + eps);
   if (!is_kv) {
     float* o = qr + (uint64_t)token * n;
-    for (uint32_t i = threadIdx.x; i < n; i += blockDim.x) o[i] = weight[i] * (r[i] * scale);
+    _Float16* oh = qr_half ? qr_half + (uint64_t)token * n : nullptr;
+    for (uint32_t i = threadIdx.x; i < n; i += blockDim.x) {
+      const float v = weight[i] * (r[i] * scale);
+      o[i] = v;
+      if (oh) oh[i] = static_cast<_Float16>(v);
+    }
     return;
   }
   __shared__ float row[kQkvMaxKv];
@@ -522,12 +534,14 @@ __global__ __launch_bounds__(256) void hc_mixes_rows_kernel(const float* fn, con
 
 /* Batched pass over the mHC state (hc = 4) of kMixTokens tokens per block,
  * each thread taking two 4-channel groups of every copy: with kExpand the
- * state is first expanded, s = post y + comb^T h, and stored to h_out;
+ * state is first expanded, s = post y + comb^T h with y = y + sum_r x[r]
+ * (as hc_expand_sum_kernel), and stored to h_out;
  * then the mixes of s (as hc_mixes_rows_kernel) and the collapse
  * weight * RMSNorm(sum_c pre_c s_c) come from the same registers, so the
  * state is read once. */
 template <bool kExpand>
-__global__ __launch_bounds__(1024) void hc_state_pass_kernel(const float* y, const float* post, const float* comb,
+__global__ __launch_bounds__(1024) void hc_state_pass_kernel(const float* y, const float* x, uint32_t rows,
+                                                             const float* post, const float* comb,
                                                              const float* h, float* h_out, const float* pre,
                                                              const float* norm_w, float* xn, const float* fn,
                                                              float* mixes, uint32_t dim, uint32_t tokens, float eps) {
@@ -545,7 +559,11 @@ __global__ __launch_bounds__(1024) void hc_state_pass_kernel(const float* y, con
     for (uint32_t g = 0; g < G; g++) {
       const uint32_t q = threadIdx.x + g * blockDim.x;
       if constexpr (kExpand) {
-        const float4 yv = reinterpret_cast<const float4*>(y + tok * dim)[q];
+        float4 yv = reinterpret_cast<const float4*>(y + tok * dim)[q];
+        for (uint32_t r = 0; r < rows; r++) {
+          const float4 xv = reinterpret_cast<const float4*>(x + (tok * rows + r) * dim)[q];
+          yv.x += xv.x, yv.y += xv.y, yv.z += xv.z, yv.w += xv.w;
+        }
         float4 hv[HC];
 #pragma unroll
         for (uint32_t a = 0; a < HC; a++) hv[a] = ht[a * groups + q];
@@ -1255,16 +1273,26 @@ __global__ __launch_bounds__(256) void indexer_score_small_kernel(const float* q
 }
 
 /* The same scores on the matrix cores, after the V4 engine's
- * indexer_scores_wmma128_kernel: a block covers 16 tokens and 128 compressed
- * rows, stages the rows once as half and each head's queries (double
- * buffered), and keeps the relu-weighted head sum in fp32. head_dim 128,
- * 256 threads; grid (ceil(len / 128), ceil(n / 16)). */
-__global__ __launch_bounds__(256) void indexer_score_wmma_kernel(const float* q, ds41_fp4_rows keys, const float* w,
-                                                                 float w_scale, float* score, uint64_t score_stride,
-                                                                 uint32_t pos0, uint32_t n, uint32_t ratio,
-                                                                 uint32_t heads) {
-  constexpr uint32_t DIM = 128, QT_PITCH = 18;
-  const uint32_t tile_c = blockIdx.x * 128;
+ * indexer_scores_wmma128_kernel: a block covers 16 tokens and
+ * kScoreWmmaRows compressed rows. Each wave keeps its 16 rows in registers
+ * as binary16 A fragments; the block stages one head's queries at a time as
+ * binary16 [token][dim] (double buffered), and the relu-weighted head sum
+ * stays in fp32. Rows were 128 per block, each block converting every head's
+ * queries again: twice the rows halve that traffic. head_dim 128; grid
+ * (ceil(len / kScoreWmmaRows), ceil(n / 16)). */
+constexpr uint32_t kScoreWmmaWaves = 16, kScoreWmmaRows = 16 * kScoreWmmaWaves;
+__global__ __launch_bounds__(32 * kScoreWmmaWaves) void indexer_score_wmma_kernel(
+    const float* q, ds41_fp4_rows keys, const float* w, float w_scale, float* score, uint64_t score_stride,
+    uint32_t pos0, uint32_t n, uint32_t ratio, uint32_t heads) {
+  using v16h = __attribute__((__vector_size__(16 * sizeof(_Float16)))) _Float16;
+  using v8f = __attribute__((__vector_size__(8 * sizeof(float)))) float;
+  union Frag {
+    v16h f;
+    uint4 u[2];
+  };
+  constexpr uint32_t DIM = 128, STEPS = DIM / 16, Q_PITCH = DIM + 8;
+  constexpr uint32_t THREADS = 32 * kScoreWmmaWaves;
+  const uint32_t tile_c = blockIdx.x * kScoreWmmaRows;
   const uint32_t tile_t = blockIdx.y * 16;
   const uint32_t tid = threadIdx.x;
   const uint32_t warp = tid / 32;
@@ -1273,34 +1301,45 @@ __global__ __launch_bounds__(256) void indexer_score_wmma_kernel(const float* q,
   const uint32_t visible_max = comp_len(pos0 + last - 1, ratio);
   if (tile_c >= visible_max) return;
 
-  __shared__ half q_sh[2][DIM * QT_PITCH];
-  __shared__ half k_sh[128 * DIM];
-  for (uint32_t i8 = tid; i8 < 128 * (DIM / 8); i8 += 256) {
-    const uint32_t c = i8 / (DIM / 8);
-    const uint32_t d = (i8 % (DIM / 8)) * 8;
-    uint4 packed = make_uint4(0u, 0u, 0u, 0u);
-    if (tile_c + c < visible_max) {
-      float4 lo, hi;
-      ik_load8(keys, tile_c + c, d, DIM, &lo, &hi);
-      const uint2 a = half4_bits(lo), b = half4_bits(hi);
-      packed = make_uint4(a.x, a.y, b.x, b.y);
-    }
-    *reinterpret_cast<uint4*>(&k_sh[c * DIM + d]) = packed;
-  }
-  /* Q^T of one head as [d][token]. */
-  const auto stage_q = [&](uint32_t h, half* dst) {
-    for (uint32_t i4 = tid; i4 < 16 * (DIM / 4); i4 += 256) {
-      const uint32_t r = i4 / (DIM / 4);
-      const uint32_t d = (i4 % (DIM / 4)) * 4;
-      float4 v4 = make_float4(0.0f, 0.0f, 0.0f, 0.0f);
-      if (tile_t + r < n) v4 = *reinterpret_cast<const float4*>(q + ((uint64_t)(tile_t + r) * heads + h) * DIM + d);
-      dst[(d + 0) * QT_PITCH + r] = __float2half_rn(v4.x);
-      dst[(d + 1) * QT_PITCH + r] = __float2half_rn(v4.y);
-      dst[(d + 2) * QT_PITCH + r] = __float2half_rn(v4.z);
-      dst[(d + 3) * QT_PITCH + r] = __float2half_rn(v4.w);
-    }
+  __shared__ __align__(16) __half q_sh[2][16 * Q_PITCH];
+  /* Q of one head as [token][d]: each thread loads four values of the next
+   * head before the current head's products and stores them after. */
+  static_assert(16 * DIM / 4 == THREADS, "one float4 of a head's queries per thread");
+  const uint32_t q_row = tid / (DIM / 4), q_dim = (tid % (DIM / 4)) * 4;
+  const auto load_q = [&](uint32_t h) {
+    return tile_t + q_row < n ? *reinterpret_cast<const float4*>(q + ((uint64_t)(tile_t + q_row) * heads + h) * DIM + q_dim)
+                              : make_float4(0.0f, 0.0f, 0.0f, 0.0f);
   };
-  stage_q(0, q_sh[0]);
+  const auto store_q = [&](float4 v4, __half* dst) {
+    __half* o = dst + q_row * Q_PITCH + q_dim;
+    o[0] = __float2half_rn(v4.x);
+    o[1] = __float2half_rn(v4.y);
+    o[2] = __float2half_rn(v4.z);
+    o[3] = __float2half_rn(v4.w);
+  };
+  store_q(load_q(0), q_sh[0]);
+  /* A fragments: compressed row lane % 16 of this wave's 16, dims 16 s .. 16 s + 15.
+   * The upper half-wave holds each step's two 8-dim halves swapped, as the
+   * rocwmma fragments did: the odd output rows sum the products in that order. */
+  const uint32_t swap = lane / 16;
+  Frag a[STEPS];
+  {
+    const uint32_t row = tile_c + warp * 16 + lane % 16;
+#pragma unroll
+    for (uint32_t s = 0; s < STEPS; s++) {
+#pragma unroll
+      for (uint32_t part = 0; part < 2; part++) {
+        uint4 packed = make_uint4(0u, 0u, 0u, 0u);
+        if (row < visible_max) {
+          float4 lo, hi;
+          ik_load8(keys, row, s * 16 + (part ^ swap) * 8, DIM, &lo, &hi);
+          const uint2 x = half4_bits(lo), y = half4_bits(hi);
+          packed = make_uint4(x.x, x.y, y.x, y.y);
+        }
+        a[s].u[part] = packed;
+      }
+    }
+  }
   __syncthreads();
 
   /* Accumulator element e is compressed row 2 * e + lane / 16 of this wave's
@@ -1310,30 +1349,37 @@ __global__ __launch_bounds__(256) void indexer_score_wmma_kernel(const float* q,
   float acc[8] = {};
   for (uint32_t h = 0; h < heads; h++) {
     const uint32_t cur = h & 1u;
-    if (h + 1 < heads) stage_q(h + 1, q_sh[cur ^ 1u]);
-    rocwmma::fragment<rocwmma::matrix_a, 16, 16, 16, half, rocwmma::row_major> a;
-    rocwmma::fragment<rocwmma::matrix_b, 16, 16, 16, half, rocwmma::row_major> b;
-    rocwmma::fragment<rocwmma::accumulator, 16, 16, 16, float> c;
-    rocwmma::fill_fragment(c, 0.0f);
+    const float4 next = h + 1 < heads ? load_q(h + 1) : make_float4(0.0f, 0.0f, 0.0f, 0.0f);
+    const __half* qb = q_sh[cur] + (lane % 16) * Q_PITCH;
+    v8f c = {};
 #pragma unroll
-    for (uint32_t k0 = 0; k0 < DIM; k0 += 16) {
-      rocwmma::load_matrix_sync(a, k_sh + warp * 16 * DIM + k0, DIM);
-      rocwmma::load_matrix_sync(b, q_sh[cur] + k0 * QT_PITCH, QT_PITCH);
-      rocwmma::mma_sync(c, a, b, c);
+    for (uint32_t s = 0; s < STEPS; s++) {
+      Frag b;
+      const uint4 lo = *reinterpret_cast<const uint4*>(qb + s * 16);
+      const uint4 hi = *reinterpret_cast<const uint4*>(qb + s * 16 + 8);
+      b.u[0] = swap ? hi : lo;
+      b.u[1] = swap ? lo : hi;
+      c = __builtin_amdgcn_wmma_f32_16x16x16_f16_w32(a[s].f, b.f, c);
     }
     if (token < n) {
       const float wh = w[(uint64_t)token * heads + h] * w_scale;
 #pragma unroll
-      for (uint32_t e = 0; e < 8; e++) acc[e] += fmaxf(c.x[e], 0.0f) * wh;
+      for (uint32_t e = 0; e < 8; e++) acc[e] += fmaxf(c[e], 0.0f) * wh;
     }
+    if (h + 1 < heads) store_q(next, q_sh[cur ^ 1u]);
     __syncthreads();
   }
-  if (token >= n) return;
-  const uint32_t visible = comp_len(pos0 + token, ratio);
+  /* Through shared memory, so each token's rows are stored contiguously. */
+  __shared__ float out_sh[16][kScoreWmmaRows + 1];
 #pragma unroll
-  for (uint32_t e = 0; e < 8; e++) {
-    const uint32_t j = comp_base + 2 * e;
-    if (j < visible) score[token * score_stride + j] = acc[e];
+  for (uint32_t e = 0; e < 8; e++) out_sh[lane % 16][comp_base - tile_c + 2 * e] = acc[e];
+  __syncthreads();
+  for (uint32_t r = warp; r < 16; r += kScoreWmmaWaves) {
+    const uint32_t t = tile_t + r;
+    if (t >= n) break;
+    const uint32_t visible = comp_len(pos0 + t, ratio);
+    for (uint32_t j = lane; j < kScoreWmmaRows && tile_c + j < visible; j += 32)
+      score[t * score_stride + tile_c + j] = out_sh[r][j];
   }
 }
 
@@ -1343,90 +1389,211 @@ __device__ __forceinline__ uint32_t ordered_key(float v) {
   return (u & 0x80000000u) ? ~u : (u ^ 0x80000000u);
 }
 
-/* Block per token: binary search for the k-th largest key, then emit keys
- * above it and the lowest-index ties, both in index order. */
-__global__ void topk_kernel(const float* all_score, uint64_t score_stride, uint32_t* all_out, uint32_t k_max,
-                            uint32_t pos0, uint32_t ratio, uint32_t div) {
-  __shared__ uint32_t hist[256];
-  __shared__ uint32_t sel_prefix, sel_rank;
-  const uint32_t token = blockIdx.x;
+/* Top-k selection, a block of kTopkThreads per token: the k-th largest key,
+ * then the keys above it in index order followed by its lowest-index ties.
+ *
+ * The row is read twice, coalesced: a 12-bit histogram finds the bin holding
+ * the k-th key (narrowed by further passes only while that bin holds more
+ * than kTopkCap keys), then one ordered pass appends the keys of higher bins
+ * and those of the bin itself to shared lists. The exact key and its ties are
+ * resolved among the bin's keys in shared memory, and the two index-ordered
+ * lists are merged. */
+constexpr uint32_t kTopkThreads = 1024, kTopkWaves = kTopkThreads / 32, kTopkBins = 4096, kTopkCap = 2048,
+                   kTopkItems = 4;
+
+/* Exclusive sum of v (0..7) over the lanes below this one. */
+__device__ __forceinline__ uint32_t lane_prefix(uint32_t v) {
+  uint32_t r = 0u;
+#pragma unroll
+  for (uint32_t b = 0; b < 3; b++) r += __builtin_amdgcn_mbcnt_lo((uint32_t)__ballot((v >> b) & 1u), 0u) << b;
+  return r;
+}
+
+/* Thread-ordered exclusive offsets of two per-thread counts (each 0..7) and
+ * their block totals. Calls alternate between the two halves of `tot`. */
+__device__ __forceinline__ void block_offsets(uint32_t a, uint32_t c, uint32_t* tot, uint32_t* a_off, uint32_t* c_off,
+                                              uint32_t* a_total, uint32_t* c_total) {
+  const uint32_t lane = threadIdx.x % 32u, wave = threadIdx.x / 32u;
+  const uint32_t pa = lane_prefix(a), pc = lane_prefix(c);
+  if (lane == 31u) {
+    tot[wave] = pa + a;
+    tot[kTopkWaves + wave] = pc + c;
+  }
+  __syncthreads();
+  const uint32_t wa = tot[lane], wc = tot[kTopkWaves + lane];
+  uint32_t ia = wa, ic = wc;
+#pragma unroll
+  for (uint32_t o = 1; o < 32u; o <<= 1) {
+    const uint32_t ua = __shfl_up(ia, o, 32), uc = __shfl_up(ic, o, 32);
+    if (lane >= o) {
+      ia += ua;
+      ic += uc;
+    }
+  }
+  *a_off = __shfl(ia - wa, (int)wave, 32) + pa;
+  *c_off = __shfl(ic - wc, (int)wave, 32) + pc;
+  *a_total = __shfl(ia, 31, 32);
+  *c_total = __shfl(ic, 31, 32);
+}
+
+/* The bin of hist[0, bins) holding the rank-th largest key, counting from the
+ * top bin, into *bin; *rank becomes the rank within it and *count its size. */
+__device__ void select_bin(const uint32_t* hist, uint32_t bins, uint32_t* bin, uint32_t* rank, uint32_t* count) {
+  const uint32_t per = (bins + kTopkThreads - 1) / kTopkThreads;
+  uint32_t c[kTopkBins / kTopkThreads];
+  uint32_t sum = 0u;
+#pragma unroll
+  for (uint32_t j = 0; j < kTopkBins / kTopkThreads; j++) {
+    const uint32_t i = per * threadIdx.x + j;
+    c[j] = j < per && i < bins ? hist[bins - 1u - i] : 0u;
+    sum += c[j];
+  }
+  const uint32_t want = *rank;
+  uint32_t total = 0u;
+  uint32_t acc = block_exclusive_scan(sum, &total);
+  if (acc < want && want <= acc + sum) {
+#pragma unroll
+    for (uint32_t j = 0; j < kTopkBins / kTopkThreads; j++) {
+      if (acc + c[j] >= want) {
+        *bin = bins - 1u - (per * threadIdx.x + j);
+        *rank = want - acc;
+        *count = c[j];
+        break;
+      }
+      acc += c[j];
+    }
+  }
+  __syncthreads();
+}
+
+__device__ __forceinline__ uint32_t lower_bound(const uint32_t* v, uint32_t n, uint32_t x) {
+  uint32_t lo = 0u;
+  while (n) {
+    const uint32_t half = n / 2u;
+    if (v[lo + half] < x) {
+      lo += half + 1u;
+      n -= half + 1u;
+    } else {
+      n = half;
+    }
+  }
+  return lo;
+}
+
+__global__ __launch_bounds__(kTopkThreads) void topk_kernel(const float* all_score, uint64_t score_stride,
+                                                            uint32_t* all_out, uint32_t k_max, uint32_t pos0,
+                                                            uint32_t ratio, uint32_t div) {
+  __shared__ uint32_t hist[kTopkBins];  // then the bin's selected indices
+  __shared__ uint32_t above[kTopkCap];
+  __shared__ uint32_t cand_key[kTopkCap], cand_idx[kTopkCap];
+  __shared__ uint32_t tot[2][2 * kTopkWaves];
+  __shared__ uint32_t sel_bin, sel_rank, sel_count;
+  const uint32_t token = blockIdx.x, tid = threadIdx.x;
   const uint32_t n = (comp_len(pos0 + token, ratio) + div - 1) / div;
   const uint32_t k = min(k_max, n);
   if (k == 0) return;
   const float* score = all_score + token * score_stride;
   uint32_t* out = all_out + (uint64_t)token * k_max;
-  const uint32_t per = (n + blockDim.x - 1) / blockDim.x;
-  const uint32_t begin = min(n, threadIdx.x * per);
-  const uint32_t end = min(n, begin + per);
-  /* The k-th largest key, a byte per pass from the top: histogram the keys
-   * that match the bytes chosen so far, then one wave finds the byte holding
-   * the rank (lane L scans digits 255 - 8L down to 248 - 8L). */
-  uint32_t prefix = 0u;
-  uint32_t mask = 0u;
-  uint32_t rank = k;
-  for (int shift = 24; shift >= 0; shift -= 8) {
-    for (uint32_t i = threadIdx.x; i < 256; i += blockDim.x) hist[i] = 0u;
+  /* Bins over bits [20, 32), then [8, 20), then [0, 8). */
+  uint32_t prefix = 0u, mask = 0u, shift = 32u;
+  if (tid == 0) sel_rank = k;
+  for (;;) {
+    const uint32_t width = shift > 8u ? 12u : 8u, bins = 1u << width;
+    shift -= width;
+    for (uint32_t i = tid; i < bins; i += kTopkThreads) hist[i] = 0u;
     __syncthreads();
-    for (uint32_t i = begin; i < end; i++) {
+    for (uint32_t i = tid; i < n; i += kTopkThreads) {
       const uint32_t key = ordered_key(score[i]);
-      if ((key & mask) == prefix) atomicAdd(&hist[(key >> shift) & 255u], 1u);
+      if ((key & mask) == prefix) atomicAdd(&hist[(key >> shift) & (bins - 1u)], 1u);
     }
     __syncthreads();
-    if (threadIdx.x < 32) {
-      const uint32_t lane = threadIdx.x;
-      uint32_t c[8];
-      uint32_t sum = 0u;
+    select_bin(hist, bins, &sel_bin, &sel_rank, &sel_count);
+    prefix |= sel_bin << shift;
+    mask |= (bins - 1u) << shift;
+    if (sel_count <= kTopkCap || shift == 0u) break;
+  }
+  /* Index-ordered keys of the higher bins (`above`) and of the bin (`cand_*`;
+   * past kTopkCap only when every one of them is the k-th key). */
+  uint32_t a_count = 0u, c_count = 0u;
+  for (uint32_t t0 = 0, it = 0; t0 < n; t0 += kTopkThreads * kTopkItems, it++) {
+    const uint32_t i0 = t0 + tid * kTopkItems;
+    uint32_t keys[kTopkItems];
+    uint32_t na = 0u, nc = 0u;
 #pragma unroll
-      for (uint32_t j = 0; j < 8; j++) {
-        c[j] = hist[255u - 8u * lane - j];
-        sum += c[j];
-      }
-      uint32_t incl = sum;
+    for (uint32_t e = 0; e < kTopkItems; e++) {
+      keys[e] = i0 + e < n ? ordered_key(score[i0 + e]) : 0u;
+      const uint32_t m = keys[e] & mask;
+      na += i0 + e < n && m > prefix;
+      nc += i0 + e < n && m == prefix;
+    }
+    uint32_t a_at, c_at, a_total, c_total;
+    block_offsets(na, nc, tot[it & 1u], &a_at, &c_at, &a_total, &c_total);
+    a_at += a_count;
+    c_at += c_count;
 #pragma unroll
-      for (int o = 1; o < 32; o <<= 1) {
-        const uint32_t up = __shfl_up(incl, o, 32);
-        if ((int)lane >= o) incl += up;
-      }
-      uint32_t acc = incl - sum;
-      if (acc < rank && rank <= incl) {
-#pragma unroll
-        for (uint32_t j = 0; j < 8; j++) {
-          if (acc + c[j] >= rank) {
-            sel_prefix = prefix | ((255u - 8u * lane - j) << shift);
-            sel_rank = rank - acc;
-            break;
-          }
-          acc += c[j];
+    for (uint32_t e = 0; e < kTopkItems; e++) {
+      if (i0 + e >= n) break;
+      const uint32_t m = keys[e] & mask;
+      if (m > prefix) {
+        above[a_at++] = i0 + e;
+      } else if (m == prefix) {
+        if (c_at < kTopkCap) {
+          cand_key[c_at] = keys[e];
+          cand_idx[c_at] = i0 + e;
         }
+        c_at++;
       }
     }
+    a_count += a_total;
+    c_count += c_total;
+  }
+  __syncthreads();
+  /* The exact k-th key among the bin's keys, a byte at a time. */
+  const uint32_t cands = min(c_count, kTopkCap);
+  while (shift) {
+    const uint32_t width = min(shift, 8u), bins = 1u << width;
+    shift -= width;
+    for (uint32_t i = tid; i < bins; i += kTopkThreads) hist[i] = 0u;
     __syncthreads();
-    prefix = sel_prefix;
-    rank = sel_rank;
-    mask |= 255u << shift;
+    for (uint32_t i = tid; i < cands; i += kTopkThreads) {
+      const uint32_t key = cand_key[i];
+      if ((key & mask) == prefix) atomicAdd(&hist[(key >> shift) & (bins - 1u)], 1u);
+    }
+    __syncthreads();
+    select_bin(hist, bins, &sel_bin, &sel_rank, &sel_count);
+    prefix |= sel_bin << shift;
+    mask |= (bins - 1u) << shift;
   }
-  const uint32_t t = prefix;
-  uint32_t above = 0;
-  uint32_t equal = 0;
-  for (uint32_t i = begin; i < end; i++) {
-    const uint32_t key = ordered_key(score[i]);
-    above += key > t;
-    equal += key == t;
-  }
-  uint32_t total_above = 0;
-  uint32_t total_equal = 0;
-  uint32_t at = block_exclusive_scan(above, &total_above);
-  uint32_t eq_at = block_exclusive_scan(equal, &total_equal);
-  const uint32_t need = k - total_above;
-  for (uint32_t i = begin; i < end; i++) {
-    const uint32_t key = ordered_key(score[i]);
-    if (key > t) {
-      out[at++] = i;
-    } else if (key == t) {
-      if (eq_at < need) out[total_above + eq_at] = i;
-      eq_at++;
+  /* The bin's keys above the k-th go to `sel`, its first ties to the end of
+   * the output; the keys above the k-th are then merged in index order. */
+  const uint32_t t = prefix, ties = sel_rank, n_above = k - ties;
+  uint32_t* sel = hist;
+  {
+    const uint32_t j0 = tid * 2u;
+    uint32_t ng = 0u, ne = 0u;
+#pragma unroll
+    for (uint32_t e = 0; e < 2u; e++) {
+      ng += j0 + e < cands && cand_key[j0 + e] > t;
+      ne += j0 + e < cands && cand_key[j0 + e] == t;
+    }
+    uint32_t g_at, e_at, g_total, e_total;
+    block_offsets(ng, ne, tot[0], &g_at, &e_at, &g_total, &e_total);
+#pragma unroll
+    for (uint32_t e = 0; e < 2u; e++) {
+      if (j0 + e >= cands) break;
+      const uint32_t key = cand_key[j0 + e];
+      if (key > t) {
+        sel[g_at++] = cand_idx[j0 + e];
+      } else if (key == t) {
+        if (e_at < ties) out[n_above + e_at] = cand_idx[j0 + e];
+        e_at++;
+      }
     }
   }
+  __syncthreads();
+  const uint32_t n_sel = n_above - a_count;
+  for (uint32_t i = tid; i < a_count; i += kTopkThreads) out[i + lower_bound(sel, n_sel, above[i])] = above[i];
+  for (uint32_t i = tid; i < n_sel; i += kTopkThreads) out[i + lower_bound(above, a_count, sel[i])] = sel[i];
 }
 
 /* The candidate mask holds one bit per block (bit b % 32 of word b / 32). */
@@ -1593,6 +1760,7 @@ __device__ __forceinline__ float sum16(float v) {
 
 constexpr uint32_t kAttnRope = 64;  // the fused rotations' rope_dim
 constexpr uint32_t kAttnRows = 16;
+constexpr uint32_t kAttnMaxTopk = 512;  // attention_f16_kernel's k
 constexpr uint32_t kAttnRowPitch = 512 + 8;  // halves per staged KV row
 constexpr uint32_t kAttnProbPitch = 16 + 8;  // halves per probability row
 typedef _Float16 attn_half16 __attribute__((ext_vector_type(16)));
@@ -1605,12 +1773,14 @@ __device__ __forceinline__ attn_half16 lds_half16(const _Float16* p) {
   return __builtin_bit_cast(attn_half16, w);
 }
 
-/* The opposite half-wave's copy of a fragment. */
+/* The opposite half-wave's copy of a fragment. Fetch-inactive and
+ * bound-control are set so the permute keeps no old destination value (every
+ * lane is active here) and needs no register copied for it. */
 __device__ __forceinline__ attn_half16 swap_halves(attn_half16 v) {
   uint32_t w[8];
   __builtin_memcpy(w, &v, sizeof(w));
 #pragma unroll
-  for (int i = 0; i < 8; i++) w[i] = __builtin_amdgcn_permlanex16(w[i], w[i], 0x76543210u, 0xfedcba98u, false, false);
+  for (int i = 0; i < 8; i++) w[i] = __builtin_amdgcn_permlanex16(w[i], w[i], 0x76543210u, 0xfedcba98u, true, true);
   return __builtin_bit_cast(attn_half16, w);
 }
 
@@ -1633,14 +1803,16 @@ __device__ __forceinline__ void lds_barrier() { asm volatile("s_waitcnt lgkmcnt(
  * the lanes' own columns and one with the opposite half's (permlanex16)
  * cover them. With `rope` (rope_table_kernel at pos0 for the batch), q's
  * tail kAttnRope dimensions are rotated as ds41_v41_rope_tail does, and the
- * output gets ds41_v41_rope_fp8's inverse rotation and FP8 rounding. The
+ * output gets ds41_v41_rope_fp8's inverse rotation and FP8 rounding. With
+ * out16 the output rows are stored as FP16 there instead of out. The
  * kernel's code is kept within the instruction cache (a rolled epilogue,
  * DPP reductions, table decoding); larger code ran several times slower. */
 __global__ __launch_bounds__(256) void attention_f16_kernel(const float* q, const float* ring, const float* chunk,
                                                             uint32_t window, uint32_t floor, ds41_fp4_rows comp,
                                                             const uint32_t* all_idx, uint32_t k, uint32_t ratio,
-                                                            const float* sinks, float* out, uint32_t pos0,
-                                                            uint32_t heads, float scale, const float2* rope) {
+                                                            const float* sinks, float* out, _Float16* out16,
+                                                            uint32_t pos0, uint32_t heads, float scale,
+                                                            const float2* rope) {
   constexpr uint32_t DIM = 512, HEADS = 32, ROWS = kAttnRows, ROPE = kAttnRope, TAIL = DIM - ROPE;
   const uint32_t token = blockIdx.x;
   const uint32_t head0 = blockIdx.y * HEADS;
@@ -1653,6 +1825,9 @@ __global__ __launch_bounds__(256) void attention_f16_kernel(const float* q, cons
 
   __shared__ uint32_t fp4_pairs[256];  // code byte -> its two E2M1 values as FP16
   __shared__ uint16_t e4m3_half[256];  // scale byte -> FP16
+  /* The token's compressed row indices: a tile's rows then cost no chain
+   * of dependent global loads (index, then the row's bytes). */
+  __shared__ uint32_t comp_idx[kAttnMaxTopk];
   __shared__ __attribute__((aligned(16))) _Float16 kv_row[ROWS * kAttnRowPitch];
   __shared__ __attribute__((aligned(16))) _Float16 probs[HEADS * kAttnProbPitch];
   __shared__ float part[4][ROWS][HEADS + 1];
@@ -1672,6 +1847,7 @@ __global__ __launch_bounds__(256) void attention_f16_kernel(const float* q, cons
     fp4_pairs[tid] = (uint32_t)__builtin_bit_cast(uint16_t, lo_value) |
                      (uint32_t)__builtin_bit_cast(uint16_t, hi_value) << 16;
     e4m3_half[tid] = __builtin_bit_cast(uint16_t, (_Float16)e4m3_value(tid));
+    for (uint32_t i = tid; i < n_comp; i += 256) comp_idx[i] = idx[i];
   }
 
   /* Q fragments (B operand: lane = head, 16 dimensions per step). */
@@ -1737,38 +1913,43 @@ __global__ __launch_bounds__(256) void attention_f16_kernel(const float* q, cons
 #pragma unroll
       for (uint32_t r = 0; r < ROWS; r++) {
         const uint32_t pos = lo + min(tile * ROWS + r, n_window - 1);
-        const float* src =
-            pos < pos0 ? ring + (uint64_t)(pos & (window - 1)) * DIM : chunk + (uint64_t)(pos - pos0) * DIM;
-        raw[r] = *reinterpret_cast<const uint2*>(src + 2 * tid);
+        const float* base = pos < pos0 ? ring : chunk;
+        const uint32_t at = (pos < pos0 ? pos & (window - 1) : pos - pos0) * DIM + 2 * tid;
+        raw[r] = *reinterpret_cast<const uint2*>(base + at);
       }
     } else {
       const uint32_t c0 = (tile - window_tiles) * ROWS;
 #pragma unroll
       for (uint32_t r = 0; r < ROWS; r++) {
-        const uint64_t row = idx[min(c0 + r, n_comp - 1)];
+        /* 32-bit offsets from the uniform bases (a context's rows stay far below 4 GiB). */
+        const uint32_t row = comp_idx[min(c0 + r, n_comp - 1)];
         raw[r] = make_uint2(comp.codes[row * (DIM / 2) + tid], comp.scales[row * (DIM / 16) + tid / 8]);
       }
     }
   };
   /* The tile's columns 2 t (even) and 2 t + 1 (odd) as B operands. */
   attn_half16 col_even, col_odd;
+  const auto put = [&](uint32_t r, uint32_t pair) {
+    const attn_half2 v = __builtin_bit_cast(attn_half2, pair);
+    col_even[r] = v.x;
+    col_odd[r] = v.y;
+    *reinterpret_cast<uint32_t*>(&kv_row[r * kAttnRowPitch + 2 * tid]) = pair;
+  };
+  /* One branch per tile, not per row. */
   const auto store = [&](uint32_t tile) {
-    const bool window_tile = tile < window_tiles;
+    if (tile < window_tiles) {
 #pragma unroll
-    for (uint32_t r = 0; r < ROWS; r++) {
-      uint32_t pair;
-      if (window_tile) {
+      for (uint32_t r = 0; r < ROWS; r++) {
         const _Float16 a = (_Float16)__uint_as_float(raw[r].x), b = (_Float16)__uint_as_float(raw[r].y);
-        pair = (uint32_t)__builtin_bit_cast(uint16_t, a) | (uint32_t)__builtin_bit_cast(uint16_t, b) << 16;
-      } else {
+        put(r, (uint32_t)__builtin_bit_cast(uint16_t, a) | (uint32_t)__builtin_bit_cast(uint16_t, b) << 16);
+      }
+    } else {
+#pragma unroll
+      for (uint32_t r = 0; r < ROWS; r++) {
         const _Float16 sc = __builtin_bit_cast(_Float16, e4m3_half[raw[r].y]);
         const attn_half2 v = __builtin_bit_cast(attn_half2, fp4_pairs[raw[r].x]) * attn_half2{sc, sc};
-        pair = __builtin_bit_cast(uint32_t, v);
+        put(r, __builtin_bit_cast(uint32_t, v));
       }
-      const attn_half2 v = __builtin_bit_cast(attn_half2, pair);
-      col_even[r] = v.x;
-      col_odd[r] = v.y;
-      *reinterpret_cast<uint32_t*>(&kv_row[r * kAttnRowPitch + 2 * tid]) = pair;
     }
   };
 
@@ -1890,9 +2071,14 @@ __global__ __launch_bounds__(256) void attention_f16_kernel(const float* q, cons
           for (uint32_t c = 0; c < 2; c++) v[2 * pr + c] = fp8_round_scaled(v[2 * pr + c], eb);
         }
       }
-      float* o = out + ((uint64_t)token * heads + head0 + head) * DIM;
-      *reinterpret_cast<float2*>(o + d_own) = make_float2(v[0], v[1]);
-      *reinterpret_cast<float2*>(o + d_other) = make_float2(v[2], v[3]);
+      const uint64_t o = ((uint64_t)token * heads + head0 + head) * DIM;
+      if (out16) {
+        *reinterpret_cast<attn_half2*>(out16 + o + d_own) = attn_half2{(_Float16)v[0], (_Float16)v[1]};
+        *reinterpret_cast<attn_half2*>(out16 + o + d_other) = attn_half2{(_Float16)v[2], (_Float16)v[3]};
+      } else {
+        *reinterpret_cast<float2*>(out + o + d_own) = make_float2(v[0], v[1]);
+        *reinterpret_cast<float2*>(out + o + d_other) = make_float2(v[2], v[3]);
+      }
     }
   }
 }
@@ -2067,9 +2253,12 @@ __global__ void gather_row_kernel(const void* table, int format, const int32_t* 
 }
 
 /* tokens[index] = argmax over finite x[v] + bias[v], the first on ties; -1 when none. One block. */
+/* Block b takes row b of x (tokens[index + b]). */
 __global__ void __launch_bounds__(1024) argmax_bias_kernel(const float* x, const float* bias, uint32_t n,
                                                            int32_t* tokens, uint32_t index,
                                                            const int32_t* id_map = nullptr) {
+  x += (uint64_t)blockIdx.x * n;
+  index += blockIdx.x;
   __shared__ float best_v[1024];
   __shared__ int32_t best_i[1024];
   float v = -INFINITY;
@@ -2365,8 +2554,8 @@ __global__ void swiglu_kernel(const float* gate, const float* up, const float* w
 }
 
 /* Block (copy, token). */
-__global__ void engram_gate_kernel(float* h, const float* kv, const uint16_t* q, const uint16_t* k, uint32_t dim,
-                                   uint32_t hc, float eps) {
+__global__ void engram_gate_kernel(float* h, const float* kv, const float* weight, uint32_t dim, uint32_t hc,
+                                   float eps) {
   const uint32_t c = blockIdx.x;
   const uint64_t t = blockIdx.y;
   float* hc_row = h + (t * hc + c) * dim;
@@ -2377,7 +2566,7 @@ __global__ void engram_gate_kernel(float* h, const float* kv, const uint16_t* q,
   float kk = 0.0f;
   float dot = 0.0f;
   for (uint32_t i = threadIdx.x; i < dim; i += blockDim.x) {
-    const float w = bf16_to_f32(q[(uint64_t)c * dim + i]) * bf16_to_f32(k[(uint64_t)c * dim + i]);
+    const float w = weight[(uint64_t)c * dim + i];
     hh += hc_row[i] * hc_row[i];
     kk += key[i] * key[i];
     dot += hc_row[i] * w * key[i];
@@ -2404,11 +2593,15 @@ extern "C" int ds41_v41_matmul_bf16(const uint16_t* w, const float* x, float* ou
   const dim3 grid((rows + rows_per_block - 1) / rows_per_block, (n + kTokenTile - 1) / kTokenTile);
   if (n >= kBf16Tile / 4 && rows % kBf16Tile == 0 && k % kBf16K == 0 && (uintptr_t)w % 16 == 0 &&
       (uintptr_t)x % 16 == 0) {
-    matmul_bf16_wmma_kernel<<<dim3(rows / kBf16Tile, (n + kBf16Tile - 1) / kBf16Tile), 256>>>(w, x, out, rows, k, n);
+    const dim3 tiles(1, (n + kBf16Tile - 1) / kBf16Tile);
+    if (rows % 128 == 0)
+      matmul_bf16_wmma_kernel<128><<<dim3(rows / 128, tiles.y), 256>>>(w, x, out, rows, k, n);
+    else
+      matmul_bf16_wmma_kernel<64><<<dim3(rows / 64, tiles.y), 256>>>(w, x, out, rows, k, n);
     return launch_ok("bf16 matmul");
   }
   if (k % 256 == 0 && (uintptr_t)w % 16 == 0 && (uintptr_t)x % 16 == 0)
-    matmul_bf16_vec8_kernel<<<grid, kThreads>>>(w, x, out, rows, k, n);
+    matmul_bf16_vec8_kernel<<<dim3(grid.x, n), kThreads>>>(w, x, out, rows, k);
   else
     matmul_kernel<uint16_t><<<grid, kThreads>>>(w, x, out, rows, k, n);
   return launch_ok("bf16 matmul");
@@ -2435,6 +2628,15 @@ extern "C" int ds41_v41_copy_rows(float* dst, uint64_t dst_stride, const float* 
   if (rows == 0) return 0;
   copy_rows_kernel<<<rows, kThreads>>>(dst, dst_stride, src, src_stride, cols);
   return launch_ok("copy rows");
+}
+
+extern "C" int ds41_v41_copy_many(const ds41_v41_copy_list* list) {
+  if (list->count == 0) return 0;
+  if (list->count > DS41_V41_COPY_LIST) return 1;
+  uint32_t most = 0;
+  for (uint32_t i = 0; i < list->count; i++) most = std::max(most, list->copy[i].count);
+  copy_list_kernel<<<dim3(std::max(1u, (most + kThreads - 1) / kThreads), list->count), kThreads>>>(*list);
+  return launch_ok("copy list");
 }
 
 extern "C" int ds41_v41_rms_norm(const float* x, const float* weight, float* out, uint32_t rows, uint32_t n,
@@ -2464,13 +2666,14 @@ extern "C" int ds41_v41_rope_fp8(float* x, uint32_t rows, uint32_t row_dim, uint
   return launch_ok("rope fp8 quant");
 }
 
-extern "C" int ds41_v41_q_kv_norm(const float* qa, const float* q_weight, float* qr, uint32_t q_dim, const float* kv,
+extern "C" int ds41_v41_q_kv_norm(const float* qa, const float* q_weight, float* qr, uint16_t* qr_half, uint32_t q_dim,
+                                  const float* kv,
                                   const float* kv_weight, float* kvn, uint32_t kv_dim, uint32_t rope_dim,
                                   const float* inv_freq, uint32_t pos0, uint32_t n, float eps) {
   if (kv_dim > kQkvMaxKv || kv_dim % 32 != 0 || rope_dim % 32 != 0 || rope_dim > kv_dim)
     return 1;
   if (n == 0) return 0;
-  q_kv_norm_kernel<<<dim3(2, n), kQkvThreads>>>(qa, q_weight, qr, q_dim, kv, kv_weight, kvn, kv_dim, rope_dim,
+  q_kv_norm_kernel<<<dim3(2, n), kQkvThreads>>>(qa, q_weight, qr, reinterpret_cast<_Float16*>(qr_half), q_dim, kv, kv_weight, kvn, kv_dim, rope_dim,
                                                 inv_freq, pos0, eps);
   return launch_ok("q kv norm");
 }
@@ -2519,16 +2722,19 @@ extern "C" int ds41_v41_hc_sinkhorn(const float* mixes, const float* scale, cons
   return launch_ok("hc sinkhorn");
 }
 
-extern "C" int ds41_v41_hc_state_pass(const float* y, const float* post, const float* comb, const float* h,
-                                     float* h_out, const float* pre, const float* norm_w, float* xn, const float* fn,
-                                     float* mixes, uint32_t hc, uint32_t dim, float eps, uint32_t n) {
-  if (hc != 4 || dim % 256 != 0 || dim / 8 > 1024) return 1;
+extern "C" int ds41_v41_hc_state_pass(const float* y, const float* x, uint32_t rows, const float* post,
+                                     const float* comb, const float* h, float* h_out, const float* pre,
+                                     const float* norm_w, float* xn, const float* fn, float* mixes, uint32_t hc,
+                                     uint32_t dim, float eps, uint32_t n) {
+  if (hc != 4 || dim % 256 != 0 || dim / 8 > 1024 || (rows && !y)) return 1;
   if (n == 0) return 0;
   const dim3 grid((n + kMixTokens - 1) / kMixTokens);
   if (y)
-    hc_state_pass_kernel<true><<<grid, dim / 8>>>(y, post, comb, h, h_out, pre, norm_w, xn, fn, mixes, dim, n, eps);
+    hc_state_pass_kernel<true>
+        <<<grid, dim / 8>>>(y, x, rows, post, comb, h, h_out, pre, norm_w, xn, fn, mixes, dim, n, eps);
   else
-    hc_state_pass_kernel<false><<<grid, dim / 8>>>(y, post, comb, h, h_out, pre, norm_w, xn, fn, mixes, dim, n, eps);
+    hc_state_pass_kernel<false>
+        <<<grid, dim / 8>>>(y, x, 0, post, comb, h, h_out, pre, norm_w, xn, fn, mixes, dim, n, eps);
   return launch_ok("hc state pass");
 }
 
@@ -2591,7 +2797,8 @@ extern "C" int ds41_v41_indexer_score(const float* q, ds41_fp4_rows keys, const 
     return launch_ok("indexer score");
   }
   if (head_dim == 128) {
-    indexer_score_wmma_kernel<<<dim3((len + 127) / 128, (n + 15) / 16), 256>>>(q, keys, w, w_scale, score,
+    indexer_score_wmma_kernel<<<dim3((len + kScoreWmmaRows - 1) / kScoreWmmaRows, (n + 15) / 16),
+                                32 * kScoreWmmaWaves>>>(q, keys, w, w_scale, score,
                                                                                score_stride, pos0, n, ratio, heads);
     return launch_ok("indexer score");
   }
@@ -2616,8 +2823,8 @@ extern "C" int ds41_v41_indexer_score_candidates(const float* q, ds41_fp4_rows k
 
 extern "C" int ds41_v41_topk(const float* score, uint64_t score_stride, uint32_t* out, uint32_t k, uint32_t pos0,
                              uint32_t n, uint32_t ratio, uint32_t div) {
-  if (k == 0 || div == 0) return 1;
-  topk_kernel<<<n, 1024>>>(score, score_stride, out, k, pos0, ratio, div);
+  if (k == 0 || k > kTopkCap || div == 0) return 1;
+  topk_kernel<<<n, kTopkThreads>>>(score, score_stride, out, k, pos0, ratio, div);
   return launch_ok("topk");
 }
 
@@ -2650,8 +2857,8 @@ extern "C" int ds41_v41_apply_mask(float* score, uint64_t score_stride, const ui
 
 extern "C" int ds41_v41_attention(float* q, const float* ring, const float* chunk, uint32_t window,
                                   uint32_t floor, ds41_fp4_rows comp, const uint32_t* idx, uint32_t k, uint32_t ratio,
-                                  const float* sinks, float* out, float* partial, uint32_t pos0, uint32_t n,
-                                  uint32_t heads, uint32_t head_dim, float scale, const float* inv_freq,
+                                  const float* sinks, float* out, uint16_t* out_half, float* partial, uint32_t pos0,
+                                  uint32_t n, uint32_t heads, uint32_t head_dim, float scale, const float* inv_freq,
                                   uint32_t rope_dim, float* rope_scratch) {
   static_assert(DS41_V41_ATTN_PARTIAL_PER_HEAD == kAttnSplits * kAttnPartial, "partial layout");
   if (inv_freq && (rope_dim % 32 != 0 || rope_dim > head_dim)) return 1;
@@ -2662,7 +2869,7 @@ extern "C" int ds41_v41_attention(float* q, const float* ring, const float* chun
    * it applies the rotations itself. */
   if (!split && n >= DS41_V41_ATTN_SPLIT_TOKENS && head_dim == 512 && heads % 32 == 0 && window <= 256 &&
       (window & (window - 1)) == 0 &&
-      (ratio == 0 || k <= 512) && (!inv_freq || rope_dim == kAttnRope)) {
+      (ratio == 0 || k <= kAttnMaxTopk) && (!inv_freq || rope_dim == kAttnRope)) {
     float2* rope = nullptr;
     if (inv_freq) {
       if (!rope_scratch) return 1;
@@ -2670,9 +2877,11 @@ extern "C" int ds41_v41_attention(float* q, const float* ring, const float* chun
       rope_table_kernel<<<blocks_for((uint64_t)n * rope_dim / 2), kThreads>>>(inv_freq, rope, rope_dim / 2, pos0, n);
     }
     attention_f16_kernel<<<dim3(n, heads / 32), 256>>>(q, ring, chunk, window, floor, comp, idx, k, ratio, sinks, out,
-                                                       pos0, heads, scale, rope);
+                                                       reinterpret_cast<_Float16*>(out_half), pos0, heads, scale,
+                                                       rope);
     return launch_ok("attention");
   }
+  if (out_half) return 1;
   if (inv_freq && ds41_v41_rope_tail(q, n * heads, head_dim, rope_dim, inv_freq, pos0, heads, 1, 0)) return 1;
   if (split) {
     attention_split_kernel<<<dim3(heads / kAttnSplitHeads, kAttnSplits, n), 32 * kAttnSplitHeads>>>(
@@ -2703,9 +2912,9 @@ extern "C" int ds41_v41_swiglu(const float* gate, const float* up, const float* 
   return launch_ok("swiglu");
 }
 
-extern "C" int ds41_v41_engram_gate(float* h, const float* kv, const uint16_t* q, const uint16_t* k, uint32_t hc,
-                                    uint32_t dim, float eps, uint32_t n) {
-  engram_gate_kernel<<<dim3(hc, n), 1024>>>(h, kv, q, k, dim, hc, eps);
+extern "C" int ds41_v41_engram_gate(float* h, const float* kv, const float* weight, uint32_t hc, uint32_t dim,
+                                    float eps, uint32_t n) {
+  engram_gate_kernel<<<dim3(hc, n), 1024>>>(h, kv, weight, dim, hc, eps);
   return launch_ok("engram gate");
 }
 
@@ -2760,6 +2969,12 @@ extern "C" int ds41_v41_propose_top8(const float* x, const float* bias, uint32_t
                                      int32_t* token) {
   top8_bias_kernel<true><<<1, 256>>>(x, bias, n, ids, logits, draw, temperature, proposal, token);
   return launch_ok("top8 proposal");
+}
+
+extern "C" int ds41_v41_argmax_rows(const float* x, uint32_t n, uint32_t rows, int32_t* tokens) {
+  if (rows == 0) return 0;
+  argmax_bias_kernel<<<rows, 1024>>>(x, nullptr, n, tokens, 0);
+  return launch_ok("argmax rows");
 }
 
 extern "C" int ds41_v41_argmax_bias(const float* x, const float* bias, uint32_t n, int32_t* tokens, uint32_t index) {

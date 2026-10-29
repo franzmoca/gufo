@@ -40,6 +40,12 @@ from gguf_model import Model  # noqa: E402
 from quants import TORCH_DEQUANT  # noqa: E402
 
 DEAD = -1
+GATING_SQRTSOFTPLUS = 4  # llama.cpp expert_gating_func
+ENGRAM_VOCAB = 16_000_000  # official config engram_vocab_size: the bucket primes start above it
+
+
+def engram_token_map(model: Model) -> np.ndarray:
+    return np.asarray(model.metadata_value("deepseek41.engram.token_map"), dtype=np.int64)
 
 
 @dataclass(frozen=True)
@@ -88,7 +94,7 @@ class Config:
     @classmethod
     def from_model(cls, m: Model) -> "Config":
         g = m.meta
-        if g("expert_scoring_func") != "sqrtsoftplus" or g("hash_layer_count", 0) != 0:
+        if g("expert_gating_func") != GATING_SQRTSOFTPLUS or g("hash_layer_count", 0) != 0:
             raise ValueError("unsupported routing")
         if g("expert_shared_count") != 1 or not g("expert_weights_norm"):
             raise ValueError("unsupported expert layout")
@@ -101,11 +107,13 @@ class Config:
             q_lora_rank=g("attention.q_lora_rank"), o_groups=g("attention.output_group_count"),
             o_lora_rank=g("attention.output_lora_rank"), window=g("attention.sliding_window"),
             compress_ratios=tuple(g("attention.compress_ratios")),
-            kv_sources=tuple(g("kv_source_layer_ids")), index_sources=tuple(g("index_source_layer_ids")),
+            kv_sources=tuple(g("attention.kv_source_layers")),
+            index_sources=tuple(g("attention.indexer.source_layers")),
             index_heads=g("attention.indexer.head_count"), index_head_dim=g("attention.indexer.key_length"),
-            index_topk=g("attention.indexer.top_k"), candidate_source=g("attention.candidate_source_layer_id"),
-            candidate_blocks=g("attention.candidate_topk_blocks"),
-            candidate_block_size=g("attention.candidate_block_size"),
+            index_topk=g("attention.indexer.top_k"),
+            candidate_source=g("attention.indexer.candidate_source_layer"),
+            candidate_blocks=g("attention.indexer.candidate_top_k_blocks"),
+            candidate_block_size=g("attention.indexer.candidate_block_size"),
             n_experts=g("expert_count"), n_active=g("expert_used_count"),
             route_scale=g("expert_weights_scale"), swiglu_limit=limits.pop(),
             norm_eps=g("attention.layer_norm_rms_epsilon"), hc_mult=g("hyper_connection.count"),
@@ -113,10 +121,11 @@ class Config:
             rope_theta=g("rope.freq_base"), compress_rope_theta=g("attention.compress_rope_freq_base"),
             rope_factor=g("rope.scaling.factor"), original_seq_len=g("rope.scaling.original_context_length"),
             beta_fast=g("rope.scaling.yarn_beta_fast"), beta_slow=g("rope.scaling.yarn_beta_slow"),
-            engram_layers=tuple(g("engram.layer_ids", ())), engram_ngram=g("engram_max_ngram_size"),
-            engram_heads=g("engram_n_heads"), engram_head_dim=g("engram_head_dim"),
-            engram_pad_id=g("engram_pad_token_id"), engram_compressed_vocab=g("engram_compressed_vocab_size"),
-            engram_vocab=g("engram_vocab_size"), vocab=m["output.weight"].shape[0],
+            engram_layers=tuple(g("ple.layers", ())), engram_ngram=g("ple.ngram_size"),
+            engram_heads=g("ple.heads_per_ngram"), engram_head_dim=g("embedding_length_per_layer_input"),
+            engram_pad_id=g("engram.pad_token_id"),
+            engram_compressed_vocab=int(engram_token_map(m).max()) + 1,
+            engram_vocab=ENGRAM_VOCAB, vocab=m["output.weight"].shape[0],
         )
 
 
@@ -315,10 +324,12 @@ class EngramHash:
 
     def __init__(self, cfg: Config, model: Model):
         self.cfg = cfg
-        self.token_map = torch.from_numpy(model["engram_token_map.weight"].array().astype(np.int64))
-        self.primes = torch.from_numpy(model["engram_primes.weight"].array())  # [layers, cols]
-        self.offsets = torch.from_numpy(model["engram_offsets.weight"].array())  # [layers, cols]
-        self.multipliers = torch.from_numpy(model["engram_multipliers.weight"].array())  # [layers, ngram]
+        layers = len(cfg.engram_layers)
+        self.token_map = torch.from_numpy(engram_token_map(model))
+        # Bucket counts and absolute row offsets into the shared table, [layers, cols]
+        self.primes = torch.tensor(model.meta("ple.head_vocab_sizes"), dtype=torch.int64).view(layers, -1)
+        self.offsets = torch.tensor(model.meta("ple.head_offsets"), dtype=torch.int64).view(layers, -1)
+        self.multipliers = torch.tensor(model.meta("ple.layer_multipliers"), dtype=torch.int64).view(layers, -1)
         self.pad = int(self.token_map[cfg.engram_pad_id])
         self.history: list[int] = []
 
@@ -506,7 +517,7 @@ class Layer:
         o = sparse_attention(q, keys, self.t("attn_sinks"), idxs, cfg.head_dim**-0.5)
         o = rotate_tail(o, freqs, rd, inverse=True)
         o = fp8_fake_quant(o.reshape(seqlen, cfg.o_groups, -1))
-        wo_a = self.t("attn_output_a")  # [groups, rank, group_dim]
+        wo_a = self.t("attn_output_a").view(cfg.o_groups, cfg.o_lora_rank, -1)  # [groups, rank, group_dim]
         o = torch.einsum("sgd,grd->sgr", o, wo_a)
         return linear(o.flatten(1), self.t("attn_output_b"))
 
@@ -544,13 +555,13 @@ class Layer:
         cfg = self.cfg
         rows = hash_ids.flatten().tolist()
         unique = sorted(set(rows))
-        table = self.w.rows(self.p + "engram_embd.weight", unique)
+        table = self.w.rows("per_layer_token_embd.weight", unique)
         lookup = {r: i for i, r in enumerate(unique)}
         embed = table[torch.tensor([lookup[r] for r in rows], device=h.device)].view(h.size(0), -1)
-        kv = linear(embed, self.t("engram_wkv"))
+        kv = linear(embed, self.t("engram_kv"))
         key, value = kv.split([cfg.hc_mult * cfg.dim, cfg.dim], dim=-1)
         key = key.unflatten(-1, (cfg.hc_mult, cfg.dim))
-        weight = self.t("engram_q") * self.t("engram_k")
+        weight = self.t("engram_gate")  # the checkpoint's q * k
         eps = cfg.norm_eps
         rstd = torch.rsqrt(h.square().mean(-1) + eps) * torch.rsqrt(key.square().mean(-1) + eps)
         dot = (h * weight * key).sum(-1) * rstd * cfg.dim**-0.5
@@ -683,20 +694,21 @@ def official_token_map(tokenizer_path: Path):
 
 
 def verify_engram(args) -> int:
-    model = Model(args.model, args.engram)
+    model = Model(args.model)
     cfg = Config.from_model(model)
     primes, offsets, multipliers = official_layout(cfg)
+    absolute = offsets + np.concatenate([[0], np.cumsum(primes.sum(axis=1))[:-1]])[:, None]
     report = {
-        "primes": bool(np.array_equal(primes, model["engram_primes.weight"].array())),
-        "offsets": bool(np.array_equal(offsets, model["engram_offsets.weight"].array())),
-        "multipliers": bool(np.array_equal(multipliers, model["engram_multipliers.weight"].array())),
-        "table_rows": [int(primes[i].sum()) for i in range(len(cfg.engram_layers))],
-        "gguf_rows": [model[f"blk.{layer}.engram_embd.weight"].shape[0] for layer in cfg.engram_layers],
+        "primes": bool(np.array_equal(primes.flatten(), model.meta("ple.head_vocab_sizes"))),
+        "offsets": bool(np.array_equal(absolute.flatten(), model.meta("ple.head_offsets"))),
+        "multipliers": bool(np.array_equal(multipliers.flatten(), model.meta("ple.layer_multipliers"))),
+        "table_rows": int(primes.sum()),
+        "gguf_rows": model["per_layer_token_embd.weight"].shape[0],
     }
     report["rows"] = report["table_rows"] == report["gguf_rows"]
     if args.tokenizer:
         lookup, size = official_token_map(args.tokenizer)
-        shipped = model["engram_token_map.weight"].array()
+        shipped = engram_token_map(model)
         report["token_map"] = bool(size == cfg.engram_compressed_vocab and np.array_equal(lookup, shipped))
         report["compressed_vocab"] = size
         from tokenizers import Tokenizer
@@ -727,7 +739,7 @@ def encode(args) -> list[int]:
 def run(args) -> int:
     torch.set_grad_enabled(False)
     device = torch.device(args.device)
-    model = Model(args.model, args.engram)
+    model = Model(args.model)
     tokens = encode(args)
     max_seq = len(tokens) + args.decode + 1
     net = Transformer(model, device, getattr(torch, args.weight_dtype), args.threads, max_seq)
@@ -805,7 +817,6 @@ def main() -> int:
     for name in ("verify-engram", "run"):
         p = sub.add_parser(name)
         p.add_argument("--model", type=Path, required=True, help="first backbone shard")
-        p.add_argument("--engram", type=Path, help="Engram GGUF (default: deepseek41.engram.file beside the model)")
         p.add_argument("--tokenizer", type=Path, help="official tokenizer.json")
     r = sub.choices["run"]
     prompt = r.add_mutually_exclusive_group(required=True)

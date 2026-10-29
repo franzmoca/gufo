@@ -6,8 +6,10 @@ dequantizes the same GGUF and keeps the official KV fake quantization
 (FP8 window, FP4 compressed and indexer KV). Parity therefore measures the
 engine, not the quantization.
 
-Artifact: ISTA-DASLab GSQ-RCO `IQ1_M` (4 shards) with
+Artifact: ISTA-DASLab GSQ-RCO `IQ1_M` with
 `DeepSeek-V4.1-Flash-Engram-IQ4_NL.gguf`. Hardware: one Strix Halo (gfx1151).
+Results before the section on the llama.cpp layout used ISTA's earlier
+four-shard files; their quantized weights are the same bytes.
 
 ## Token parity
 
@@ -149,7 +151,8 @@ Flags that remain, from alternating runs:
 
 - One rotation return reuses 2 more tokens (8,470 instead of 8,468) and
   prefills 216 ms instead of 202: its 7-token batch takes 136 ms where the
-  old 9-token batch took 120, also without a restore (BACKLOG item 7).
+  old 9-token batch took 120, also without a restore
+  (7- and 8-token batches since moved to the batched paths, [E32](EXPERIMENTS.md#e32-batched-paths-for-7--and-8-token-prompt-batches-retained)).
 - Restores queue 5-6 ms longer in cache-shared-prefix (`long_tasks_1-3`),
   outside the restore itself; a fresh server with few checkpoints shows no
   difference. Time to first token is still lower than before.
@@ -440,3 +443,108 @@ preserves all 2,999 argmax and NLL records (six-decimal NLL output), perplexity
 6.319756; production tg128 token hashes also match. This is not a new full-logit
 bitwise claim. No quantization, expert accumulation or route weights changed.
 [Evidence](artifacts/2026-10-26-device-route-plan/summary.json).
+
+## llama.cpp GGUF layout (2026-10-27 republication)
+
+ISTA-DASLab republished the GSQ-RCO files in llama.cpp's `deepseek41` layout,
+converted locally with the repository's `convert_ds41_upstream.py`. The
+converter copies every quantized tensor byte for byte (checked again here for
+all tensors under 50M elements of IQ1_M) and folds the BF16 Engram `q` and `k`
+into the F32 `engram_gate`, bit-for-bit equal to their product.
+
+With the Engram gate fed the old BF16 `q`/`k` and the old product order, the
+new loader reproduces the previous 3K score files byte for byte: IQ1_M
+resident and IQ2_XXS streamed. That covers the metadata hash constants, the
+absolute rows of the shared Engram table, the shard split and the streamed
+expert reads. Production reads the folded gate. The old kernel's fast-math
+evaluated `((h·q)·key)·k`; the folded weight gives `(h·(q·k))·key`, the
+official `h * weight * key`. That rounding change moves the scores:
+
+| Build | Perplexity, old / new | GPU argmax changed | Target top-1, old / new | Agreement with IQ2 oracle, old / new |
+| --- | ---: | ---: | ---: | ---: |
+| IQ1_M resident | 6.320 / 6.296 | 120 of 2,999 | 57.7% / 58.0% | — |
+| IQ2_XXS streamed | 6.004 / 6.022 | 136 of 2,999 | 58.8% / 58.5% | 95.63% / 95.30% |
+
+The IQ2_XXS oracle scores 6.028; mean \|ΔNLL\| to it is 0.0825 before and
+0.0844 after. Neither order is closer to the oracle on both measures.
+
+## Streamed IQ2_XXS (M3, preliminary)
+
+The ISTA IQ2_XXS build mixes IQ1_M, IQ2_XXS and IQ2_XS expert tensors. On
+gfx1151, the independent oracle and streamed decoder scored the same 2,999
+positions of `docs/KV-CACHE.md`. The GPU ran exact prefill in 2,048- and
+952-token batches. IQ1_M's previously retained oracle score is included as a
+quantization comparison, not as a comparison of two identical backends.
+
+| Build and path | Perplexity | Target top-1 | Agreement with IQ2 oracle |
+| --- | ---: | ---: | ---: |
+| IQ1_M oracle | 6.309 | 58.2% | — |
+| IQ2_XXS oracle | 6.028 | 58.5% | — |
+| IQ2_XXS streamed GPU | 6.009 | 58.7% | 95.3% |
+
+Mean absolute NLL difference between the IQ2 paths is 0.0815. Four logits
+from the capital-of-France continuation have the same argmax; their KL
+divergences range from 0.000042 to 0.00125. The IQ2_XS NumPy and Torch
+dequantizers match llama.cpp bit-for-bit on 2,048 random blocks, and the GPU
+operator test checks an analytic IQ2_XS dot product and batched dispatch.
+
+Six-row speculative verification preserves all 10 retained logit rows
+bit-for-bit against single-token decode. Two joint sessions preserve all 28
+rows against their isolated evaluations. With the Lucebox drafter, a short
+greedy replay produced 27 drafts, accepted 23, and matched plain decoding on
+all 32 tokens.
+[Scores and probe logs](artifacts/m3-streaming/score3k-summary.json),
+[oracle manifest](artifacts/m3-streaming/iq2-oracle-manifest.json),
+[verification](artifacts/m3-streaming/spec-check.log),
+[joint sessions](artifacts/m3-streaming/joint-check.log),
+[DSpark](artifacts/m3-streaming/dspark-check.log).
+
+### Overlapped staging keeps the streamed outputs bit-identical
+
+The October 27 staging change (per-expert weight tables, split hit/miss
+launches, per-reader upload streams) only moves bytes between kernels; every
+route row keeps the arithmetic of a single-launch evaluation. The streamed
+tg128 outputs hash `04842be7…40254` on both the previous and the changed
+build, autoregressive and with the Lucebox drafter (110 drafted, 71 accepted
+in both). `ds41.expert_store` verifies the table contents, eviction, I/O
+failure, the split hit/miss rows and scan-resistant admission on synthetic
+shards; `ds41.mmq_typed` and the extended `ds41_gemv_bench` table mode check
+the IQ1/IQ2 kernels against their packed-layout outputs bit for bit. At the
+native 1M-context budget `ds41_load_probe` peaks at 106.4 GiB RSS with
+8.7 GiB available after generation. The tools, conversation,
+sampling-defaults and batch HTTP suites pass against `gufo serve` with the
+Lucebox drafter (the model's normal mode). The oracle perplexity table
+above is unchanged by construction.
+[AR + DSpark runs](artifacts/m3-streaming/bench-iq2-tables-ar1.log),
+[DSpark](artifacts/m3-streaming/bench-iq2-tables-dspark1.log).
+
+## Benchmark card (2026-10-29)
+
+[BENCHMARKS.md](BENCHMARKS.md) was measured with
+`tools/bench/model-bench.py --model deepseek-v4.1-flash` (`run --target gufo
+--fresh`, one warmed sample per point) on the production `nix build` of
+`cd8b92c1` (binary SHA-256 `fd5cd916…`), sequentially with nothing else on
+the GPU. Files: GSQ-RCO `IQ1_M` and `IQ2_XXS` in the llama.cpp layout (first
+shard of six; Engram `IQ4_NL` as shard 6) and the Lucebox Q2_K/Q4_K
+drafter. The `iq2xxs` variant adds `--stream-experts`; its routed experts
+were read from a Samsung 990 PRO. Loading dropped the page cache
+(`sync; echo 3 > /proc/sys/vm/drop_caches`) before each launch. This host
+exposes no ACPI platform profile; Tctl was 44–71 °C during the sweeps.
+
+Exactness checks of the card's own outputs:
+
+- Single user: the greedy DSpark completion equals the AR completion at
+  all eight depths of both quantizations (16 of 16 hashes).
+- Multiple users: every AR cohort (C1–C8) matches its isolated C1, and
+  every DSpark cohort, mixed and repetitive, matches the isolated C1 AR
+  reference of its quantization. The October 26 AR references predated the
+  folded Engram gate's rounding change ([llama.cpp GGUF
+  layout](#llamacpp-gguf-layout-2026-10-27-republication)) and no longer
+  matched current AR output (`4f19f5c1…` against `7a765f6d…` for IQ1_M
+  mixed), so all four references were regenerated with this build before
+  the DSpark tables ran; each mixed reference equals that quantization's
+  single-user d0 AR completion.
+
+These hashes show that speculative and concurrent execution reproduce plain
+decoding; they do not measure accuracy against the original model (see the
+teacher-forced sections above).

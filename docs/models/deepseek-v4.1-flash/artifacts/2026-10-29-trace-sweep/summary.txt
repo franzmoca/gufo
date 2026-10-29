@@ -1,0 +1,56 @@
+== Trace sweep, 2026-10-29 (release build at 0c1dae31)
+
+sweep.sh runs each model x mode once unprofiled (timing) and once under
+`tools/prof/prof.py run`: IQ1_M resident and IQ2_XXS with --stream-experts;
+pp2048 (`gufo bench -p 2048 -n 0 -r 2`) and `gufo prompt` on code.txt (96
+prompt tokens, 256 generated, --think off) greedy (-t 0) or sampled (model
+preset, -s 1), AR or DSpark (Lucebox Q2K/Q4K drafter). Each process starts
+with a cold expert cache. rollup.py: GPU busy, wall span and stages per
+decoded token (per pp2048 pair of repetitions for pp); shapes.py: per-shape
+launch costs; gaps.py: idle time between kernels by size; bytes.py: weight
+bytes read per decoded token from the GGUF headers.
+
+Measured ceilings (tools/bench/gfx1151_peak.hip): DRAM read 239.8 GB/s,
+write 220.2, copy 210.2; WMMA FP16 55.4 TFLOP/s, BF16 55.4, INT8 57.1 TOPS;
+VALU FP32 FMA 26.5 TFLOP/s; LDS read 6.5 TB/s.
+
+Weights per decoded token (bytes.py, Engram table rows excluded):
+IQ1_M 7,147 MiB -> 32.0 tok/s at 240 GB/s; IQ2_XXS 7,408 MiB -> 30.9 tok/s.
+Attention projections 3,646 MiB, six routed experts 1,707 / 1,968 MiB,
+shared expert 928, output head 434, Engram projection 206, router 150,
+hyper-connections 75.
+
+Unprofiled                IQ1_M          IQ2_XXS streamed
+pp2048 tok/s              1393.2 +-39    1208.3 +-212 (first repetition cold)
+AR greedy tok/s           23.98          22.03
+AR sampled tok/s          24.38          21.96
+DSpark greedy tok/s       38.12 (81.3% acceptance, 72 steps, 301 rows)
+                                         34.38 (79.3%, 77 steps, 309 rows)
+DSpark sampled tok/s      38.46 (78.8%, 61 steps, 283 rows)
+                                         35.13 (76.4%, 70 steps, 295 rows)
+
+Profiled per token (rollup.txt): AR IQ1_M 39.0 ms busy, 41.9 ms span, 975
+launches (dense GEMV 24.0, routed GEMV 9.7, mHC 1.8, BF16 router 1.8,
+attention 1.0); AR IQ2_XXS 40.4 busy, 45.8 span (routed 11.2). DSpark IQ1_M
+24.0 busy, 25.6 span per generated token (routed 10.0, dense 9.1, drafter
+~1.9); IQ2_XXS 26.4 / 29.5.
+
+Single-token bandwidth (IQ1_M AR, shapes.py): output head 455 MB in 1908.5
+us (238 GB/s), output_a 23.07 MB in 99.6 us (232), q_b 28.84 MB in 127.2
+(227), shared gate+up 16.22 MB in 73.6 (220), q_a+kv 9.75 MB in 45.9 (212),
+output_b 28.84 MB in 139.9 (206), shared down 8.11 MB in 39.3 (206); routed
+gate+up IQ1_S 27.6 MB in 135.8 (203), IQ2_XXS layers 31 MB in 180.8 (171),
+routed down IQ1_S 13.8 MB in 80.6 (171), IQ1_M 15.5 MB in 89.0 (174); BF16
+router 3.93 MB in 24.9 (158).
+
+DSpark verification: ~4.2 rows per step touch 24-36 distinct experts per
+layer; the grouped expert launches read at 188-210 GB/s, so a step's ~88 ms
+of reads matches the ~85-90 ms of kernels. 5-6-row output heads take the
+lane kernel (2,426 us, 98 calls) because the split scratch holds no
+129,280-row head beyond 4 columns.
+
+Idle (gaps.py): AR IQ1_M 2.89 ms/token, 2.35 of it gaps under 5 us; AR
+IQ2_XXS 5.37 (1.63 in >1 ms waits for expert reads); DSpark IQ1_M 5.54 ms
+per step (~1.2 around the logits copies, 0.27 between the drafter's
+quantize_q8_1 and mul_mat_vec_q); DSpark IQ2_XXS 10.20 per step (~2.9
+before expert_plan_kernel while misses are read).

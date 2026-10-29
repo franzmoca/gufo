@@ -16,6 +16,8 @@
 #include <span>
 #include <vector>
 
+#include <hip/hip_runtime_api.h>
+
 #include "ds41_v41.h"
 #include "model.h"
 #include "native_internal.h"
@@ -47,13 +49,14 @@ struct ds41_session {
   static constexpr uint32_t kVerifyRows = DS41_DECODER_MAX_SPECULATIVE;
   static constexpr float kAcceptPrior = 0.7f;
   /* Greedy cycles with the drafter's learned acceptance head draft the
-   * request's limit and verify the prefix whose rows each predict acceptance
-   * >= kLearnedDraft (+13% greedy over the timing policy). Sampled cycles do
-   * the same with q's top probability >= kConfidentDraft: diffuse rows are
-   * accepted 19-51% of the time, against 85% for the rest; the learned cut
-   * measured no gain there. Either cut depends only on the draft, never on
-   * timing, so seeded replay is unaffected. */
-  static constexpr float kLearnedDraft = 0.5f;
+   * request's limit and verify the prefix that maximizes the expected
+   * emitted tokens over the cycle's time, with the head's predictions as the
+   * acceptance estimates. Each emitted token takes one draw at its position
+   * whatever the prefix, so the timing-based cut leaves outputs unchanged.
+   * Sampled cycles verify the prefix whose q top probability is
+   * >= kConfidentDraft: diffuse rows are accepted 19-51% of the time, against
+   * 85% for the rest; the learned cut measured no gain there. That cut
+   * depends only on q, never on timing, so seeded replay is unaffected. */
   static constexpr float kConfidentDraft = 0.6f;
   /* Plain steps before a one-draft cycle re-measures acceptance: from the
    * first, doubling while the policy keeps returning to plain steps. */
@@ -72,6 +75,7 @@ struct ds41_session {
     uint32_t probe = kProbeFirst;  // plain steps before a one-draft cycle re-measures
   } policy;
   std::vector<float> spec_logits;
+  bool spec_pinned = false;
   struct {
     uint64_t drafted = 0, accepted = 0, support_drafted = 0, support_accepted = 0, positional = 0;
     uint64_t anchors = 0, full_blocks = 0, steps = 0;
@@ -145,6 +149,10 @@ int ds41_session_create(ds41_session** out, ds41_engine* engine, int context_siz
   }
   s->logits.resize(vocab(s));
   s->spec_logits.resize((uint64_t)ds41_session::kVerifyRows * vocab(s));
+  /* Pinned, so the evaluations' logits download by DMA, not staged copies. */
+  s->spec_pinned = hipHostRegister(s->spec_logits.data(), s->spec_logits.size() * sizeof(float),
+                                   hipHostRegisterDefault) == hipSuccess;
+  if (!s->spec_pinned) (void)hipGetLastError();
   *out = s;
   return 0;
 }
@@ -153,6 +161,7 @@ void ds41_session_free(ds41_session* s) {
   if (!s) return;
   ds41_dspark_state_destroy(s->dspark);
   ds41_decoder_destroy(s->decoder);
+  if (s->spec_pinned) (void)hipHostUnregister(s->spec_logits.data());
   delete s;
 }
 
@@ -282,20 +291,31 @@ void ds41_session_prepare_batch_execution(ds41_session*) {}
 
 namespace {
 
-constexpr float kPolicyRate = 0.1f, kPolicyRelax = 0.02f;
+/* A cycle's time also moves the other widths' estimates by kPolicyShift of
+ * its error: widths the policy rarely picks otherwise keep their prior. */
+constexpr float kPolicyRate = 0.1f, kPolicyRelax = 0.02f, kPolicyShift = 0.05f;
 
-uint32_t draft_width(ds41_session* s, uint32_t limit) {
-  auto& p = s->policy;
+/* The drafts per cycle that maximize the expected emitted tokens over the
+ * cycle's time; accept[k] estimates P(draft k + 1 is accepted | the drafts
+ * before it were). */
+uint32_t best_width(const ds41_session* s, const float* accept, uint32_t limit) {
+  const auto& p = s->policy;
   uint32_t best_w = 0;
   float best = 1.0f / p.cycle_ms[0], expected = 1.0f, reach = 1.0f;
   for (uint32_t w = 1; w <= limit; w++) {
-    reach *= p.accept[w - 1];
+    reach *= accept[w - 1];
     expected += reach;
     if (expected / p.cycle_ms[w] > best) {
       best = expected / p.cycle_ms[w];
       best_w = w;
     }
   }
+  return best_w;
+}
+
+uint32_t draft_width(ds41_session* s, uint32_t limit) {
+  auto& p = s->policy;
+  uint32_t best_w = best_width(s, p.accept, limit);
   if (best_w > 0) {
     p.probe = ds41_session::kProbeFirst;
   } else if (limit > 0 && ++p.plain >= p.probe) {
@@ -310,8 +330,8 @@ void ema(float& v, float x, float rate = kPolicyRate) { v += rate * (x - v); }
 
 /* The request's next token from target logits: the argmax (greedy) or a
  * draw by the request's sampler. */
-int draw(const ds41_session* s, const ds41_dspark_sampler* sampler, const float* row) {
-  const int top = ds41_sample_argmax(row, vocab(s));
+int draw(const ds41_session* s, const ds41_dspark_sampler* sampler, const float* row, const int32_t* argmax = nullptr) {
+  const int top = argmax ? *argmax : ds41_sample_argmax(row, vocab(s));
   if (!sampler || (sampler->try_accept_argmax && top >= 0 && sampler->try_accept_argmax(sampler->ctx, top)))
     return top;
   return sampler->sample(sampler->ctx, row, vocab(s));
@@ -362,11 +382,21 @@ struct Cycle {
   const ds41_session_dspark_batch_item* item = nullptr;
   bool stochastic = false;
   bool done = false;  // finished without an evaluation
+  /* Proposals this cycle may verify (copies and greedy drafts); a batch's
+   * sessions share one joint evaluation's rows. Their cycles' times are the
+   * batch's, not their own. */
+  uint32_t cap = ds41_session::kVerifyRows - 1;
+  bool shared = false;
   int block[ds41_session::kVerifyRows] = {};
   uint32_t first = 0, copied = 0, tail = 0, m = 0;
   size_t copy_start = 0;
   bool plain = false;        // the drafter's policy chose a plain step
   bool speculative = false;  // the block's rows wait in spec_logits for the commit
+  int32_t argmax[ds41_session::kVerifyRows] = {};  // each row's argmax, from the evaluation
+  /* A drafter pass this cycle waits for (draft), its learned width policy
+   * and the drafter's outputs. */
+  bool draft = false, learned = false;
+  float top[DS41_DSPARK_BLOCK] = {}, confidence[DS41_DSPARK_BLOCK] = {};
   std::chrono::steady_clock::time_point t0, t1;
 };
 
@@ -422,7 +452,7 @@ int prepare(Cycle& c, char* error, size_t capacity) {
     size_t agreed = 0;
     const auto match = s->lookup.Find(s->tokens, std::span<const int>(&anchor, 1),
                                       sampler ? Lookup::kSampledMinMatch : Lookup::kMinMatch, false, &agreed);
-    const uint32_t cap = std::min(ds41_session::kVerifyRows - 1, room);
+    const uint32_t cap = std::min(c.cap, room);
     if (match.length != 0) {
       c.copy_start = match.start;
       while (c.copied < std::min<size_t>(cap, agreed)) {
@@ -432,29 +462,51 @@ int prepare(Cycle& c, char* error, size_t capacity) {
       }
     }
   }
-  /* Without a copy, the drafter (if any) proposes the block. */
+  /* Without a copy, the drafter (if any) proposes the block: c.tail rows,
+   * drafted with the batch's other cycles (finish_draft). */
   c.tail = c.copied;
   if (c.copied == 0 && s->dspark) {
-    const uint32_t limit = std::min({(uint32_t)DS41_DSPARK_BLOCK, item.max_draft_tokens, room});
-    const bool learned = !c.stochastic && ds41_dspark_has_confidence(s->engine->dspark);
-    c.tail = c.stochastic || learned ? limit : draft_width(s, limit);
+    /* Sampled proposals keep their own width: the draws a block consumes
+     * depend on it, and seeded outputs must not depend on the batch. */
+    const uint32_t limit =
+        std::min({(uint32_t)DS41_DSPARK_BLOCK, item.max_draft_tokens, room, c.stochastic ? UINT32_MAX : c.cap});
+    c.learned = !c.stochastic && ds41_dspark_has_confidence(s->engine->dspark);
+    c.tail = c.stochastic || c.learned ? limit : draft_width(s, limit);
     c.plain = c.tail == 0;
-    float top[DS41_DSPARK_BLOCK] = {}, confidence[DS41_DSPARK_BLOCK] = {};
-    if (c.tail != 0 &&
-        (ds41_dspark_state_end(s->dspark) != c.first ||
-         !ds41_dspark_draft(s->dspark, anchor, c.block + 1, c.tail, sampler, top, learned ? confidence : nullptr)))
-      c.tail = 0;
-    if (learned || c.stochastic) {
-      const float* score = learned ? confidence : top;
-      const float floor = learned ? ds41_session::kLearnedDraft : ds41_session::kConfidentDraft;
-      uint32_t confident = 0;
-      while (confident < c.tail && score[confident] >= floor) ++confident;
-      c.tail = confident;
-    }
+    if (c.tail != 0 && ds41_dspark_state_end(s->dspark) != c.first) c.tail = 0;
+    c.draft = c.tail != 0;
+  }
+  c.m = c.tail + 1;
+  if (!c.draft) c.t1 = std::chrono::steady_clock::now();
+  return 0;
+}
+
+/* The drafter's request for a cycle that drafts. */
+ds41_dspark_draft_request draft_request(Cycle& c) {
+  ds41_dspark_draft_request r;
+  r.state = c.item->session->dspark;
+  r.anchor = c.block[0];
+  r.drafts = c.block + 1;
+  r.count = c.tail;
+  r.sampler = c.item->sampler;
+  r.top = c.top;
+  r.confidence = c.learned ? c.confidence : nullptr;
+  return r;
+}
+
+/* After the drafter pass: the cycle's width from its drafts. */
+void finish_draft(Cycle& c, bool drafted) {
+  ds41_session* s = c.item->session;
+  if (!drafted) c.tail = 0;
+  if (c.learned) {
+    c.tail = best_width(s, c.confidence, c.tail);
+  } else if (c.stochastic) {
+    uint32_t confident = 0;
+    while (confident < c.tail && c.top[confident] >= ds41_session::kConfidentDraft) ++confident;
+    c.tail = confident;
   }
   c.m = c.tail + 1;
   c.t1 = std::chrono::steady_clock::now();
-  return 0;
 }
 
 /* Evaluates one cycle's block on its own. */
@@ -462,7 +514,7 @@ int evaluate(Cycle& c, char* error, size_t capacity) {
   ds41_session* s = c.item->session;
   if (c.m == 1) return eval(s, c.block, 1, error, capacity) ? 0 : 1;
   if (s->before_write) s->before_write(s->write_data, c.first, c.first + c.m);
-  if (ds41_decoder_eval_speculative(s->decoder, c.block, c.m, s->spec_logits.data()) != 0) {
+  if (ds41_decoder_eval_speculative(s->decoder, c.block, c.m, s->spec_logits.data(), c.argmax) != 0) {
     set_error(error, capacity, "DSpark verification failed");
     s->valid = false;
     return 1;
@@ -478,6 +530,7 @@ int evaluate_joint(Cycle* const* cycles, uint32_t count, char* error, size_t cap
   const int* tokens[DS41_DECODER_MAX_JOINT];
   uint32_t ns[DS41_DECODER_MAX_JOINT];
   float* logits[DS41_DECODER_MAX_JOINT];
+  int32_t* argmax[DS41_DECODER_MAX_JOINT];
   for (uint32_t i = 0; i < count; i++) {
     ds41_session* s = cycles[i]->item->session;
     if ((int)(s->tokens.size() + cycles[i]->m) >= s->context) return 2;
@@ -485,13 +538,14 @@ int evaluate_joint(Cycle* const* cycles, uint32_t count, char* error, size_t cap
     tokens[i] = cycles[i]->block;
     ns[i] = cycles[i]->m;
     logits[i] = s->spec_logits.data();
+    argmax[i] = cycles[i]->argmax;
   }
   for (uint32_t i = 0; i < count; i++) {
     const Cycle& c = *cycles[i];
     ds41_session* s = c.item->session;
     if (s->before_write) s->before_write(s->write_data, c.first, c.first + c.m);
   }
-  const int rc = ds41_decoder_eval_joint(decoders, tokens, ns, count, logits);
+  const int rc = ds41_decoder_eval_joint(decoders, tokens, ns, count, logits, argmax);
   if (rc == 1) {
     set_error(error, capacity, "DSpark verification failed");
     for (uint32_t i = 0; i < count; i++) cycles[i]->item->session->valid = false;
@@ -521,17 +575,20 @@ int finish(Cycle& c, char* error, size_t capacity) {
   int next = -1;
   const ds41_v41_proposal* proposals =
       c.stochastic && c.copied == 0 && s->dspark ? ds41_dspark_proposals(s->dspark) : nullptr;
+  /* A speculative evaluation's rows come with their argmax. */
+  const int32_t* row_argmax = c.speculative ? c.argmax : nullptr;
   for (uint32_t i = 1; i < m; i++) {
     const float* row = rows + (uint64_t)(i - 1) * n_vocab;
+    const int32_t* top = row_argmax ? row_argmax + (i - 1) : nullptr;
     if (next >= 0) {
-      positional += ds41_sample_argmax(row, n_vocab) == block[i];
+      positional += (top ? *top : ds41_sample_argmax(row, n_vocab)) == block[i];
       continue;
     }
     int drawn = -1, argmax = -1;
     if (!device_draw(s, sampler, i - 1, proposals ? proposals + (i - 1) : nullptr, &drawn, &argmax)) {
-      argmax = ds41_sample_argmax(row, n_vocab);
+      argmax = top ? *top : ds41_sample_argmax(row, n_vocab);
       drawn = c.stochastic && c.copied == 0 ? sampler->verify(sampler->ctx, i - 1, row, n_vocab, block[i])
-                                            : draw(s, sampler, row);
+                                            : draw(s, sampler, row, &argmax);
     }
     positional += argmax == block[i];
     if (drawn != block[i] || ends(drawn) || block[i] == stop)
@@ -557,7 +614,7 @@ int finish(Cycle& c, char* error, size_t capacity) {
   /* The token after a fully accepted block (or a plain step): the last row. */
   int bonus_argmax = -1;
   if (next < 0 && !device_draw(s, sampler, m - 1, nullptr, &next, &bonus_argmax))
-    next = draw(s, sampler, s->logits.data());
+    next = draw(s, sampler, s->logits.data(), row_argmax ? row_argmax + m - 1 : nullptr);
   if (next < 0 || next >= (int)n_vocab) {
     set_error(error, capacity, "DSpark target logits contain no finite values");
     s->valid = false;
@@ -569,7 +626,7 @@ int finish(Cycle& c, char* error, size_t capacity) {
   const auto t2 = std::chrono::steady_clock::now();
   auto& p = s->policy;
   if (m == 1) {
-    if (c.plain) ema(p.cycle_ms[0], ms(c.t0, t2));
+    if (c.plain && !c.shared) ema(p.cycle_ms[0], ms(c.t0, t2));
     return 0;
   }
   auto& st = s->stats;
@@ -594,7 +651,8 @@ int finish(Cycle& c, char* error, size_t capacity) {
   /* Drafts after the first rejection say nothing about their acceptance. */
   for (uint32_t k = 0; k < std::min(accepted, c.tail); k++) ema(p.accept[k], k + 1 < accepted ? 1.0f : 0.0f);
   for (uint32_t k = c.tail; k < DS41_DSPARK_BLOCK; k++) ema(p.accept[k], ds41_session::kAcceptPrior, kPolicyRelax);
-  ema(p.cycle_ms[c.tail], ms(c.t0, t2));
+  const float miss = c.shared ? 0.0f : ms(c.t0, t2) - p.cycle_ms[c.tail];
+  for (uint32_t w = 1; w <= DS41_DSPARK_BLOCK; w++) p.cycle_ms[w] += (w == c.tail ? kPolicyRate : kPolicyShift) * miss;
   if (trace)
     fprintf(stderr, "ds41: DSpark pos=%u drafted=%u accepted=%u draft=%.1fms verify=%.1fms\n", c.first, c.tail,
             accepted - 1, ms(c.t0, c.t1), ms(c.t1, t2));
@@ -604,13 +662,41 @@ int finish(Cycle& c, char* error, size_t capacity) {
 }  // namespace
 
 /* Sessions' blocks evaluate jointly, in groups of up to DS41_DECODER_MAX_JOINT
- * rows: each weight is read once per group instead of once per session. */
+ * rows: each weight is read once per group instead of once per session. The
+ * sessions share one group's rows: each keeps room for the anchors and even
+ * shares of the sessions after it and takes the rest, so a session gets at
+ * least its even share and the rows earlier ones left. A batch of more than
+ * DS41_DECODER_MAX_JOINT / 2 sessions verifies anchors only. Sampled drafts
+ * are not capped and may need a second group. */
 int ds41_sessions_dspark_step_batch(const ds41_session_dspark_batch_item* items, size_t count, char* error,
                                     size_t capacity) {
   std::vector<Cycle> cycles(count);
+  constexpr uint32_t kRows = DS41_DECODER_MAX_JOINT;
+  const uint32_t share = count > 1 ? std::max<uint32_t>(1, kRows / (uint32_t)count) : 0;
+  uint32_t taken = 0;
   for (size_t i = 0; i < count; i++) {
-    cycles[i].item = &items[i];
-    if (prepare(cycles[i], error, capacity) != 0) return 1;
+    Cycle& c = cycles[i];
+    c.item = &items[i];
+    if (count > 1) {
+      const uint32_t reserved = (uint32_t)(count - i - 1) * share;
+      c.cap = std::min(c.cap, kRows - 1 - std::min(kRows - 1, taken + reserved));
+      c.shared = true;
+    }
+    if (prepare(c, error, capacity) != 0) return 1;
+    if (!c.done) taken += c.m;
+  }
+  /* One drafter pass for the drafting cycles (their full widths count
+   * against the later cycles' shares above). */
+  std::vector<Cycle*> drafting;
+  for (Cycle& c : cycles)
+    if (!c.done && c.draft) drafting.push_back(&c);
+  for (size_t i = 0; i < drafting.size(); i += DS41_DSPARK_MAX_BATCH) {
+    const uint32_t n = (uint32_t)std::min<size_t>(DS41_DSPARK_MAX_BATCH, drafting.size() - i);
+    ds41_dspark_draft_request requests[DS41_DSPARK_MAX_BATCH];
+    for (uint32_t j = 0; j < n; j++) requests[j] = draft_request(*drafting[i + j]);
+    /* A failed pass leaves its cycles plain, as a failed draft did. */
+    const bool ok = ds41_dspark_draft_batch(requests, n);
+    for (uint32_t j = 0; j < n; j++) finish_draft(*drafting[i + j], ok && requests[j].drafted);
   }
   Cycle* group[DS41_DECODER_MAX_JOINT];
   uint32_t grouped = 0, rows = 0;

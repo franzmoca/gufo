@@ -1,10 +1,59 @@
-# Gemma fork changelog
+# Fork changelog
 
-Changes made in this fork's Gemma 4 engine, newest first. Each entry is a brief
-summary; its pull request has the details, measurements and validation.
-Upstream Gufo's changes are in [CHANGELOG.md](CHANGELOG.md).
+Changes made in this fork's DeepSeek V4.1 Flash and Gemma 4 engines, newest
+first. Each entry is a brief summary; its pull request has the details,
+measurements and validation. Upstream Gufo's changes are in
+[CHANGELOG.md](CHANGELOG.md).
 
-## 2026-10-24: Upstream v0.23.0 and faster small binary16 GEMMs ([#9](https://github.com/franzmoca/gufo/pull/9))
+## 2026-10-29: DeepSeek V4.1 Flash: streamed IQ2_XXS, llama.cpp GGUF layout and faster decode ([#12](https://github.com/franzmoca/gufo/pull/12))
+
+- `--stream-experts` keeps the dense weights of the 128.75 GiB `IQ2_XXS` build
+  resident and streams its routed experts from SSD into a memory-bounded
+  expert cache (`--expert-cache-bytes`). Streamed outputs are bit-identical to
+  the staged build. With a Samsung 990 PRO, AR decode is 20.8–22.7 tok/s
+  across depths and the server is ready in 22.5 s from a cold page cache.
+- **Breaking:** only ISTA-DASLab's republished six-shard llama.cpp layout
+  loads, with the Engram file linked as shard 6 and the image routing bias
+  read from the backbone. Older four-shard files convert in place with
+  `convert_ds41_upstream.py`.
+- **Breaking:** streaming is opt-in. A model that does not fit memory fails
+  to load and states what it needs, unless `--stream-experts` is passed.
+- Faster decode, prefill and DSpark. On `IQ1_M` resident at depth 0:
+  - AR decode 23.3 → 24.5 tok/s.
+  - pp2048 1,077 → 1,228 tok/s.
+  - DSpark 28.0 → 30.7 tok/s on mixed text and 65.3 → 73.6 on repetitive
+    text.
+  - At 8 users, AR 78.5 → 86.1 tok/s and DSpark mixed 55.9 → 73.8.
+
+  Greedy and seeded outputs are unchanged by the speedups.
+- The benchmark card adds `IQ2_XXS` streamed tables, and the fork README now
+  leads with DeepSeek V4.1 Flash.
+
+## 2026-10-27: DeepSeek V4.1 Flash: small explicit prompt caches and memory warnings ([#11](https://github.com/franzmoca/gufo/pull/11))
+
+- An explicit `--cache-ram-bytes` up to the automatic budget is always
+  accepted. With the DSpark drafter at a 256K context, a 512 MiB cache used to
+  fail the load and now leaves 2.7 GiB of host memory free.
+- The server warns at load when the weights do not fit the GPU heap, naming
+  the kernel parameters that raise the limit, and when more than 1 GiB of
+  CMA is free.
+- README_DEEPSEEK.md adds a rootless Podman setup that needs no Nix on the
+  host.
+
+## 2026-10-26: DeepSeek V4.1 Flash engine ([#10](https://github.com/franzmoca/gufo/pull/10))
+
+- A native DeepSeek V4.1 Flash engine keeps the 763B model's GSQ-RCO `IQ1_M`
+  backbone resident on one 128 GB Strix Halo at the native 1M context and
+  reads the Engram tables from SSD.
+- DSpark speculative decoding with a separate drafter, prompt lookup of up
+  to 15 tokens, and joint verification of concurrent sessions; greedy output
+  is identical to plain decoding.
+- Image input through the vision tower (`--mmproj`), V4.1 DSML tool calls,
+  and RAM and disk prompt caching.
+- `feat/ds41` became the fork's default branch; it contains the Gemma 4
+  engine as well.
+
+## 2026-10-24: Gemma 4: Upstream v0.23.0 and faster small binary16 GEMMs ([#9](https://github.com/franzmoca/gufo/pull/9))
 
 - Merged upstream Gufo v0.22.0–v0.23.0. Repeated `--served-model-name` works
   for Gemma models.
@@ -13,7 +62,7 @@ Upstream Gufo's changes are in [CHANGELOG.md](CHANGELOG.md).
   97 ms on the 26B-A4B; 31B UD-Q8_K_XL pp768 is +2.3%. Results are
   bit-identical.
 
-## 2026-10-23: Faster UD-Q8_K_XL prefill and MTP decoding ([#8](https://github.com/franzmoca/gufo/pull/8))
+## 2026-10-23: Gemma 4: Faster UD-Q8_K_XL prefill and MTP decoding ([#8](https://github.com/franzmoca/gufo/pull/8))
 
 - Q8_0 projections verify MTP drafts on the WMMA kernel over the grouped
   weight layout. 31B UD-Q8_K_XL MTP decode is +2.2% on mixed text, +19–20%
@@ -34,7 +83,7 @@ Upstream Gufo's changes are in [CHANGELOG.md](CHANGELOG.md).
   follows the request's sampling exactly. 31B UD-Q8_K_XL sampled decode is
   +1.8–3.2%; the 26B-A4B keeps top-p.
 
-## 2026-10-23: Faster sampled MTP verification ([#7](https://github.com/franzmoca/gufo/pull/7))
+## 2026-10-23: Gemma 4: Faster sampled MTP verification ([#7](https://github.com/franzmoca/gufo/pull/7))
 
 - Sampled MTP cycles verify from each row's exact top logits, selected on the
   GPU, instead of copying every row's full logits to the host. Output is
@@ -42,7 +91,7 @@ Upstream Gufo's changes are in [CHANGELOG.md](CHANGELOG.md).
   a repeat penalty) and +0.2% on 31B UD-Q4_K_XL.
 - Synced with upstream main through gufo-org/gufo#729 (0.21.0).
 
-## 2026-10-21: Faster MTP decoding and opt-in prefill weight copies ([#6](https://github.com/franzmoca/gufo/pull/6))
+## 2026-10-21: Gemma 4: Faster MTP decoding and opt-in prefill weight copies ([#6](https://github.com/franzmoca/gufo/pull/6))
 
 - With an MTP drafter loaded, the target's projection weights are reordered
   at load into 128-row groups that the verification kernel reads as one
@@ -59,7 +108,7 @@ Upstream Gufo's changes are in [CHANGELOG.md](CHANGELOG.md).
   matching decode row, so it passes on 26B QAT.
 - Synced with upstream main through gufo-org/gufo#686 (0.19.0).
 
-## 2026-10-20: Faster MTP attention at depth and a per-cycle draft trace ([#5](https://github.com/franzmoca/gufo/pull/5))
+## 2026-10-20: Gemma 4: Faster MTP attention at depth and a per-cycle draft trace ([#5](https://github.com/franzmoca/gufo/pull/5))
 
 - MTP verification attention folds its reductions into DPP additions and
   coalesces score reductions, and 9–12 verified rows launch as one block:
@@ -80,7 +129,7 @@ Upstream Gufo's changes are in [CHANGELOG.md](CHANGELOG.md).
   change.
 - Synced with upstream main through gufo-org/gufo#665 (0.18.0).
 
-## 2026-10-20: MTP on depth-upscaled 31B targets ([#4](https://github.com/franzmoca/gufo/pull/4))
+## 2026-10-20: Gemma 4: MTP on depth-upscaled 31B targets ([#4](https://github.com/franzmoca/gufo/pull/4))
 
 - MTP decoding accepts targets of up to 96 layers instead of 64, so
   depth-upscaled 31B models such as BeaverAI/Spectre-37B-v1a (72 layers) run
@@ -88,7 +137,7 @@ Upstream Gufo's changes are in [CHANGELOG.md](CHANGELOG.md).
   greedy decode 9.8 to 18.0 tok/s on Spectre-37B-v1a Q4_K_M. 26B-A4B and 31B
   are unchanged.
 
-## 2026-10-19: Continuations from the component cache ([#3](https://github.com/franzmoca/gufo/pull/3))
+## 2026-10-19: Gemma 4: Continuations from the component cache ([#3](https://github.com/franzmoca/gufo/pull/3))
 
 - Gemma 4 serves continuations through upstream's component cache instead of
   whole-session snapshots. Checkpoints keep global rows, sliding-window rows
@@ -111,7 +160,7 @@ Upstream Gufo's changes are in [CHANGELOG.md](CHANGELOG.md).
   into a free slot, where legacy reused the other slot's session, remain
   slower.
 
-## 2026-10-18: Prompt lookup from upstream and fewer request stalls ([#2](https://github.com/franzmoca/gufo/pull/2))
+## 2026-10-18: Gemma 4: Prompt lookup from upstream and fewer request stalls ([#2](https://github.com/franzmoca/gufo/pull/2))
 
 - Synced with upstream main through gufo-org/gufo#613. Gemma 4 takes its
   prompt-lookup rules where they measured faster, and copies only what every
@@ -122,7 +171,7 @@ Upstream Gufo's changes are in [CHANGELOG.md](CHANGELOG.md).
 - Prompt-lookup copies are reported in `lookup_n` / `lookup_n_accepted` and
   the `/metrics` counters.
 
-## 2026-10-17: Faster prefill at depth and MTP verification ([#1](https://github.com/franzmoca/gufo/pull/1))
+## 2026-10-17: Gemma 4: Faster prefill at depth and MTP verification ([#1](https://github.com/franzmoca/gufo/pull/1))
 
 - Prefill attention and projections: 31B prefill +3.5% with no context, +9%
   at 32K and +22% at 128K; 26B-A4B +12–17% from 16K.

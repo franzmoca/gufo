@@ -42,13 +42,17 @@ int ds41_v41_gemv_pair(int type, const void* w1, float* y1, uint32_t m1, const v
  * clamp(up x, +-limit), for n tokens of k floats (y rows m floats). */
 int ds41_v41_gemv_swiglu(int type, const void* gate, const void* up, const float* x, float* y, uint32_t m, uint32_t k,
                          float limit, int slices, uint32_t n);
-/* Decode routed experts in IQ1_S, IQ1_M, IQ2_XXS or IQ2_S with FP32
+/* Decode routed experts in IQ1_S, IQ1_M, IQ2_XXS, IQ2_XS or IQ2_S with FP32
  * activations: y[s, 0:m] = W[ids[s]] x_s for s < slots, x_s = x + (s /
  * slots_per_x) * x_slot (x_slot 0 shares one input); expert e's blocks start
- * at w + e * expert_bytes, and a negative id writes zeros. Every slot sees the
- * same arithmetic. Returns 1 for other types. */
+ * at w + e * expert_bytes, or at w_table[e] when w_table holds the expert's
+ * base pointers (the streamed store's resident slots and stage rows), and a
+ * negative id writes zeros unless zero_dropped is 0, which leaves y[s]
+ * untouched for a later launch to fill. Every slot sees the same arithmetic.
+ * Returns 1 for other types. */
 int ds41_v41_gemv_experts(int type, const void* w, uint64_t expert_bytes, const int32_t* ids, uint32_t slots,
-                          const float* x, uint32_t x_slot, uint32_t slots_per_x, float* y, uint32_t m, uint32_t k);
+                          const float* x, uint32_t x_slot, uint32_t slots_per_x, float* y, uint32_t m, uint32_t k,
+                          const void* const* w_table = nullptr, int zero_dropped = 1);
 /* Gate and up of the same experts (one type, same layout) over the inputs of
  * ds41_v41_gemv_experts, fused with the SwiGLU of ds41_v41_swiglu: y[s, r] =
  * route_w[s] * silu(min(gate, limit)) * clamp(up, +-limit); route_w may be
@@ -56,7 +60,8 @@ int ds41_v41_gemv_experts(int type, const void* w, uint64_t expert_bytes, const 
 int ds41_v41_gemv_experts_swiglu(int type, const void* gate, const void* up, uint64_t expert_bytes,
                                  const int32_t* ids, uint32_t slots, const float* x, uint32_t x_slot,
                                  uint32_t slots_per_x, const float* route_w, float limit, float* y, uint32_t m,
-                                 uint32_t k);
+                                 uint32_t k, const void* const* w_table = nullptr,
+                                 const void* const* w_up_table = nullptr, int zero_dropped = 1);
 
 /* Small batches of routed experts, each expert's weights decoded once for
  * all slots routed to it. ds41_v41_expert_plan groups the `slots` (<=
@@ -69,21 +74,27 @@ int ds41_v41_gemv_experts_swiglu(int type, const void* gate, const void* up, uin
  * ungrouped launch bit for bit. */
 #define DS41_V41_EXPERT_PLAN_SLOTS 128
 #define DS41_V41_EXPERT_PLAN_COLS 16
-#define DS41_V41_EXPERT_PLAN_INTS(slots) (1 + (slots) * (2 + DS41_V41_EXPERT_PLAN_COLS))
+#define DS41_V41_EXPERT_PLAN_INTS(slots) (1 + (slots) * (3 + DS41_V41_EXPERT_PLAN_COLS))
 int ds41_v41_expert_plan(const int32_t* ids, uint32_t slots, int32_t* plan);
 int ds41_v41_gemv_experts_grouped(int type, const void* w, const void* w_up, const float* route_w, float limit,
                                   uint64_t expert_bytes, const int32_t* plan, uint32_t slots, uint32_t cols,
                                   const float* x, uint32_t x_slot, uint32_t slots_per_x, float* y, uint32_t m,
-                                  uint32_t k);
+                                  uint32_t k, const void* const* w_table = nullptr,
+                                  const void* const* w_up_table = nullptr, int zero_dropped = 1);
 
 /* Batched dense projections (Q5_K) on the FP16 matrix cores: for each group
  * z < groups, out[t, z m + r] = W_z[r] . x[t, z k : z k + k] over n tokens,
  * W_z the z-th [m][k] matrix stored back to back; x rows hold groups * k
- * floats, rounded to FP16 as they are staged, and out rows groups * m;
- * non-finite outputs read as 0. Returns 1 for other types, m not a multiple
- * of 256 or k not a multiple of 256. */
-int ds41_v41_dense_f16(int type, const void* w, const float* x, float* out, uint32_t m, uint32_t n, uint32_t k,
-                       uint32_t groups);
+ * floats, rounded to FP16 as they are staged, and out rows groups * m
+ * floats; non-finite outputs read as 0. With DS41_V41_DENSE_X_HALF in io
+ * the x rows are already FP16 (the same results), with
+ * DS41_V41_DENSE_OUT_HALF out rows are FP16 (rounded from the floats).
+ * Returns 1 for other types, m not a multiple of 256 or k not a multiple
+ * of 256. */
+#define DS41_V41_DENSE_X_HALF 1u
+#define DS41_V41_DENSE_OUT_HALF 2u
+int ds41_v41_dense_f16(int type, const void* w, const void* x, void* out, uint32_t m, uint32_t n, uint32_t k,
+                       uint32_t groups, uint32_t io);
 /* Batched routed experts (IQ1_S, IQ1_M, IQ2_XXS) on the FP16 matrix cores, with FP16
  * activations x. rows lists the slots grouped by expert, expert e owning
  * rows[bounds[e] .. bounds[e + 1]), and tiles[0:n_tiles] names 64 of them
@@ -95,7 +106,8 @@ int ds41_v41_dense_f16(int type, const void* w, const float* x, float* out, uint
 int ds41_v41_routed_f16(int type, const void* w, const void* w_up, uint64_t expert_bytes, const uint16_t* x,
                         uint32_t x_div, const int32_t* rows, const int32_t* bounds, const int32_t* tiles,
                         uint32_t n_tiles, const float* route_w, float limit, void* y, int y_half, uint32_t m,
-                        uint32_t k);
+                        uint32_t k, const void* const* w_table = nullptr,
+                        const void* const* w_up_table = nullptr);
 /* y[0:n] = x[0:n] rounded to FP16 (bits). */
 int ds41_v41_to_half(const float* x, uint16_t* y, uint64_t n);
 /* Host side: rows[slots], bounds[n_experts + 1] and tiles (at most
@@ -113,6 +125,20 @@ int ds41_v41_routed_plan_device(const int32_t* ids, uint32_t slots, uint32_t n_e
 /* dst[r, 0:cols] = src[r, 0:cols] for `rows` rows with the given strides (floats). */
 int ds41_v41_copy_rows(float* dst, uint64_t dst_stride, const float* src, uint64_t src_stride, uint32_t rows,
                        uint32_t cols);
+
+/* Independent device copies of count floats each, in one launch: the list
+ * travels as the kernel argument, so it needs no staging buffer. */
+#define DS41_V41_COPY_LIST 96
+typedef struct ds41_v41_copy {
+  float* dst;
+  const float* src;
+  uint32_t count;
+} ds41_v41_copy;
+typedef struct ds41_v41_copy_list {
+  ds41_v41_copy copy[DS41_V41_COPY_LIST];
+  uint32_t count;
+} ds41_v41_copy_list;
+int ds41_v41_copy_many(const ds41_v41_copy_list* list);
 
 /* out[r] = weight * x[r] * rsqrt(mean(x[r]^2) + eps) for `rows` rows of n; weight may be NULL. */
 int ds41_v41_rms_norm(const float* x, const float* weight, float* out, uint32_t rows, uint32_t n, float eps);
@@ -144,8 +170,10 @@ typedef struct ds41_fp4_rows {
  * returns the quantized floats); x is kept. */
 int ds41_v41_fp4_store(const float* x, uint8_t* codes, uint8_t* scales, uint32_t n, uint32_t block, int e4m3_scale);
 /* qr = RMSNorm(qa) * q_weight, and kvn = RMSNorm(kv) * kv_weight followed by
- * ds41_v41_rope_fp8 (token t at pos0 + t), for n tokens in one launch. */
-int ds41_v41_q_kv_norm(const float* qa, const float* q_weight, float* qr, uint32_t q_dim, const float* kv,
+ * ds41_v41_rope_fp8 (token t at pos0 + t), for n tokens in one launch. With
+ * qr_half set, qr is also stored there rounded to FP16 (q_dim per token). */
+int ds41_v41_q_kv_norm(const float* qa, const float* q_weight, float* qr, uint16_t* qr_half, uint32_t q_dim,
+                       const float* kv,
                        const float* kv_weight, float* kvn, uint32_t kv_dim, uint32_t rope_dim, const float* inv_freq,
                        uint32_t pos0, uint32_t n, float eps);
 
@@ -163,12 +191,13 @@ int ds41_v41_hc_mix(const float* fn, const float* h, const float* scale, const f
 int ds41_v41_hc_collapse_norm(const float* h, const float* pre, const float* weight, float* out, uint32_t hc,
                               uint32_t dim, float eps, uint32_t n);
 /* Batched hc_mixes and hc_collapse_norm over one read of the state: with y,
- * the state is first ds41_v41_hc_expand(y, h, post, comb) and stored to
- * h_out, otherwise it is h. mixes come from fn, xn from pre and norm_w.
- * Returns 1 for hc != 4 or dim not a multiple of 256 up to 8192. */
-int ds41_v41_hc_state_pass(const float* y, const float* post, const float* comb, const float* h, float* h_out,
-                           const float* pre, const float* norm_w, float* xn, const float* fn, float* mixes,
-                           uint32_t hc, uint32_t dim, float eps, uint32_t n);
+ * the state is first ds41_v41_hc_expand_sum(x, y, rows, h, post, comb) and
+ * stored to h_out, otherwise it is h. mixes come from fn, xn from pre and
+ * norm_w. Returns 1 for hc != 4, dim not a multiple of 256 up to 8192, or
+ * rows without y. */
+int ds41_v41_hc_state_pass(const float* y, const float* x, uint32_t rows, const float* post, const float* comb,
+                           const float* h, float* h_out, const float* pre, const float* norm_w, float* xn,
+                           const float* fn, float* mixes, uint32_t hc, uint32_t dim, float eps, uint32_t n);
 /* out[t, b, i] = post[t, b] * y[t, i] + sum_a comb[t, a, b] * residual[t, a, i]. */
 int ds41_v41_hc_expand(const float* y, const float* residual, const float* post, const float* comb, float* out,
                        uint32_t hc, uint32_t dim, uint32_t n);
@@ -225,14 +254,17 @@ int ds41_v41_topk(const float* score, uint64_t score_stride, uint32_t* out, uint
  * With `partial` (n * heads * DS41_V41_ATTN_PARTIAL_PER_HEAD floats),
  * batches of up to DS41_V41_ATTN_SPLIT_MAX_TOKENS rows split each row across
  * its own blocks, with the arithmetic of a single-row launch. Without it,
- * batches from DS41_V41_ATTN_SPLIT_TOKENS rows take the matrix cores. */
+ * batches from DS41_V41_ATTN_SPLIT_TOKENS rows take the matrix cores; only
+ * that form takes out_half, which then receives the output rows as FP16 in
+ * place of out (returns 1 for out_half on a batch of another form). */
 #define DS41_V41_ATTN_SPLIT_TOKENS 8u
 #define DS41_V41_ATTN_SPLIT_MAX_TOKENS 16u
 #define DS41_V41_ATTN_PARTIAL_PER_HEAD (20u * 516u)
 int ds41_v41_attention(float* q, const float* ring, const float* chunk, uint32_t window, uint32_t floor,
                        ds41_fp4_rows comp, const uint32_t* idx, uint32_t k, uint32_t ratio, const float* sinks,
-                       float* out, float* partial, uint32_t pos0, uint32_t n, uint32_t heads, uint32_t head_dim,
-                       float scale, const float* inv_freq, uint32_t rope_dim, float* rope_scratch);
+                       float* out, uint16_t* out_half, float* partial, uint32_t pos0, uint32_t n, uint32_t heads,
+                       uint32_t head_dim, float scale, const float* inv_freq, uint32_t rope_dim,
+                       float* rope_scratch);
 
 /* Routing per token: scores = sqrt(softplus(logits)); top-k of scores + bias;
  * weights normalized and multiplied by route_scale. ids/weights are [n, k]. */
@@ -244,9 +276,10 @@ int ds41_v41_swiglu(const float* gate, const float* up, const float* weight, flo
                     uint32_t n, float limit);
 
 /* Engram: kv[t] holds hc keys then one value of `dim` each. Per copy c,
- * h[t, c] += sigmoid(signed_sqrt(dot)) * value. q/k are BF16 [hc, dim]. */
-int ds41_v41_engram_gate(float* h, const float* kv, const uint16_t* q, const uint16_t* k, uint32_t hc,
-                         uint32_t dim, float eps, uint32_t n);
+ * h[t, c] += sigmoid(signed_sqrt(dot)) * value. weight is F32 [hc, dim], the
+ * checkpoint's q * k. */
+int ds41_v41_engram_gate(float* h, const float* kv, const float* weight, uint32_t hc, uint32_t dim, float eps,
+                         uint32_t n);
 
 /* DSpark block attention: each of the n_block queries attends the ring rows
  * of positions first .. first + n_ring - 1 (slot pos % window) and all
@@ -304,6 +337,9 @@ int ds41_v41_markov_propose(const uint16_t* w2, const float* x, const float* log
                             float temperature, ds41_v41_proposal* proposal, int32_t* token);
 int ds41_v41_propose_top8(const float* x, const float* bias, uint32_t n, int32_t* ids, float* logits,
                           const uint32_t* draw, float temperature, ds41_v41_proposal* proposal, int32_t* token);
+/* tokens[r] = the first index of the largest finite value of row r of x
+ * (rows of n), -1 for a row without one: ds41_sample_argmax per row. */
+int ds41_v41_argmax_rows(const float* x, uint32_t n, uint32_t rows, int32_t* tokens);
 /* tokens[index] = the first index of the largest finite x[v] + bias[v]
  * (bias may be NULL), or -1 when none is finite. */
 int ds41_v41_argmax_bias(const float* x, const float* bias, uint32_t n, int32_t* tokens, uint32_t index);

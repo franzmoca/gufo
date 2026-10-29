@@ -6,6 +6,7 @@
 #include <hip/hip_runtime.h>
 
 #include <algorithm>
+#include <bit>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
@@ -174,14 +175,33 @@ double Case(uint32_t pos0, uint32_t n, uint32_t ratio, uint32_t comp_rows,
   (void)hipMalloc(&dout, sizeof(float) * n * kHeads * kDim);
   (void)hipMalloc(&dtable, sizeof(float) * n * kRope);
   const float scale = 1.0f / std::sqrt((float)kDim);
-  const int rc = ds41_v41_attention(
+  const bool matrix = !(n < DS41_V41_ATTN_SPLIT_TOKENS || split);
+  int rc = ds41_v41_attention(
       dq, dring, dchunk, kWindow, floor, dcomp, didx, kTopK, ratio, dsinks,
-      dout, n < DS41_V41_ATTN_SPLIT_TOKENS || split ? dpartial : nullptr, pos0,
-      n, kHeads, kDim, scale, rope ? dfreq : nullptr, kRope, dtable);
+      dout, nullptr, matrix ? nullptr : dpartial, pos0, n, kHeads, kDim, scale,
+      rope ? dfreq : nullptr, kRope, dtable);
   std::vector<float> out((std::size_t)n * kHeads * kDim);
   (void)hipDeviceSynchronize();
   (void)hipMemcpy(out.data(), dout, out.size() * sizeof(float),
                   hipMemcpyDeviceToHost);
+  /* The matrix-core form's FP16 output is its FP32 output rounded. */
+  if (rc == 0 && matrix) {
+    uint16_t* dhalf = nullptr;
+    (void)hipMalloc(&dhalf, sizeof(uint16_t) * out.size());
+    rc = ds41_v41_attention(dq, dring, dchunk, kWindow, floor, dcomp, didx,
+                            kTopK, ratio, dsinks, nullptr, dhalf, nullptr, pos0,
+                            n, kHeads, kDim, scale, rope ? dfreq : nullptr,
+                            kRope, dtable);
+    std::vector<uint16_t> half(out.size());
+    (void)hipMemcpy(half.data(), dhalf, half.size() * sizeof(uint16_t),
+                    hipMemcpyDeviceToHost);
+    (void)hipFree(dhalf);
+    for (std::size_t i = 0; rc == 0 && i < out.size(); i++)
+      if (half[i] != std::bit_cast<uint16_t>(static_cast<_Float16>(out[i]))) {
+        std::printf("attention n=%u: FP16 output differs at %zu\n", n, i);
+        rc = 1;
+      }
+  }
   for (void* p : {(void*)dq, (void*)dring, (void*)dchunk, (void*)dcodes,
                   (void*)dscales, (void*)dsinks, (void*)didx, (void*)dpartial,
                   (void*)dout, (void*)dfreq, (void*)dtable})
@@ -307,7 +327,8 @@ double IndexerCase(uint32_t pos0, uint32_t n, uint32_t ratio,
 /* ds41_v41_q_kv_norm against ds41_v41_rms_norm and ds41_v41_rope_fp8 (the
  * same loops, so identical values; the tolerance only admits reassociation
  * under fast-math, well below an FP8 step); returns the largest absolute
- * difference. */
+ * difference, or infinity if the FP16 copy of qr is not exactly the rounded
+ * FP32 qr. */
 double QkvNormCase(uint32_t pos0, uint32_t n, std::mt19937& rng) {
   constexpr uint32_t q_dim = 1280, kv_dim = 512, rope = 64;
   std::normal_distribution<float> normal;
@@ -321,6 +342,8 @@ double QkvNormCase(uint32_t pos0, uint32_t n, std::mt19937& rng) {
   float *d_qa = Device(qa), *d_kv = Device(kv), *d_qw = Device(qw),
         *d_kw = Device(kw), *d_freq = Device(freq);
   float *qr[2] = {}, *kvn[2] = {};
+  uint16_t* qr_half = nullptr;
+  (void)hipMalloc(&qr_half, qa.size() * sizeof(uint16_t));
   for (int i = 0; i < 2; i++) {
     (void)hipMalloc(&qr[i], qa.size() * sizeof(float));
     (void)hipMalloc(&kvn[i], kv.size() * sizeof(float));
@@ -329,8 +352,8 @@ double QkvNormCase(uint32_t pos0, uint32_t n, std::mt19937& rng) {
   if (ds41_v41_rms_norm(d_qa, d_qw, qr[0], n, q_dim, eps) ||
       ds41_v41_rms_norm(d_kv, d_kw, kvn[0], n, kv_dim, eps) ||
       ds41_v41_rope_fp8(kvn[0], n, kv_dim, rope, d_freq, pos0, 1, 1, 0) ||
-      ds41_v41_q_kv_norm(d_qa, d_qw, qr[1], q_dim, d_kv, d_kw, kvn[1], kv_dim,
-                         rope, d_freq, pos0, n, eps) ||
+      ds41_v41_q_kv_norm(d_qa, d_qw, qr[1], qr_half, q_dim, d_kv, d_kw, kvn[1],
+                         kv_dim, rope, d_freq, pos0, n, eps) ||
       hipDeviceSynchronize() != hipSuccess) {
     std::fprintf(stderr, "q kv norm launch failed\n");
     return INFINITY;
@@ -346,9 +369,19 @@ double QkvNormCase(uint32_t pos0, uint32_t n, std::mt19937& rng) {
     for (std::size_t i = 0; i < count; i++)
       worst = std::max(worst, (double)std::fabs(a[i] - b[i]));
   }
+  std::vector<float> full(qa.size());
+  std::vector<uint16_t> half(qa.size());
+  (void)hipMemcpy(full.data(), qr[1], full.size() * sizeof(float),
+                  hipMemcpyDeviceToHost);
+  (void)hipMemcpy(half.data(), qr_half, half.size() * sizeof(uint16_t),
+                  hipMemcpyDeviceToHost);
+  for (std::size_t i = 0; i < full.size(); i++)
+    if (std::bit_cast<uint16_t>(static_cast<_Float16>(full[i])) != half[i])
+      worst = INFINITY;
   for (float* p :
        {d_qa, d_kv, d_qw, d_kw, d_freq, qr[0], qr[1], kvn[0], kvn[1]})
     (void)hipFree(p);
+  (void)hipFree(qr_half);
   return worst;
 }
 
@@ -449,9 +482,9 @@ double Bench(uint32_t pos0, uint32_t n, uint32_t ratio, bool rope,
   const float scale = 1.0f / std::sqrt((float)kDim);
   auto run = [&] {
     return ds41_v41_attention(dq, dring, dchunk, kWindow, 0, {dcodes, dscales},
-                              didx, kTopK, ratio, dsinks, dout, nullptr, pos0,
-                              n, kHeads, kDim, scale, rope ? dfreq : nullptr,
-                              64, dtable);
+                              didx, kTopK, ratio, dsinks, dout, nullptr,
+                              nullptr, pos0, n, kHeads, kDim, scale,
+                              rope ? dfreq : nullptr, 64, dtable);
   };
   double ms = INFINITY;
   if (run() == 0 && hipDeviceSynchronize() == hipSuccess) {

@@ -23,6 +23,7 @@
 #include "src/core/crypto/sha256.hpp"
 #include "src/core/gguf_reader.hpp"
 #include "src/core/sampling.hpp"
+#include "src/models/deepseek_v41_flash/artifact_hint.hpp"
 #include "src/models/deepseek_v41_flash/dspark_sampler.hpp"
 #include "src/models/deepseek_v41_flash/engine.hpp"
 #include "src/models/deepseek_v4_flash/dspark_sampler.hpp"
@@ -103,6 +104,17 @@ void RegisterBenchOptions(ArgParser& parser, BenchOptions& opt,
                  "prompt token instead of only the prompt's last 140 (decoder "
                  "SWA bounded replay; about twice the prefill time)",
                  "Model", &opt.exact_prefill);
+  parser.AddFlag("", "--stream-experts",
+                 "DeepSeek V4.1 Flash: keep dense weights resident and "
+                 "stream routed experts from the SSD through a bounded cache "
+                 "(needed for IQ2_XXS; runs IQ1_M in less memory, more "
+                 "slowly)",
+                 "Model", &opt.stream_experts);
+  parser.AddOption("", "--expert-cache-bytes", "N",
+                   "DeepSeek V4.1 Flash with --stream-experts: streamed "
+                   "expert cache bytes (default: 0 = available memory minus "
+                   "4 GiB)",
+                   "Model", &opt.expert_cache_bytes);
 
   parser.AddCustomOption(
       "-p", "--n-prompt", "n,n,...",
@@ -408,13 +420,15 @@ bool IsDeepSeekV4Flash(const core::GgufReader& reader) {
   return reader.GetMetadataString("general.architecture") == "deepseek4";
 }
 
-/// Model options; the prefill batch and exact prefill apply to DeepSeek V4.1
-/// Flash only.
+/// Model options; the prefill batch, exact prefill and expert streaming apply
+/// to DeepSeek V4.1 Flash only.
 template<typename Ds>
 typename Ds::ModelOptions DeepSeekModelOptions(std::uint32_t max_context,
                                                std::string dspark_model_path,
                                                std::uint32_t prefill_batch,
-                                               bool exact_prefill) {
+                                               bool exact_prefill,
+                                               bool stream_experts,
+                                               std::size_t expert_cache_bytes) {
   typename Ds::ModelOptions options{
       .max_context = max_context,
       .dspark_model_path = std::move(dspark_model_path),
@@ -422,6 +436,8 @@ typename Ds::ModelOptions DeepSeekModelOptions(std::uint32_t max_context,
   if constexpr (requires { options.prefill_batch; }) {
     options.prefill_batch = prefill_batch;
     options.exact_prefill = exact_prefill;
+    options.stream_experts = stream_experts;
+    options.expert_cache_bytes = expert_cache_bytes;
   }
   return options;
 }
@@ -512,12 +528,14 @@ int RunDeepSeekBenchmark(
   };
 
   std::string error;
-  auto model = Ds::Model::Load(
-      options.model_path,
-      DeepSeekModelOptions<Ds>(static_cast<std::uint32_t>(required_context),
-                               dspark ? options.dspark_model_path : "",
-                               options.prefill_batch, options.exact_prefill),
-      &error);
+  auto model =
+      Ds::Model::Load(options.model_path,
+                      DeepSeekModelOptions<Ds>(
+                          static_cast<std::uint32_t>(required_context),
+                          dspark ? options.dspark_model_path : "",
+                          options.prefill_batch, options.exact_prefill,
+                          options.stream_experts, options.expert_cache_bytes),
+                      &error);
   if (model == nullptr) {
     std::cerr << "Error creating " << Ds::kName << " model: " << error << '\n';
     PrintModelLoadTime(model_load_start, false);
@@ -1571,6 +1589,8 @@ int RunBench(std::span<const char* const> args) {
   auto reader_owner = gufo::core::GgufReader::OpenFile(opt.model_path, &err);
   if (!reader_owner) {
     std::cerr << "Error loading GGUF model '" << opt.model_path << "': " << err
+              << models::deepseek_v41_flash::MissingEngramShardHint(
+                     opt.model_path)
               << "\n";
     PrintModelLoadTime(model_load_start, false);
     return 1;
