@@ -77,7 +77,7 @@ pp2048 runs 1,182 tok/s at 32K, 1,155 at 64K and 1,098 at 128K.
 | 16 | Multi-user AR decode below the 2026-10-26 card | Serving decode | Distinct-prompt C8 63.0 tok/s against a ~93 tok/s read ceiling | Medium |
 | 17 | Single-row routed expert GEMV bandwidth | Decode | ~1.7 ms/token (~4% AR) | Medium |
 | 18 | Small decode kernels: hyper-connections, router, routing | Decode | ~1–1.5 ms of ~4 ms/token | Medium |
-| 19 | DSpark host round trips | Speculative decode | ~1.5 ms per step | Medium |
+| 19 | DSpark host round trips | Speculative decode | ~0.7 ms per step | Low |
 | 20 | `markov_select` | Drafter | Part of 1.6 ms per step | Medium |
 
 ### 3. Expert reads for rejected verification rows
@@ -229,7 +229,9 @@ gate+up 27.6 MB in 135.8 µs (203 GB/s, IQ1_S), down 13.8 MB in 80.6 µs
 gate+up 31 MB in 180.8 µs (171 GB/s). The dense Q5_K GEMVs reach 206–238
 GB/s. Each launch covers six experts of 2,304 (gate+up) or 5,120 (down)
 rows; check the decode's VALU share (IQ1 and IQ2 codebook decode) against
-the loads with `tools/prof/isa_mix.py` before changing the layout.
+the loads with `tools/prof/isa_mix.py` before changing the layout. Paired IQ1
+down rows (E46) and single-slot IQ1 verification experts on this kernel (E51)
+are retained; more tiles per block were slower.
 
 ### 18. Small decode kernels
 
@@ -237,19 +239,22 @@ Per AR token: hyper-connections 1.78 ms (`hc_mix_small` 80 launches of
 14 µs over 160 MB of FP32 mixing weights, ~0.67 ms at the read ceiling),
 the BF16 router 1.0 ms (3.93 MB per layer in 24.9 µs, 158 GB/s), attention
 ~1 ms, routing and norms ~0.6 ms. Fusing launches also shortens item 4.
+Fusing the mix with the shifted collapse was slower in the model (E49).
 
 ### 19. DSpark host round trips
 
-Per verification step (`IQ1_M`): ~1.2 ms of gaps around the logits copies
-after the output head (`copyBuffer` → `copyBufferRectAligned`) and 0.27 ms
-between the drafter's `quantize_q8_1` and `mul_mat_vec_q`. Overlap the
-drafter's first forward with the copy, or keep the drafter's input on the
-device.
+Verification argmax now runs on the device (E50). The 2026-10-29 trace of
+greedy DSpark C1 (`IQ1_M`) leaves ~0.7 ms of gaps over 20 µs per ~89 ms step,
+mostly around the logits copies after the output head (`copyBuffer` →
+`copyBufferRectAligned`, ~0.28 ms) and the following copies; downloading full
+logit rows only when sampling needs them would remove most of it.
 
 ### 20. `markov_select`
 
 `markov_select_kernel<1u>` takes 301 µs per call, 5.3 calls and 1.6 ms per
-step, more than the drafter's attention (0.66 ms).
+step, more than the drafter's attention (0.66 ms), at ~92% of the read
+ceiling for its 66 MB FP16 W2. An exact norm bound would still score most
+rows (E47).
 
 ## Memory
 
