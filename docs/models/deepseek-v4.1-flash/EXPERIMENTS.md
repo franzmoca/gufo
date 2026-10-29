@@ -1581,3 +1581,39 @@ Server, IQ1_M, distinct prompts (AR, 128 tokens, two alternations): C4
 61.82 (+2.0%). All 22 completions identical between builds in both
 alternations. Single-user DSpark greedy (256 tokens): 38.29 / 38.56 →
 38.41 / 39.69 tok/s, token trace identical.
+
+### E39: joint-step boundary without per-session syncs (retained)
+
+A C8 AR server trace (distinct prompts, after E38) spent 4.75 ms between a
+step's output head and the next step's first layer: ~405 us downloading 8
+sessions' logits into pageable vectors, then each session's commit queued
+its ~38 window-row copies and waited for them (`hipDeviceSynchronize`)
+before the next session's host work could start. Commits no longer
+synchronize: the copies stay queued ahead of the next evaluation, which
+every later reader follows on the null stream (snapshots read with blocking
+copies), and sessions' `spec_logits` are registered as pinned memory. The
+same trace takes 3.33 ms at the boundary (logits download 153 us), and the
+mean step 125.2 -> 124.2 ms. Server C8 60.75 / 61.96 against 61.80 / 61.78
+tok/s and C4 54.82 / 55.05 against 54.87 / 54.35: inside the noise. All 22
+completions and the single-user DSpark token trace identical.
+
+### E40: one token per wave in the BF16 decode matmul (retained)
+
+The router (384 x 5,120 BF16) and the indexer's BF16 projections took
+`matmul_bf16_vec8_kernel`, whose wave walked one row for up to 8 tokens:
+at 8 rows the router took 55.7 us per layer against 25.2 at one. A wave now
+takes one row of one token (the grid's second dimension); every output keeps
+its lane-strided sums and xor reduction, bit-identical. Standalone with
+production flags (DRAM-cold weights, us), 1 / 8 tokens:
+
+| Rows x 5,120 | before | after |
+| --- | --- | --- |
+| 384 (router) | 29.0 / 83.6 | 22.2 / 38.3 |
+| 512 | 34.8 / 109.4 | 29.0 / 50.7 |
+| 128 | 14.3 / 31.2 | 11.6 / 15.9 |
+| 32 | 12.0 / 27.8 | 8.6 / 8.6 |
+
+Server, IQ1_M, distinct prompts (AR, two alternations): C8 61.92 / 61.90 ->
+62.85 / 62.72 tok/s (+1.5%), C4 55.40 / 55.17 -> 55.10 / 55.81. Single-user
+(256 tokens) AR 24.07 / 24.08 -> 24.12 / 24.22, DSpark 38.68 / 39.17 ->
+38.98 / 39.84. All completions and token traces identical.
