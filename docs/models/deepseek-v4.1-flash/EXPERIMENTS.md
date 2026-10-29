@@ -1728,3 +1728,28 @@ slower for every type but IQ1_S down (86 -> 82 µs) and is not used.
 Single-user AR greedy (`gufo prompt`, 256 tokens, three alternations):
 24.25 / 24.24 / 24.24 -> 24.37 / 24.36 / 24.36 tok/s (+0.5%); DSpark
 39.44 / 39.64 -> 39.66 / 39.58. Generated text identical in every run.
+
+### E47: exact Markov candidate pruning (measured, not pursued)
+
+`markov_select` reads the drafter's 129,280 x 256 FP16 W2 (66 MB) once per
+draft row in ~300 µs (~220 GB/s, 92% of the read ceiling), 1.66 ms per
+single-user DSpark step; the rows are sequential (each row's x is the
+previous draft token's W1 row). A Cauchy-Schwarz bound (logit + |W2[t]|
+|x|, against the exact score of the 64 best logits) would let a kernel
+skip rows that cannot win. On 379 captured greedy calls it still had to
+score 99.2% of tokens (median): |W2 . x| reaches 24-40 against a logit
+spread of ~15-20, and the winner was outside the top-64 logits in some
+calls. The selection stays at its read ceiling.
+
+### E48: grouped routed experts in the drafter (retained)
+
+The drafter's routed experts ran one slot per launch row (5 rows x 3
+experts) through the single-token GEMV, reading a shared expert once per
+slot. Blocks of 2-16 rows now plan their slots by expert and take the
+grouped GEMV (bit-identical per slot); wider batched blocks keep the
+per-slot launch. Single-user DSpark greedy trace: drafter expert kernels
+2.06 -> 1.70 ms per step (plus 0.11 ms of plan launches). `gufo prompt`,
+256 tokens, three alternations: greedy 39.82 / 39.62 / 39.58 -> 41.60 /
+39.93 / 39.76 tok/s (the first run's timing-based widths drafted 211
+instead of 220 rows), seeded sampled 40.26 / 40.19 -> 40.24 / 40.32 with
+identical text, drafts and acceptance.
