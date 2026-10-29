@@ -1992,7 +1992,8 @@ int ds41_decoder_commit(ds41_decoder* d, uint32_t keep) {
            copy_dev(s.pool_score + slot, spec_rows(d, d->spec_pool, il, 1) + row, kHeadDim);
     }
   }
-  ok = ok && hipDeviceSynchronize() == hipSuccess;
+  /* The copies stay queued ahead of the next evaluation; a batch's sessions
+   * do their host work meanwhile. */
   if (!ok) return 1;
   d->pos = end;
   d->engram_history.resize(end);
