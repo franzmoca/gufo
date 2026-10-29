@@ -34,6 +34,8 @@ using ds41_gemv_tasks::HalfBits;
 
 constexpr int kWave = 32;
 constexpr int kWaves = 8;
+/* An expert id the ungrouped kernel skips: a grouped launch computes the slot. */
+constexpr int32_t kSkipSlot = INT32_MIN;
 
 /* sum_i (n_i + c) x_i over one 8-value IQ1 grid group: the nibbles move to
  * bytes (elements 0-3 low, 4-7 high) so each converts in one instruction. */
@@ -457,8 +459,8 @@ __global__ void __launch_bounds__(kWave* kWaves)
   __shared__ uint8_t iq2_signs[F::kIq2Words ? 128 : 1];
   const int32_t id = ids[blockIdx.y];
   y += (uint64_t)blockIdx.y * m;
-  if (id < 0) {  // dropped slot
-    if (zero_dropped) {
+  if (id < 0) {  // dropped slot, or one a grouped launch computes
+    if (zero_dropped && id != kSkipSlot) {
       for (uint32_t r = threadIdx.x; r < kRows; r += blockDim.x)
         if (blockIdx.x * kRows + r < m) y[blockIdx.x * kRows + r] = 0.0f;
     }
@@ -573,7 +575,9 @@ __global__ void __launch_bounds__(kWave* kWaves)
 
 /* ds41_v41_expert_plan: one block of kPlanSlots threads groups the slots of
  * `ids` by expert. plan[0] is the group count; group g, at plan + 1 + g * kPlanGroup,
- * holds the expert id, the slot count and the slots in ascending order. */
+ * holds the expert id, the slot count and the slots in ascending order. The
+ * `slots` ints after the groups repeat each slot's expert id when no other
+ * slot shares it (or it is dropped) and hold kSkipSlot otherwise. */
 constexpr int kPlanCols = DS41_V41_EXPERT_PLAN_COLS;
 constexpr int kPlanGroup = 2 + kPlanCols;
 constexpr int kPlanSlots = DS41_V41_EXPERT_PLAN_SLOTS;
@@ -614,6 +618,7 @@ __global__ void expert_plan_kernel(const int32_t* __restrict__ ids, uint32_t slo
     g[1] = count;
   }
   if (col < kPlanCols) g[2 + col] = (int32_t)s;
+  plan[1 + slots * kPlanGroup + s] = count == 1 || id < 0 ? id : kSkipSlot;
   if (s == slots - 1) {
     int32_t groups = 0;
     for (uint32_t o = 0; o < slots; ++o) groups += first_of[o] == (int32_t)o;
@@ -815,25 +820,27 @@ template <int kType, int U, int UDown = U>
 int dispatch_group(const void* w, const void* w_up, const void* const* w_table, const void* const* w_up_table,
                    const float* route_w, float limit, uint64_t expert_bytes, const int32_t* plan, uint32_t groups,
                    uint32_t cols, const float* x, uint32_t x_slot, uint32_t slots_per_x, float* y, uint32_t m,
-                   uint32_t k, int zero_dropped) {
+                   uint32_t k, int zero_dropped, int32_t min_cols = 1) {
   if constexpr (UDown != U)
     if (!w_up)
       return dispatch_group<kType, UDown>(w, w_up, w_table, w_up_table, route_w, limit, expert_bytes, plan, groups,
-                                          cols, x, x_slot, slots_per_x, y, m, k, zero_dropped);
+                                          cols, x, x_slot, slots_per_x, y, m, k, zero_dropped, min_cols);
+  /* min_cols 2 leaves single slots and dropped slots to the ungrouped kernel. */
+  const int32_t first = min_cols > 1 ? min_cols : 0;
   if (cols <= 2)
     return launch_group<kType, U, 2>(w, w_up, w_table, w_up_table, route_w, limit, expert_bytes, plan, groups, x,
-                                     x_slot, slots_per_x, y, m, k, zero_dropped);
+                                     x_slot, slots_per_x, y, m, k, zero_dropped, first);
   /* IQ1_S's fused SwiGLU also splits 3- and 4-column launches. */
   const bool split4 = kType == 19 && w_up;
   if (cols <= 4 && !split4)
     return launch_group<kType, U, 4>(w, w_up, w_table, w_up_table, route_w, limit, expert_bytes, plan, groups, x,
-                                     x_slot, slots_per_x, y, m, k, zero_dropped);
+                                     x_slot, slots_per_x, y, m, k, zero_dropped, first);
   /* Wider launches: groups of one or two slots (most of them when sessions
    * route apart) take the 2-column kernel and the rest a wider one. The
    * fused SwiGLU's 6- and 8-column kernels spill registers for every type
    * but IQ1_M, so those wider groups take the 16-column kernel. */
   if (launch_group<kType, U, 2>(w, w_up, w_table, w_up_table, route_w, limit, expert_bytes, plan, groups, x, x_slot,
-                                slots_per_x, y, m, k, zero_dropped, 1))
+                                slots_per_x, y, m, k, zero_dropped, min_cols))
     return 1;
   if (cols <= 4)
     return launch_group<kType, U, 4>(w, w_up, w_table, w_up_table, route_w, limit, expert_bytes, plan, groups, x,
@@ -969,6 +976,15 @@ extern "C" int ds41_v41_gemv_experts_grouped(int type, const void* w, const void
   if (!plan || slots == 0 || slots > DS41_V41_EXPERT_PLAN_SLOTS || cols == 0 || cols > kPlanCols ||
       slots_per_x == 0 || m == 0 || k % 256 != 0)
     return 1;
+  /* IQ1 experts of a single slot take the ungrouped kernel, which pairs
+   * down rows and loads its expert id directly (24 slots of 4 routed-apart
+   * rows: IQ1_S 562 -> 509 us gate/up, 298 -> 271 us down). */
+  if (type == 19 || type == 29) {
+    if (dispatch(type, w, w_up, w_table, w_up_table, route_w, limit, expert_bytes, plan + 1 + slots * kPlanGroup,
+                 slots, x, x_slot, slots_per_x, y, m, k, zero_dropped))
+      return 1;
+    if (cols == 1) return 0;
+  }
   switch (type) {
   case 10:
     return dispatch_group<10, 1>(w, w_up, w_table, w_up_table, route_w, limit, expert_bytes, plan, slots, cols, x,
@@ -978,10 +994,10 @@ extern "C" int ds41_v41_gemv_experts_grouped(int type, const void* w, const void
                                  x_slot, slots_per_x, y, m, k, zero_dropped);
   case 19:
     return dispatch_group<19, 2, 9>(w, w_up, w_table, w_up_table, route_w, limit, expert_bytes, plan, slots, cols, x,
-                                 x_slot, slots_per_x, y, m, k, zero_dropped);
+                                 x_slot, slots_per_x, y, m, k, zero_dropped, 2);
   case 29:
     return dispatch_group<29, 1, 9>(w, w_up, w_table, w_up_table, route_w, limit, expert_bytes, plan, slots, cols, x,
-                                 x_slot, slots_per_x, y, m, k, zero_dropped);
+                                 x_slot, slots_per_x, y, m, k, zero_dropped, 2);
   case 16:
     return dispatch_group<16, 2, 9>(w, w_up, w_table, w_up_table, route_w, limit, expert_bytes, plan, slots, cols, x,
                                  x_slot, slots_per_x, y, m, k, zero_dropped);
