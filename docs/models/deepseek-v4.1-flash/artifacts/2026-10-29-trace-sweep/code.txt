@@ -1,0 +1,1 @@
+Write a Python module that parses ISO 8601 durations such as "P3Y6M4DT12H30M5S" and "PT0.5S" into a dataclass with years, months, days, hours, minutes and seconds, rejects malformed input with clear error messages, and converts durations without years or months to datetime.timedelta. Include type hints, docstrings and a pytest test suite covering edge cases.

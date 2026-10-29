@@ -7,6 +7,22 @@ figures are estimates unless stated.
 
 ## Where the time goes
 
+**All modes, 2026-10-29** ([trace sweep](artifacts/2026-10-29-trace-sweep/summary.txt);
+measured ceilings 240 GB/s DRAM read, 55.4 TFLOP/s FP16/BF16 WMMA). A
+decoded token reads 7.15 GiB of weights (`IQ1_M`) or 7.4 GiB (`IQ2_XXS`),
+a ~31–32 tok/s ceiling.
+
+| Mode (96-token prompt, 256 tokens) | `IQ1_M` | `IQ2_XXS` streamed | Position |
+| --- | ---: | ---: | --- |
+| pp2048 (tok/s) | 1,393 | 1,208 | 95% GPU busy; WMMA at ~55% of peak |
+| AR greedy / sampled (tok/s) | 24.0 / 24.4 | 22.0 / 22.0 | 39.0 / 40.4 ms of kernels per token against ~31; 2.9 / 5.4 ms idle |
+| DSpark greedy / sampled (tok/s) | 38.1 / 38.5 | 34.4 / 35.1 | Verification at the read ceiling (24–36 distinct experts per layer per step) |
+
+Single-token decode bandwidth: output head 99%, dense Q5_K/Q8_0 GEMVs
+86–97%, routed gate+up 85% (IQ1_S) and 71% (IQ2_XXS layers), routed down
+71–72%, BF16 router 66%. 2.35 of AR's 2.9 ms idle per token are gaps under
+5 µs between ~975 launches.
+
 **Streamed `IQ2_XXS` decode** (rocprofv3, warm cache, tg128 after pp512,
 medians per token, 2026-10-27): 50.1 ms per token, 40.3 ms of kernels and
 9.8 ms of GPU idle. Since then the per-layer tables removed most of the
@@ -48,18 +64,23 @@ pp2048 runs 1,182 tok/s at 32K, 1,155 at 64K and 1,098 at 128K.
 
 | # | Item | Area | Est. impact | Confidence |
 | ---: | --- | --- | --- | --- |
-| 2 | Fused SwiGLU and Q8_0 pair launches through the split GEMV | Verification | sh_gate costs 103 µs at 8 tokens against 75 µs for one | Medium |
 | 3 | Expert reads for rejected verification rows | Streamed DSpark | Part of the 36% verification-expert time | Low |
-| 4 | Launch gaps between decode kernels | Decode | Up to ~2.7 ms/token | Medium |
-| 5 | Compact selection and WMMA prefill rescoring | Long context | Prefill and verification beyond 16K | Medium |
-| 6 | Routed FP16 kernel: weight decode per slot | Prefill | ~5–20% of routed time | Low |
-| 7 | Remaining prefill glue | Prefill | ~30–60 ms per 2K batch | Medium |
+| 4 | Launch gaps between decode kernels | Decode | ~2.35 ms/token AR (~6%), ~3 ms per DSpark step | Medium |
+| 5 | Compact selection for `--exact-prefill` rescoring | Long context | ~85 ms per masked layer per 2K chunk at 128K, `--exact-prefill` only | Medium |
+| 6 | Routed FP16 kernel: weight decode per slot | Prefill | ~4.4 ms of ~21 per layer | Low |
+| 7 | Remaining prefill glue | Prefill | ~25–50 ms per 2K batch | Medium |
 | 9 | Stable-boundary prefill pass per chat request | Serving | ~65 ms per request | Medium |
 | 10 | Concurrent drafter forwards | Serving decode | ~9 ms per drafting session per step; DSpark 5% under AR at C8 | Medium |
 | 13 | Route bias toward cached experts (changes outputs) | Streamed decode | Opt-in approximation | Low |
 | 14 | Higher-precision Engram tables | Quality | Unmeasured | — |
 | 15 | Smaller items | Various | Small | — |
 | 16 | Multi-user AR decode below the 2026-10-26 card | Serving decode | C8 51.8 against 78.5 tok/s | Medium |
+| 17 | Single-row routed expert GEMV bandwidth | Decode | ~1.7 ms/token (~4% AR) | Medium |
+| 18 | Small decode kernels: hyper-connections, router, routing | Decode | ~1–1.5 ms of ~4 ms/token | Medium |
+| 19 | DSpark host round trips | Speculative decode | ~1.5 ms per step | Medium |
+| 20 | `markov_select` | Drafter | Part of 1.6 ms per step | Medium |
+| 21 | Spills in the 6- and 16-column grouped expert kernels | Verification | Unmeasured | Low |
+| 22 | Split GEMV scratch for 5–8-row output heads | Verification | ~0.33 ms per 5–6-row head, ~0.5% DSpark | High |
 
 ### 3. Expert reads for rejected verification rows
 
@@ -202,6 +223,50 @@ slower (`--joint-check 8 --joint-rows 8`: 129.5 ms on a 1,096-token prompt),
 so the time is in the serving path around it. The card's multi-user tables
 also give every user the same prompt, which keeps sessions in lockstep and
 lets a joint pass share experts (E27); refresh them with distinct prompts.
+
+### 17. Single-row routed expert GEMV bandwidth
+
+`expert_gemv_kernel` at one token (2026-10-29 trace, `IQ1_M` resident):
+gate+up 27.6 MB in 135.8 µs (203 GB/s, IQ1_S), down 13.8 MB in 80.6 µs
+(171 GB/s) and 15.5 MB in 89.0 µs (IQ1_M, 174 GB/s); the IQ2_XXS layers'
+gate+up 31 MB in 180.8 µs (171 GB/s). The dense Q5_K GEMVs reach 206–238
+GB/s. Each launch covers six experts of 2,304 (gate+up) or 5,120 (down)
+rows; check the decode's VALU share (IQ1 and IQ2 codebook decode) against
+the loads with `tools/prof/isa_mix.py` before changing the layout.
+
+### 18. Small decode kernels
+
+Per AR token: hyper-connections 1.78 ms (`hc_mix_small` 80 launches of
+14 µs over 160 MB of FP32 mixing weights, ~0.67 ms at the read ceiling),
+the BF16 router 1.0 ms (3.93 MB per layer in 24.9 µs, 158 GB/s), attention
+~1 ms, routing and norms ~0.6 ms. Fusing launches also shortens item 4.
+
+### 19. DSpark host round trips
+
+Per verification step (`IQ1_M`): ~1.2 ms of gaps around the logits copies
+after the output head (`copyBuffer` → `copyBufferRectAligned`) and 0.27 ms
+between the drafter's `quantize_q8_1` and `mul_mat_vec_q`. Overlap the
+drafter's first forward with the copy, or keep the drafter's input on the
+device.
+
+### 20. `markov_select`
+
+`markov_select_kernel<1u>` takes 301 µs per call, 5.3 calls and 1.6 ms per
+step, more than the drafter's attention (0.66 ms).
+
+### 21. Spills in wide grouped expert kernels
+
+`expert_group_kernel` with 6 columns uses 256 VGPRs and 192 (IQ1_S) or 96
+(IQ2_XXS) bytes of scratch; 16 columns 80 bytes. The 6-column gate+up still
+reads at ~210 GB/s, so the gain is bounded; measure the 16-column
+verification first.
+
+### 22. Split GEMV scratch for 5–8-row output heads
+
+`kSplitPartFloats` (8 × 16 × 32,768) holds no 129,280-row output head
+beyond 4 columns at 8 slices, so 5–6-row heads fall back to the lane kernel:
+2.43 ms against ~2.1 ms for the split kernel (98 calls in a 256-token
+DSpark run).
 
 ## Memory
 

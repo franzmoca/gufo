@@ -152,7 +152,7 @@ Flags that remain, from alternating runs:
 - One rotation return reuses 2 more tokens (8,470 instead of 8,468) and
   prefills 216 ms instead of 202: its 7-token batch takes 136 ms where the
   old 9-token batch took 120, also without a restore
-  ([backlog](BACKLOG.md#8-small-batch-evaluation-cost)).
+  (7- and 8-token batches since moved to the batched paths, [E32](EXPERIMENTS.md#e32-batched-paths-for-7--and-8-token-prompt-batches-retained)).
 - Restores queue 5-6 ms longer in cache-shared-prefix (`long_tasks_1-3`),
   outside the restore itself; a fresh server with few checkpoints shows no
   difference. Time to first token is still lower than before.
