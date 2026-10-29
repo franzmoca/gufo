@@ -11,6 +11,11 @@ native engines to Gufo, each with its own HIP kernels for prefill, decode and
 speculative verification on Strix Halo. Neither model is on upstream's
 roadmap, so both are maintained here; the default branch is `feat/ds41`.
 
+> [!NOTE]
+> **What's new:** the [fork changelog](CHANGELOG_FORK.md) lists the fork's
+> DeepSeek V4.1 and Gemma 4 changes, newest first, with a link to each pull
+> request.
+
 ### DeepSeek V4.1 Flash, on one Strix Halo
 
 The 763B-parameter **DeepSeek-V4.1-Flash-1017** runs on a single 128 GB Strix
@@ -33,10 +38,6 @@ in [README_DEEPSEEK.md](README_DEEPSEEK.md); every number is on the
 
 The native **Gemma 4** engine is also on this branch. Upstream
 [PR #426](https://github.com/gufo-org/gufo/pull/426) stays open for feedback.
-
-> [!NOTE]
-> **What's new:** the [Gemma changelog](CHANGELOG_GEMMA.md) lists the fork's
-> Gemma changes, newest first, with a link to each pull request.
 
 #### What it runs
 
