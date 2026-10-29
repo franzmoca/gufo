@@ -413,6 +413,11 @@ private:
               task = &(*demand_)[demand_next_++];
               demand = true;
             } else {
+              /* Park once per phase: a worker that joined the phase from a
+               * prefetch task still holds an older wake count and would
+               * otherwise wake for this phase again and park twice, which
+               * overshoots the count RunPhase waits for. */
+              seen = wake_;
               if (++parked_workers_ == threads_.size())
                 done_.notify_one();
               break;
