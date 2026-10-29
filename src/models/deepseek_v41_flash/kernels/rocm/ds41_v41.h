@@ -74,7 +74,7 @@ int ds41_v41_gemv_experts_swiglu(int type, const void* gate, const void* up, uin
  * ungrouped launch bit for bit. */
 #define DS41_V41_EXPERT_PLAN_SLOTS 128
 #define DS41_V41_EXPERT_PLAN_COLS 16
-#define DS41_V41_EXPERT_PLAN_INTS(slots) (1 + (slots) * (2 + DS41_V41_EXPERT_PLAN_COLS))
+#define DS41_V41_EXPERT_PLAN_INTS(slots) (1 + (slots) * (3 + DS41_V41_EXPERT_PLAN_COLS))
 int ds41_v41_expert_plan(const int32_t* ids, uint32_t slots, int32_t* plan);
 int ds41_v41_gemv_experts_grouped(int type, const void* w, const void* w_up, const float* route_w, float limit,
                                   uint64_t expert_bytes, const int32_t* plan, uint32_t slots, uint32_t cols,

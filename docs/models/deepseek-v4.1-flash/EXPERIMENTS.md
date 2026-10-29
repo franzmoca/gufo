@@ -1784,3 +1784,19 @@ tok/s for runs with the same drafted rows (220), text identical; seeded
 sampled identical text, drafts and acceptance (40.31 -> 40.32). Server,
 distinct prompts: seeded sampled completions at C1/C4/C8 and greedy
 DSpark completions at C1/C4/C8 identical to the previous build.
+
+## E51 — IQ1 single-slot experts leave the grouped kernel (retained)
+
+The expert plan also lists, per slot, the expert id when no other slot
+shares it; for IQ1_S and IQ1_M those slots (and dropped ones) take the
+ungrouped kernel, which loads its id directly and pairs down rows, and the
+grouped launches start at two slots. A one-column grouped kernel instead
+was no faster than the two-column one (rejected); Q2_K, Q4_K and IQ2_XXS
+stay grouped, where the ungrouped kernel was equal or slower. Synthetic
+24 slots of 4 routed-apart rows: IQ1_M gate/up 717 -> 609 us, IQ1_S 562 ->
+523 us, down 2-4% faster; fully shared rows pay one launch (+2-4%), all
+bit-exact. `gufo prompt`, 256 tokens, C1: greedy DSpark +0.15-0.5% (text
+identical), seeded sampled 40.16 / 40.00 -> 40.25 / 40.33 tok/s with
+identical text, drafts and acceptance; AR unchanged. Server, distinct
+prompts, greedy DSpark: C4 47.01 / 46.86 -> 47.14 / 47.39, C8 60.71 /
+60.33 -> 61.79 / 60.75 tok/s, completions identical.
