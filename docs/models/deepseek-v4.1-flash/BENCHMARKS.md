@@ -112,11 +112,10 @@ in one forward; every output matches its isolated C1 reference.
 
 Same pp2048 mixed/repetitive prompts as single-user d0, tg128, context 4096
 per user. Concurrent sessions verify their blocks jointly in batches of up to
-16 rows; every output matches its isolated AR reference. Each session still
-drafts full blocks at any concurrency, so from four users a step needs
-several joint evaluations and mixed text decodes slower than AR; fitting the
-drafts into one 16-row pass is open work
-([backlog](BACKLOG.md)).
+16 rows; every output matches its isolated AR reference. These rows predate
+E27, which fits the sessions' drafts into one 16-row pass (C4–C8 mixed +21–29%
+on this workload, see [EXPERIMENTS.md](EXPERIMENTS.md)); they will be
+refreshed with the card.
 
 <!-- bench:multi-dspark -->
 | DS4.1 Flash IQ1_M DSpark<br>Users | Gufo mixed (tok/s) | Gufo repetitive (tok/s) |
