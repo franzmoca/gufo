@@ -1460,3 +1460,16 @@ rows; decode, verification and joint evaluations keep theirs. pp7 107.7 →
 pp9+ unchanged. The first batch of a new batched shape in a process costs
 ~20% more once, in both builds. `cache-edits` and `long-context` pass; the
 DS4.1 GPU tests pass.
+
+### E33: pinned embedding staging and threaded dequantization (retained)
+
+BACKLOG item 7: each prefill batch dequantized its embedding rows on one
+host thread and uploaded them, with the layer-0 one-hot pre-mix, through
+synchronous pageable copies while the GPU waited. The rows and pre-mix now
+stage in a pinned buffer beside the Engram staging and upload
+asynchronously, and batches of 256 rows or more dequantize on four threads.
+Embedding stage per 2,048-row batch (IQ1_M, pp8192, host timer up to a
+device synchronize): ~6.0 → ~4.5 ms (dequantization 2.0 → 1.2 ms, upload
+~2.5 → ~1 ms); the remaining ~2 ms are the device copies into the residual
+streams. pp2048 / pp8192 throughput moves within noise (~0.1%). Greedy
+output is identical, and `--joint-check 4` keeps all 164 rows bit-identical.

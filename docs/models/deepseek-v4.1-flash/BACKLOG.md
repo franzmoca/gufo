@@ -130,9 +130,9 @@ time): the Q8_0 projections still go through MMQ (30 ms) and its Q8_1 pass
 (9.5 ms); the BF16 matmuls take 49 ms (the 384-row router at ~5 TFLOP/s);
 the routed rows' closing expand before Engram layers and replay boundaries
 8 ms; the shared-expert SwiGLU 5 ms and the routed input's FP16 conversion
-4 ms. Between chunks the host still dequantizes the 2,048 embedding rows and
-uploads them with a synchronous pageable copy (5–8 ms with the GPU idle);
-a pinned buffer or a device gather would hide most of it. The Engram
+4 ms. Each chunk still starts with ~4.5 ms of embedding staging: ~1.2 ms
+of host dequantization on four threads, ~1 ms of pinned upload and ~2 ms of
+copies into the four residual streams (E33). The Engram
 projection (25,600 × 6,144, 17.8 ms per call, two per chunk) still reads
 FP32 rows; FP16 rows from the host reader would save 0.8 ms per call and
 half the upload, and the shared down projection's SwiGLU input 0.04 ms.

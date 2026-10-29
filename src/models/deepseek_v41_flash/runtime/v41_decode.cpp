@@ -232,6 +232,9 @@ struct Activations {
    * evaluation allocates host rows. Each evaluation ends with a device
    * synchronize, so the next one finds the buffers idle. */
   float* engram_pinned[DS41_N_ENGRAM_LAYER] = {};
+  /* Pinned staging for a batch's embeddings (capacity rows) followed by its
+   * layer-0 one-hot pre-mix (capacity * kHc), uploaded the same way. */
+  float* embd_pinned = nullptr;
 };
 
 struct SharedActivations {
@@ -244,6 +247,7 @@ struct SharedActivations {
     for (void* p : device) (void)hipFree(p);
     for (float* p : views.engram_pinned)
       if (p) (void)hipHostFree(p);
+    if (views.embd_pinned) (void)hipHostFree(views.embd_pinned);
   }
 };
 
@@ -1364,6 +1368,7 @@ std::shared_ptr<SharedActivations> make_activations(ds41_engine* engine, uint32_
   }
   for (uint32_t slot = 0; slot < DS41_N_ENGRAM_LAYER && ok; slot++)
     ok = hipHostMalloc(&a.engram_pinned[slot], cap * kEngramIn * sizeof(float)) == hipSuccess;
+  ok = ok && hipHostMalloc(&a.embd_pinned, cap * (kDim + kHc) * sizeof(float)) == hipSuccess;
   return ok ? sh : nullptr;
 }
 
@@ -1442,7 +1447,7 @@ ds41_decoder* ds41_decoder_create(ds41_engine* engine, uint32_t context) {
       ok = hipEventCreateWithFlags(&d->pred_events[l],
                                    hipEventDisableTiming) == hipSuccess;
   }
-  d->host_h.resize(std::max<uint64_t>((uint64_t)d->capacity * kDim, (uint64_t)kHc * kDim));
+  d->host_h.resize((uint64_t)kHc * kDim);
   d->host_ids.resize(DS41_N_EXPERT_USED);
   return d;
 }
@@ -1698,14 +1703,26 @@ int eval_rows(ds41_decoder* d, const int* tokens, uint32_t n, uint32_t keep_from
   /* Embedding, replicated over the hc residual streams; layer 0 pre-mix is one-hot. */
   const ds41_tensor* embd = w->token_embd;
   const uint64_t row_bytes = embd->bytes / DS41_N_VOCAB;
-  std::vector<float> one_hot((uint64_t)n * kHc, 0.0f);
-  bool ok = true;
-  for (uint32_t t = 0; t < n && ok; t++) {
-    ok = dequant_row(embd->type, host(d, embd) + (uint64_t)tokens[t] * row_bytes, d->host_h.data() + t * kDim, kDim);
-    one_hot[(uint64_t)t * kHc] = 1.0f;
-  }
+  float* embd_rows = d->embd_pinned;
+  float* one_hot = embd_rows + (uint64_t)n * kDim;
+  memset(one_hot, 0, (uint64_t)n * kHc * sizeof(float));
+  /* Long batches dequantize their rows on a few threads. */
+  auto dequant_rows = [&](uint32_t begin, uint32_t end) {
+    bool rows_ok = true;
+    for (uint32_t t = begin; t < end && rows_ok; t++)
+      rows_ok = dequant_row(embd->type, host(d, embd) + (uint64_t)tokens[t] * row_bytes, embd_rows + t * kDim, kDim);
+    return rows_ok;
+  };
+  constexpr uint32_t kDequantThreads = 4, kDequantMinRows = 256;
+  const uint32_t parts = n >= kDequantMinRows ? kDequantThreads : 1, step = (n + parts - 1) / parts;
+  std::future<bool> dequant_parts[kDequantThreads - 1];
+  for (uint32_t i = 1; i < parts; i++)
+    dequant_parts[i - 1] = std::async(std::launch::async, dequant_rows, std::min(n, i * step), std::min(n, (i + 1) * step));
+  bool ok = dequant_rows(0, std::min(n, step));
+  for (uint32_t i = 1; i < parts; i++) ok = dequant_parts[i - 1].get() && ok;
+  for (uint32_t t = 0; t < n; t++) one_hot[(uint64_t)t * kHc] = 1.0f;
   /* One upload into xn (free until the first block), then a device copy per stream. */
-  ok = ok && hipMemcpy(d->xn, d->host_h.data(), (uint64_t)n * kDim * sizeof(float), hipMemcpyHostToDevice) ==
+  ok = ok && hipMemcpyAsync(d->xn, embd_rows, (uint64_t)n * kDim * sizeof(float), hipMemcpyHostToDevice, 0) ==
                  hipSuccess;
   /* Image rows replace their placeholder embeddings (merge_image_embeddings). */
   for (const ds41_image_span& image : d->images) {
@@ -1717,8 +1734,8 @@ int eval_rows(ds41_decoder* d, const int* tokens, uint32_t n, uint32_t keep_from
   for (uint32_t c = 0; c < kHc && ok; c++)
     ok = hipMemcpy2DAsync(d->h + c * kDim, hd * sizeof(float), d->xn, kDim * sizeof(float), kDim * sizeof(float), n,
                           hipMemcpyDeviceToDevice, 0) == hipSuccess;
-  ok = ok &&
-       hipMemcpy(d->pre[0], one_hot.data(), one_hot.size() * sizeof(float), hipMemcpyHostToDevice) == hipSuccess;
+  ok = ok && hipMemcpyAsync(d->pre[0], one_hot, (uint64_t)n * kHc * sizeof(float), hipMemcpyHostToDevice, 0) ==
+                 hipSuccess;
 
   const int prev = 0;
   const uint32_t feature_rows = std::min(kept, DS41_DSPARK_FEATURE_ROWS);
@@ -1870,22 +1887,24 @@ int ds41_decoder_eval_joint(ds41_decoder* const* ds, const int* const* tokens, c
   /* Embedding, replicated over the hc residual streams; layer 0 pre-mix is one-hot. */
   const ds41_tensor* embd = w->token_embd;
   const uint64_t row_bytes = embd->bytes / DS41_N_VOCAB;
-  std::vector<float> one_hot((uint64_t)total * kHc, 0.0f);
+  float* embd_rows = lead->embd_pinned;
+  float* one_hot = embd_rows + (uint64_t)total * kDim;
+  memset(one_hot, 0, (uint64_t)total * kHc * sizeof(float));
   bool ok = true;
   for (uint32_t i = 0; i < count && ok; i++)
     for (uint32_t t = 0; t < ns[i] && ok; t++) {
       const uint64_t r = first[i] + t;
-      ok = dequant_row(embd->type, host(lead, embd) + (uint64_t)tokens[i][t] * row_bytes,
-                       lead->host_h.data() + r * kDim, kDim);
+      ok = dequant_row(embd->type, host(lead, embd) + (uint64_t)tokens[i][t] * row_bytes, embd_rows + r * kDim,
+                       kDim);
       one_hot[r * kHc] = 1.0f;
     }
-  ok = ok && hipMemcpy(lead->xn, lead->host_h.data(), (uint64_t)total * kDim * sizeof(float),
-                       hipMemcpyHostToDevice) == hipSuccess;
+  ok = ok && hipMemcpyAsync(lead->xn, embd_rows, (uint64_t)total * kDim * sizeof(float), hipMemcpyHostToDevice,
+                            0) == hipSuccess;
   for (uint32_t c = 0; c < kHc && ok; c++)
     ok = hipMemcpy2DAsync(lead->h + c * kDim, hd * sizeof(float), lead->xn, kDim * sizeof(float),
                           kDim * sizeof(float), total, hipMemcpyDeviceToDevice, 0) == hipSuccess;
-  ok = ok &&
-       hipMemcpy(lead->pre[0], one_hot.data(), one_hot.size() * sizeof(float), hipMemcpyHostToDevice) == hipSuccess;
+  ok = ok && hipMemcpyAsync(lead->pre[0], one_hot, (uint64_t)total * kHc * sizeof(float), hipMemcpyHostToDevice,
+                            0) == hipSuccess;
 
   /* Each session's views start at its rows; every one takes the decode paths. */
   for (uint32_t i = 0; i < count; i++) {
