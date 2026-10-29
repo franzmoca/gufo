@@ -1415,3 +1415,24 @@ prompt, alternating builds, ms): 5 rows 89.5 / 89.4 → 89.1 / 88.9, 6 rows
 100.5 / 100.6 → 99.6 / 99.9, other widths unchanged. The column jump the
 item measured is gone on the current kernels (4 → 5 rows adds 12.4 ms, on
 the per-row trend), so the gain is 0.5–0.8%.
+
+### E30: expert-contiguous repack, read side (rejected)
+
+BACKLOG item 12 proposed repacking the streamed build so each expert's
+gate, up and down rows are one read instead of three about 1 GiB apart. A
+read benchmark over the real `IQ2_XXS` expert spans (O_DIRECT, four
+readers, per-layer batches, alternating arms; [script](artifacts/2026-10-29-expert-repack-io/repack_io.py))
+compared the three projection spans with one contiguous span of the same
+size per expert, and with one long run per layer:
+
+| Batch | Three spans per expert | One span per expert | One run per layer |
+| --- | ---: | ---: | ---: |
+| 6 experts per layer (decode) | 5.53–5.83 GiB/s | 5.70–5.83 GiB/s | — |
+| 64 experts per layer (prefill) | 4.66–4.68 GiB/s | 4.70–4.74 GiB/s | 6.35 GiB/s |
+
+A ~2.7 MiB projection span already reads at the drive's large-IO rate, so
+contiguity per expert is worth ~1%. Only long runs of neighbouring experts
+gain (+36%); a rank-ordered file would give those only when a batch misses
+many rank-adjacent experts, mainly a cold first prefill, while decode
+misses a few random experts and warm prefill waits ~0 on reads. Not worth
+a second model conversion for users.
