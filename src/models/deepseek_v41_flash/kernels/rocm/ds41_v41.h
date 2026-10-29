@@ -337,6 +337,9 @@ int ds41_v41_markov_propose(const uint16_t* w2, const float* x, const float* log
                             float temperature, ds41_v41_proposal* proposal, int32_t* token);
 int ds41_v41_propose_top8(const float* x, const float* bias, uint32_t n, int32_t* ids, float* logits,
                           const uint32_t* draw, float temperature, ds41_v41_proposal* proposal, int32_t* token);
+/* tokens[r] = the first index of the largest finite value of row r of x
+ * (rows of n), -1 for a row without one: ds41_sample_argmax per row. */
+int ds41_v41_argmax_rows(const float* x, uint32_t n, uint32_t rows, int32_t* tokens);
 /* tokens[index] = the first index of the largest finite x[v] + bias[v]
  * (bias may be NULL), or -1 when none is finite. */
 int ds41_v41_argmax_bias(const float* x, const float* bias, uint32_t n, int32_t* tokens, uint32_t index);

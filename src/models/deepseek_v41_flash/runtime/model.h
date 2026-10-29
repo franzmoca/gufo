@@ -262,14 +262,16 @@ int ds41_decoder_eval_prompt(ds41_decoder* decoder, const int* tokens,
  * the token's embedding. */
 void ds41_decoder_set_images(ds41_decoder* decoder,
                              const ds41_image_span* images, size_t n_images);
-/* Rows a speculative batch may hold. */
+/* Rows a speculative batch may hold. With `argmax`, the evaluations also
+ * leave each row's ds41_sample_argmax there, computed on the device. */
 #define DS41_DECODER_MAX_SPECULATIVE 16
 /* ds41_decoder_eval of `n` tokens (n <= DS41_DECODER_MAX_SPECULATIVE) with
  * logits for every row, whose window rows and compressor inputs stay pending
  * until ds41_decoder_commit keeps a prefix of them. The decoder's position
  * advances by n meanwhile; no other evaluation may run before the commit. */
 int ds41_decoder_eval_speculative(ds41_decoder* decoder, const int* tokens,
-                                  uint32_t n, float* logits);
+                                  uint32_t n, float* logits,
+                                  int32_t* argmax = nullptr);
 /* Rows a joint speculative evaluation may hold in total. */
 #define DS41_DECODER_MAX_JOINT 16
 /* ds41_decoder_eval_speculative of tokens[i] (ns[i] rows) on decoders[i],
@@ -279,7 +281,8 @@ int ds41_decoder_eval_speculative(ds41_decoder* decoder, const int* tokens,
  * does not take (image tokens, other activations, too many rows). */
 int ds41_decoder_eval_joint(ds41_decoder* const* decoders,
                             const int* const* tokens, const uint32_t* ns,
-                            uint32_t count, float* const* logits);
+                            uint32_t count, float* const* logits,
+                            int32_t* const* argmax = nullptr);
 /* Keeps the first `keep` (1 to n) tokens of the pending speculative batch,
  * leaving the state of an evaluation of exactly those tokens. */
 int ds41_decoder_commit(ds41_decoder* decoder, uint32_t keep);

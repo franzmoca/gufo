@@ -1766,3 +1766,21 @@ collapse block (128 loads per thread) outlasted the mix with cold weights,
 the fused kernel took 22.1 us against 13.7 + 4.3, and VGPRs rose 48 -> 72.
 Single-user AR 24.35 -> 24.22 tok/s (collapse block first; 24.12 with it
 last).
+
+### E50: verification argmax on the device (retained)
+
+A single-user DSpark step left the GPU idle ~680 µs between the target's
+output head and the commit: the host scanned each verified 129,280-logit
+row with `ds41_sample_argmax` (67 µs per scan, scalar), twice for accepted
+rows (positional statistics and the greedy draw), plus the bonus row,
+8-9 scans per step. The speculative and joint evaluations now launch
+`ds41_v41_argmax_rows` (the drafter's argmax kernel, one block per row;
+same first-largest-finite rule, -1 without a finite value) before their
+final sync and download the ids with the logits; verification and greedy
+draws use them. Sampled requests keep their device draws.
+
+`gufo prompt`, 256 tokens: greedy DSpark 39.77 / 39.74 -> 40.00 / 40.04
+tok/s for runs with the same drafted rows (220), text identical; seeded
+sampled identical text, drafts and acceptance (40.31 -> 40.32). Server,
+distinct prompts: seeded sampled completions at C1/C4/C8 and greedy
+DSpark completions at C1/C4/C8 identical to the previous build.
