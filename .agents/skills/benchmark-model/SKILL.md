@@ -104,8 +104,9 @@ table.
 
 `bench.json` (`schema: gufo-model-bench/1`) holds: `category`; `model.id`;
 `files` (the file roles the CLI must supply, with a description each);
-`variants` (id, label, required roles; single-variant models use `default`
-and unsuffixed table ids); `sampling`; `speculative` (mode, label, Gufo
+`variants` (id, label, required roles, optional extra Gufo `gufo_args` such as
+`--stream-experts`; single-variant models use `default` and unsuffixed table
+ids); `sampling`; `speculative` (mode, label, Gufo
 arguments with `{role}` placeholders, and which reference mode it is compared
 against); `tables` keyed by table id with that table's workload, and
 `gufo.serve` / `reference.server` + `args` for the two servers. Readiness is

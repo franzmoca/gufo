@@ -517,3 +517,34 @@ Lucebox drafter (the model's normal mode). The oracle perplexity table
 above is unchanged by construction.
 [AR + DSpark runs](artifacts/m3-streaming/bench-iq2-tables-ar1.log),
 [DSpark](artifacts/m3-streaming/bench-iq2-tables-dspark1.log).
+
+## Benchmark card (2026-10-29)
+
+[BENCHMARKS.md](BENCHMARKS.md) was measured with
+`tools/bench/model-bench.py --model deepseek-v4.1-flash` (`run --target gufo
+--fresh`, one warmed sample per point) on the production `nix build` of
+`cd8b92c1` (binary SHA-256 `fd5cd916…`), sequentially with nothing else on
+the GPU. Files: GSQ-RCO `IQ1_M` and `IQ2_XXS` in the llama.cpp layout (first
+shard of six; Engram `IQ4_NL` as shard 6) and the Lucebox Q2_K/Q4_K
+drafter. The `iq2xxs` variant adds `--stream-experts`; its routed experts
+were read from a Samsung 990 PRO. Loading dropped the page cache
+(`sync; echo 3 > /proc/sys/vm/drop_caches`) before each launch. This host
+exposes no ACPI platform profile; Tctl was 44–71 °C during the sweeps.
+
+Exactness checks of the card's own outputs:
+
+- Single user: the greedy DSpark completion equals the AR completion at
+  all eight depths of both quantizations (16 of 16 hashes).
+- Multiple users: every AR cohort (C1–C8) matches its isolated C1, and
+  every DSpark cohort, mixed and repetitive, matches the isolated C1 AR
+  reference of its quantization. The October 26 AR references predated the
+  folded Engram gate's rounding change ([llama.cpp GGUF
+  layout](#llamacpp-gguf-layout-2026-10-27-republication)) and no longer
+  matched current AR output (`4f19f5c1…` against `7a765f6d…` for IQ1_M
+  mixed), so all four references were regenerated with this build before
+  the DSpark tables ran; each mixed reference equals that quantization's
+  single-user d0 AR completion.
+
+These hashes show that speculative and concurrent execution reproduce plain
+decoding; they do not measure accuracy against the original model (see the
+teacher-forced sections above).
