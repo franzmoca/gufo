@@ -74,12 +74,11 @@ pp2048 runs 1,182 tok/s at 32K, 1,155 at 64K and 1,098 at 128K.
 | 13 | Route bias toward cached experts (changes outputs) | Streamed decode | Opt-in approximation | Low |
 | 14 | Higher-precision Engram tables | Quality | Unmeasured | — |
 | 15 | Smaller items | Various | Small | — |
-| 16 | Multi-user AR decode below the 2026-10-26 card | Serving decode | Distinct-prompt C8 62.8 tok/s against a ~93 tok/s read ceiling | Medium |
+| 16 | Multi-user AR decode below the 2026-10-26 card | Serving decode | Distinct-prompt C8 63.0 tok/s against a ~93 tok/s read ceiling | Medium |
 | 17 | Single-row routed expert GEMV bandwidth | Decode | ~1.7 ms/token (~4% AR) | Medium |
 | 18 | Small decode kernels: hyper-connections, router, routing | Decode | ~1–1.5 ms of ~4 ms/token | Medium |
 | 19 | DSpark host round trips | Speculative decode | ~1.5 ms per step | Medium |
 | 20 | `markov_select` | Drafter | Part of 1.6 ms per step | Medium |
-| 22 | Split GEMV scratch for 5–8-row output heads | Verification | ~0.33 ms per 5–6-row head, ~0.5% DSpark | High |
 
 ### 3. Expert reads for rejected verification rows
 
@@ -217,8 +216,8 @@ read and wait times, since rows grow up to 3.6× (E28 measured the current reads
 
 The card's multi-user tables give every user the same prompt, which keeps
 sessions in lockstep and lets a joint pass share experts (E27); with
-distinct prompts (2026-10-29, after E40) IQ1_M AR decodes C1 / C4 / C8 at
-24.5 / 55.5 / 62.8 tok/s. A C8 step (8 rows, ~42 distinct experts per
+distinct prompts (2026-10-29, after E41) IQ1_M AR decodes C1 / C4 / C8 at
+24.5 / 55.5 / 63.0 tok/s. A C8 step (8 rows, ~42 distinct experts per
 layer) took ~115 ms of kernels and ~10 ms of host time against ~86 ms of
 reads before E38; the grouped expert GEMV now reads at ~190-210 GB/s for
 IQ1_S and IQ2_XXS gate+up and ~175-200 GB/s for the down projections
@@ -254,13 +253,6 @@ device.
 
 `markov_select_kernel<1u>` takes 301 µs per call, 5.3 calls and 1.6 ms per
 step, more than the drafter's attention (0.66 ms).
-
-### 22. Split GEMV scratch for 5–8-row output heads
-
-`kSplitPartFloats` (8 × 16 × 32,768) holds no 129,280-row output head
-beyond 4 columns at 8 slices, so 5–6-row heads fall back to the lane kernel:
-2.43 ms against ~2.1 ms for the split kernel (98 calls in a 256-token
-DSpark run).
 
 ## Memory
 
