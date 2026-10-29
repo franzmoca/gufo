@@ -126,6 +126,20 @@ int ds41_v41_routed_plan_device(const int32_t* ids, uint32_t slots, uint32_t n_e
 int ds41_v41_copy_rows(float* dst, uint64_t dst_stride, const float* src, uint64_t src_stride, uint32_t rows,
                        uint32_t cols);
 
+/* Independent device copies of count floats each, in one launch: the list
+ * travels as the kernel argument, so it needs no staging buffer. */
+#define DS41_V41_COPY_LIST 96
+typedef struct ds41_v41_copy {
+  float* dst;
+  const float* src;
+  uint32_t count;
+} ds41_v41_copy;
+typedef struct ds41_v41_copy_list {
+  ds41_v41_copy copy[DS41_V41_COPY_LIST];
+  uint32_t count;
+} ds41_v41_copy_list;
+int ds41_v41_copy_many(const ds41_v41_copy_list* list);
+
 /* out[r] = weight * x[r] * rsqrt(mean(x[r]^2) + eps) for `rows` rows of n; weight may be NULL. */
 int ds41_v41_rms_norm(const float* x, const float* weight, float* out, uint32_t rows, uint32_t n, float eps);
 

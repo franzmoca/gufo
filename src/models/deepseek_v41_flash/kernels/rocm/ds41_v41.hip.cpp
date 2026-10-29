@@ -8,6 +8,7 @@
 
 #include <rocwmma/rocwmma.hpp>
 
+#include <algorithm>
 #include <cmath>
 #include <cstdio>
 
@@ -323,6 +324,14 @@ __global__ void copy_rows_kernel(float* dst, uint64_t dst_stride, const float* s
   const float* s = src + (uint64_t)blockIdx.x * src_stride;
   float* d = dst + (uint64_t)blockIdx.x * dst_stride;
   for (uint32_t i = threadIdx.x; i < cols; i += blockDim.x) d[i] = s[i];
+}
+
+/* Copy blockIdx.y of the list; values move as bits. */
+__global__ void copy_list_kernel(ds41_v41_copy_list list) {
+  const ds41_v41_copy c = list.copy[blockIdx.y];
+  const uint32_t* s = reinterpret_cast<const uint32_t*>(c.src);
+  uint32_t* d = reinterpret_cast<uint32_t*>(c.dst);
+  for (uint32_t i = blockIdx.x * blockDim.x + threadIdx.x; i < c.count; i += gridDim.x * blockDim.x) d[i] = s[i];
 }
 
 __global__ void rms_norm_kernel(const float* x, const float* weight, float* out, uint32_t n, float eps) {
@@ -2616,6 +2625,15 @@ extern "C" int ds41_v41_copy_rows(float* dst, uint64_t dst_stride, const float* 
   if (rows == 0) return 0;
   copy_rows_kernel<<<rows, kThreads>>>(dst, dst_stride, src, src_stride, cols);
   return launch_ok("copy rows");
+}
+
+extern "C" int ds41_v41_copy_many(const ds41_v41_copy_list* list) {
+  if (list->count == 0) return 0;
+  if (list->count > DS41_V41_COPY_LIST) return 1;
+  uint32_t most = 0;
+  for (uint32_t i = 0; i < list->count; i++) most = std::max(most, list->copy[i].count);
+  copy_list_kernel<<<dim3(std::max(1u, (most + kThreads - 1) / kThreads), list->count), kThreads>>>(*list);
+  return launch_ok("copy list");
 }
 
 extern "C" int ds41_v41_rms_norm(const float* x, const float* weight, float* out, uint32_t rows, uint32_t n,

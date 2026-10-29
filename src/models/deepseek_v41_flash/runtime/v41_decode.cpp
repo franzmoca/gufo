@@ -515,17 +515,39 @@ bool copy_dev(float* dst, const float* src, uint64_t count) {
          hipMemcpyAsync(dst, src, count * sizeof(float), hipMemcpyDeviceToDevice, 0) == hipSuccess;
 }
 
-/* Keeps the newest DS41_N_SWA of the batch's window rows in the ring. */
-bool store_window(LayerState& s, const float* rows, uint32_t pos0, uint32_t n) {
+/* Device copies launched together (ds41_v41_copy_many): each small copy
+ * on its own costs a dependent launch. */
+struct CopyQueue {
+  ds41_v41_copy_list list{};
+  bool ok = true;
+  void add(float* dst, const float* src, uint64_t count) {
+    if (count == 0) return;
+    if (list.count == DS41_V41_COPY_LIST) flush();
+    list.copy[list.count++] = {dst, src, (uint32_t)count};
+  }
+  bool flush() {
+    ok = ok && ds41_v41_copy_many(&list) == 0;
+    list.count = 0;
+    return ok;
+  }
+};
+
+/* Queues the newest DS41_N_SWA of the batch's window rows into the ring. */
+void queue_window(CopyQueue& q, LayerState& s, const float* rows, uint32_t pos0, uint32_t n) {
   const uint32_t first = n > DS41_N_SWA ? n - DS41_N_SWA : 0;
   for (uint32_t t = first; t < n;) {
     const uint32_t slot = (pos0 + t) % DS41_N_SWA;
     const uint32_t run = std::min(n - t, DS41_N_SWA - slot);
-    if (!copy_dev(s.window + (uint64_t)slot * kHeadDim, rows + (uint64_t)t * kHeadDim, (uint64_t)run * kHeadDim))
-      return false;
+    q.add(s.window + (uint64_t)slot * kHeadDim, rows + (uint64_t)t * kHeadDim, (uint64_t)run * kHeadDim);
     t += run;
   }
-  return true;
+}
+
+/* Keeps the newest DS41_N_SWA of the batch's window rows in the ring. */
+bool store_window(LayerState& s, const float* rows, uint32_t pos0, uint32_t n) {
+  CopyQueue q;
+  queue_window(q, s, rows, pos0, n);
+  return q.flush();
 }
 
 /* Layer il's pending rows of a speculative buffer; `part` selects kv or score of spec_pool. */
@@ -639,6 +661,7 @@ bool attention(ds41_decoder* d, uint32_t il, uint32_t n, const Joint* joint) {
     return false;
 
   if (ratio && ds41_layer_is_kv_source(il)) {
+    CopyQueue pending;
     if (!linear(d, l->attn_compressor_kv, d->xn, d->ckv, n) ||
         (ratio > 1 && !linear(d, l->attn_compressor_gate, d->xn, d->cscore, n)) ||
         !each([&](ds41_decoder* e, uint32_t m) {
@@ -648,18 +671,20 @@ bool attention(ds41_decoder* d, uint32_t il, uint32_t n, const Joint* joint) {
           const uint32_t emitted = (e->pos + m) / ratio - r0;
           if (ratio == 1) {
             if (ds41_v41_rms_norm(e->ckv, f32(e, l->attn_compressor_norm), e->latent, m, kHeadDim, eps)) return false;
-          } else if ((e->spec_eval &&
-                      (!copy_dev(spec_rows(e, e->spec_pool, il, 0), e->ckv, (uint64_t)m * kHeadDim) ||
-                       !copy_dev(spec_rows(e, e->spec_pool, il, 1), e->cscore, (uint64_t)m * kHeadDim))) ||
-                     ds41_v41_compress_pool(e->ckv, e->cscore, s.pool_kv, s.pool_score, e->pos, m, ratio, e->craw,
-                                            kHeadDim) ||
-                     ds41_v41_rms_norm(e->craw, f32(e, l->attn_compressor_norm), e->latent, emitted, kHeadDim, eps)) {
-            return false;
+          } else if (e->spec_eval) {
+            pending.add(spec_rows(e, e->spec_pool, il, 0), e->ckv, (uint64_t)m * kHeadDim);
+            pending.add(spec_rows(e, e->spec_pool, il, 1), e->cscore, (uint64_t)m * kHeadDim);
           }
+          if (ratio > 1 && (ds41_v41_compress_pool(e->ckv, e->cscore, s.pool_kv, s.pool_score, e->pos, m, ratio, e->craw,
+                                            kHeadDim) ||
+                            ds41_v41_rms_norm(e->craw, f32(e, l->attn_compressor_norm), e->latent, emitted,
+                                              kHeadDim, eps)))
+            return false;
           if (emitted && !store_compressed(e, il, r0, emitted, ratio)) return false;
           e->comp_layer = (int)il;
           return true;
-        }))
+        }) ||
+        !pending.flush())
       return false;
   }
   if (ratio && ds41_layer_is_index_source(il)) {
@@ -722,6 +747,9 @@ bool attention(ds41_decoder* d, uint32_t il, uint32_t n, const Joint* joint) {
                       dense_f16(wo_a->type, DS41_N_LORA_O, kGroupDim, n);
   const bool oa_half = o_half && dense_f16(wo_b->type, (uint32_t)(wo_b->elements / wo_b->dim[0]),
                                            (uint32_t)wo_b->dim[0], n);
+  /* Speculative window rows wait for the commit; the ring keeps the rows
+   * that rejected positions would overwrite. */
+  CopyQueue windows;
   if (!each([&](ds41_decoder* e, uint32_t m) {
         LayerState& s = e->layer[il];
         ds41_fp4_rows comp{};
@@ -733,9 +761,10 @@ bool attention(ds41_decoder* d, uint32_t il, uint32_t n, const Joint* joint) {
                                   ratio, f32(e, l->attn_sinks), e->o,
                                   o_half ? reinterpret_cast<uint16_t*>(e->o) : nullptr, partial, e->pos, m,
                                   DS41_N_HEAD, kHeadDim, 1.0f / sqrtf((float)kHeadDim), freq, kRot, e->rope) == 0 &&
-               (e->spec_eval ? copy_dev(spec_rows(e, e->spec_window, il, 0), e->kvn, (uint64_t)m * kHeadDim)
-                             : store_window(s, e->kvn, e->pos, m));
-      }))
+               (e->spec_eval ? (windows.add(spec_rows(e, e->spec_window, il, 0), e->kvn, (uint64_t)m * kHeadDim), true)
+                             : (queue_window(windows, s, e->kvn, e->pos, m), true));
+      }) ||
+      !windows.flush())
     return false;
 
   /* Grouped LoRA output: group g maps head slice g of every token. */
@@ -1975,26 +2004,26 @@ int ds41_decoder_commit(ds41_decoder* d, uint32_t keep) {
   const uint32_t pos0 = d->spec_pos0;
   const uint32_t end = pos0 + keep;
   d->spec_n = 0;
-  bool ok = true;
-  for (uint32_t il = 0; il < DS41_N_LAYER && ok; il++) {
+  CopyQueue q;
+  for (uint32_t il = 0; il < DS41_N_LAYER; il++) {
     LayerState& s = d->layer[il];
-    ok = store_window(s, spec_rows(d, d->spec_window, il, 0), pos0, keep);
+    queue_window(q, s, spec_rows(d, d->spec_window, il, 0), pos0, keep);
     const uint32_t ratio = ds41_layer_compress_ratio(il);
-    if (!ok || !s.pool_kv || ratio < 2) continue;
+    if (!s.pool_kv || ratio < 2) continue;
     /* The frontier holds the positions of the kept tokens' unfinished group,
      * slot pos % ratio. Ratio 2 keeps at most the last kept token, which is
      * in the batch; older pending positions would need the earlier frontier. */
-    for (uint32_t pos = end - end % ratio; pos < end && ok; pos++) {
+    for (uint32_t pos = end - end % ratio; pos < end; pos++) {
       if (pos < pos0) return 1;
       const uint64_t row = (uint64_t)(pos - pos0) * kHeadDim;
       const uint64_t slot = (uint64_t)(pos % ratio) * kHeadDim;
-      ok = copy_dev(s.pool_kv + slot, spec_rows(d, d->spec_pool, il, 0) + row, kHeadDim) &&
-           copy_dev(s.pool_score + slot, spec_rows(d, d->spec_pool, il, 1) + row, kHeadDim);
+      q.add(s.pool_kv + slot, spec_rows(d, d->spec_pool, il, 0) + row, kHeadDim);
+      q.add(s.pool_score + slot, spec_rows(d, d->spec_pool, il, 1) + row, kHeadDim);
     }
   }
   /* The copies stay queued ahead of the next evaluation; a batch's sessions
    * do their host work meanwhile. */
-  if (!ok) return 1;
+  if (!q.flush()) return 1;
   d->pos = end;
   d->engram_history.resize(end);
   return 0;
