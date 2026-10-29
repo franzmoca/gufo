@@ -99,17 +99,18 @@ embedding lookup removes most of it. Graph capture would need the mixed-MMQ
 layers' route plans on the device (E7 covers the FP16 layers) and the Engram
 reads as capture boundaries.
 
-### 5. Compact selection and WMMA prefill rescoring
+### 5. Compact selection for `--exact-prefill` rescoring
 
-E1 restricts FP32 rescoring of 1–4 rows to layer 20's candidate blocks
-after 16K. Prefill rescoring (WMMA) still scores the full history and masks
-afterwards, and the final top-k still scans dense scores (both about 4×
-cheaper per row after E19/E20; the encoder index layers 2, 8 and 14 have no
-candidate mask and remain the main depth cost, ~40 ms each per 2K batch at
-128K). Keep absolute
-position tie order, the pinned newest block, causal partial blocks and the
-emitted row order; at or below 16K keep the dense route unless compact
-dispatch measures faster.
+Verification already rescores in groups of four rows over layer 20's
+candidate blocks (E1). Prefill rescoring (WMMA) of the masked decoder index
+layers 24, 28, 32 and 36 still scores the full history and masks afterwards,
+but with bounded replay those layers see only the last 140 prompt rows:
+5.6 ms of scores and 0.7 ms of top-k per layer at 128K, ~25 ms once per
+prompt (E34). Compact rescoring pays only under `--exact-prefill`, where the
+same four layers score every 2,048-row chunk (~85 ms each at 128K). The
+encoder index layers 2, 8 and 14 (~40 ms each per 2K batch at 128K) have no
+candidate mask. Keep absolute position tie order, the pinned newest block,
+causal partial blocks and the emitted row order.
 
 ### 6. Routed FP16 kernel: weight decode per slot
 
