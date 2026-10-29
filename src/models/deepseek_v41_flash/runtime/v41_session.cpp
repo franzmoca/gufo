@@ -16,6 +16,8 @@
 #include <span>
 #include <vector>
 
+#include <hip/hip_runtime_api.h>
+
 #include "ds41_v41.h"
 #include "model.h"
 #include "native_internal.h"
@@ -73,6 +75,7 @@ struct ds41_session {
     uint32_t probe = kProbeFirst;  // plain steps before a one-draft cycle re-measures
   } policy;
   std::vector<float> spec_logits;
+  bool spec_pinned = false;
   struct {
     uint64_t drafted = 0, accepted = 0, support_drafted = 0, support_accepted = 0, positional = 0;
     uint64_t anchors = 0, full_blocks = 0, steps = 0;
@@ -146,6 +149,10 @@ int ds41_session_create(ds41_session** out, ds41_engine* engine, int context_siz
   }
   s->logits.resize(vocab(s));
   s->spec_logits.resize((uint64_t)ds41_session::kVerifyRows * vocab(s));
+  /* Pinned, so the evaluations' logits download by DMA, not staged copies. */
+  s->spec_pinned = hipHostRegister(s->spec_logits.data(), s->spec_logits.size() * sizeof(float),
+                                   hipHostRegisterDefault) == hipSuccess;
+  if (!s->spec_pinned) (void)hipGetLastError();
   *out = s;
   return 0;
 }
@@ -154,6 +161,7 @@ void ds41_session_free(ds41_session* s) {
   if (!s) return;
   ds41_dspark_state_destroy(s->dspark);
   ds41_decoder_destroy(s->decoder);
+  if (s->spec_pinned) (void)hipHostUnregister(s->spec_logits.data());
   delete s;
 }
 
