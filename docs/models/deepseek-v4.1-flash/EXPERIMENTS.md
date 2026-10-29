@@ -1387,3 +1387,18 @@ tokens and shares their experts (166 against 185 ms once sessions drift);
 that lockstep, not the policy, explains v1's repetitive lead. The remaining
 cost is the serial drafter forwards ([backlog](BACKLOG.md) item 10).
 Runs are in [the E27 record](artifacts/2026-10-29-joint-draft-sizing/summary.txt).
+
+### E28: Engram row reads under a full expert cache (rejected)
+
+BACKLOG item 11 blamed the Engram's ~98,000 random 4 KiB reads per pp2048
+batch for streamed prefill slowing as the expert cache fills. On real text
+a batch reads 49,152 rows per Engram layer, 39–43K of them unique (12–20%
+repeats); unique 4 KiB pages are slightly more than unique rows (144 B rows
+straddle pages), so sorting by offset shares nothing and deduplication
+would remove at most ~15% of the reads. As an upper bound, a timing-only
+build skipped every Engram read (`IQ2_XXS`, `--stream-experts`, synthetic
+tokens, eight pp2048 tests per process, alternating twice): warm batches
+1,365 → 1,376 tok/s (+0.8%), the first batch 1,027–1,063 → 1,064–1,102
+(+3.6%). Streamed prefill now runs ~1,370 tok/s, against the 742–787 the
+item was based on, and the Engram reads no longer limit it; a hot-row cache
+would also take memory from the expert cache. Not pursued.
