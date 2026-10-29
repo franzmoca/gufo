@@ -1402,3 +1402,16 @@ tokens, eight pp2048 tests per process, alternating twice): warm batches
 (+3.6%). Streamed prefill now runs ~1,370 tok/s, against the 742–787 the
 item was based on, and the Engram reads no longer limit it; a hot-row cache
 would also take memory from the expert cache. Not pursued.
+
+### E29: 6-column dense and grouped expert GEMVs (retained)
+
+BACKLOG item 1 expected 4–5 ms from 5- and 6-row verifications running the
+8-column kernels. The dense split GEMV and the grouped expert GEMV now
+instantiate 6 columns for 5–6 rows (expert groups of 5–6 tokens). Every
+row stays bit-identical: the kernel test matches 5-, 6- and 7-row launches
+against one launch per row for every type, and `--spec-check` keeps widths
+5 and 6 identical to single-token decode. `--spec-bench` (IQ1_M, 1,096-token
+prompt, alternating builds, ms): 5 rows 89.5 / 89.4 → 89.1 / 88.9, 6 rows
+100.5 / 100.6 → 99.6 / 99.9, other widths unchanged. The column jump the
+item measured is gone on the current kernels (4 → 5 rows adds 12.4 ms, on
+the per-row trend), so the gain is 0.5–0.8%.

@@ -1120,7 +1120,7 @@ int main(int argc, char** argv) {
   }
   ok = GemvCase(kQ4K, 300, 1280, 0, rng) && ok;
   ok = GemvCase(kQ4K, 256, 5120, 0, rng) && ok;
-  for (const int n : {2, 3, 5, 8, 12, 16})
+  for (const int n : {2, 3, 5, 6, 7, 8, 12, 16})
     ok = GemvTokensCase(kQ4K, 300, 1280, 0, n, rng) && ok;
   ok = SwigluCase(kQ4K, 2304, 5120, rng) && ok;
   for (const auto& t : kTypes) {
@@ -1134,7 +1134,7 @@ int main(int argc, char** argv) {
     if (t.type == 8 || t.type == 13) {
       ok = GemvCase(t, 300, 1280, 0, rng) && ok;
       ok = GemvCase(t, 256, 4096, 64, rng) && ok;
-      for (const int n : {2, 3, 5, 8, 12, 16}) {
+      for (const int n : {2, 3, 5, 6, 7, 8, 12, 16}) {
         ok = GemvTokensCase(t, 300, 1280, 0, n, rng) && ok;
         ok = GemvTokensCase(t, 256, 4096, 64, n, rng) && ok;
       }
@@ -1143,7 +1143,7 @@ int main(int argc, char** argv) {
     if (t.type != 8 && t.type != 13) {
       ok = ExpertGemvCase(t, 2304, 5120, false, rng) && ok;
       ok = ExpertGemvCase(t, 512, 2304, true, rng) && ok;
-      for (const int n : {2, 3, 4, 6, 8, 12, 16})
+      for (const int n : {2, 3, 4, 5, 6, 7, 8, 12, 16})
         ok = ExpertTokensCase(t, 512, 2304, n, rng) && ok;
       if (t.type == 19 || t.type == 29 || t.type == 16 || t.type == 17)
         ok = SwigluCase(t, 2304, 5120, rng) && ok;

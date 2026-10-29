@@ -48,7 +48,6 @@ pp2048 runs 1,182 tok/s at 32K, 1,155 at 64K and 1,098 at 128K.
 
 | # | Item | Area | Est. impact | Confidence |
 | ---: | --- | --- | --- | --- |
-| 1 | 5–7 token GEMV instantiations | Verification | ~5 ms per 5-row verification | Medium |
 | 2 | Fused SwiGLU and Q8_0 pair launches through the split GEMV | Verification | sh_gate costs 103 µs at 8 tokens against 75 µs for one | Medium |
 | 3 | Expert reads for rejected verification rows | Streamed DSpark | Part of the 36% verification-expert time | Low |
 | 4 | Launch gaps between decode kernels | Decode | Up to ~2.7 ms/token | Medium |
@@ -63,16 +62,6 @@ pp2048 runs 1,182 tok/s at 32K, 1,155 at 64K and 1,098 at 128K.
 | 14 | Higher-precision Engram tables | Quality | Unmeasured | — |
 | 15 | Smaller items | Various | Small | — |
 | 16 | Multi-user AR decode below the 2026-10-26 card | Serving decode | C8 51.8 against 78.5 tok/s | Medium |
-
-### 1. 5–7 token GEMV instantiations
-
-The dense and routed decode GEMVs instantiate 1, 2, 4, 8 and 16 columns, so
-5–7 rows run the 8-column kernels. In the table above, row 5 adds 17.8 ms
-streamed and 11.3 ms resident, against a trend of ~13 ms (streamed) per row:
-about 4–5 ms of the 5-row step is the column jump. DSpark verifies up to six
-rows, so 5- and 6-row steps are common. Instantiate the exact counts (or 6
-and 8) for the dense split GEMV and the expert-group kernel and measure code
-size and `--spec-bench`; rows must stay bit-identical to single-token decode.
 
 ### 2. Fused SwiGLU and Q8_0 pair launches through the split GEMV
 

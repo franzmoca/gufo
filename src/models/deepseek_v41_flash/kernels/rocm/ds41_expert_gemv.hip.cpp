@@ -809,6 +809,9 @@ int dispatch_group(const void* w, const void* w_up, const void* const* w_table, 
   if (cols <= 4)
     return launch_group<kType, U, 4>(w, w_up, w_table, w_up_table, route_w, limit, expert_bytes, plan, groups, x,
                                      x_slot, slots_per_x, y, m, k, zero_dropped);
+  if (cols <= 6)
+    return launch_group<kType, U, 6>(w, w_up, w_table, w_up_table, route_w, limit, expert_bytes, plan, groups, x,
+                                     x_slot, slots_per_x, y, m, k, zero_dropped);
   if (cols <= 8)
     return launch_group<kType, U, 8>(w, w_up, w_table, w_up_table, route_w, limit, expert_bytes, plan, groups, x,
                                      x_slot, slots_per_x, y, m, k, zero_dropped);
