@@ -96,8 +96,10 @@ output-changing item (13).
 Re-traced 2026-10-29 (IQ1_M, tg32 after pp512): 974 launches and 2.9 ms
 idle per 41 ms token, ~0.2 ms of it at the step start (output head →
 next step's first copy) and ~2.7 ms as 2–3 µs gaps between dependent
-launches. Fusions and the device-side embedding lookup below are each
-worth ~0.2–0.5%; only graph capture addresses the bulk.
+launches. Graph replay keeps those gaps (E44: ~0.13 µs saved per launch,
+~0.3% per token); only fewer launches recover them, through the fusions
+below (~0.2–0.5% each) or by batching the per-session launches of a joint
+step (~2,000 per C8 step, mostly attention).
 
 ~1,000 dependent launches per token leave ~2.7 ms idle (resident profile).
 Left to fuse: the q rope after q_b (40 per token; would need a GEMV epilogue
@@ -106,9 +108,7 @@ the window copy (43; cannot run before attention, which reads the slot it
 overwrites). hc mixes read 2 MB of F32 weights in ~14 µs (80 per token)
 regardless of blocks per row. ~90 µs of host work starts each step
 (embedding dequant and two synchronous uploads ~70 µs); a device-side
-embedding lookup removes most of it. Graph capture would need the mixed-MMQ
-layers' route plans on the device (E7 covers the FP16 layers) and the Engram
-reads as capture boundaries.
+embedding lookup removes most of it.
 
 ### 5. Compact selection for `--exact-prefill` rescoring
 

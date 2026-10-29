@@ -1670,3 +1670,16 @@ Server, IQ1_M, distinct prompts, DSpark, tok/s (rows drafted / accepted):
 C8 alone, three alternations: >= 0.5 61.41 / 61.13 / 61.11 against
 62.07 / 61.95 / 61.88 (-1.1%). Reallocation accepts more drafts per step,
 but the wider blocks cost more than they return.
+
+### E44: graph replay of dependent decode launches (measured, not pursued)
+
+A chain of 1,000 dependent kernels (`tools/bench/graph_gap_bench.hip`,
+ROCm 7.2, gfx1151) takes 1.96-2.42 us per launch for empty 4-256-block
+kernels launched eagerly (null or nonblocking stream alike) and 1.84-2.26
+us replayed as a graph; with 64-512 iterations of work per thread the saving
+stays 0.12-0.15 us per launch. The host already enqueues ahead of the GPU:
+the 2-3 us gaps between decode kernels are the device's dispatch latency
+between dependent packets, which a graph keeps. At ~1,000 launches per
+token that is ~0.13 ms of the ~2.7 ms idle (~0.3%), against an explicit
+stream, device-side positions and capacity-sized indexer grids through
+the whole decoder. Only fewer launches recover the gaps.
