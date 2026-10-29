@@ -1651,3 +1651,22 @@ with outputs matching the previous build. C4 `batch` timings stay
 inconclusive: the request that waits behind its peer's prefill swaps
 between runs, and two unchanged-build controls flag as many timings as
 the candidate (no request is flagged in every candidate run but no control).
+
+### E43: joint rows by draft confidence across sessions (rejected)
+
+With one drafter pass (E42), a batch's learned drafts could be drafted at
+full width and the 16 joint rows handed to the drafts most likely to be
+emitted (product of the chain's acceptance estimates) across sessions,
+instead of each session's even share trimmed by its own width policy.
+Server, IQ1_M, distinct prompts, DSpark, tok/s (rows drafted / accepted):
+
+| Rows to drafts with reach | C4 | C8 |
+| --- | --- | --- |
+| even share (current) | 57.5 / 57.5 (~880 / 735) | 57.3 / 55.7 (~880 / 780) |
+| every row | 50.4 / 50.9 (1,541 / 842) | 54.4 / 49.0 (1,339 / 938) |
+| >= 0.25 | 57.0 / 56.7 (1,060 / 806) | 58.3 / 54.5 (1,080 / 924) |
+| >= 0.5 | 57.0 / 56.9 (~885 / 745) | 58.6 / 53.1 (976 / 888) |
+
+C8 alone, three alternations: >= 0.5 61.41 / 61.13 / 61.11 against
+62.07 / 61.95 / 61.88 (-1.1%). Reallocation accepts more drafts per step,
+but the wider blocks cost more than they return.
