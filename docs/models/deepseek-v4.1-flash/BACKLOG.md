@@ -83,6 +83,12 @@ output-changing item (13).
 
 ### 4. Launch gaps between decode kernels
 
+Re-traced 2026-10-29 (IQ1_M, tg32 after pp512): 974 launches and 2.9 ms
+idle per 41 ms token, ~0.2 ms of it at the step start (output head →
+next step's first copy) and ~2.7 ms as 2–3 µs gaps between dependent
+launches. Fusions and the device-side embedding lookup below are each
+worth ~0.2–0.5%; only graph capture addresses the bulk.
+
 ~1,000 dependent launches per token leave ~2.7 ms idle (resident profile).
 Left to fuse: the q rope after q_b (40 per token; would need a GEMV epilogue
 pairing rows 8 lanes apart), route after the router matvec (40; 7 µs each),
