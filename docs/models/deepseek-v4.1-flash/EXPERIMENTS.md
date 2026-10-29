@@ -1683,3 +1683,25 @@ between dependent packets, which a graph keeps. At ~1,000 launches per
 token that is ~0.13 ms of the ~2.7 ms idle (~0.3%), against an explicit
 stream, device-side positions and capacity-sized indexer grids through
 the whole decoder. Only fewer launches recover the gaps.
+
+### E45: device copies batched into one launch (retained)
+
+A C8 AR step issued ~627 small device-to-device copies (window rows into
+the pending buffer and the ring, compressor pool rows), each a dependent
+blit with ~6 us of gap before it (3.95 ms per step). `ds41_v41_copy_many`
+takes up to 96 copies as its kernel argument, so it needs no staging
+buffer: a joint layer queues every session's window and pool rows into
+one launch, a commit its ~40-80 copies into one or two. Values move as
+bits; seeded sampled DSpark completions at C1/C4/C8 and greedy AR
+completions are identical.
+
+Server, IQ1_M, distinct prompts, tok/s (two alternations):
+
+| Mode | before | after |
+| --- | --- | --- |
+| AR C4 | 55.87 / 55.75 | 56.10 / 56.11 |
+| AR C8 | 61.69 / 60.15 | 63.67 / 61.86 |
+| DSpark C4 | 57.14 / 57.22 | 58.06 / 57.71 |
+| DSpark C8 | 54.53 / 53.82 | 58.14 / 55.43 |
+| AR C1 | 31.54 / 31.55 | 31.56 / 31.56 |
+| DSpark C1 | 43.59 / 43.79 | 43.58 / 43.53 |
