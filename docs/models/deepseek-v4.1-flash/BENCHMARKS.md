@@ -172,9 +172,8 @@ verifies copies the same way.
 ## Native prefill
 
 `gufo bench` (synthetic token IDs, one 2048-row pass per pp2048) on the same
-binary: pp2048 1,205 tok/s at depth 0 and 1,189 at 8K
-([E16 record](artifacts/2026-10-26-prefill-batch/summary.txt): 1,149–1,187
-at d0, 1,122–1,134 at 32K). Served chat prefill is lower for two measured
+binary: pp2048 1,394 ± 37 tok/s at depth 0 (three runs; 1,205 on the
+October 26 build, [E16 record](artifacts/2026-10-26-prefill-batch/summary.txt)). Served chat prefill is lower for two measured
 reasons: real text costs 5–7% more than the synthetic IDs in matched
 batches, and the prompt cache's stable-boundary checkpoint adds a 3-token
 pass (about 65 ms) to every chat request ([backlog](BACKLOG.md)). A profile
