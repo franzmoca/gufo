@@ -161,7 +161,7 @@ Build as described in the [README](README.md#build-from-source), then:
 ```
 
 Add `--mmproj ds41/mmproj-DeepSeek-V4.1-Flash-1017-BF16.gguf` for image input. The server is
-ready in about 19 s from a cold page cache; the model stays resident until the
+ready in about 20 s from a cold page cache; the model stays resident until the
 server exits. Useful options:
 
 - `--context N` per session; the default is the native 1M tokens.
@@ -277,28 +277,44 @@ podman logs -f gufo-ds41
 
 ## Performance
 
-The following `IQ1_M` results are measured over HTTP with `gufo serve` (greedy, thinking off, real chat
-text); full tables and charts are on the
+Measured over HTTP with `gufo serve` on October 29, 2026 (greedy, thinking
+off, real chat text); full tables and charts are on the
 [benchmark card](docs/models/deepseek-v4.1-flash/BENCHMARKS.md).
 
-| Workload | Depth 0 | 32K | 128K |
+| `IQ1_M` resident, single user | Depth 0 | 32K | 128K |
 | --- | ---: | ---: | ---: |
-| Prefill, pp2048 (tok/s) | 1,077 | 993 | 700 |
-| Decode, AR (tok/s) | 23.3 | 22.9 | 21.7 |
-| Decode, DSpark, mixed text (tok/s) | 28.0 | 30.1 | 27.2 |
-| Decode, DSpark, repetitive text (tok/s) | 65.3 | 59.6 | 55.2 |
+| Prefill, pp2048 (tok/s) | 1,228 | 1,177 | 1,045 |
+| Decode, AR (tok/s) | 24.5 | 24.1 | 23.1 |
+| Decode, DSpark, mixed text (tok/s) | 30.7 | 29.8 | 29.9 |
+| Decode, DSpark, repetitive text (tok/s) | 73.6 | 66.6 | 64.4 |
 
-| Concurrent users | 1 | 2 | 4 | 8 |
+| `IQ1_M` resident, concurrent users | 1 | 2 | 4 | 8 |
 | --- | ---: | ---: | ---: | ---: |
-| AR, total decode (tok/s) | 23.8 | 39.6 | 60.4 | 78.5 |
-| DSpark mixed, total decode (tok/s) | 27.6 | 40.5 | 51.2 | 55.9 |
+| AR, total decode (tok/s) | 24.2 | 41.3 | 64.5 | 86.1 |
+| DSpark mixed, total decode (tok/s) | 31.0 | 45.0 | 58.3 | 73.8 |
 
-- `gufo bench` prefills 1,205 tok/s at depth 0 (synthetic token IDs).
+Streamed `IQ2_XXS` (`--stream-experts`, default expert cache), with the routed
+experts read from a Samsung 990 PRO. A slower SSD gives lower numbers,
+mostly while the expert cache warms up; each row starts from a new server.
+
+| `IQ2_XXS` streamed, single user | Depth 0 | 32K | 128K |
+| --- | ---: | ---: | ---: |
+| Prefill, pp2048 (tok/s) | 1,064 | 899 | 992 |
+| Decode, AR (tok/s) | 20.8 | 22.6 | 21.7 |
+| Decode, DSpark, mixed text (tok/s) | 23.3 | 27.7 | 24.9 |
+| Decode, DSpark, repetitive text (tok/s) | 54.9 | 63.7 | 59.6 |
+
+| `IQ2_XXS` streamed, concurrent users | 1 | 2 | 4 | 8 |
+| --- | ---: | ---: | ---: | ---: |
+| AR, total decode (tok/s) | 20.2 | 35.6 | 59.4 | 81.5 |
+| DSpark mixed, total decode (tok/s) | 22.7 | 36.1 | 51.6 | 69.1 |
+
+- `gufo bench` prefills 1,394 tok/s at depth 0 (synthetic token IDs).
 - Repeating a source file with one edit decodes at 67.6 tok/s through
   prompt lookup.
-- The server is ready 18.6 s after a cold start with the page cache dropped.
-- From four users, plain AR is faster than DSpark on mixed text, because
-  every session still drafts a full block (open work).
+- From a cold page cache the server is ready in 19.7 s (`IQ1_M`) or 22.5 s
+  (`IQ2_XXS` streamed).
+- From four users, plain AR is faster than DSpark on mixed text.
 - Greedy DSpark and concurrent outputs are identical to single-session plain
   decoding.
 

@@ -4,24 +4,41 @@
   <img src="assets/gufo-logo.jpg" alt="Gufo logo" width="180">
 </p>
 
-## About this fork: Gemma 4 on Gufo
+## About this fork: DeepSeek V4.1 Flash and Gemma 4 on Gufo
 
-This fork of [gufo-org/gufo](https://github.com/gufo-org/gufo) adds a native
-**Gemma 4** engine to Gufo, with its own HIP kernels for prefill, decode and MTP
-verification on Strix Halo. Gemma 4 isn't on upstream's roadmap, so it is
-maintained here on the default branch, `feat/gemma`. Upstream
+This fork of [gufo-org/gufo](https://github.com/gufo-org/gufo) adds two
+native engines to Gufo, each with its own HIP kernels for prefill, decode and
+speculative verification on Strix Halo. Neither model is on upstream's
+roadmap, so both are maintained here; the default branch is `feat/ds41`.
+
+### DeepSeek V4.1 Flash, on one Strix Halo
+
+The 763B-parameter **DeepSeek-V4.1-Flash-1017** runs on a single 128 GB Strix
+Halo, with its native 1M-token context:
+
+- **`IQ1_M` resident** in GPU memory: 24.5 tok/s decode, 30.7 tok/s with
+  DSpark speculative decoding on mixed text and 73.6 tok/s on repetitive
+  text, 1,228 tok/s prefill (single user, depth 0).
+- **`IQ2_XXS` with routed experts streamed from SSD:** 20.8–22.7 tok/s decode
+  across depths.
+- DSpark speculative decoding and prompt lookup, with greedy output identical
+  to plain decoding; image input; up to 86 tok/s total decode across eight
+  concurrent users.
+
+Setup, downloads, memory limits and the headless-deployment requirement are
+in [README_DEEPSEEK.md](README_DEEPSEEK.md); every number is on the
+[benchmark card](docs/models/deepseek-v4.1-flash/BENCHMARKS.md).
+
+### Gemma 4
+
+The native **Gemma 4** engine is also on this branch. Upstream
 [PR #426](https://github.com/gufo-org/gufo/pull/426) stays open for feedback.
 
 > [!NOTE]
 > **What's new:** the [Gemma changelog](CHANGELOG_GEMMA.md) lists the fork's
-> changes, newest first, with a link to each pull request.
+> Gemma changes, newest first, with a link to each pull request.
 
-> [!TIP]
-> **DeepSeek V4.1 Flash, resident on one Strix Halo:** the 763B model runs
-> fully in GPU memory with DSpark speculative decoding and image input, for
-> headless dedicated machines. See [README_DEEPSEEK.md](README_DEEPSEEK.md).
-
-### What it runs
+#### What it runs
 
 - **Gemma 4 26B-A4B** (mixture of experts): Unsloth UD-Q4_K_XL, UD-Q6_K_XL,
   UD-Q8_K_XL and the QAT checkpoint.
@@ -33,7 +50,7 @@ maintained here on the default branch, `feat/gemma`. Upstream
   are not qualified to the cards' limits; the 26B card records one fine-tune's
   results.
 
-### Features
+#### Features
 
 - MTP speculative decoding with the `gemma4-assistant` drafters, with a draft
   length learned from how many drafts are accepted.
@@ -52,10 +69,10 @@ Benchmarks against llama.cpp and quality reports are in each model card:
 ### Status
 
 The fork merges upstream `main` periodically and is currently synced with
-v0.17.0. Like upstream, it is Strix Halo only (`gfx1151`, Linux).
+v0.23.0. Like upstream, it is Strix Halo only (`gfx1151`, Linux).
 Everything below the line is upstream's README; its build steps apply
-unchanged ([Build from source](#build-from-source)). If a Gemma 4 GGUF doesn't
-load, open an issue on this fork with the file name. Bug reports, benchmark
+unchanged ([Build from source](#build-from-source)). If a DeepSeek V4.1 or
+Gemma 4 GGUF doesn't load, open an issue on this fork with the file name. Bug reports, benchmark
 numbers from other setups, feature requests and PRs are welcome here.
 Thanks to the Gufo maintainers for the engine this builds on.
 
