@@ -57,7 +57,6 @@ pp2048 runs 1,182 tok/s at 32K, 1,155 at 64K and 1,098 at 128K.
 | 8 | Small-batch evaluation cost | Short turns | ~15 ms per follow-up turn | Low |
 | 9 | Stable-boundary prefill pass per chat request | Serving | ~65 ms per request | Medium |
 | 10 | Concurrent drafter forwards | Serving decode | ~9 ms per drafting session per step; DSpark 5% under AR at C8 | Medium |
-| 12 | Rank-major expert-contiguous repack | Streaming | Reads from 5.7 GiB/s toward 8.2 GB/s | Medium |
 | 13 | Route bias toward cached experts (changes outputs) | Streamed decode | Opt-in approximation | Low |
 | 14 | Higher-precision Engram tables | Quality | Unmeasured | — |
 | 15 | Smaller items | Various | Small | — |
@@ -171,16 +170,6 @@ against 54.6). One drafter forward over all drafting sessions, as Gemma's
 `DraftChains` does, removes most of that time. E27's v3 (a batch plan that
 skips drafting when it does not pay) is the fallback if batching is not
 possible.
-
-### 12. Rank-major expert-contiguous repack
-
-The GGUF stores each layer's experts as three projection-major ~1 GiB
-blocks, so one expert is three reads a block apart. Repacking to
-expert-contiguous rows ordered by the built-in rank (gate, down, up adjacent)
-makes a decode job one sequential read and a prefill job one contiguous run,
-toward the 8.2 GB/s sequential ceiling from today's 5.7 GiB/s. Needs a
-repack tool beside `tools/ds41/quants.py`, a loader mapping expert id → rank
-row, and byte-identical streamed outputs.
 
 ### 13. Route bias toward cached experts (quality-affecting, optional)
 
