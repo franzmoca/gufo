@@ -57,12 +57,13 @@ pp2048 runs 1,182 tok/s at 32K, 1,155 at 64K and 1,098 at 128K.
 | 7 | Remaining prefill glue | Prefill | ~30–60 ms per 2K batch | Medium |
 | 8 | Small-batch evaluation cost | Short turns | ~15 ms per follow-up turn | Low |
 | 9 | Stable-boundary prefill pass per chat request | Serving | ~65 ms per request | Medium |
-| 10 | Multi-user DSpark draft sizing | Serving decode | C4–C8 mixed text from 51–56 toward AR's 60–78 tok/s | Medium |
+| 10 | Concurrent drafter forwards | Serving decode | ~9 ms per drafting session per step; DSpark 5% under AR at C8 | Medium |
 | 11 | Engram row reads under cache pressure | Streamed prefill | ~0.35 s of device reads per pp2048 batch | Medium |
 | 12 | Rank-major expert-contiguous repack | Streaming | Reads from 5.7 GiB/s toward 8.2 GB/s | Medium |
 | 13 | Route bias toward cached experts (changes outputs) | Streamed decode | Opt-in approximation | Low |
 | 14 | Higher-precision Engram tables | Quality | Unmeasured | — |
 | 15 | Smaller items | Various | Small | — |
+| 16 | Multi-user AR decode below the 2026-10-26 card | Serving decode | C8 51.8 against 78.5 tok/s | Medium |
 
 ### 1. 5–7 token GEMV instantiations
 
@@ -166,14 +167,16 @@ invasive). Gemma's generation-prompt lookahead is the local precedent. The
 policy is shared (`src/cache/retention.cpp`), so other models' reuse must
 hold.
 
-### 10. Multi-user DSpark draft sizing
+### 10. Concurrent drafter forwards
 
-Concurrent sessions verify jointly in batches of up to 16 rows (E14), but
-each still drafts a full block (anchor + 5). From four users a step needs two
-or more joint evaluations, and mixed text decodes slower than AR: 51.22 /
-52.42 / 55.93 tok/s at C4 / C6 / C8 against 60.35 / 71.33 / 78.46 (card
-sweep). Fit the drafts into one 16-row pass, about 16 / users − 1 rows per
-session as Gemma does, and fall back to AR rows when that leaves none.
+Concurrent sessions now share one 16-row verification (E27), but each
+drafting session still runs its own drafter forward, one after another
+(~9 ms each, ~34 ms per step at C4). With different prompts per user DSpark
+matches AR at C4 (47.6 against 46.0 tok/s) and trails it at C8 (51.5
+against 54.6). One drafter forward over all drafting sessions, as Gemma's
+`DraftChains` does, removes most of that time. E27's v3 (a batch plan that
+skips drafting when it does not pay) is the fallback if batching is not
+possible.
 
 ### 11. Engram row reads under cache pressure
 
@@ -235,6 +238,16 @@ read and wait times, since rows grow up to 3.6×, which interacts with item 11.
 - **Decode expert GEMV spills.** Several `expert_group_kernel` variants
   use 256 VGPRs and still spill 80–540 bytes per lane to scratch; check
   whether fewer columns per lane or `ext_vector_type` arrays remove them.
+
+### 16. Multi-user AR decode below the card
+
+Today's build decodes C4 / C6 / C8 AR at 62.9 / 60.0 / 51.8 tok/s against
+the card's 60.4 / 71.3 / 78.5 (2026-10-26, 4-shard layout, which can no
+longer be loaded for a direct A/B). The joint evaluation itself is not
+slower (`--joint-check 8 --joint-rows 8`: 129.5 ms on a 1,096-token prompt),
+so the time is in the serving path around it. The card's multi-user tables
+also give every user the same prompt, which keeps sessions in lockstep and
+lets a joint pass share experts (E27); refresh them with distinct prompts.
 
 ## Memory
 

@@ -1355,3 +1355,35 @@ factor of a wave is exactly 1 (a uniform branch around the multiplies:
 measured: the Engram projection is 25,600 × 6,144 (17.8 ms per call, 36
 TFLOP/s; the tune bench had a 1,280-wide input), and FP16 rows would save
 0.8 ms of it.
+
+### E27: one joint verification for concurrent DSpark sessions (retained)
+
+Concurrent sessions verified jointly in groups of up to 16 rows (E14), but
+each still drafted a full block, so from four users a step needed two or
+more joint evaluations and mixed text decoded slower than AR. A batch now
+gives each session at most its even share of one 16-row evaluation
+(16 / users − 1 copies or greedy drafts), plus the rows earlier sessions
+left, and verifies anchors only past eight users. Cycles in a batch no
+longer feed the batch's time into a session's own width timings. Sampled
+drafts keep their own width: a shorter block consumes different draws, and
+seeded outputs must not depend on the batch (the `batch` suite's
+cross-endpoint replay caught this).
+
+On the card workload (the same prompt for every user, greedy) mixed text
+rises 42.6 / 43.7 / 44.7 → 51.4 / 55.0 / 57.8 tok/s at C4 / C6 / C8 and
+repetitive text 75.4 / 74.9 / 74.8 → 89.2 / 97.4 / 92.3, every completion
+identical to the isolated AR reference. With a different prompt per user
+(11-prompt corpus) it rises 40.6 / 42.1 → 47.6 / 51.5 at C4 / C8, against
+46.0 / 54.6 for AR.
+
+Two policies on top were measured and not kept. Trimming drafts after
+drafting by an expected-tokens-per-ms model (v2) stayed within noise. A
+batch plan before drafting (v3), from measured drafter (8–10 ms per session,
+run one after another) and joint pass costs, skips drafting where it does
+not pay: +6–13% on the card's mixed text, −4–7% on its repetitive text, and
+a tie on distinct prompts (47.3 / 52.0). The card's identical prompts keep
+v1's sessions in lockstep, so a 16-row pass holds four copies of the same
+tokens and shares their experts (166 against 185 ms once sessions drift);
+that lockstep, not the policy, explains v1's repetitive lead. The remaining
+cost is the serial drafter forwards ([backlog](BACKLOG.md) item 10).
+Runs are in [the E27 record](artifacts/2026-10-29-joint-draft-sizing/summary.txt).

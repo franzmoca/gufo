@@ -374,6 +374,11 @@ struct Cycle {
   const ds41_session_dspark_batch_item* item = nullptr;
   bool stochastic = false;
   bool done = false;  // finished without an evaluation
+  /* Proposals this cycle may verify (copies and greedy drafts); a batch's
+   * sessions share one joint evaluation's rows. Their cycles' times are the
+   * batch's, not their own. */
+  uint32_t cap = ds41_session::kVerifyRows - 1;
+  bool shared = false;
   int block[ds41_session::kVerifyRows] = {};
   uint32_t first = 0, copied = 0, tail = 0, m = 0;
   size_t copy_start = 0;
@@ -434,7 +439,7 @@ int prepare(Cycle& c, char* error, size_t capacity) {
     size_t agreed = 0;
     const auto match = s->lookup.Find(s->tokens, std::span<const int>(&anchor, 1),
                                       sampler ? Lookup::kSampledMinMatch : Lookup::kMinMatch, false, &agreed);
-    const uint32_t cap = std::min(ds41_session::kVerifyRows - 1, room);
+    const uint32_t cap = std::min(c.cap, room);
     if (match.length != 0) {
       c.copy_start = match.start;
       while (c.copied < std::min<size_t>(cap, agreed)) {
@@ -447,7 +452,10 @@ int prepare(Cycle& c, char* error, size_t capacity) {
   /* Without a copy, the drafter (if any) proposes the block. */
   c.tail = c.copied;
   if (c.copied == 0 && s->dspark) {
-    const uint32_t limit = std::min({(uint32_t)DS41_DSPARK_BLOCK, item.max_draft_tokens, room});
+    /* Sampled proposals keep their own width: the draws a block consumes
+     * depend on it, and seeded outputs must not depend on the batch. */
+    const uint32_t limit =
+        std::min({(uint32_t)DS41_DSPARK_BLOCK, item.max_draft_tokens, room, c.stochastic ? UINT32_MAX : c.cap});
     const bool learned = !c.stochastic && ds41_dspark_has_confidence(s->engine->dspark);
     c.tail = c.stochastic || learned ? limit : draft_width(s, limit);
     c.plain = c.tail == 0;
@@ -581,7 +589,7 @@ int finish(Cycle& c, char* error, size_t capacity) {
   const auto t2 = std::chrono::steady_clock::now();
   auto& p = s->policy;
   if (m == 1) {
-    if (c.plain) ema(p.cycle_ms[0], ms(c.t0, t2));
+    if (c.plain && !c.shared) ema(p.cycle_ms[0], ms(c.t0, t2));
     return 0;
   }
   auto& st = s->stats;
@@ -606,7 +614,7 @@ int finish(Cycle& c, char* error, size_t capacity) {
   /* Drafts after the first rejection say nothing about their acceptance. */
   for (uint32_t k = 0; k < std::min(accepted, c.tail); k++) ema(p.accept[k], k + 1 < accepted ? 1.0f : 0.0f);
   for (uint32_t k = c.tail; k < DS41_DSPARK_BLOCK; k++) ema(p.accept[k], ds41_session::kAcceptPrior, kPolicyRelax);
-  const float miss = ms(c.t0, t2) - p.cycle_ms[c.tail];
+  const float miss = c.shared ? 0.0f : ms(c.t0, t2) - p.cycle_ms[c.tail];
   for (uint32_t w = 1; w <= DS41_DSPARK_BLOCK; w++) p.cycle_ms[w] += (w == c.tail ? kPolicyRate : kPolicyShift) * miss;
   if (trace)
     fprintf(stderr, "ds41: DSpark pos=%u drafted=%u accepted=%u draft=%.1fms verify=%.1fms\n", c.first, c.tail,
@@ -617,13 +625,28 @@ int finish(Cycle& c, char* error, size_t capacity) {
 }  // namespace
 
 /* Sessions' blocks evaluate jointly, in groups of up to DS41_DECODER_MAX_JOINT
- * rows: each weight is read once per group instead of once per session. */
+ * rows: each weight is read once per group instead of once per session. The
+ * sessions share one group's rows: each keeps room for the anchors and even
+ * shares of the sessions after it and takes the rest, so a session gets at
+ * least its even share and the rows earlier ones left. A batch of more than
+ * DS41_DECODER_MAX_JOINT / 2 sessions verifies anchors only. Sampled drafts
+ * are not capped and may need a second group. */
 int ds41_sessions_dspark_step_batch(const ds41_session_dspark_batch_item* items, size_t count, char* error,
                                     size_t capacity) {
   std::vector<Cycle> cycles(count);
+  constexpr uint32_t kRows = DS41_DECODER_MAX_JOINT;
+  const uint32_t share = count > 1 ? std::max<uint32_t>(1, kRows / (uint32_t)count) : 0;
+  uint32_t taken = 0;
   for (size_t i = 0; i < count; i++) {
-    cycles[i].item = &items[i];
-    if (prepare(cycles[i], error, capacity) != 0) return 1;
+    Cycle& c = cycles[i];
+    c.item = &items[i];
+    if (count > 1) {
+      const uint32_t reserved = (uint32_t)(count - i - 1) * share;
+      c.cap = std::min(c.cap, kRows - 1 - std::min(kRows - 1, taken + reserved));
+      c.shared = true;
+    }
+    if (prepare(c, error, capacity) != 0) return 1;
+    if (!c.done) taken += c.m;
   }
   Cycle* group[DS41_DECODER_MAX_JOINT];
   uint32_t grouped = 0, rows = 0;
