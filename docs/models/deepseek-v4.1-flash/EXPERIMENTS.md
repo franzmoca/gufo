@@ -1617,3 +1617,14 @@ Server, IQ1_M, distinct prompts (AR, two alternations): C8 61.92 / 61.90 ->
 62.85 / 62.72 tok/s (+1.5%), C4 55.40 / 55.17 -> 55.10 / 55.81. Single-user
 (256 tokens) AR 24.07 / 24.08 -> 24.12 / 24.22, DSpark 38.68 / 39.17 ->
 38.98 / 39.84. All completions and token traces identical.
+
+### E41: split GEMV scratch for 5-8-row output heads (retained)
+
+The split GEMV's slice results (`kSplitPartFloats`, 16 MiB) held no
+129,280-row output head beyond 4 tokens at 8 slices, so 5-8-row heads
+(DSpark verification, C6-C8 joint steps) took the lane kernel. The scratch
+is now 32 MiB. Standalone (DRAM-cold, bit-identical to single-token
+launches): 6 rows 2,553 -> 2,147 us, 8 rows 2,918 -> 2,190 (1 row 1,920).
+Server, IQ1_M, distinct prompts: C8 62.69 / 62.70 -> 63.08 / 63.00 tok/s,
+C4 unchanged; single-user DSpark (256 tokens) 39.25 / 39.04 -> 40.36 /
+39.32, AR unchanged. All completions and token traces identical.

@@ -326,8 +326,9 @@ __global__ void __launch_bounds__(kWave* kWaves)
 }
 
 /* Slice results and per-tile counters of split_gemv_kernel: every launch
- * runs on the null stream, so one buffer serves them in turn. */
-constexpr uint64_t kSplitPartFloats = 8ull * 16 * 32768;
+ * runs on the null stream, so one buffer serves them in turn. 32 MiB holds
+ * the 129,280-row output head's 8 slices for up to 8 tokens. */
+constexpr uint64_t kSplitPartFloats = 8ull * 16 * 65536;
 struct SplitScratch {
   float* part = nullptr;
   uint32_t* counter = nullptr;
