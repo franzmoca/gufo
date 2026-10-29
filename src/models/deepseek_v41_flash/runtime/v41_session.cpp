@@ -330,8 +330,8 @@ void ema(float& v, float x, float rate = kPolicyRate) { v += rate * (x - v); }
 
 /* The request's next token from target logits: the argmax (greedy) or a
  * draw by the request's sampler. */
-int draw(const ds41_session* s, const ds41_dspark_sampler* sampler, const float* row) {
-  const int top = ds41_sample_argmax(row, vocab(s));
+int draw(const ds41_session* s, const ds41_dspark_sampler* sampler, const float* row, const int32_t* argmax = nullptr) {
+  const int top = argmax ? *argmax : ds41_sample_argmax(row, vocab(s));
   if (!sampler || (sampler->try_accept_argmax && top >= 0 && sampler->try_accept_argmax(sampler->ctx, top)))
     return top;
   return sampler->sample(sampler->ctx, row, vocab(s));
@@ -392,6 +392,7 @@ struct Cycle {
   size_t copy_start = 0;
   bool plain = false;        // the drafter's policy chose a plain step
   bool speculative = false;  // the block's rows wait in spec_logits for the commit
+  int32_t argmax[ds41_session::kVerifyRows] = {};  // each row's argmax, from the evaluation
   /* A drafter pass this cycle waits for (draft), its learned width policy
    * and the drafter's outputs. */
   bool draft = false, learned = false;
@@ -513,7 +514,7 @@ int evaluate(Cycle& c, char* error, size_t capacity) {
   ds41_session* s = c.item->session;
   if (c.m == 1) return eval(s, c.block, 1, error, capacity) ? 0 : 1;
   if (s->before_write) s->before_write(s->write_data, c.first, c.first + c.m);
-  if (ds41_decoder_eval_speculative(s->decoder, c.block, c.m, s->spec_logits.data()) != 0) {
+  if (ds41_decoder_eval_speculative(s->decoder, c.block, c.m, s->spec_logits.data(), c.argmax) != 0) {
     set_error(error, capacity, "DSpark verification failed");
     s->valid = false;
     return 1;
@@ -529,6 +530,7 @@ int evaluate_joint(Cycle* const* cycles, uint32_t count, char* error, size_t cap
   const int* tokens[DS41_DECODER_MAX_JOINT];
   uint32_t ns[DS41_DECODER_MAX_JOINT];
   float* logits[DS41_DECODER_MAX_JOINT];
+  int32_t* argmax[DS41_DECODER_MAX_JOINT];
   for (uint32_t i = 0; i < count; i++) {
     ds41_session* s = cycles[i]->item->session;
     if ((int)(s->tokens.size() + cycles[i]->m) >= s->context) return 2;
@@ -536,13 +538,14 @@ int evaluate_joint(Cycle* const* cycles, uint32_t count, char* error, size_t cap
     tokens[i] = cycles[i]->block;
     ns[i] = cycles[i]->m;
     logits[i] = s->spec_logits.data();
+    argmax[i] = cycles[i]->argmax;
   }
   for (uint32_t i = 0; i < count; i++) {
     const Cycle& c = *cycles[i];
     ds41_session* s = c.item->session;
     if (s->before_write) s->before_write(s->write_data, c.first, c.first + c.m);
   }
-  const int rc = ds41_decoder_eval_joint(decoders, tokens, ns, count, logits);
+  const int rc = ds41_decoder_eval_joint(decoders, tokens, ns, count, logits, argmax);
   if (rc == 1) {
     set_error(error, capacity, "DSpark verification failed");
     for (uint32_t i = 0; i < count; i++) cycles[i]->item->session->valid = false;
@@ -572,17 +575,20 @@ int finish(Cycle& c, char* error, size_t capacity) {
   int next = -1;
   const ds41_v41_proposal* proposals =
       c.stochastic && c.copied == 0 && s->dspark ? ds41_dspark_proposals(s->dspark) : nullptr;
+  /* A speculative evaluation's rows come with their argmax. */
+  const int32_t* row_argmax = c.speculative ? c.argmax : nullptr;
   for (uint32_t i = 1; i < m; i++) {
     const float* row = rows + (uint64_t)(i - 1) * n_vocab;
+    const int32_t* top = row_argmax ? row_argmax + (i - 1) : nullptr;
     if (next >= 0) {
-      positional += ds41_sample_argmax(row, n_vocab) == block[i];
+      positional += (top ? *top : ds41_sample_argmax(row, n_vocab)) == block[i];
       continue;
     }
     int drawn = -1, argmax = -1;
     if (!device_draw(s, sampler, i - 1, proposals ? proposals + (i - 1) : nullptr, &drawn, &argmax)) {
-      argmax = ds41_sample_argmax(row, n_vocab);
+      argmax = top ? *top : ds41_sample_argmax(row, n_vocab);
       drawn = c.stochastic && c.copied == 0 ? sampler->verify(sampler->ctx, i - 1, row, n_vocab, block[i])
-                                            : draw(s, sampler, row);
+                                            : draw(s, sampler, row, &argmax);
     }
     positional += argmax == block[i];
     if (drawn != block[i] || ends(drawn) || block[i] == stop)
@@ -608,7 +614,7 @@ int finish(Cycle& c, char* error, size_t capacity) {
   /* The token after a fully accepted block (or a plain step): the last row. */
   int bonus_argmax = -1;
   if (next < 0 && !device_draw(s, sampler, m - 1, nullptr, &next, &bonus_argmax))
-    next = draw(s, sampler, s->logits.data());
+    next = draw(s, sampler, s->logits.data(), row_argmax ? row_argmax + m - 1 : nullptr);
   if (next < 0 || next >= (int)n_vocab) {
     set_error(error, capacity, "DSpark target logits contain no finite values");
     s->valid = false;

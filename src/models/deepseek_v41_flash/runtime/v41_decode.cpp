@@ -292,6 +292,10 @@ struct ds41_decoder : Activations {
   uint32_t logits_row0 = 0;  // their first row there
   uint64_t logits_gen = 0;   // the evaluation that left them
   void* sample_scratch = nullptr;
+  /* Rows' device argmax for the speculative evaluations (row_argmax), and
+   * where eval_rows leaves them on the host (null: not wanted). */
+  int32_t* row_argmax = nullptr;
+  int32_t* argmax_out = nullptr;
   /* Streamed-expert prefetch (expert_store.h): the next layer's router is
    * evaluated one layer early on this layer's FFN input, and the store's
    * thread submits a background read when each prediction's ids land. The
@@ -1806,9 +1810,12 @@ int eval_rows(ds41_decoder* d, const int* tokens, uint32_t n, uint32_t keep_from
     for (uint32_t r = 0; r < logit_rows && ok; r += kLogitRows) {
       const uint32_t rows = std::min(kLogitRows, logit_rows - r);
       ok = linear(d, w->output, d->xn + (uint64_t)r * kDim, d->logits, rows) &&
+           (!d->argmax_out || ds41_v41_argmax_rows(d->logits, DS41_N_VOCAB, rows, d->row_argmax + r) == 0) &&
            hipMemcpy(logits + (uint64_t)r * DS41_N_VOCAB, d->logits, (uint64_t)rows * DS41_N_VOCAB * sizeof(float),
                      hipMemcpyDeviceToHost) == hipSuccess;
     }
+    ok = ok && (!d->argmax_out || hipMemcpy(d->argmax_out, d->row_argmax, logit_rows * sizeof(int32_t),
+                                            hipMemcpyDeviceToHost) == hipSuccess);
   }
   ok = ok && hipDeviceSynchronize() == hipSuccess;
   if (!ok) {
@@ -1849,23 +1856,32 @@ int ds41_decoder_eval_prompt(ds41_decoder* d, const int* tokens, uint32_t n, uin
   return rc;
 }
 
-int ds41_decoder_eval_speculative(ds41_decoder* d, const int* tokens, uint32_t n, float* logits) {
+/* The device rows for row_argmax, allocated on first use. */
+static bool ensure_row_argmax(ds41_decoder* d) {
+  if (!d->row_argmax) d->row_argmax = alloc<int32_t>(d->allocations, kLogitRows);
+  return d->row_argmax != nullptr;
+}
+
+int ds41_decoder_eval_speculative(ds41_decoder* d, const int* tokens, uint32_t n, float* logits, int32_t* argmax) {
   static_assert(DS41_DECODER_MAX_SPECULATIVE <= DS41_V41_GEMV_MAX_TOKENS &&
-                DS41_DECODER_MAX_SPECULATIVE <= DS41_V41_ATTN_SPLIT_MAX_TOKENS);
-  if (!d || d->spec_n || n == 0 || n > DS41_DECODER_MAX_SPECULATIVE) return 1;
+                DS41_DECODER_MAX_SPECULATIVE <= DS41_V41_ATTN_SPLIT_MAX_TOKENS &&
+                DS41_DECODER_MAX_SPECULATIVE <= kLogitRows);
+  if (!d || d->spec_n || n == 0 || n > DS41_DECODER_MAX_SPECULATIVE || (argmax && !ensure_row_argmax(d))) return 1;
   d->spec_pos0 = d->pos;
   d->spec_eval = true;
+  d->argmax_out = argmax;
   /* Every row keeps single-token arithmetic, as serial decode would. */
   d->decode_rows = DS41_DECODER_MAX_SPECULATIVE;
   const int rc = ds41_decoder_eval(d, tokens, n, logits, n, nullptr, nullptr);
   d->decode_rows = kDecodeRows;
   d->spec_eval = false;
+  d->argmax_out = nullptr;
   if (rc == 0) d->spec_n = n;
   return rc;
 }
 
 int ds41_decoder_eval_joint(ds41_decoder* const* ds, const int* const* tokens, const uint32_t* ns, uint32_t count,
-                            float* const* logits) {
+                            float* const* logits, int32_t* const* argmax) {
   static_assert(DS41_DECODER_MAX_JOINT <= DS41_V41_GEMV_MAX_TOKENS && DS41_DECODER_MAX_JOINT <= kMinCapacity &&
                 DS41_DECODER_MAX_JOINT <= kLogitRows && DS41_DECODER_MAX_JOINT <= DS41_V41_ATTN_SPLIT_MAX_TOKENS);
   if (!ds || !tokens || !ns || !logits || count == 0) return 1;
@@ -1970,9 +1986,15 @@ int ds41_decoder_eval_joint(ds41_decoder* const* ds, const int* const* tokens, c
     ok = ds41_v41_hc_collapse_norm(lead->h, lead->pre[prev], f32(lead, w->output_norm), lead->xn, kHc, kDim,
                                    DS41_RMS_EPS, total) == 0 &&
          linear(lead, w->output, lead->xn, lead->logits, total);
+  int32_t ids[DS41_DECODER_MAX_JOINT];
+  ok = ok && (!argmax || (ensure_row_argmax(lead) &&
+                          ds41_v41_argmax_rows(lead->logits, DS41_N_VOCAB, total, lead->row_argmax) == 0));
   for (uint32_t i = 0; i < count && ok; i++)
     ok = hipMemcpy(logits[i], lead->logits + (uint64_t)first[i] * DS41_N_VOCAB,
                    (uint64_t)ns[i] * DS41_N_VOCAB * sizeof(float), hipMemcpyDeviceToHost) == hipSuccess;
+  ok = ok && (!argmax || hipMemcpy(ids, lead->row_argmax, total * sizeof(int32_t), hipMemcpyDeviceToHost) == hipSuccess);
+  for (uint32_t i = 0; i < count && ok && argmax; i++)
+    if (argmax[i]) memcpy(argmax[i], ids + first[i], ns[i] * sizeof(int32_t));
   ok = ok && hipDeviceSynchronize() == hipSuccess;
   const uint64_t gen = ok ? ++lead->shared->logits_gen : 0;
   for (uint32_t i = 0; i < count; i++) {

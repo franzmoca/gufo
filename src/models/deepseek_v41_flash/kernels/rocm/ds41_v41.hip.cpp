@@ -2253,9 +2253,12 @@ __global__ void gather_row_kernel(const void* table, int format, const int32_t* 
 }
 
 /* tokens[index] = argmax over finite x[v] + bias[v], the first on ties; -1 when none. One block. */
+/* Block b takes row b of x (tokens[index + b]). */
 __global__ void __launch_bounds__(1024) argmax_bias_kernel(const float* x, const float* bias, uint32_t n,
                                                            int32_t* tokens, uint32_t index,
                                                            const int32_t* id_map = nullptr) {
+  x += (uint64_t)blockIdx.x * n;
+  index += blockIdx.x;
   __shared__ float best_v[1024];
   __shared__ int32_t best_i[1024];
   float v = -INFINITY;
@@ -2966,6 +2969,12 @@ extern "C" int ds41_v41_propose_top8(const float* x, const float* bias, uint32_t
                                      int32_t* token) {
   top8_bias_kernel<true><<<1, 256>>>(x, bias, n, ids, logits, draw, temperature, proposal, token);
   return launch_ok("top8 proposal");
+}
+
+extern "C" int ds41_v41_argmax_rows(const float* x, uint32_t n, uint32_t rows, int32_t* tokens) {
+  if (rows == 0) return 0;
+  argmax_bias_kernel<<<rows, 1024>>>(x, nullptr, n, tokens, 0);
+  return launch_ok("argmax rows");
 }
 
 extern "C" int ds41_v41_argmax_bias(const float* x, const float* bias, uint32_t n, int32_t* tokens, uint32_t index) {
