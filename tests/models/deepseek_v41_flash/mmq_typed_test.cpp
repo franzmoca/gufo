@@ -1137,6 +1137,8 @@ int main(int argc, char** argv) {
       for (const int n : {2, 3, 5, 6, 7, 8, 12, 16}) {
         ok = GemvTokensCase(t, 300, 1280, 0, n, rng) && ok;
         ok = GemvTokensCase(t, 256, 4096, 64, n, rng) && ok;
+        // Pairs split at multiples of 32 rows take the task-major kernel.
+        ok = GemvTokensCase(t, 320, 1280, 0, n, rng) && ok;
       }
       ok = SwigluCase(t, 2304, 5120, rng) && ok;
     }

@@ -61,14 +61,6 @@ pp2048 runs 1,182 tok/s at 32K, 1,155 at 64K and 1,098 at 128K.
 | 15 | Smaller items | Various | Small | — |
 | 16 | Multi-user AR decode below the 2026-10-26 card | Serving decode | C8 51.8 against 78.5 tok/s | Medium |
 
-### 2. Fused SwiGLU and Q8_0 pair launches through the split GEMV
-
-The task-major split GEMV covers single Q5_K projections only. The fused
-shared gate/up + SwiGLU launch (sh_gate 75 → 103 µs from one to eight
-tokens) and the Q8_0 q_a/KV pair still use the lane layout whose
-multi-token cost is activation loads. Port them to the split kernel with the
-same xor-tree and slice order.
-
 ### 3. Expert reads for rejected verification rows
 
 On streamed DSpark every verification row pays for its own experts, and
