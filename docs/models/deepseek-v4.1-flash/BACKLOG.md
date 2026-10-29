@@ -54,7 +54,6 @@ pp2048 runs 1,182 tok/s at 32K, 1,155 at 64K and 1,098 at 128K.
 | 5 | Compact selection and WMMA prefill rescoring | Long context | Prefill and verification beyond 16K | Medium |
 | 6 | Routed FP16 kernel: weight decode per slot | Prefill | ~5–20% of routed time | Low |
 | 7 | Remaining prefill glue | Prefill | ~30–60 ms per 2K batch | Medium |
-| 8 | Small-batch evaluation cost | Short turns | ~15 ms per follow-up turn | Low |
 | 9 | Stable-boundary prefill pass per chat request | Serving | ~65 ms per request | Medium |
 | 10 | Concurrent drafter forwards | Serving decode | ~9 ms per drafting session per step; DSpark 5% under AR at C8 | Medium |
 | 13 | Route bias toward cached experts (changes outputs) | Streamed decode | Opt-in approximation | Low |
@@ -137,15 +136,6 @@ a pinned buffer or a device gather would hide most of it. The Engram
 projection (25,600 × 6,144, 17.8 ms per call, two per chunk) still reads
 FP32 rows; FP16 rows from the host reader would save 0.8 ms per call and
 half the upload, and the shared down projection's SwiGLU input 0.04 ms.
-
-### 8. Small-batch evaluation cost
-
-Short follow-up turns evaluate 3–20 tokens per batch and the cost is not
-monotonic: 7 tokens from position 8,469 take 136 ms, 9 tokens from 8,467
-take 120 ms; at position 0, 10 tokens take 160 ms and 12 take 143. Find
-which kernels switch paths between these sizes (`tools/prof/prof.py`), then
-tune dispatch per projection and purpose; WMMA changes verification
-arithmetic, so verification keeps its own switch points.
 
 ### 9. Stable-boundary prefill pass on every chat request
 
