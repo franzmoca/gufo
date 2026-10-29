@@ -118,10 +118,10 @@ preempts it.
 
 - Prefill batches of at least 1,024 tokens predict every layer; their jobs
   are "wide" and only a batch of that size adopts them.
-- Single tokens predict only when the current layer waited on reads: misses
-  cluster in neighbouring layers, and a prediction without a read stall to
-  hide its matvec costs more than the read it saves.
-- Verification and joint batches (2–16 rows) predict nothing.
+- Single tokens, verification and joint batches (up to 16 rows) predict
+  only when the current layer waited on reads: misses cluster in
+  neighbouring layers, and a prediction without a read stall to hide its
+  matvec costs more than the read it saves.
 - The next prepare of the job's layer adopts only the experts it routes,
   including their not yet started tasks; a wrong prediction costs bandwidth,
   never phase time. A prepare for the layer after parks the job; any other
