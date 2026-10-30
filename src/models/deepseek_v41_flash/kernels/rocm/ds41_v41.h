@@ -82,7 +82,7 @@ int ds41_v41_gemv_experts_grouped(int type, const void* w, const void* w_up, con
                                   uint32_t k, const void* const* w_table = nullptr,
                                   const void* const* w_up_table = nullptr, int zero_dropped = 1);
 
-/* Batched dense projections (Q5_K, Q6_K) on the FP16 matrix cores: for each group
+/* Batched dense projections (Q5_K, Q6_K, Q8_0) on the FP16 matrix cores: for each group
  * z < groups, out[t, z m + r] = W_z[r] . x[t, z k : z k + k] over n tokens,
  * W_z the z-th [m][k] matrix stored back to back; x rows hold groups * k
  * floats, rounded to FP16 as they are staged, and out rows groups * m

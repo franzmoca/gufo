@@ -1157,7 +1157,7 @@ int main(int argc, char** argv) {
   for (const auto& t : kTypes) {
     ok = DenseCase(t, 256, 37, 1024, rng) && ok;
     ok = DenseCase(t, 384, 130, 2304, rng) && ok;
-    if (t.type == 13 || t.type == 14) {
+    if (t.type == 8 || t.type == 13 || t.type == 14) {
       ok = DenseF16Case(t, 256, 37, 1280, 1, rng) && ok;
       ok = DenseF16Case(t, 512, 300, 2304, 1, rng) && ok;
       ok = DenseF16Case(t, 256, 130, 512, 4, rng) && ok;
