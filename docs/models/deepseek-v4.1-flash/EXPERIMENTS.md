@@ -1879,3 +1879,55 @@ With FP32 output, against 3.14 / 5.48 / 8.31 ms for the full kernel:
 Reading FP32 Q costs 0.2–0.5 ms per call. FP16 Q written by `q_b` (rope
 and rounding moved into its epilogue) would save about half of that, about
 1% of prefill. Not attempted.
+
+## E54 — decode: global expert loads, FP8 output in the split combine
+
+Profile of one warm UD-IQ1_M decode layer (streamed experts): 23 launches,
+990 us busy, 78 us of gaps. The dense GEMVs read at 87-95% of the
+240 GB/s ceiling (`ds41_gemv_bench`); the table-indexed expert GEMVs that
+streaming uses ran at 77-81%.
+
+**Retained, global expert loads.** The streamed store passes each expert's
+rows through a pointer table. A pointer loaded from memory is generic, so
+the expert GEMV's weight loads compiled to `flat_load`, which count against
+the same wait counter as the LDS codebook reads: every codebook wait also
+waited for the weight loads in flight. The table entries are now read as
+global pointers. Neither an address-space cast of the loaded pointer nor
+`__builtin_assume(!is_shared && !is_private)` changed the code; a
+global-typed table element did. `ds41_gemv_bench`, table path, x6 slots:
+
+| Format | before | after |
+| --- | ---: | ---: |
+| IQ1_S up / down | 90.3 / 91.0 us | 75.6-76.1 / 77.5-78.2 |
+| IQ2_XXS up / down | 103.5 / 104.5 | 97.5 / 99.3 |
+| IQ2_XS up / down | 110.5 / 110.7 | 105.8 / 104.3 |
+
+The table path now matches the plain path bit for bit and in time.
+`gufo bench` tg128, streamed UD-IQ1_M, alternating: 20.15 / 20.32 ->
+20.59 / 20.61 tok/s.
+
+**Retained, FP8 output in the split combine.** The decode split
+attention's combine applies `rope_fp8`'s inverse rotation and FP8 rounding
+(4 dimensions per thread, block maximum over 8 lanes, the rotation's FMAs
+written as `rope_fp8_kernel` contracts them), dropping one launch per
+layer. `ds41.attention` checks the result bit for bit against the separate
+`rope_tail`, unrotated attention and `rope_fp8` launches at 1, 3 and 16
+tokens. One-token attention call (rope, split path): 0.042 -> 0.038 ms
+(ratio 4), 0.023 -> 0.020 (ratio 128), 0.023 -> 0.019 (window only).
+
+Rejected:
+
+- Rotating q in the split kernel's registers instead of `rope_tail`: the
+  rotation compiled identically, but the compiler then reassociated the
+  score dot products, changing about half of the FP32 outputs by an ulp.
+- The expert GEMV's first blocks loaded before its codebook copy and
+  barrier: every format slower (IQ1_S 76 -> 81 us up, 79 -> 88 down).
+- Global instead of flat weight loads in the prefill routed FP16 tiles
+  (the aligned-word pointer was formed through an integer mask): 20.53 ->
+  20.42 ms IQ1_S gate+up, 21.39 -> 21.27 IQ2_XXS, within noise; those tiles
+  are bound by the matrix cores.
+
+A synthetic dependent chain (`hipcc`, gfx1151) gives a tiny kernel 1.9 us
+after a 2,048-block working kernel and 5-11 us after 64-1,024-block ones,
+so the profile's ~7 us gaps after the large-grid GEMVs are not explained
+by grid size.
