@@ -61,6 +61,32 @@ The 95.4–95.9% agreement equals the GPU-vs-oracle agreement of one engine
 on one table, so swapping the table moves predictions about as much as
 floating-point differences do.
 
+### Natural text, per token
+
+Five texts of about 4,000 tokens each (batched path, same binary):
+the opening of *Pride and Prejudice* and of Deledda's *Dopo il divorzio*
+(Project Gutenberg #1342, #43226), the English "Venice" and Italian
+"Venezia" Wikipedia articles (revisions 1381565361, 153064346), and FLORES-200
+devtest as interleaved `English:` / `Italiano:` pairs. ΔNLL is MXFP8 −
+IQ4_NL with a 95% block-bootstrap interval (blocks of 256 positions).
+
+| Text | `IQ1_M` PPL IQ4_NL / MXFP8 | ΔNLL | `IQ2_XXS` PPL IQ4_NL / MXFP8 | ΔNLL |
+|---|---|---:|---|---:|
+| English novel | 1.144 / 1.138 | −0.0045 [−0.0114, +0.0011] | 1.119 / 1.115 | −0.0037 [−0.0065, −0.0009] |
+| Italian novel | 8.913 / 8.924 | +0.0012 [−0.0037, +0.0065] | 7.999 / 7.963 | −0.0046 [−0.0101, +0.0007] |
+| English Wikipedia | 1.770 / 1.761 | −0.0050 [−0.0086, −0.0014] | 1.625 / 1.613 | −0.0074 [−0.0120, −0.0028] |
+| Italian Wikipedia | 4.355 / 4.318 | −0.0084 [−0.0153, −0.0016] | 3.984 / 3.945 | −0.0098 [−0.0206, −0.0004] |
+| FLORES EN/IT pairs | 2.798 / 2.764 | −0.0122 [−0.0211, −0.0042] | 2.699 / 2.675 | −0.0091 [−0.0151, −0.0028] |
+
+MXFP8 is lower on 9 of 10 runs and the interval excludes zero on 6. The
+gain is largest where the model has likely memorised the text (perplexity
+1.1-2.8: the English novel, Wikipedia, FLORES) and absent on the one
+unfamiliar text, the Italian novel (perplexity 8-9) on `IQ1_M`. That fits
+the Engram tables' role as n-gram memory: a more precise table recalls
+familiar sequences slightly better. On FLORES the gain sits on the English
+side (−0.021 and −0.025), not the Italian translation. The technical
+English texts above show no gain, and the task scores do not move.
+
 ## Task evaluation
 
 `gufo serve` (release build), greedy (`temperature 0`, `seed 1`),
