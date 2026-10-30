@@ -95,6 +95,11 @@ int ds41_v41_gemv_experts_grouped(int type, const void* w, const void* w_up, con
 #define DS41_V41_DENSE_OUT_HALF 2u
 int ds41_v41_dense_f16(int type, const void* w, const void* x, void* out, uint32_t m, uint32_t n, uint32_t k,
                        uint32_t groups, uint32_t io);
+/* out1 = W1 x and out2 = W2 x in one launch, as two ds41_v41_dense_f16
+ * calls of one group (the same results): W1 [m1][k] and W2 [m2][k] of one
+ * type share the x rows. m2 must be a multiple of 256 as well. */
+int ds41_v41_dense_f16_pair(int type, const void* w1, void* out1, uint32_t m1, const void* w2, void* out2,
+                            uint32_t m2, const void* x, uint32_t n, uint32_t k, uint32_t io);
 /* Batched routed experts (IQ1_S, IQ1_M, IQ2_XXS, IQ2_XS, IQ2_S) on the FP16 matrix cores, with FP16
  * activations x. rows lists the slots grouped by expert, expert e owning
  * rows[bounds[e] .. bounds[e + 1]), and tiles[0:n_tiles] names 64 of them

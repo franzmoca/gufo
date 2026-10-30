@@ -393,6 +393,23 @@ bool dense_f16(uint32_t type, uint32_t rows, uint32_t k, uint32_t n) {
   return n > 8 && (type == DS41_TENSOR_Q5_K || type == DS41_TENSOR_Q6_K) && rows % 256 == 0 && k % 256 == 0;
 }
 
+/* Whether out1 = W1 x and out2 = W2 x fit one ds41_v41_dense_f16_pair launch. */
+bool dense_f16_pair(const ds41_tensor* w1, const ds41_tensor* w2, uint32_t n) {
+  const uint32_t k = (uint32_t)w1->dim[0];
+  return w1->type == w2->type && w2->dim[0] == k && dense_f16(w1->type, (uint32_t)(w1->elements / k), k, n) &&
+         dense_f16(w2->type, (uint32_t)(w2->elements / k), k, n);
+}
+
+bool run_dense_f16_pair(const ds41_decoder* d, const ds41_tensor* w1, void* out1, const ds41_tensor* w2, void* out2,
+                        const void* x, uint32_t n, uint32_t io) {
+  const uint32_t k = (uint32_t)w1->dim[0];
+  const void* p1 = dev(d, w1);
+  const void* p2 = dev(d, w2);
+  return p1 && p2 &&
+         ds41_v41_dense_f16_pair((int)w1->type, p1, out1, (uint32_t)(w1->elements / k), p2, out2,
+                                 (uint32_t)(w2->elements / k), x, n, k, io) == 0;
+}
+
 /* out[t] = W x[t] for n tokens and a [rows, k] weight at `p` of `type`. */
 bool linear_raw(uint32_t type, const void* p, uint32_t rows, uint32_t k, const float* x, float* out, uint32_t n,
                 uint32_t decode_rows = kDecodeRows) {
@@ -438,6 +455,7 @@ bool linear(const ds41_decoder* d, const ds41_tensor* w, const float* x, float* 
 bool linear_pair(const ds41_decoder* d, const ds41_tensor* w1, float* out1, const ds41_tensor* w2, float* out2,
                  const float* x, uint32_t n) {
   const uint32_t k = (uint32_t)w1->dim[0];
+  if (n > d->decode_rows && dense_f16_pair(w1, w2, n)) return run_dense_f16_pair(d, w1, out1, w2, out2, x, n, 0);
   if (n > d->decode_rows && w1->type == w2->type && w2->dim[0] == k && mmq_batched(w1->type) &&
       !dense_f16(w1->type, (uint32_t)(w1->elements / k), k, n)) {
     const void* p1 = dev(d, w1);
@@ -668,6 +686,13 @@ bool attention(ds41_decoder* d, uint32_t il, uint32_t n, const Joint* joint) {
     const uint32_t m = (uint32_t)((wqa->elements + wkv->elements) / k);
     if (ds41_v41_gemv_pair((int)wqa->type, dev(d, wqa), d->qa, DS41_N_LORA_Q, dev(d, wkv), d->kv, kHeadDim, d->xn, k,
                            gemv_slices(m, k), n))
+      return false;
+  } else if (n > d->decode_rows && dense_f16_pair(wqa, wkv, n)) {
+    /* FP16 rows of xn (rounded as the kernel would stage them) in o, idle
+     * until the attention writes it: half the bytes per staged tile. */
+    auto* x16 = reinterpret_cast<uint16_t*>(d->o);
+    if (ds41_v41_to_half(d->xn, x16, (uint64_t)n * wqa->dim[0]) ||
+        !run_dense_f16_pair(d, wqa, d->qa, wkv, d->kv, x16, n, DS41_V41_DENSE_X_HALF))
       return false;
   } else if (!linear_pair(d, wqa, d->qa, wkv, d->kv, d->xn, n)) {
     return false;
@@ -902,13 +927,8 @@ static_assert(DS41_V41_GEMV_MAX_TOKENS <= DS41_V41_EXPERT_PLAN_COLS &&
 bool shared_moe(ds41_decoder* d, const ds41_layer_weights* l, uint32_t n, const uint16_t* x16) {
   const ds41_tensor* sg = l->ffn_gate_shexp;
   const ds41_tensor* su = l->ffn_up_shexp;
-  const uint32_t sk = (uint32_t)sg->dim[0], sm = (uint32_t)(sg->elements / sk);
-  if (x16 && su->dim[0] == sk && su->elements == sg->elements && dense_f16(sg->type, sm, sk, n) &&
-      dense_f16(su->type, sm, sk, n)) {
-    const void* pg = dev(d, sg);
-    const void* pu = dev(d, su);
-    if (!pg || !pu || ds41_v41_dense_f16((int)sg->type, pg, x16, d->sg, sm, n, sk, 1, DS41_V41_DENSE_X_HALF) ||
-        ds41_v41_dense_f16((int)su->type, pu, x16, d->su, sm, n, sk, 1, DS41_V41_DENSE_X_HALF) ||
+  if (x16 && dense_f16_pair(sg, su, n)) {
+    if (!run_dense_f16_pair(d, sg, d->sg, su, d->su, x16, n, DS41_V41_DENSE_X_HALF) ||
         ds41_v41_swiglu(d->sg, d->su, nullptr, d->sm, n, DS41_N_FF_EXP, kSwigluLimit))
       return false;
   } else if (n <= d->decode_rows && sg->type == su->type && sg->elements == su->elements && gemv_type(sg->type)) {
