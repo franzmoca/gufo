@@ -306,7 +306,7 @@ bool hc_mix(const ds41_dspark_tensor& fn, const ds41_dspark_tensor& scale, const
   for (uint32_t r = 0; r < n; r += kMixRows)
     if (ds41_v41_hc_mix(f32(fn), h + (uint64_t)r * kHc * kDim, f32(scale), f32(base), s.mixes + (uint64_t)r * kMixes,
                         pre + (uint64_t)r * kHc, post + (uint64_t)r * kHc, comb + (uint64_t)r * kHc * kHc, kHc, kDim,
-                        DS41_RMS_EPS, DS41_N_HC_SINKHORN_ITER, DS41_HC_EPS, std::min(kMixRows, n - r)))
+                        DS41_RMS_EPS, DS41_N_HC_SINKHORN_ITER, DS41_HC_EPS, std::min(kMixRows, n - r), nullptr))
       return false;
   return true;
 }

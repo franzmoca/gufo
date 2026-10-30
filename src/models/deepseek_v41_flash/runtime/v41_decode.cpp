@@ -330,6 +330,9 @@ struct ds41_decoder : Activations {
   /* Recorded after the router so the store reads the routes while the
    * shared expert runs; without it the store's copy waits for the stream. */
   hipEvent_t routes_ready = nullptr;
+  /* hc_mix's side stream: mixes overlap the projections of their half. */
+  hipStream_t mix_stream = nullptr;
+  hipEvent_t mix_start = nullptr, mix_done = nullptr;
   /* Batches of up to this many rows take the decode paths (FP32 GEMV,
    * grouped experts, per-row state mixes), where each row sees the
    * arithmetic of a single-token evaluation; up to
@@ -555,10 +558,26 @@ bool engram(ds41_decoder* d, uint32_t il, const float* rows, uint32_t n) {
   return ds41_v41_engram_gate(d->h, d->engram_kv, f32(d, l->engram_gate), kHc, kDim, DS41_RMS_EPS, n) == 0;
 }
 
+/* Up to this many tokens hc_mix is one kernel, which can run on mix_stream. */
+constexpr uint32_t kMixStreamTokens = 16;
+
+/* With a side stream (mix_stream, up to kMixStreamTokens), the mix runs there
+ * once the null stream reaches it; the mixes feed only the expand closing
+ * their half, which waits for mix_done first (join_mix). */
 bool hc_mix(ds41_decoder* d, const ds41_tensor* fn, const ds41_tensor* scale, const ds41_tensor* base,
             const float* h, float* pre, float* post, float* comb, uint32_t n) {
+  const bool side = d->mix_stream && n <= kMixStreamTokens;
+  hipStream_t stream = side ? d->mix_stream : nullptr;
+  if (side && (hipEventRecord(d->mix_start, nullptr) != hipSuccess ||
+               hipStreamWaitEvent(stream, d->mix_start, 0) != hipSuccess))
+    return false;
   return ds41_v41_hc_mix(f32(d, fn), h, f32(d, scale), f32(d, base), d->mixes, pre, post, comb, kHc, kDim,
-                         DS41_RMS_EPS, DS41_N_HC_SINKHORN_ITER, DS41_HC_EPS, n) == 0;
+                         DS41_RMS_EPS, DS41_N_HC_SINKHORN_ITER, DS41_HC_EPS, n, stream) == 0 &&
+         (!side || hipEventRecord(d->mix_done, stream) == hipSuccess);
+}
+
+bool join_mix(ds41_decoder* d, uint32_t n) {
+  return !d->mix_stream || n > kMixStreamTokens || hipStreamWaitEvent(nullptr, d->mix_done, 0) == hipSuccess;
 }
 
 bool copy_dev(float* dst, const float* src, uint64_t count) {
@@ -1314,13 +1333,13 @@ bool block(ds41_decoder* d, uint32_t il, int prev, int next, uint32_t n, const J
   /* Attention uses the pre-mix of the previous FFN (shifted mHC). */
   if (!hc_mix(d, l->hc_attn_fn, l->hc_attn_scale, l->hc_attn_base, d->h, d->pre[next], d->post, d->comb, n) ||
       ds41_v41_hc_collapse_norm(d->h, d->pre[prev], f32(d, l->attn_norm), d->xn, kHc, kDim, eps, n) ||
-      !attention(d, il, n, joint) ||
+      !attention(d, il, n, joint) || !join_mix(d, n) ||
       ds41_v41_hc_expand(d->attn_out, d->h, d->post, d->comb, d->h2, kHc, kDim, n))
     return false;
   /* The FFN uses this layer's attention pre-mix; its own pre-mix feeds the next attention. */
   if (!hc_mix(d, l->hc_ffn_fn, l->hc_ffn_scale, l->hc_ffn_base, d->h2, d->pre[prev], d->ffn_post, d->ffn_comb, n) ||
       ds41_v41_hc_collapse_norm(d->h2, d->pre[next], f32(d, l->ffn_norm), d->xn, kHc, kDim, eps, n) ||
-      !moe(d, il, n) ||
+      !moe(d, il, n) || !join_mix(d, n) ||
       ds41_v41_hc_expand_sum(d->down6, d->sd, DS41_N_EXPERT_USED, d->h2, d->ffn_post, d->ffn_comb, d->h, kHc, kDim,
                              n))
     return false;
@@ -1548,6 +1567,10 @@ ds41_decoder* ds41_decoder_create(ds41_engine* engine, uint32_t context) {
     if (hipEventCreateWithFlags(&d->routes_ready, hipEventDisableTiming) != hipSuccess)
       d->routes_ready = nullptr;
   }
+  if (hipEventCreateWithFlags(&d->mix_start, hipEventDisableTiming) != hipSuccess ||
+      hipEventCreateWithFlags(&d->mix_done, hipEventDisableTiming) != hipSuccess ||
+      hipStreamCreateWithFlags(&d->mix_stream, hipStreamNonBlocking) != hipSuccess)
+    d->mix_stream = nullptr;
   d->host_h.resize((uint64_t)kHc * kDim);
   d->host_ids.resize(DS41_N_EXPERT_USED);
   return d;
@@ -1562,6 +1585,13 @@ void ds41_decoder_destroy(ds41_decoder* d) {
       (void)hipEventDestroy(event);
   if (d->routes_ready)
     (void)hipEventDestroy(d->routes_ready);
+  if (d->mix_stream) {
+    (void)hipStreamSynchronize(d->mix_stream);
+    (void)hipStreamDestroy(d->mix_stream);
+  }
+  for (hipEvent_t event : {d->mix_start, d->mix_done})
+    if (event)
+      (void)hipEventDestroy(event);
   if (d->pred_pinned)
     (void)hipHostFree(d->pred_pinned);
   for (void* p : d->allocations) (void)hipFree(p);

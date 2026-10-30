@@ -1973,3 +1973,25 @@ Prefill keeps the shared expert in the read overlap. The pp2048 means
 this size: with the launch moved for every batch they read 1.7-3.8%
 lower, but the decode-only build, whose prefill path matches the previous
 commit, also read 0.7-2.4% lower.
+
+## E57 — decode: HC mixes on a side stream
+
+A layer's mixes (pre, post and comb) feed only the expand closing their
+half, and its collapse uses the previous half's pre-mix, so decode batches
+of up to 16 tokens now run `hc_mix` on a non-blocking stream forked after
+the state is written and joined before that expand. The kernels and their
+inputs are unchanged; logits and per-layer states of a 40-token streamed
+UD-IQ1_M greedy decode match bit for bit.
+
+The mix still reads its 2 MB while the projections it overlaps are
+bandwidth-bound, so only its latency is hidden. The profile shows the
+single-block collapse slowed from 4.2 to 10 us beside the mix, and the
+attention half's critical path shortened from about 28 to 19 us.
+`gufo bench` streamed UD-IQ1_M tg128, alternating with the previous
+commit: 20.19 -> 20.61, 20.48 -> 20.60 (pp2048 runs), 20.14 -> 20.22,
+20.06 -> 20.18 tok/s (pp512 runs); about +0.6% at the median.
+
+Rejected: launching each collapse before forking its mix. The collapse
+kept its 4.2 us, but the fork's host calls then delayed the first
+projection; tg128 20.49 / 20.49 -> 20.50 / 20.56, and 20.12 / 19.86 in the
+three-way pp512 runs, no gain.

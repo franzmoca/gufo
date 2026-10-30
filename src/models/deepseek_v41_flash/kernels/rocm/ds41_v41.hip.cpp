@@ -2744,12 +2744,13 @@ extern "C" int ds41_v41_hc_mixes(const float* fn, const float* h, float* mixes, 
 
 extern "C" int ds41_v41_hc_mix(const float* fn, const float* h, const float* scale, const float* base, float* mixes,
                                float* pre, float* post, float* comb, uint32_t hc, uint32_t dim, float eps,
-                               uint32_t iters, float hc_eps, uint32_t n) {
+                               uint32_t iters, float hc_eps, uint32_t n, hipStream_t stream) {
   if (n <= kMixSmallTokens && hc == 4 && (hc * dim) % 4 == 0) {
-    hc_mix_small_kernel<4><<<dim3((2 * hc + hc * hc) * kMixSlices, n), kMixSmallThreads>>>(fn, h, scale, base, mixes, pre, post,
-                                                                           comb, hc * dim, eps, iters, hc_eps);
+    hc_mix_small_kernel<4><<<dim3((2 * hc + hc * hc) * kMixSlices, n), kMixSmallThreads, 0, stream>>>(
+        fn, h, scale, base, mixes, pre, post, comb, hc * dim, eps, iters, hc_eps);
     return launch_ok("hc mix");
   }
+  if (stream) return 1;
   return ds41_v41_hc_mixes(fn, h, mixes, hc, dim, eps, n) ||
          ds41_v41_hc_sinkhorn(mixes, scale, base, pre, post, comb, hc, iters, hc_eps, n);
 }
