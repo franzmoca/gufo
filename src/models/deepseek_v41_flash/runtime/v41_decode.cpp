@@ -388,9 +388,10 @@ bool gemv_type(uint32_t type) {
   return type == DS41_TENSOR_Q5_K || type == DS41_TENSOR_Q6_K || type == DS41_TENSOR_Q8_0;
 }
 
-/* Batches of Q5_K and Q6_K rows run on the FP16 matrix cores (ds41_v41_dense_f16). */
+/* Batches of Q5_K, Q6_K and Q8_0 rows run on the FP16 matrix cores (ds41_v41_dense_f16). */
 bool dense_f16(uint32_t type, uint32_t rows, uint32_t k, uint32_t n) {
-  return n > 8 && (type == DS41_TENSOR_Q5_K || type == DS41_TENSOR_Q6_K) && rows % 256 == 0 && k % 256 == 0;
+  return n > 8 && (type == DS41_TENSOR_Q5_K || type == DS41_TENSOR_Q6_K || type == DS41_TENSOR_Q8_0) &&
+         rows % 256 == 0 && k % 256 == 0;
 }
 
 /* Whether out1 = W1 x and out2 = W2 x fit one ds41_v41_dense_f16_pair launch. */

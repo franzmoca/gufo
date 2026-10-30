@@ -1,8 +1,8 @@
-/* Batched dense Q5_K and Q6_K projections on the FP16 matrix cores. The activations
+/* Batched dense Q5_K, Q6_K and Q8_0 projections on the FP16 matrix cores. The activations
  * are rounded to FP16 as they are staged (11-bit mantissa, against the 8-bit
  * block quantization of MMQ's Q8_1 inputs), or arrive as FP16 from a
  * producer that rounded them the same way and each weight decodes to FP16
- * as (d sc) q - dmin m (Q6_K: (d sc) (q - 32)), so the K loop has no per-block scale arithmetic
+ * as (d sc) q - dmin m (Q6_K: (d sc) (q - 32), Q8_0: d q), so the K loop has no per-block scale arithmetic
  * beside the matrix-core products; the products accumulate in FP32.
  *
  * A workgroup takes 256 weight rows and 128 tokens: each of its 16 waves
@@ -164,6 +164,52 @@ struct Q6K {
     const half2_t scale = {sc, sc};
     /* 1024 + q - 1056 = q - 32, exact in FP16. */
     const half2_t magic = {static_cast<_Float16>(-1056.0f), static_cast<_Float16>(-1056.0f)};
+    const uint32_t p[4] = {__builtin_amdgcn_perm(b0, kHalfMagic, 0x01050004u),
+                           __builtin_amdgcn_perm(b0, kHalfMagic, 0x03070206u),
+                           __builtin_amdgcn_perm(b1, kHalfMagic, 0x01050004u),
+                           __builtin_amdgcn_perm(b1, kHalfMagic, 0x03070206u)};
+#pragma unroll
+    for (int i = 0; i < 4; ++i)
+      out[i] = __builtin_bit_cast(uint32_t, (__builtin_bit_cast(half2_t, p[i]) + magic) * scale);
+  }
+};
+
+/* Eight Q8_0 blocks (d, qs[32]) as one 256-value block: sub-block j is
+ * Q8_0 block j. A half-wave keeps the value bytes 8 h .. 8 h + 7 and
+ * 16 + 8 h .. 16 + 8 h + 7 of each, and the eight scales two per word.
+ * Blocks are 34 bytes, so these loads are only 2-byte aligned. */
+struct Q8Lane {
+  uint2 qs[8][2];  // [j][part]
+  uint32_t d[4];
+};
+
+struct Q8 {
+  static constexpr int kBlockBytes = 8 * 34;
+  static constexpr bool kWide = true;
+  using Lane = Q8Lane;
+  static __device__ __forceinline__ Lane load(const uint8_t* b, int h) {
+    Lane q;
+#pragma unroll
+    for (int j = 0; j < 8; ++j)
+#pragma unroll
+      for (int part = 0; part < 2; ++part)
+        q.qs[j][part] = *reinterpret_cast<const uint2*>(b + 34 * j + 2 + 16 * part + 8 * h);
+#pragma unroll
+    for (int i = 0; i < 4; ++i)
+      q.d[i] = *reinterpret_cast<const uint16_t*>(b + 68 * i) |
+               (uint32_t)*reinterpret_cast<const uint16_t*>(b + 68 * i + 34) << 16;
+    return q;
+  }
+  /* d of sub-block j in both halves. */
+  static __device__ __forceinline__ uint32_t affine(const Lane& q, int j) {
+    const uint32_t d = (q.d[j / 2] >> (16 * (j % 2))) & 0xffffu;
+    return d | d << 16;
+  }
+  static __device__ __forceinline__ void decode8(const Lane& q, int j, int part, uint32_t affine, uint32_t* out) {
+    /* Flipping the sign bit maps q to q + 128 in 0 .. 255; 1024 + q + 128 - 1152 = q, exact in FP16. */
+    const uint32_t b0 = q.qs[j][part].x ^ 0x80808080u, b1 = q.qs[j][part].y ^ 0x80808080u;
+    const half2_t scale = __builtin_bit_cast(half2_t, affine);
+    const half2_t magic = {static_cast<_Float16>(-1152.0f), static_cast<_Float16>(-1152.0f)};
     const uint32_t p[4] = {__builtin_amdgcn_perm(b0, kHalfMagic, 0x01050004u),
                            __builtin_amdgcn_perm(b0, kHalfMagic, 0x03070206u),
                            __builtin_amdgcn_perm(b1, kHalfMagic, 0x01050004u),
@@ -364,10 +410,10 @@ int dense_io(const DenseArgs& a, uint32_t io) {
 }
 
 int dense_run(int type, const DenseArgs& a, uint32_t io) {
-  if ((type != 13 && type != 14) || a.m % kRows != 0 || a.m2 % kRows != 0 || a.k % 256 != 0 ||
+  if ((type != 8 && type != 13 && type != 14) || a.m % kRows != 0 || a.m2 % kRows != 0 || a.k % 256 != 0 ||
       a.n == 0 || a.groups == 0 || (a.m2 && a.groups != 1) || (io & ~(DS41_V41_DENSE_X_HALF | DS41_V41_DENSE_OUT_HALF)))
     return 1;
-  return type == 13 ? dense_io<Q5K>(a, io) : dense_io<Q6K>(a, io);
+  return type == 8 ? dense_io<Q8>(a, io) : type == 13 ? dense_io<Q5K>(a, io) : dense_io<Q6K>(a, io);
 }
 
 }  // namespace
