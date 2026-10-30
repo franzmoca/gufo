@@ -82,7 +82,7 @@ int ds41_v41_gemv_experts_grouped(int type, const void* w, const void* w_up, con
                                   uint32_t k, const void* const* w_table = nullptr,
                                   const void* const* w_up_table = nullptr, int zero_dropped = 1);
 
-/* Batched dense projections (Q5_K) on the FP16 matrix cores: for each group
+/* Batched dense projections (Q5_K, Q6_K) on the FP16 matrix cores: for each group
  * z < groups, out[t, z m + r] = W_z[r] . x[t, z k : z k + k] over n tokens,
  * W_z the z-th [m][k] matrix stored back to back; x rows hold groups * k
  * floats, rounded to FP16 as they are staged, and out rows groups * m
@@ -95,7 +95,7 @@ int ds41_v41_gemv_experts_grouped(int type, const void* w, const void* w_up, con
 #define DS41_V41_DENSE_OUT_HALF 2u
 int ds41_v41_dense_f16(int type, const void* w, const void* x, void* out, uint32_t m, uint32_t n, uint32_t k,
                        uint32_t groups, uint32_t io);
-/* Batched routed experts (IQ1_S, IQ1_M, IQ2_XXS) on the FP16 matrix cores, with FP16
+/* Batched routed experts (IQ1_S, IQ1_M, IQ2_XXS, IQ2_XS, IQ2_S) on the FP16 matrix cores, with FP16
  * activations x. rows lists the slots grouped by expert, expert e owning
  * rows[bounds[e] .. bounds[e + 1]), and tiles[0:n_tiles] names 64 of them
  * each as expert | index << 16 (see ds41_v41_routed_plan). A slot s reads x

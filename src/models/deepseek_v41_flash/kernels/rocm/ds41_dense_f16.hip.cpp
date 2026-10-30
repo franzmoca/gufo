@@ -1,8 +1,8 @@
-/* Batched dense Q5_K projections on the FP16 matrix cores. The activations
+/* Batched dense Q5_K and Q6_K projections on the FP16 matrix cores. The activations
  * are rounded to FP16 as they are staged (11-bit mantissa, against the 8-bit
  * block quantization of MMQ's Q8_1 inputs), or arrive as FP16 from a
  * producer that rounded them the same way and each weight decodes to FP16
- * as (d sc) q - dmin m, so the K loop has no per-block scale arithmetic
+ * as (d sc) q - dmin m (Q6_K: (d sc) (q - 32)), so the K loop has no per-block scale arithmetic
  * beside the matrix-core products; the products accumulate in FP32.
  *
  * A workgroup takes 256 weight rows and 128 tokens: each of its 16 waves
@@ -33,7 +33,6 @@ constexpr int kTile = 128;              // tokens per workgroup
 constexpr int kThreads = kRows * 2;
 constexpr int kStageK = 64;             // activation values per LDS stage
 constexpr int kPitch = kStageK + 8;     // halves; token rows land on distinct banks
-constexpr int kQ5Bytes = 176;           // d, dmin, scales[12], qh[32], qs[128]
 constexpr uint32_t kHalfMagic = 0x64646464u;
 
 /* The bytes of one Q5_K block a half-wave decodes: the header (d, dmin and
@@ -98,6 +97,81 @@ __device__ __forceinline__ void q5_decode8(const Q5Lane& q, int j, int part, uin
     out[i] = __builtin_bit_cast(uint32_t, (__builtin_bit_cast(half2_t, p[i]) + magic) * scale + bias);
 }
 
+/* The weight formats: a lane's bytes of a super-block, the per-sub-block
+ * scale word, and eight weights of part `part` of sub-block j as four half2. */
+struct Q5K {
+  static constexpr int kBlockBytes = 176;  // d, dmin, scales[12], qh[32], qs[128]
+  using Lane = Q5Lane;
+  static __device__ __forceinline__ Lane load(const uint8_t* b, int h) { return load_q5(b, h); }
+  static __device__ __forceinline__ uint32_t affine(const Lane& q, int j) { return q5_affine(q.head, j); }
+  static __device__ __forceinline__ void decode8(const Lane& q, int j, int part, uint32_t affine, uint32_t* out) {
+    q5_decode8(q, j, part, affine, out);
+  }
+};
+
+/* The bytes of one Q6_K block a half-wave decodes: for value offsets
+ * 8 h .. 8 h + 7 and 16 + 8 h .. 16 + 8 h + 7 of each 32-value sub-block
+ * j = 4 n + g, the ql bytes of both ql vectors of half n (low nibbles for
+ * g < 2, high for g >= 2) and the qh bytes of half n (bits 2 g), with the
+ * 16 signed scales and d. Blocks are 210 bytes, so these loads are only
+ * 2-byte aligned. */
+struct Q6Lane {
+  uint2 ql[2][2][2];  // [n][g & 1][part]
+  uint2 qh[2][2];     // [n][part]
+  u32x4 sc;
+  uint32_t d;
+};
+
+struct Q6K {
+  static constexpr int kBlockBytes = 210;  // ql[128], qh[64], scales[16], d
+  using Lane = Q6Lane;
+  static __device__ __forceinline__ Lane load(const uint8_t* b, int h) {
+    Lane q;
+#pragma unroll
+    for (int n = 0; n < 2; ++n)
+#pragma unroll
+      for (int part = 0; part < 2; ++part) {
+#pragma unroll
+        for (int a = 0; a < 2; ++a)
+          q.ql[n][a][part] = *reinterpret_cast<const uint2*>(b + 64 * n + 32 * a + 16 * part + 8 * h);
+        q.qh[n][part] = *reinterpret_cast<const uint2*>(b + 128 + 32 * n + 16 * part + 8 * h);
+      }
+    q.sc = *reinterpret_cast<const u32x4*>(b + 192);
+    q.d = *reinterpret_cast<const uint16_t*>(b + 208);
+    return q;
+  }
+  /* The scales of parts 0 and 1 of sub-block j (scales 8 n + 2 g and the
+   * next one) as a half2. */
+  static __device__ __forceinline__ uint32_t affine(const Lane& q, int j) {
+    const int i = 8 * (j >> 2) + 2 * (j & 3);
+    const uint32_t word = q.sc[i / 4] >> (8 * (i % 4));
+    const float d = static_cast<float>(__builtin_bit_cast(_Float16, static_cast<uint16_t>(q.d)));
+    return __builtin_bit_cast(
+        uint32_t, half2_t{static_cast<_Float16>(d * static_cast<float>(static_cast<int8_t>(word & 0xffu))),
+                          static_cast<_Float16>(d * static_cast<float>(static_cast<int8_t>((word >> 8) & 0xffu)))});
+  }
+  static __device__ __forceinline__ void decode8(const Lane& q, int j, int part, uint32_t affine, uint32_t* out) {
+    const int n = j >> 2, g = j & 3;
+    const uint2 low = q.ql[n][g & 1][part];
+    const uint2 high = q.qh[n][part];
+    const int shift = 4 * (g >> 1);
+    const uint32_t b0 = ((low.x >> shift) & 0x0f0f0f0fu) | (((high.x >> (2 * g)) & 0x03030303u) << 4);
+    const uint32_t b1 = ((low.y >> shift) & 0x0f0f0f0fu) | (((high.y >> (2 * g)) & 0x03030303u) << 4);
+    const half2_t s = __builtin_bit_cast(half2_t, affine);
+    const _Float16 sc = part ? s.y : s.x;
+    const half2_t scale = {sc, sc};
+    /* 1024 + q - 1056 = q - 32, exact in FP16. */
+    const half2_t magic = {static_cast<_Float16>(-1056.0f), static_cast<_Float16>(-1056.0f)};
+    const uint32_t p[4] = {__builtin_amdgcn_perm(b0, kHalfMagic, 0x01050004u),
+                           __builtin_amdgcn_perm(b0, kHalfMagic, 0x03070206u),
+                           __builtin_amdgcn_perm(b1, kHalfMagic, 0x01050004u),
+                           __builtin_amdgcn_perm(b1, kHalfMagic, 0x03070206u)};
+#pragma unroll
+    for (int i = 0; i < 4; ++i)
+      out[i] = __builtin_bit_cast(uint32_t, (__builtin_bit_cast(half2_t, p[i]) + magic) * scale);
+  }
+};
+
 /* Lane L's word from lane L ^ 16. With fetch-inactive and bound-control set
  * the instruction does not keep its destination's old value (every lane is
  * active here anyway), so the compiler no longer copies or zeroes a
@@ -117,15 +191,14 @@ __device__ __forceinline__ float finite_or_zero(float v) { return __builtin_isfi
 /* out[t, z m + r] = sum_c W_z[r, c] x[t, z k + c] for group z = blockIdx.z;
  * x rows are groups * k values of X (float or _Float16), out rows groups * m
  * of Y (float, or _Float16 rounded from the float result). */
-template <bool kFull, typename X, typename Y>
-__global__ __launch_bounds__(kThreads) void dense_q5k_f16_kernel(const uint8_t* __restrict__ w,
-                                                                 const X* __restrict__ x, Y* __restrict__ out,
-                                                                 uint32_t m, uint32_t n, uint32_t k, uint32_t groups,
-                                                                 uint32_t tile0) {
+template <typename F, bool kFull, typename X, typename Y>
+__global__ __launch_bounds__(kThreads) void dense_f16_kernel(const uint8_t* __restrict__ w, const X* __restrict__ x,
+                                                             Y* __restrict__ out, uint32_t m, uint32_t n, uint32_t k,
+                                                             uint32_t groups, uint32_t tile0) {
   __shared__ __attribute__((aligned(16))) _Float16 act[2][kTile * kPitch];
   const int tid = threadIdx.x, wave = tid / 32, lane = tid % 32, h = lane / 16;
   const uint32_t z = blockIdx.z;
-  const uint64_t row_bytes = (uint64_t)k / 256 * kQ5Bytes;
+  const uint64_t row_bytes = (uint64_t)k / 256 * F::kBlockBytes;
   const uint32_t row = blockIdx.x * kRows + wave * 16 + lane % 16;
   const uint8_t* wr = w + ((uint64_t)z * m + row) * row_bytes;
   const uint32_t t0 = (tile0 + blockIdx.y) * kTile;
@@ -176,13 +249,13 @@ __global__ __launch_bounds__(kThreads) void dense_q5k_f16_kernel(const uint8_t* 
   for (int t = 0; t < 8; ++t) acc[t] = float8{};
 
   const uint32_t blocks = k / 256;
-  Q5Lane next = load_q5(wr, h);
+  typename F::Lane next = F::load(wr, h);
 #pragma unroll
   for (int a = 0; a < kAhead; ++a)
     if (a * kStageK < k) fetch(ring[a], a * kStageK);
   for (uint32_t sb = 0; sb < blocks; ++sb) {
-    const Q5Lane q = next;
-    if (sb + 1 < blocks) next = load_q5(wr + (uint64_t)(sb + 1) * kQ5Bytes, h);
+    const typename F::Lane q = next;
+    if (sb + 1 < blocks) next = F::load(wr + (uint64_t)(sb + 1) * F::kBlockBytes, h);
 #pragma unroll
     for (int stage = 0; stage < 4; ++stage) {
       const uint32_t k0 = sb * 256 + stage * kStageK;
@@ -192,11 +265,11 @@ __global__ __launch_bounds__(kThreads) void dense_q5k_f16_kernel(const uint8_t* 
 #pragma unroll
       for (int jj = 0; jj < 2; ++jj) {
         const int j = stage * 2 + jj;
-        const uint32_t affine = q5_affine(q.head, j);
+        const uint32_t affine = F::affine(q, j);
 #pragma unroll
         for (int e = 0; e < 2; ++e) {
           uint32_t words[8];
-          q5_decode8(q, j, e, affine, words);
+          F::decode8(q, j, e, affine, words);
 #pragma unroll
           for (int i = 0; i < 4; ++i)
             words[4 + i] = other_half(words[i]);
@@ -235,34 +308,40 @@ __global__ __launch_bounds__(kThreads) void dense_q5k_f16_kernel(const uint8_t* 
   }
 }
 
-template <typename X, typename Y>
+template <typename F, typename X, typename Y>
 int dense_launch(const uint8_t* w, const void* x, void* out, uint32_t m, uint32_t n, uint32_t k, uint32_t groups) {
   const auto* xt = static_cast<const X*>(x);
   auto* yt = static_cast<Y*>(out);
   const uint32_t full = n / kTile;
   if (full)
-    dense_q5k_f16_kernel<true, X, Y><<<dim3(m / kRows, full, groups), kThreads>>>(w, xt, yt, m, n, k, groups, 0);
+    dense_f16_kernel<F, true, X, Y><<<dim3(m / kRows, full, groups), kThreads>>>(w, xt, yt, m, n, k, groups, 0);
   if (n % kTile)
-    dense_q5k_f16_kernel<false, X, Y><<<dim3(m / kRows, 1, groups), kThreads>>>(w, xt, yt, m, n, k, groups, full);
+    dense_f16_kernel<F, false, X, Y><<<dim3(m / kRows, 1, groups), kThreads>>>(w, xt, yt, m, n, k, groups, full);
   return hipGetLastError() == hipSuccess ? 0 : 1;
+}
+
+template <typename F>
+int dense_io(const uint8_t* w, const void* x, void* out, uint32_t m, uint32_t n, uint32_t k, uint32_t groups,
+             uint32_t io) {
+  switch (io) {
+  case 0:
+    return dense_launch<F, float, float>(w, x, out, m, n, k, groups);
+  case DS41_V41_DENSE_X_HALF:
+    return dense_launch<F, _Float16, float>(w, x, out, m, n, k, groups);
+  case DS41_V41_DENSE_OUT_HALF:
+    return dense_launch<F, float, _Float16>(w, x, out, m, n, k, groups);
+  default:
+    return dense_launch<F, _Float16, _Float16>(w, x, out, m, n, k, groups);
+  }
 }
 
 }  // namespace
 
 extern "C" int ds41_v41_dense_f16(int type, const void* w, const void* x, void* out, uint32_t m, uint32_t n,
                                   uint32_t k, uint32_t groups, uint32_t io) {
-  if (type != 13 || m % kRows != 0 || k % 256 != 0 || n == 0 || groups == 0 ||
+  if ((type != 13 && type != 14) || m % kRows != 0 || k % 256 != 0 || n == 0 || groups == 0 ||
       (io & ~(DS41_V41_DENSE_X_HALF | DS41_V41_DENSE_OUT_HALF)))
     return 1;
   const auto* wb = static_cast<const uint8_t*>(w);
-  switch (io) {
-  case 0:
-    return dense_launch<float, float>(wb, x, out, m, n, k, groups);
-  case DS41_V41_DENSE_X_HALF:
-    return dense_launch<_Float16, float>(wb, x, out, m, n, k, groups);
-  case DS41_V41_DENSE_OUT_HALF:
-    return dense_launch<float, _Float16>(wb, x, out, m, n, k, groups);
-  default:
-    return dense_launch<_Float16, _Float16>(wb, x, out, m, n, k, groups);
-  }
+  return type == 13 ? dense_io<Q5K>(wb, x, out, m, n, k, groups, io) : dense_io<Q6K>(wb, x, out, m, n, k, groups, io);
 }

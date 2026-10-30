@@ -146,6 +146,28 @@ bool dequant_row(uint32_t type, const uint8_t* src, float* out, uint32_t n) {
       }
     }
     return true;
+  case DS41_TENSOR_Q6_K:
+    for (uint32_t b = 0; b < n / 256; b++, src += 210) {
+      const float d = half_to_float(read_u16(src + 208));
+      const uint8_t* ql = src;
+      const uint8_t* qh = src + 128;
+      const int8_t* sc = (const int8_t*)(src + 192);
+      float* y = out + b * 256;
+      for (int half = 0; half < 2; half++, ql += 64, qh += 32, sc += 8, y += 128) {
+        for (int l = 0; l < 32; l++) {
+          const int is = l / 16;
+          const int q1 = (int)((ql[l] & 0xf) | ((qh[l] & 3) << 4)) - 32;
+          const int q2 = (int)((ql[l + 32] & 0xf) | (((qh[l] >> 2) & 3) << 4)) - 32;
+          const int q3 = (int)((ql[l] >> 4) | (((qh[l] >> 4) & 3) << 4)) - 32;
+          const int q4 = (int)((ql[l + 32] >> 4) | (((qh[l] >> 6) & 3) << 4)) - 32;
+          y[l] = d * sc[is] * q1;
+          y[l + 32] = d * sc[is + 2] * q2;
+          y[l + 64] = d * sc[is + 4] * q3;
+          y[l + 96] = d * sc[is + 6] * q4;
+        }
+      }
+    }
+    return true;
   default:
     return false;
   }
@@ -342,6 +364,7 @@ bool mmq_batched(uint32_t type) {
   switch (type) {
   case DS41_TENSOR_Q8_0:
   case DS41_TENSOR_Q5_K:
+  case DS41_TENSOR_Q6_K:
   case DS41_TENSOR_IQ1_S:
   case DS41_TENSOR_IQ1_M:
   case DS41_TENSOR_IQ2_XXS:
@@ -361,11 +384,13 @@ int gemv_slices(uint32_t rows, uint32_t k) {
   return 8;
 }
 
-bool gemv_type(uint32_t type) { return type == DS41_TENSOR_Q5_K || type == DS41_TENSOR_Q8_0; }
+bool gemv_type(uint32_t type) {
+  return type == DS41_TENSOR_Q5_K || type == DS41_TENSOR_Q6_K || type == DS41_TENSOR_Q8_0;
+}
 
-/* Batches of Q5_K rows run on the FP16 matrix cores (ds41_v41_dense_f16). */
+/* Batches of Q5_K and Q6_K rows run on the FP16 matrix cores (ds41_v41_dense_f16). */
 bool dense_f16(uint32_t type, uint32_t rows, uint32_t k, uint32_t n) {
-  return n > 8 && type == DS41_TENSOR_Q5_K && rows % 256 == 0 && k % 256 == 0;
+  return n > 8 && (type == DS41_TENSOR_Q5_K || type == DS41_TENSOR_Q6_K) && rows % 256 == 0 && k % 256 == 0;
 }
 
 /* out[t] = W x[t] for n tokens and a [rows, k] weight at `p` of `type`. */
@@ -826,7 +851,7 @@ bool attention(ds41_decoder* d, uint32_t il, uint32_t n, const Joint* joint) {
 /* Batched routed projections on the FP16 matrix cores (ds41_v41_routed_f16). */
 bool routed_f16_type(int type) {
   return type == (int)DS41_TENSOR_IQ1_S || type == (int)DS41_TENSOR_IQ1_M ||
-         type == (int)DS41_TENSOR_IQ2_XXS || type == (int)DS41_TENSOR_IQ2_XS;
+         type == (int)DS41_TENSOR_IQ2_XXS || type == (int)DS41_TENSOR_IQ2_XS || type == (int)DS41_TENSOR_IQ2_S;
 }
 
 /* ds41_v41_routed_plan's rows, bounds and tiles for batches up to cap tokens. */
@@ -907,6 +932,14 @@ bool shared_moe(ds41_decoder* d, const ds41_layer_weights* l, uint32_t n, const 
  * joint batches predict only when this layer waited on reads: misses
  * cluster in neighbouring layers, and a prediction without a stall to hide
  * it costs more than the read it saves. */
+/* Router logits of layer il (the narrowed BF16 copy when there is one). */
+bool router_logits(ds41_decoder* d, uint32_t il, uint32_t n) {
+  const ds41_weights* w = d->engine->weights;
+  if (!w->router_bf16) return linear(d, w->layer[il].ffn_gate_inp, d->xn, d->router, n);
+  return linear_raw(DS41_TENSOR_BF16, w->router_bf16 + (uint64_t)il * DS41_N_EXPERT * DS41_N_EMBD, DS41_N_EXPERT,
+                    DS41_N_EMBD, d->xn, d->router, n, d->decode_rows);
+}
+
 void predict_next_layer(ds41_decoder* d, uint32_t il, uint32_t n, bool misses_now) {
   if (!d->engine->expert_store || !d->pred_ok || il + 1 >= DS41_N_LAYER)
     return;
@@ -918,7 +951,7 @@ void predict_next_layer(ds41_decoder* d, uint32_t il, uint32_t n, bool misses_no
   const uint32_t used = DS41_N_EXPERT_USED;
   const uint64_t rows = (uint64_t)d->capacity * DS41_N_EXPERT_USED;
   int32_t* ids = d->pred_pinned + (size_t)(il + 1) * rows;
-  if (!linear(d, nl->ffn_gate_inp, d->xn, d->router, n) ||
+  if (!router_logits(d, il + 1, n) ||
       ds41_v41_route(d->router, f32(d, nl->ffn_exp_probs_b), d->pred_ids, d->pred_w,
                      DS41_N_EXPERT, used, DS41_EXPERT_WEIGHT_SCALE, n) ||
       hipMemcpyAsync(ids, d->pred_ids, (size_t)n * used * sizeof(int32_t),
@@ -934,7 +967,7 @@ void predict_next_layer(ds41_decoder* d, uint32_t il, uint32_t n, bool misses_no
 bool moe(ds41_decoder* d, uint32_t il, uint32_t n) {
   const ds41_layer_weights* l = &d->engine->weights->layer[il];
   const int used = (int)DS41_N_EXPERT_USED;
-  if (!linear(d, l->ffn_gate_inp, d->xn, d->router, n) ||
+  if (!router_logits(d, il, n) ||
       ds41_v41_route(d->router, f32(d, l->ffn_exp_probs_b), d->route_ids, d->route_w, DS41_N_EXPERT, used,
                      DS41_EXPERT_WEIGHT_SCALE, n))
     return false;
@@ -1190,8 +1223,8 @@ bool moe(ds41_decoder* d, uint32_t il, uint32_t n) {
                                              rows, DS41_N_EXPERT, 1, 0)) {
     return false;
   } else if (streamed) {
-    /* No FP16 tile kernel for this type (IQ2_S, two down projections of the
-     * IQ1_M build): each row through the table-indexed expert GEMV. */
+    /* No FP16 tile kernel for this type: each row through the
+     * table-indexed expert GEMV. */
     int status = 0;
     if (!expert_gemv(down_type, down, d->route_ids, rows, d->mid6, true, d->down6, kDim, DS41_N_FF_EXP, &status,
                      down_table) ||

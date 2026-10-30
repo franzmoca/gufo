@@ -165,6 +165,10 @@ struct ds41_weights {
   ds41_tensor* output_norm;
   ds41_tensor* output;
   ds41_layer_weights layer[DS41_MAX_LAYER];
+  /* Device [layer][expert][embd]: F32 routers whose values are all BF16
+   * (Unsloth stores the BF16 router widened) narrowed back, or NULL. The
+   * F32 tensors then stay on the host. */
+  uint16_t* router_bf16;
   /* Engram n-gram hash constants (metadata). Each head hashes into its own
    * bucket range of the shared table: head_offsets are absolute rows. */
   int32_t engram_token_map[DS41_N_VOCAB];
