@@ -22,5 +22,9 @@ inline constexpr uint32_t DS41_TENSOR_I64 = 27;
 inline constexpr uint32_t DS41_TENSOR_IQ1_M = 29;
 inline constexpr uint32_t DS41_TENSOR_BF16 = 30;
 inline constexpr uint32_t DS41_TENSOR_MXFP4 = 39;
+/* unsloth's MXFP8 Engram tables: an E8M0 exponent, then 32 E4M3 values.
+ * Upstream ggml gives type 43 to unscaled F8_E4M3; the table's byte size
+ * tells the two apart. */
+inline constexpr uint32_t DS41_TENSOR_MXFP8 = 43;
 
 #endif  // GUFO_MODELS_DEEPSEEK_V41_FLASH_RUNTIME_TENSOR_TYPES_H_

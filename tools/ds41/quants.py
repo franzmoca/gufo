@@ -2,7 +2,8 @@
 
 Covers every storage type in the ISTA GSQ-RCO builds and the Engram table:
 F32, F16, BF16, Q8_0 and Q5_K come from ``tools/gufo/gguf.py``; this module adds
-IQ1_S, IQ1_M, IQ2_XXS, IQ2_XS, IQ2_S and IQ4_NL, and MXFP4 for the DSpark drafter's experts. Codebooks are format constants, read
+IQ1_S, IQ1_M, IQ2_XXS, IQ2_XS, IQ2_S and IQ4_NL, MXFP4 for the DSpark drafter's experts and
+MXFP8 for unsloth's Engram tables. Codebooks are format constants, read
 from the vendored ggml header so the oracle and the kernels agree on the format
 while sharing no decode code.
 """
@@ -28,7 +29,7 @@ IQ1_DELTA = 0.125
 # type -> (elements per block, bytes per block)
 BLOCK = dict(BASE_BLOCK)
 BLOCK.update({19: (256, 50), 29: (256, 56), 16: (256, 66), 17: (256, 74), 22: (256, 82),
-              20: (32, 18), 39: (32, 17)})
+              20: (32, 18), 39: (32, 17), 43: (32, 33)})
 
 
 @lru_cache(None)
@@ -168,6 +169,18 @@ def dequant_mxfp4(data: np.ndarray) -> np.ndarray:
     return (values * scale[:, None]).reshape(-1).astype(np.float32)
 
 
+def dequant_mxfp8(data: np.ndarray) -> np.ndarray:
+    """unsloth's MXFP8 Engram tables: E8M0 exponent e, then 32 E4M3FN codes; value 2**(e - 127) * code."""
+    b = _blocks(data, 33)
+    scale = np.ldexp(1.0, b[:, 0].astype(np.int64) - 127)
+    codes = np.arange(256)
+    exp, man = (codes >> 3) & 15, (codes & 7).astype(np.float64)
+    table = np.where(exp == 0, np.ldexp(man, -9), np.ldexp(8 + man, exp - 10))
+    table = np.where(codes & 0x80, -table, table)
+    table[(exp == 15) & ((codes & 7) == 7)] = np.nan
+    return (table[b[:, 1:33]] * scale[:, None]).reshape(-1).astype(np.float32)
+
+
 # Torch ports of the expert formats: the same integer decode and the same float64
 # scale product rounded once to float32, so they match the numpy versions bit for
 # bit while running on the oracle's device.
@@ -284,7 +297,7 @@ TORCH_DEQUANT = {19: torch_dequant_iq1_s, 29: torch_dequant_iq1_m, 16: torch_deq
 
 DEQUANT = dict(BASE_DEQUANT)
 DEQUANT.update({19: dequant_iq1_s, 29: dequant_iq1_m, 16: dequant_iq2_xxs, 17: dequant_iq2_xs,
-                22: dequant_iq2_s, 20: dequant_iq4_nl, 39: dequant_mxfp4})
+                22: dequant_iq2_s, 20: dequant_iq4_nl, 39: dequant_mxfp4, 43: dequant_mxfp8})
 
 
 def nbytes(ggml_type: int, elements: int) -> int:

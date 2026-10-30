@@ -47,6 +47,9 @@ enum class GgmlType : std::uint16_t {
   kI64 = 27,
   kIQ1_M = 29,
   kBF16 = 30,
+  /// unsloth's MXFP8 (E8M0 scale + 32 E4M3); upstream ggml uses 43 for
+  /// unscaled F8_E4M3, which this block size rejects.
+  kMXFP8 = 43,
 };
 
 [[nodiscard]] constexpr std::string_view ToString(GgmlType type) noexcept {
@@ -103,6 +106,8 @@ enum class GgmlType : std::uint16_t {
       return "IQ1_M";
     case GgmlType::kBF16:
       return "BF16";
+    case GgmlType::kMXFP8:
+      return "MXFP8";
   }
   return "UNKNOWN";
 }

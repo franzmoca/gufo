@@ -10,6 +10,7 @@
 #include <unistd.h>
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstdio>
 #include <atomic>
@@ -116,6 +117,23 @@ bool dequant_row(uint32_t type, const uint8_t* src, float* out, uint32_t n) {
         out[b * 32 + i] = d * kValues[src[2 + i] & 0xf];
         out[b * 32 + 16 + i] = d * kValues[src[2 + i] >> 4];
       }
+    }
+    return true;
+  }
+  case DS41_TENSOR_MXFP8: {
+    /* OCP MX: 2^(e - 127) times E4M3FN (no infinities, S.1111.111 is NaN). */
+    static const std::array<float, 256> kValues = [] {
+      std::array<float, 256> v{};
+      for (int c = 0; c < 256; c++) {
+        const int e = (c >> 3) & 15, m = c & 7;
+        const float x = e == 0 ? ldexpf((float)m, -9) : ldexpf((float)(8 + m), e - 10);
+        v[c] = (e == 15 && m == 7) ? NAN : (c & 0x80 ? -x : x);
+      }
+      return v;
+    }();
+    for (uint32_t b = 0; b < n / 32; b++, src += 33) {
+      const int e = (int)src[0] - 127;
+      for (int i = 0; i < 32; i++) out[b * 32 + i] = ldexpf(kValues[src[1 + i]], e);
     }
     return true;
   }
