@@ -79,6 +79,13 @@ pp2048 runs 1,182 tok/s at 32K, 1,155 at 64K and 1,098 at 128K.
 | 18 | Small decode kernels: hyper-connections, router, routing | Decode | ~1–1.5 ms of ~4 ms/token | Medium |
 | 19 | DSpark host round trips | Speculative decode | ~0.7 ms per step | Low |
 | 20 | `markov_select` | Drafter | Part of 1.6 ms per step | Medium |
+| 21 | Two-layer-ahead decode prediction with a usefulness gate | Streamed decode | Small warm; part of the read stall cold and after long prompts | Low |
+| 22 | Decode misses after a long prompt under scan-resistant admission | Streamed decode | Unmeasured | — |
+| 23 | Streamed `IQ2_XS` with cache-aware routing | Quality option | Unmeasured; lower KL than `IQ2_XXS` at a residency cost | Low |
+| 27 | Streamed kernels for the `IQ2_XS` build (IQ3_XXS down, IQ2_S gate/up) | Model support | Prerequisite for item 23 | High |
+| 24 | Selection-only miss penalty, mako's form of item 13 (changes outputs) | Streamed decode, short prefills | Up to the ~5 ms/token of miss-read idle; more cold, after long prompts and in verification | Medium |
+| 25 | Direction projection and steering vectors | Feature | Per-request behavior edits; ~0.1–0.5 ms/token if unfused | Medium |
+| 26 | LoRA adapters (GGUF `adapter.type = lora`) | Feature | Adapter compatibility; rank-1 abliteration adapters reduce to item 25 | Medium |
 
 ### 3. Expert reads for rejected verification rows
 
@@ -255,6 +262,179 @@ logit rows only when sampling needs them would remove most of it.
 step, more than the drafter's attention (0.66 ms), at ~92% of the read
 ceiling for its 66 MB FP16 W2. An exact norm bound would still score most
 rows (E47).
+
+### 21. Two-layer-ahead decode prediction with a usefulness gate
+
+Streamed decode predicts one layer ahead and only after a layer waited on
+reads ([design](STREAMING.md#prefetch-from-router-predictions); +0.8% at
+82–83% hits). On Maya-S, mako found layer l+1's router on layer l's FFN
+input catches 34% of misses at top 4 and layer l+2's 30%, but
+one-ahead reads often had not finished (0.4–1.5 s of waits over 200 steps,
+~0.1 s two ahead). Its default reads the top 4 non-resident experts two
+layers ahead and stops predicting while under 35% of recent reads ahead were
+routed (one layer in 16 keeps measuring): +3.5% on a story, −0.3% instead of
+−2.7% after a 16K code prompt. Read time per expert is ~2–3× theirs here
+(~4.9 GB/s against 12–16 GB/s), which favors the longer lead. Measure where
+misses remain: cold cache, reduced cap, after long prompts, and with items
+13 and 24.
+
+### 22. Decode misses after a long prompt under scan-resistant admission
+
+Once the cache is full, a large prefill admits only its final 16 rows and
+its frequent experts. mako found the opposite trade-off on its decayed
+counts: leaving prefill out of the eviction scores raised steady decode
+misses by 20% (19–21 against 15–17 per step), because a prompt's experts
+are the ones its decode uses. Measure route hits and tok/s over the first
+64–256 decode steps after 4K and 16K prompts with the current rule against
+admitting every prompt expert, and against a looser frequency threshold.
+
+### 23. Streamed `IQ2_XS` with cache-aware routing
+
+ISTA's `IQ2_XS` backbone (~155 GB) is closer to the reference than
+`IQ2_XXS` in mako's measurements (top-1 92.5% / KL 0.068 against 91% /
+0.103 on Maya-S logits; prose / code perplexity 1.873 / 2.903 against
+1.935 / 3.025) and, with item 24 at 0.1, decoded 34.0 against 33.1 tok/s
+there. Here the ~104 GiB cache would hold about three quarters of its
+expert bytes, against 83% of `IQ2_XXS`'s experts (12,688 seeded), on a
+slower SSD, so expect it slower; measure whether item 13 or 24 makes it a
+usable higher-quality streamed option. It does not run streamed yet: item 27.
+
+### 24. Selection-only miss penalty (quality-affecting, optional)
+
+[mako](https://github.com/jhanssen/mako/blob/8567de3/src/kernels/moe_route.h)
+(`--miss-penalty F`, Apple Silicon) subtracts a constant from the selection
+score (sqrt(softplus) plus the router bias) of each expert the cache lacks.
+The mixing weights stay the unpenalized scores, so the penalty only breaks
+near-ties: a missing expert is replaced only by a resident one within F of
+it. It applies to decode and to prefill groups under 512 tokens, such as
+short chat turns (16–32 tokens after 8K of context missed ~30 experts per
+token against ~10 in steady decode). On Maya-S, 1,300 positions against the
+reference logits:
+
+| F | Misses/step | Top-1 | KL | Step |
+| ---: | ---: | ---: | ---: | ---: |
+| 0 | 13.4 | 98.2% | 0.0056 | 44.4 ms |
+| 0.05 | 8.6 | 98.2% | 0.0067 | 40.2 ms |
+| 0.1 | 6.6 | 98.0% | 0.0088 | 37.9 ms |
+| 0.2 | 4.4 | 97.5% | 0.0100 | 35.4 ms |
+| 0.5 | 2.1 | 96.5% | 0.0185 | 33.4 ms |
+
+Prose and code perplexity stayed within noise up to 0.2, and on ISTA
+`IQ2_XS` 0.1 halved the misses (9.5 → 4.8 per step, 31.4 → 34.0 tok/s).
+With its read-ahead (item 21) the gains add up: 24.6 → 29.1 tok/s. Unlike
+Xolotl's logit scaling (item 13), it leaves the mixing weights alone and
+swaps only near-ties; test both on the same quality gates and speed runs.
+
+At ~99.3% warm route hits (~1.7 misses per token) the gain is bounded by
+the ~5 ms/token of miss-read idle; measure it cold, at reduced
+`--expert-cache-bytes`, for the first steps after a long prompt, for short
+continuation prefills and in DSpark verification, where every row pays for
+its own experts (item 3). The penalty goes into the router's top-k with the
+cache's residency as a device bitmap per layer. Outputs then depend on the
+cache contents: no longer bit-identical across cache sizes, not
+reproducible across sessions, and a replayed prefix may route differently
+from its first pass. Opt-in only; gate both with teacher-forced KL and top-1
+against the oracle plus perplexity at 3K and 18.5K tokens.
+
+### 25. Direction projection and steering vectors
+
+Remove (or add) per-layer directions from what a sublayer writes into the
+hyper-connection streams, at run time, with the weights unchanged. mako's
+`--ablate FILE` (`src/mtl/ablation.hpp`, format `MAKOABL1`: n_embd,
+n_layer, n_site, k, 16-byte site names, then F32 vectors
+`[layer][site][k][n_embd]`) applies `x -= scale (x · v) v` per direction to
+each row of the attention output (`attn_out`) and of the shared expert's
+output (`shexp_out`) before `hc_post`; the routed experts are added after
+the projection and keep the direction. The published DeepSeek file
+(`skafte/mako-ablations`, `refusal.abl`) holds two directions per layer at
+both sites: 40 × 2 × 2 × 5,120 F32 = 3.28 MB.
+
+Projection is linear, so projecting a sublayer's output equals projecting
+each of its writers (attention, shared expert, every routed expert); the
+site choice decides which writers keep the direction. Plan:
+
+- One fused kernel per site (dot, then axpy over 5,120 floats per row, k
+  directions), or better an epilogue of the existing attention-output and
+  MoE-combine launches, so decode adds no launches (item 4: ~2–3 µs each,
+  ~80 sites per token).
+- Sites: attention output, shared-expert output, and the full FFN output
+  (shared plus routed), so both mako's files and full-writer projections
+  load.
+- Additive steering (`x += α v`, llama.cpp's control vectors) on the same
+  sites.
+- `gufo serve` option for the file and a global scale; per-request scale
+  only once the prompt cache keys on it (projected prefixes produce
+  different KV and snapshots).
+- Gates: outputs bit-identical with no file or zero vectors; teacher-forced
+  KL and perplexity at 3K and 18.5K tokens with a file; DSpark acceptance
+  (the drafter reads the target's hidden states).
+
+### 26. LoRA adapters
+
+`BoldingBuilds/DeepSeek-V4.1-Flash-1017-Abliteration-LoRA-GGUF` is a
+standard llama.cpp LoRA (`general.type = adapter`, `adapter.lora.alpha =
+1`) for the same purpose built another way: one direction r taken at
+layer 22 and removed from every residual writer of every layer as
+`W' = W − r (rᵀ W)`, written as a rank-1 pair per matrix with `lora_b = r`
+and `lora_a = Wᵀ r`. Its 240 F32 tensors (459 MB):
+
+| Tensor | Shapes per layer | Bytes |
+| --- | --- | ---: |
+| `ffn_down_exps` | a 2,304 × 1 × 384, b 1 × 5,120 × 384 | 456.1 MB |
+| `attn_output_b` | a 8,192 × 1, b 1 × 5,120 | 2.1 MB |
+| `ffn_down_shexp` | a 2,304 × 1, b 1 × 5,120 | 1.2 MB |
+
+It is ~140× mako's file although it carries less: one direction instead of
+160 per-layer vectors. The LoRA form must express the edit per weight
+matrix, so it stores `Wᵀ r` for each of the 15,360 routed down projections
+(a product of the weights the engine already has) and repeats the same r
+as `lora_b` 15,440 times (~316 MB). `lora_a` was computed from Maya-S's
+dequantized weights, so on another quant it only approximately removes r;
+a runtime projection is exact for any quant. It reports 98.3% → 4.2%
+harmful-prompt refusals and HumanEval 95.1% → 95.7% on Maya-S.
+
+Plan:
+
+- Load GGUF LoRA adapters for the dense and shared-expert matrices as
+  low-rank epilogues of their GEMVs and GEMMs (`y += scale · B (A x)`).
+- Routed experts: per-expert A and B indexed by the route, resident even
+  while experts stream (~29 KB per expert at rank 1); grouped expert
+  kernels gain a rank-r tail.
+- Detect rank-1 adapters whose `lora_b` is one vector r on every writer of
+  a layer and `lora_a ≈ Wᵀ r`, and load them as item 25's full-writer
+  projection instead: exact on our quants, no 456 MB, no extra reads.
+- Gates as item 25; adapters change the outputs, so the prompt cache must
+  key on the adapter set and scales.
+
+Both items apply beyond DeepSeek V4.1; place shared loaders and kernels so
+other models can adopt them.
+
+### 27. Streamed kernels for the `IQ2_XS` build
+
+The ISTA `IQ2_XS` backbone (4 shards, ~145 GiB) only runs with
+`--stream-experts`. Its [allocation](https://huggingface.co/ISTA-DASLab/DeepSeek-V4.1-Flash-1017-GSQ-RCO-GGUF/blob/main/tensor-allocation/DeepSeek-V4.1-Flash-1017-GSQ-RCO-IQ2_XS.rco-allocation.txt)
+uses the dense types, IQ2_XXS and IQ2_XS experts and IQ2_S down projections
+already exercised by the `IQ1_M` and `IQ2_XXS` builds, plus two expert
+placements no streamed path handles (traced in `runtime/v41_decode.cpp`, not
+run):
+
+- **IQ3_XXS down projection (`blk.23.ffn_down_exps`).** The loader accepts
+  it and the resident MMQ/MMVQ kernels have it, but the table-indexed expert
+  GEMV does not (`expert_block_bytes` returns 0) and there is no FP16 tile,
+  so single-token, verification and prefill rows of layer 23 all fail when
+  streamed. Add IQ3_XXS traits (98-byte blocks, `mmq/ggml-common.h`) to
+  `kernels/rocm/ds41_expert_gemv.hip.cpp`, at least the per-slot down
+  variant.
+- **IQ2_S gate/up (layers 17, 25, 30).** The expert GEMV kernels take IQ2_S
+  (fused SwiGLU and grouped), so verification batches work, but
+  `fused_pair` leaves IQ2_S out and the streamed single-token miss path
+  then fails; adding it there should suffice. Streamed prefill fails at "no
+  table-indexed kernel for this shape" because `routed_f16_type` excludes
+  IQ2_S: add an IQ2_S FP16 tile or the per-row expert GEMV fallback the
+  IQ2_S down projections use.
+
+Check each against the resident MMQ/MMVQ outputs (`ds41.mmq_typed`,
+`ds41_gemv_bench`) and keep the existing builds' outputs bit-identical.
 
 ## Memory
 
