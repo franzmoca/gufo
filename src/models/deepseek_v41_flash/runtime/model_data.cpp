@@ -416,6 +416,15 @@ static ds41_kv* model_find_kv(const ds41_model* m, const char* key) {
  * ids that way). */
 static bool model_get_u32(const ds41_model* m, const char* key, uint32_t* out) {
   ds41_kv* kv = model_find_kv(m, key);
+  if (kv && kv->type == GGUF_VALUE_UINT16) {
+    /* llama.cpp writes split.no and split.count as u16. */
+    uint16_t v = 0;
+    ds41_cursor c = cursor_at(m, kv->value_pos);
+    if (!cursor_read(&c, &v, sizeof(v)))
+      return false;
+    *out = v;
+    return true;
+  }
   if (!kv || (kv->type != GGUF_VALUE_UINT32 && kv->type != GGUF_VALUE_INT32))
     return false;
   ds41_cursor c = cursor_at(m, kv->value_pos);
@@ -1681,7 +1690,7 @@ static void engram_open(ds41_engram_tables* e, const ds41_weights* w,
   /* A build may link the Engram file another build published (they share
    * one table), whose split header names its own position; say so. */
   uint32_t engram_no = 0, engram_count = 0;
-  const uint32_t backbone_count = required_u32(backbone, "split.count");
+  const uint32_t backbone_count = backbone->n_shards + 1;
   if (model_get_u32(m, "split.no", &engram_no) &&
       model_get_u32(m, "split.count", &engram_count) &&
       (engram_count != backbone_count || engram_no + 1 != backbone_count))
