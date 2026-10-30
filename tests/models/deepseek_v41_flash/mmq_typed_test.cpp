@@ -911,6 +911,31 @@ bool DenseF16Case(const TypeCase& t, int M, int N, int K, int groups,
     (void)hipFree(y16);
     (void)hipFree(y);
   }
+  /* One launch over the first m1 rows and the rest as a second matrix
+   * gives each part's rows of the single launch bit for bit. */
+  if (same && groups == 1 && M >= 512) {
+    const int m1 = M - 256, m2 = 256;
+    float *y1 = nullptr, *y2 = nullptr;
+    (void)hipMalloc(&y1, sizeof(float) * N * m1);
+    (void)hipMalloc(&y2, sizeof(float) * N * m2);
+    const auto* w2 =
+        static_cast<const uint8_t*>(static_cast<void*>(dw)) +
+        static_cast<std::size_t>(m1) * K / t.block_values * t.block_bytes;
+    same = ds41_v41_dense_f16_pair(t.type, dw, y1, m1, w2, y2, m2, dx, N, K,
+                                   0) == 0;
+    if (same) {
+      const auto ref = Host(got, n_out),
+                 a = Host(y1, static_cast<std::size_t>(N) * m1),
+                 b = Host(y2, static_cast<std::size_t>(N) * m2);
+      for (int token = 0; same && token < N; ++token)
+        for (int r = 0; same && r < M; ++r)
+          same = ref[static_cast<std::size_t>(token) * M + r] ==
+                 (r < m1 ? a[static_cast<std::size_t>(token) * m1 + r]
+                         : b[static_cast<std::size_t>(token) * m2 + r - m1]);
+    }
+    (void)hipFree(y1);
+    (void)hipFree(y2);
+  }
   for (int token = 0; ok && token < N; ++token)
     for (int z = 0; ok && z < groups; ++z)
       ok = ds41_v41_gemv(

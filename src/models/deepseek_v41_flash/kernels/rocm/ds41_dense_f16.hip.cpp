@@ -192,16 +192,27 @@ __device__ __forceinline__ float finite_or_zero(float v) { return __builtin_isfi
 
 /* out[t, z m + r] = sum_c W_z[r, c] x[t, z k + c] for group z = blockIdx.z;
  * x rows are groups * k values of X (float or _Float16), out rows groups * m
- * of Y (float, or _Float16 rounded from the float result). */
+ * of Y (float, or _Float16 rounded from the float result). Row blocks past
+ * the first matrix's m rows take a second [m2][k] matrix w2 of one group
+ * on the same rows of x, into out2. */
 template <typename F, bool kFull, typename X, typename Y>
 __global__ __launch_bounds__(kThreads) void dense_f16_kernel(const uint8_t* __restrict__ w, const X* __restrict__ x,
                                                              Y* __restrict__ out, uint32_t m, uint32_t n, uint32_t k,
-                                                             uint32_t groups, uint32_t tile0) {
+                                                             uint32_t groups, uint32_t tile0,
+                                                             const uint8_t* __restrict__ w2, Y* __restrict__ out2,
+                                                             uint32_t m2) {
   __shared__ __attribute__((aligned(16))) _Float16 act[2][kTile * kPitch];
   const int tid = threadIdx.x, wave = tid / 32, lane = tid % 32, h = lane / 16;
   const uint32_t z = blockIdx.z;
   const uint64_t row_bytes = (uint64_t)k / 256 * F::kBlockBytes;
-  const uint32_t row = blockIdx.x * kRows + wave * 16 + lane % 16;
+  uint32_t block = blockIdx.x;
+  if (block * kRows >= m) {
+    block -= m / kRows;
+    w = w2;
+    out = out2;
+    m = m2;
+  }
+  const uint32_t row = block * kRows + wave * 16 + lane % 16;
   const uint8_t* wr = w + ((uint64_t)z * m + row) * row_bytes;
   const uint32_t t0 = (tile0 + blockIdx.y) * kTile;
   /* Live 16-token tiles; a runtime count even for full tiles, since a
@@ -312,40 +323,63 @@ __global__ __launch_bounds__(kThreads) void dense_f16_kernel(const uint8_t* __re
   }
 }
 
+/* One launch for W x (m rows, groups matrices) and, when m2 > 0, W2 x (m2 rows, one group). */
+struct DenseArgs {
+  const uint8_t* w;
+  const void* x;
+  void* out;
+  uint32_t m, n, k, groups;
+  const uint8_t* w2;
+  void* out2;
+  uint32_t m2;
+};
+
 template <typename F, typename X, typename Y>
-int dense_launch(const uint8_t* w, const void* x, void* out, uint32_t m, uint32_t n, uint32_t k, uint32_t groups) {
-  const auto* xt = static_cast<const X*>(x);
-  auto* yt = static_cast<Y*>(out);
-  const uint32_t full = n / kTile;
+int dense_launch(const DenseArgs& a) {
+  const auto* xt = static_cast<const X*>(a.x);
+  auto* yt = static_cast<Y*>(a.out);
+  auto* y2 = static_cast<Y*>(a.out2);
+  const uint32_t full = a.n / kTile, blocks = (a.m + a.m2) / kRows;
   if (full)
-    dense_f16_kernel<F, true, X, Y><<<dim3(m / kRows, full, groups), kThreads>>>(w, xt, yt, m, n, k, groups, 0);
-  if (n % kTile)
-    dense_f16_kernel<F, false, X, Y><<<dim3(m / kRows, 1, groups), kThreads>>>(w, xt, yt, m, n, k, groups, full);
+    dense_f16_kernel<F, true, X, Y><<<dim3(blocks, full, a.groups), kThreads>>>(a.w, xt, yt, a.m, a.n, a.k, a.groups,
+                                                                                 0, a.w2, y2, a.m2);
+  if (a.n % kTile)
+    dense_f16_kernel<F, false, X, Y><<<dim3(blocks, 1, a.groups), kThreads>>>(a.w, xt, yt, a.m, a.n, a.k, a.groups,
+                                                                              full, a.w2, y2, a.m2);
   return hipGetLastError() == hipSuccess ? 0 : 1;
 }
 
 template <typename F>
-int dense_io(const uint8_t* w, const void* x, void* out, uint32_t m, uint32_t n, uint32_t k, uint32_t groups,
-             uint32_t io) {
+int dense_io(const DenseArgs& a, uint32_t io) {
   switch (io) {
   case 0:
-    return dense_launch<F, float, float>(w, x, out, m, n, k, groups);
+    return dense_launch<F, float, float>(a);
   case DS41_V41_DENSE_X_HALF:
-    return dense_launch<F, _Float16, float>(w, x, out, m, n, k, groups);
+    return dense_launch<F, _Float16, float>(a);
   case DS41_V41_DENSE_OUT_HALF:
-    return dense_launch<F, float, _Float16>(w, x, out, m, n, k, groups);
+    return dense_launch<F, float, _Float16>(a);
   default:
-    return dense_launch<F, _Float16, _Float16>(w, x, out, m, n, k, groups);
+    return dense_launch<F, _Float16, _Float16>(a);
   }
+}
+
+int dense_run(int type, const DenseArgs& a, uint32_t io) {
+  if ((type != 13 && type != 14) || a.m % kRows != 0 || a.m2 % kRows != 0 || a.k % 256 != 0 ||
+      a.n == 0 || a.groups == 0 || (a.m2 && a.groups != 1) || (io & ~(DS41_V41_DENSE_X_HALF | DS41_V41_DENSE_OUT_HALF)))
+    return 1;
+  return type == 13 ? dense_io<Q5K>(a, io) : dense_io<Q6K>(a, io);
 }
 
 }  // namespace
 
 extern "C" int ds41_v41_dense_f16(int type, const void* w, const void* x, void* out, uint32_t m, uint32_t n,
                                   uint32_t k, uint32_t groups, uint32_t io) {
-  if ((type != 13 && type != 14) || m % kRows != 0 || k % 256 != 0 || n == 0 || groups == 0 ||
-      (io & ~(DS41_V41_DENSE_X_HALF | DS41_V41_DENSE_OUT_HALF)))
-    return 1;
-  const auto* wb = static_cast<const uint8_t*>(w);
-  return type == 13 ? dense_io<Q5K>(wb, x, out, m, n, k, groups, io) : dense_io<Q6K>(wb, x, out, m, n, k, groups, io);
+  return dense_run(type, {static_cast<const uint8_t*>(w), x, out, m, n, k, groups, nullptr, nullptr, 0}, io);
+}
+
+extern "C" int ds41_v41_dense_f16_pair(int type, const void* w1, void* out1, uint32_t m1, const void* w2, void* out2,
+                                       uint32_t m2, const void* x, uint32_t n, uint32_t k, uint32_t io) {
+  return dense_run(type,
+                   {static_cast<const uint8_t*>(w1), x, out1, m1, n, k, 1, static_cast<const uint8_t*>(w2), out2, m2},
+                   io);
 }
