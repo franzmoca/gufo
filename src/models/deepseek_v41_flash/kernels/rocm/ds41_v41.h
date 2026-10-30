@@ -12,6 +12,8 @@
 
 #include <stdint.h>
 
+#include <hip/hip_runtime_api.h>
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -188,10 +190,11 @@ int ds41_v41_hc_mixes(const float* fn, const float* h, float* mixes, uint32_t hc
 /* Split mixes into pre[t, hc], post[t, hc] and Sinkhorn-normalized comb[t, hc*hc]. */
 int ds41_v41_hc_sinkhorn(const float* mixes, const float* scale, const float* base, float* pre, float* post,
                          float* comb, uint32_t hc, uint32_t iters, float eps, uint32_t n);
-/* hc_mixes followed by hc_sinkhorn (iters, hc_eps); small batches run as one kernel. */
+/* hc_mixes followed by hc_sinkhorn (iters, hc_eps); up to 16 tokens run as one
+ * kernel, the only form that takes a stream (larger batches need a null one). */
 int ds41_v41_hc_mix(const float* fn, const float* h, const float* scale, const float* base, float* mixes, float* pre,
                     float* post, float* comb, uint32_t hc, uint32_t dim, float eps, uint32_t iters, float hc_eps,
-                    uint32_t n);
+                    uint32_t n, hipStream_t stream);
 /* x[t, i] = sum_c pre[t, c] * h[t, c, i]; out[t] = weight * RMSNorm(x[t]). */
 int ds41_v41_hc_collapse_norm(const float* h, const float* pre, const float* weight, float* out, uint32_t hc,
                               uint32_t dim, float eps, uint32_t n);
