@@ -1950,3 +1950,26 @@ Rejected:
 
 A four-lane Sinkhorn could save part of the 2.2 us tail; at about 0.1% of
 a token it was not attempted.
+
+## E56 — decode: shared expert during the streamed route read
+
+With streamed experts, each layer's prepare copied the route ids with a
+blocking `hipMemcpy`, planned the layer and only then launched the shared
+expert from the read overlap, leaving the GPU idle about 11 us per layer.
+Decode batches (one token or the grouped expert path) now record an event
+after the router, queue the shared expert, and let the store copy the ids
+on its own non-blocking stream after that event. The event still follows
+every earlier launch, so the stage, slot and table uploads keep their
+ordering. Logits and per-layer states of a 40-token streamed UD-IQ1_M
+greedy decode are unchanged bit for bit.
+
+`gufo bench` streamed UD-IQ1_M tg128, alternating with the previous
+commit: 20.11 / 20.00 -> 20.48 / 20.44, 20.11 / 20.08 -> 20.48 / 20.51,
+19.70 / 20.11 -> 20.37 / 20.50 tok/s (about +2%); host wait 42.8 -> 41.3
+ms per token.
+
+Prefill keeps the shared expert in the read overlap. The pp2048 means
+(cold expert reads, about +-400 t/s per run) cannot resolve a change of
+this size: with the launch moved for every batch they read 1.7-3.8%
+lower, but the decode-only build, whose prefill path matches the previous
+commit, also read 0.7-2.4% lower.

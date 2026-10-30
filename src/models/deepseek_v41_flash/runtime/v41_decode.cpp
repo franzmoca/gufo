@@ -327,6 +327,9 @@ struct ds41_decoder : Activations {
   int32_t* pred_pinned = nullptr;  // pinned [DS41_N_LAYER][capacity][DS41_N_EXPERT_USED]
   hipEvent_t pred_events[DS41_N_LAYER] = {};
   bool pred_ok = true;
+  /* Recorded after the router so the store reads the routes while the
+   * shared expert runs; without it the store's copy waits for the stream. */
+  hipEvent_t routes_ready = nullptr;
   /* Batches of up to this many rows take the decode paths (FP32 GEMV,
    * grouped experts, per-row state mixes), where each row sees the
    * arithmetic of a single-token evaluation; up to
@@ -1040,13 +1043,14 @@ bool moe(ds41_decoder* d, uint32_t il, uint32_t n) {
     bool fused;
     const uint16_t* x16;
     bool gate_up_done = false;
+    bool shared_done = false;
     ds41_expert_overlap info{};
   };
   StreamWork work{d,         l,          il,        n,         (uint32_t)rows, (uint32_t)used, gate_type,
                   d->expert_plan_split[0], fused_pair, shared_x16};
   const auto streamed_overlap = [](void* context, const ds41_expert_overlap* info) {
     StreamWork& w = *static_cast<StreamWork*>(context);
-    if (!shared_moe(w.d, w.layer, w.n, w.x16))
+    if (!w.shared_done && !shared_moe(w.d, w.layer, w.n, w.x16))
       return false;
     predict_next_layer(w.d, w.il, w.n, info && info->miss_rows > 0);
     if (!info || !info->hit_ids || info->miss_rows == 0 || info->miss_rows == info->rows || !w.fused)
@@ -1070,8 +1074,16 @@ bool moe(ds41_decoder* d, uint32_t il, uint32_t n) {
                                          static_cast<const void* const*>(info->table[1]), 1) == 0;
   };
   if (d->engine->expert_store) {
+    /* Decode batches queue the shared expert, which reads none of the
+     * store's buffers, so it runs while the host reads the routes and plans
+     * the layer. Prefill keeps it in the read overlap, where the gap is
+     * small next to its reads. */
+    if (small && d->routes_ready) {
+      if (hipEventRecord(d->routes_ready, nullptr) != hipSuccess || !shared_moe(d, l, n, shared_x16)) return false;
+      work.shared_done = true;
+    }
     if (!ds41_expert_store_prepare(d->engine->expert_store, il, d->route_ids, n, &gate, &up, &down,
-                                   streamed_overlap, &work))
+                                   streamed_overlap, &work, work.shared_done ? d->routes_ready : nullptr))
       return false;
   } else {
     gate = dev(d, l->ffn_gate_exps);
@@ -1533,6 +1545,8 @@ ds41_decoder* ds41_decoder_create(ds41_engine* engine, uint32_t context) {
     for (uint32_t l = 0; ok && l < DS41_N_LAYER; ++l)
       ok = hipEventCreateWithFlags(&d->pred_events[l],
                                    hipEventDisableTiming) == hipSuccess;
+    if (hipEventCreateWithFlags(&d->routes_ready, hipEventDisableTiming) != hipSuccess)
+      d->routes_ready = nullptr;
   }
   d->host_h.resize((uint64_t)kHc * kDim);
   d->host_ids.resize(DS41_N_EXPERT_USED);
@@ -1546,6 +1560,8 @@ void ds41_decoder_destroy(ds41_decoder* d) {
   for (hipEvent_t event : d->pred_events)
     if (event)
       (void)hipEventDestroy(event);
+  if (d->routes_ready)
+    (void)hipEventDestroy(d->routes_ready);
   if (d->pred_pinned)
     (void)hipHostFree(d->pred_pinned);
   for (void* p : d->allocations) (void)hipFree(p);
