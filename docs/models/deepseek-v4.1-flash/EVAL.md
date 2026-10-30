@@ -12,18 +12,19 @@ Hardware: one Strix Halo (gfx1151), 128 GB. Engine: `gufo` on
 
 ## Summary
 
-On `IQ1_M`, MXFP8 gives no measurable quality gain over IQ4_NL: teacher-forced
-perplexity, MMLU-Pro, HumanEval+ and MBPP+ all agree within noise, and a blind
-pairwise review prefers neither. The one consistent difference is style:
-with MXFP8 the model adds a prose explanation around its code more often.
-`IQ2_XXS` task results and the speed comparison are pending.
+On `IQ1_M` and `IQ2_XXS`, MXFP8 gives no measurable quality gain over
+IQ4_NL: teacher-forced perplexity, MMLU-Pro, HumanEval+ and MBPP+ all agree
+within noise, and a blind pairwise review (on `IQ1_M`) prefers neither. The
+one consistent difference is style: with MXFP8 the model writes longer
+coding answers and adds a prose explanation around its code more often.
+The speed comparison is pending.
 
-| `IQ1_M` | IQ4_NL | MXFP8 |
-|---|---:|---:|
-| PPL, 18.5K tokens | 6.2665 | 6.2682 |
-| MMLU-Pro, 1,001 questions | 74.3% | 74.4% |
-| HumanEval+ (plus tests) | 90.2% | 90.2% |
-| MBPP+ (plus tests) | 77.8% | 78.0% |
+| | `IQ1_M` IQ4_NL | `IQ1_M` MXFP8 | `IQ2_XXS` IQ4_NL | `IQ2_XXS` MXFP8 |
+|---|---:|---:|---:|---:|
+| PPL, 18.5K tokens | 6.2665 | 6.2682 | 6.0029 | 6.0080 |
+| MMLU-Pro, 1,001 questions | 74.3% | 74.4% | 75.4% | 75.4% |
+| HumanEval+ (plus tests) | 90.2% | 90.2% | 87.8% | 88.4% |
+| MBPP+ (plus tests) | 77.8% | 78.0% | 79.1% | 78.6% |
 
 ## Using the MXFP8 table
 
@@ -63,7 +64,8 @@ floating-point differences do.
 ## Task evaluation
 
 `gufo serve` (release build), greedy (`temperature 0`, `seed 1`),
-thinking off, context 16,384, four concurrent requests. Each item is
+thinking off, context 16,384, four concurrent requests on `IQ1_M` and
+eight on `IQ2_XXS` (streamed experts). Each item is
 compared per question across the two tables (McNemar, exact).
 
 - **HumanEval+ / MBPP+** (evalplus 0.1.10 / 0.2.0, 164 / 378 problems):
@@ -84,10 +86,28 @@ compared per question across the two tables (McNemar, exact).
 | MBPP+ plus | 77.8% | 78.0% | 6 | 7 | 1.00 |
 | MMLU-Pro | 74.3% | 74.4% | 30 | 31 | 1.00 |
 
-MMLU-Pro picks the same answer on 916 of 1,001 questions; per-category
+| `IQ2_XXS` streamed | IQ4_NL | MXFP8 | Only IQ4_NL | Only MXFP8 | p |
+|---|---:|---:|---:|---:|---:|
+| HumanEval+ base | 95.1% | 95.7% | 0 | 1 | 1.00 |
+| HumanEval+ plus | 87.8% | 88.4% | 0 | 1 | 1.00 |
+| MBPP+ base | 91.3% | 91.3% | 4 | 4 | 1.00 |
+| MBPP+ plus | 79.1% | 78.6% | 7 | 5 | 0.77 |
+| MMLU-Pro | 75.4% | 75.4% | 27 | 27 | 1.00 |
+
+On `IQ1_M`, MMLU-Pro picks the same answer on 916 of 1,001 questions
+(922 on `IQ2_XXS`); per-category
 differences go both ways and stay within small-sample noise (computer
-science −11.7 points on 34 questions, history +6.2 on 32). About 7% of
-answers hit the 512-token limit with either table.
+science −11.7 points on 34 questions, history +6.2 on 32). About 5-8% of
+answers hit the 512-token limit with either table (`IQ1_M`: 76 and 73,
+58 of them the same questions); leaving out every question truncated on
+either side gives 731 vs 733 correct of 910 on `IQ1_M`.
+
+Swapping the backbone moves more results than swapping the table:
+`IQ1_M` and `IQ2_XXS` (both IQ4_NL) differ on 6 HumanEval+ plus results
+(5 favour `IQ1_M`, p = 0.22) and 21 MBPP+ plus results (13 favour
+`IQ2_XXS`). The discordant HumanEval+ problems are ordinary greedy-path
+flips: misread specifications and edge cases such as `fib(0)` and
+booleans counted as integers, in both directions.
 
 These results measure direct answers. DeepSeek reports V4 Flash in
 Non-Think, Think High and Think Max modes, and the gap between modes is
@@ -96,7 +116,7 @@ evaluation of the tables is not covered here.
 
 ## Writing style
 
-On the coding answers whose text differs between tables (111 HumanEval+,
+On `IQ1_M` coding answers whose text differs between tables (111 HumanEval+,
 258 MBPP+; the rest are identical):
 
 | | IQ4_NL | MXFP8 |
@@ -106,7 +126,9 @@ On the coding answers whose text differs between tables (111 HumanEval+,
 | Prose explanation only on this side, MBPP+ | 7 | 55 (p < 0.0001) |
 | Comment lines in code, MBPP+ | 261 | 300 |
 
-Docstrings and test blocks are as frequent on both sides.
+Docstrings and test blocks are as frequent on both sides. On `IQ2_XXS`
+the length difference repeats: median 734 vs 778 characters on the 84
+differing HumanEval+ answers, 566 vs 620 on the 191 differing MBPP+ answers.
 
 A blind pairwise review of 70 random differing pairs (random A/B order,
 judged on code clarity, explanation quality, apparent correctness and fit
@@ -127,6 +149,5 @@ at KL 0.314 / 87.1% top-1, an error far larger than the table swap.
 
 ## Pending
 
-- `IQ2_XXS` streamed: MMLU-Pro, HumanEval+ and MBPP+ with both tables.
 - Speed: pp2048 / tg128 at the card depths for both tables on both
   backbones, same binary.
