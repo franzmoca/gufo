@@ -101,6 +101,7 @@ __device__ __forceinline__ void q5_decode8(const Q5Lane& q, int j, int part, uin
  * scale word, and eight weights of part `part` of sub-block j as four half2. */
 struct Q5K {
   static constexpr int kBlockBytes = 176;  // d, dmin, scales[12], qh[32], qs[128]
+  static constexpr bool kWide = false;
   using Lane = Q5Lane;
   static __device__ __forceinline__ Lane load(const uint8_t* b, int h) { return load_q5(b, h); }
   static __device__ __forceinline__ uint32_t affine(const Lane& q, int j) { return q5_affine(q.head, j); }
@@ -124,6 +125,7 @@ struct Q6Lane {
 
 struct Q6K {
   static constexpr int kBlockBytes = 210;  // ql[128], qh[64], scales[16], d
+  static constexpr bool kWide = true;
   using Lane = Q6Lane;
   static __device__ __forceinline__ Lane load(const uint8_t* b, int h) {
     Lane q;
@@ -213,7 +215,9 @@ __global__ __launch_bounds__(kThreads) void dense_f16_kernel(const uint8_t* __re
    * is of vector types: arrays of uint4 went to scratch memory. */
   constexpr int kPer = kStageK * kTile / kThreads;
   constexpr int kVec = kPer * sizeof(X) / 16;  // 16-byte loads per stage
-  constexpr int kAhead = sizeof(X) == 2 ? 4 : 2;
+  /* Wide formats hold more weight bytes per lane; a shorter ring keeps them
+   * at two workgroups per WGP (192 VGPRs). */
+  constexpr int kAhead = (sizeof(X) == 2 ? 4 : 2) / (F::kWide ? 2 : 1);
   const uint32_t st = tid % kTile, sh = tid / kTile;
   const X* xs = kFull || t0 + st < n ? x + (t0 + st) * x_stride + (uint64_t)z * k + kPer * sh : nullptr;
   _Float16* as0 = act[0] + st * kPitch + kPer * sh;
