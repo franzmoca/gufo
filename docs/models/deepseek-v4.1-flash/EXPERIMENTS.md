@@ -1838,3 +1838,44 @@ Remaining prefill (UD-IQ1_M, 1,549 ms of kernels): routed FP16 tiles 42%
 the per-token part runs near 39 TFLOPS), dense FP16 30% (32-40 TFLOPS),
 attention 9.6%, `hc_state_pass` 7.7% (at the DRAM ceiling), router 4.9%
 (exact three-term BF16 split, about 25 effective TFLOPS).
+
+## E53 — prefill fragment loads and attention fixed costs (rejected)
+
+Dense FP16 kernel, Q6_K/Q8_0 at 2,048 tokens (`ds41_mmq_bench --dense
+--x-half 1`; `q_b` 4.19 ms). Each 16-token product waits on its own LDS
+fragment load behind the per-tile guard. All three variants were
+bit-identical to the committed kernel on every dense shape, with FP32 and
+FP16 inputs:
+
+- Next tile's fragment loaded during the current product (full tiles,
+  scheduling barrier between tiles): the compiler hoists every load anyway,
+  256 VGPRs with 815 spills, `q_b` 30 ms.
+- Both fragment halves read from LDS instead of four `permlanex16` per
+  product (already rejected in E21 on Q5_K): 185 VGPRs, `q_b` 5.02 ms, every
+  shape 20–37% slower.
+- Fragments loaded in pairs under the runtime guard: 196–202 VGPRs, one
+  workgroup per WGP, `q_b` 5.85 ms, `wo_a` 6.73.
+
+The second resident workgroup already hides the waits.
+
+Prefill attention (`ds41_attention_test --bench`, 2,048 tokens, FP16
+output as in production; ablations are timing-only):
+
+| Case | ratio 128, depth 0 | ratio 4, depth 0 | ratio 4, depth 16K |
+| --- | ---: | ---: | ---: |
+| Kernel | 2.59 ms | 5.31 | 8.26 |
+| No Q loads | 2.06 | 4.95 | 8.08 |
+
+With FP32 output, against 3.14 / 5.48 / 8.31 ms for the full kernel:
+
+| Ablation | ratio 128, depth 0 | ratio 4, depth 0 | ratio 4, depth 16K |
+| --- | ---: | ---: | ---: |
+| No tile loop | 2.90 | 2.94 | — |
+| No score products | 3.12 | 4.09 | 5.46 |
+| No PV products | 3.02 | 4.42 | 6.25 |
+| No window-row loads | 2.96 | 5.28 | 8.12 |
+| Without rope/FP8 | 2.91 | 5.21 | — |
+
+Reading FP32 Q costs 0.2–0.5 ms per call. FP16 Q written by `q_b` (rope
+and rounding moved into its epilogue) would save about half of that, about
+1% of prefill. Not attempted.
