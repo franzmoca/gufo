@@ -186,6 +186,9 @@ agreement. This changes outputs: opt-in only, with its own quality gates.
 
 ### 14. Higher-precision Engram tables
 
+In progress: [EVAL.md](EVAL.md). The MXFP8 table loads and matches IQ4_NL
+on `IQ1_M`; `IQ2_XXS` task results and speed are open.
+
 Measure speed and quality of Engram tables above IQ4_NL (144 B rows).
 [unsloth](https://huggingface.co/unsloth/DeepSeek-V4.1-Flash-1017-GGUF)
 `engram/` offers Q5_K (125.89 GiB), Q6_K (150.21 GiB) and MXFP8
