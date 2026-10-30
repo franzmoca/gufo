@@ -13,7 +13,7 @@
  *   ds41_mmq_bench [--type 19|29|16|17|22] [--counts FILE] [--line N] [--reps
  * N]
  *                  [--f16 1] [--tokens N]
- *   ds41_mmq_bench --type 13|8 --dense M,K[,GROUPS] [--tokens N] [--reps N]
+ *   ds41_mmq_bench --type 13|14|8 --dense M,K[,GROUPS] [--tokens N] [--reps N]
  */
 #include <hip/hip_runtime.h>
 
@@ -114,10 +114,11 @@ std::vector<unsigned int> Counts(const char* path, int line, int tokens,
 }
 
 /* Dense projection of `kTokens` tokens (2048 by default), MMQ against the FP16
- * kernel, over `groups` [m, k] matrices with their own input columns (Q5_K or
- * Q8_0). */
+ * kernel, over `groups` [m, k] matrices with their own input columns (Q5_K,
+ * Q6_K or Q8_0). */
 int DenseBench(int type, int m, int k, int groups, int reps, int kTokens) {
-  const int block = type == 13 ? 176 : 34, values = type == 13 ? 256 : 32;
+  const int block = type == 13 ? 176 : type == 14 ? 210 : 34;
+  const int values = type == 8 ? 32 : 256;
   std::mt19937 rng(7);
   std::vector<uint8_t> w(static_cast<std::size_t>(groups) * m * k / values *
                          block);
@@ -125,7 +126,7 @@ int DenseBench(int type, int m, int k, int groups, int reps, int kTokens) {
     w[at] = static_cast<uint8_t>(rng());
   for (std::size_t at = 0; at < w.size(); at += block) {
     const uint16_t d = 0x2000 | (rng() & 0x03ff);
-    std::memcpy(&w[at], &d, 2);
+    std::memcpy(&w[at + (type == 14 ? 208 : 0)], &d, 2);
     if (type == 13)
       std::memcpy(&w[at + 2], &d, 2);
   }

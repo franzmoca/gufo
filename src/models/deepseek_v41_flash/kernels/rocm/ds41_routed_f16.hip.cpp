@@ -1,4 +1,4 @@
-/* Batched routed-expert projections for IQ1_S, IQ1_M, IQ2_XXS and IQ2_XS weights on
+/* Batched routed-expert projections for IQ1_S, IQ1_M, IQ2_XXS, IQ2_XS and IQ2_S weights on
  * the FP16 matrix cores. The activations are rounded to FP16 (11-bit
  * mantissa, against the 8-bit block quantization of MMQ's Q8_1 inputs) and
  * each weight decodes to FP16 with its sub-block scale folded in, so the K
@@ -271,6 +271,46 @@ struct Format<17> {
   }
 };
 
+/* IQ2_S (82 bytes): d, qs[32], signs[32], qh[8] and eight scale bytes. Group
+ * l of sub-block ib takes codebook entry qs[4 ib + l] | ((qh[ib] >> 2 l) & 3)
+ * << 8 of 1024 with the sign byte signs[4 ib + l] (a bit mask, not an index);
+ * the scale nibbles apply as in IQ2_XS. */
+template <>
+struct Format<22> {
+  static constexpr int kBytes = 82, kWords = 21;
+  static constexpr bool kAligned = false;
+  static constexpr bool kShareActivations = true;
+  struct Tables {
+    uint4 grid[1024];
+    uint2 signs[256];
+  };
+  static __device__ void fill(Tables& t, int tid) {
+    Format<16>::fill_grid(t.grid, iq2s_grid, 1024, tid);
+    uint32_t w[2] = {0, 0};
+#pragma unroll
+    for (int j = 0; j < 8; ++j) w[j / 4] |= ((uint32_t)(tid >> j) & 1u) << (8 * (j % 4) + 7);
+    t.signs[tid] = make_uint2(w[0], w[1]);
+  }
+  struct Sub {
+    uint32_t qs, signs, qh, scale[2];
+  };
+  static __device__ __forceinline__ Sub sub(const Raw<kWords>& b, int ib) {
+    const uint32_t qh = (b.w[(66 + ib) / 4] >> (8 * ((66 + ib) % 4))) & 0xffu;
+    const uint32_t sc = (b.w[(74 + ib) / 4] >> (8 * ((74 + ib) % 4))) & 0xffu;
+    const float d = half_bits(b.w[0]) * 0.25f;
+    const float lo = d * (0.5f + static_cast<float>(sc & 15u));
+    const float hi = d * (0.5f + static_cast<float>(sc >> 4));
+    return {__builtin_amdgcn_alignbyte(b.w[ib + 1], b.w[ib], 2),
+            __builtin_amdgcn_alignbyte(b.w[ib + 9], b.w[ib + 8], 2),
+            qh,
+            {pack_half2(lo, lo), pack_half2(hi, hi)}};
+  }
+  static __device__ __forceinline__ void decode(const Sub& s, int l, const Tables& t, uint32_t* out) {
+    const uint32_t idx = ((s.qs >> (8 * l)) & 0xffu) | (((s.qh >> (2 * l)) & 3u) << 8);
+    Format<16>::apply(t.grid[idx], t.signs[(s.signs >> (8 * l)) & 0xffu], s.scale[l / 2], out);
+  }
+};
+
 /* Lane L's word from lane L ^ 16, without the destination's old value
  * (fetch-inactive and bound-control set; every lane is active here), so no
  * register is copied for it before each permute. */
@@ -501,6 +541,10 @@ extern "C" int ds41_v41_routed_f16(int type, const void* w, const void* w_up, ui
     break;
   case 17:
     launch_routed<17>(a, b, ta, tb, expert_bytes, x, x_div, rows, bounds, tiles, n_tiles, route_w, limit, y, y_half,
+                      m, k);
+    break;
+  case 22:
+    launch_routed<22>(a, b, ta, tb, expert_bytes, x, x_div, rows, bounds, tiles, n_tiles, route_w, limit, y, y_half,
                       m, k);
     break;
   default:

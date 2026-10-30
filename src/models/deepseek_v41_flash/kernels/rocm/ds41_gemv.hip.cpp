@@ -1,5 +1,5 @@
-/* Single-token decode projections for the V4.1 Flash dense Q5_K and Q8_0
- * weights (and the DSpark drafter's Q4_K), after the Gemma 4 K-quant GEMV (src/models/gemma4/kernels/rocm/
+/* Single-token decode projections for the V4.1 Flash dense Q5_K, Q6_K and
+ * Q8_0 weights (and the DSpark drafter's Q4_K), after the Gemma 4 K-quant GEMV (src/models/gemma4/kernels/rocm/
  * gemv.hip.cpp): weights stay in their GGUF blocks, activations stay FP32. A
  * lane's unit of work is one 16-byte vector of quantized values; lanes
  * holding the same task of different rows read the same activations, which
@@ -48,6 +48,17 @@ struct Format<12> {  // Q4_K (DSpark drafter projections)
   static __device__ __forceinline__ void Decode(const uint8_t* b, int t, float (&w)[32]) { DecodeQ45K<false>(b, t, w); }
   static __device__ __forceinline__ float Dot(float acc, const float (&w)[32], int t, const float* x) {
     return DotQ45K(acc, w, t, x);
+  }
+};
+template <>
+struct Format<14> {  // Q6_K (Unsloth's dense projections)
+  static constexpr int kBlockBytes = 210;
+  static constexpr int kTasks = 8;
+  static __device__ __forceinline__ void Decode(const uint8_t* b, int t, float (&w)[32]) { DecodeQ6K32(b, t, w); }
+  static __device__ __forceinline__ float Dot(float acc, const float (&w)[32], int t, const float* x) {
+    const float* xv = x + OffsetQ6K32(t);
+    acc = Accumulate<16>(acc, w, xv);
+    return Accumulate<16>(acc, w + 16, xv + 32);
   }
 };
 struct RawQ8_0 {
@@ -464,6 +475,8 @@ int run(int type, const void* w, const void* w_up, float limit, const float* x, 
     return dispatch<8>(w, w_up, limit, x, y, m, k, rows_per_x, slices, second, tokens);
   case 12:
     return dispatch<12>(w, w_up, limit, x, y, m, k, rows_per_x, slices, second, tokens);
+  case 14:
+    return dispatch<14>(w, w_up, limit, x, y, m, k, rows_per_x, slices, second, tokens);
   default:
     return 1;
   }
