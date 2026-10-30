@@ -1800,3 +1800,41 @@ identical), seeded sampled 40.16 / 40.00 -> 40.25 / 40.33 tok/s with
 identical text, drafts and acceptance; AR unchanged. Server, distinct
 prompts, greedy DSpark: C4 47.01 / 46.86 -> 47.14 / 47.39, C8 60.71 /
 60.33 -> 61.79 / 60.75 tok/s, completions identical.
+
+## E52 — dense FP16 prefill: Q6_K occupancy, Q8_0, paired launches (retained)
+
+Unsloth UD-IQ1_M keeps its attention projections in Q6_K and its shared
+experts in Q8_0. Q6_K took 1.3-1.45x the Q5_K time for 1.19x the bytes,
+with the same instruction mix and DRAM traffic: at 200 VGPRs it held one
+16-wave workgroup per WGP instead of two (the limit is 192). A shorter
+activation prefetch ring for the wide formats (2 stages for FP16 inputs,
+1 for FP32) brings it to 184 VGPRs. Q8_0 joins the kernel as eight 34-byte
+blocks per 256-value step (sign-flipped bytes through the FP16 magic
+constant, exact), so the UD shared experts and the ISTA `attn_q_a`/`attn_kv`
+leave MMQ. One launch now takes two matrices on the same rows: `attn_q_a` +
+`attn_kv` (with `xn` rounded to FP16 once into the idle `o` scratch) and
+shared gate + up. Rejected: padding Q6_K to 32-byte-aligned blocks (0-7%),
+an 8-wave occupancy cap (16 spilled VGPRs, no faster), full activation
+fragments from LDS instead of `permlanex16` (LDS-bound, 15-30% slower),
+token tiles as the fastest grid index (activation re-reads, 20-80% slower),
+and router BF16 staging of 64 values per barrier with register prefetch
+(bit-identical, 3-24% slower at 2,048 tokens).
+
+`ds41_mmq_bench --dense --x-half 1`, Q6_K: `attn_q_b` 5.65 -> 5.32 ms,
+`attn_output_a` (8 groups) 5.82 -> 4.74, `attn_output_b` 5.06 -> 4.50; Q8_0
+shared gate 2.18 (MMQ) -> 1.34 ms. Last warm pp2048 prefill of a profiled
+`gufo bench` (streamed): UD-IQ1_M 1,804 -> 1,603 ms (1,135 -> 1,278 tok/s),
+GSQ IQ2_XXS 1,722 -> 1,675 ms. The Q6_K ring and the paired launches are
+bit-identical: the dense kernel matches the previous one on every shape
+with FP32 and FP16 inputs, and the UD-IQ1_M 3K-token batch score with Q8_0
+still on MMQ matches the previous build on all 2,999 positions. Only Q8_0
+changes the arithmetic (FP16 activations instead of Q8_1): UD-IQ1_M PPL
+5.772 -> 5.779 (mean dNLL +0.0012 +- 0.0035, argmax agreement 94.1%),
+GSQ IQ2_XXS 6.022 -> 6.041 (+0.0031 +- 0.0028, 95.3%), both within noise,
+for about 28 ms (1.7%) of each UD-IQ1_M pp2048.
+
+Remaining prefill (UD-IQ1_M, 1,549 ms of kernels): routed FP16 tiles 42%
+(about 6 ms per gate/up call is weight decode, independent of the tokens;
+the per-token part runs near 39 TFLOPS), dense FP16 30% (32-40 TFLOPS),
+attention 9.6%, `hc_state_pass` 7.7% (at the DRAM ceiling), router 4.9%
+(exact three-term BF16 split, about 25 effective TFLOPS).
