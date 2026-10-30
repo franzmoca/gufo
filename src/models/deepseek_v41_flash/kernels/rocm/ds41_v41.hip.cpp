@@ -2168,8 +2168,12 @@ __global__ __launch_bounds__(512) void attention_split_kernel(const float* q, co
   out4[lane + 96] = o3;
 }
 
-/* Block (head, token): out = sum_s exp(m_s - M) o_s / (exp(sink - M) + sum_s exp(m_s - M) l_s). */
-__global__ void attention_combine_kernel(const float* partial, const float* sinks, float* out, uint32_t heads) {
+/* Block (head, token): out = sum_s exp(m_s - M) o_s / (exp(sink - M) + sum_s exp(m_s - M) l_s).
+ * With inv_freq, each thread holds 4 consecutive dimensions and applies
+ * rope_fp8_block's inverse rotation and FP8 rounding (block maximum over 8
+ * lanes) to the values ds41_v41_rope_fp8 would read back. 128 threads. */
+__global__ void attention_combine_kernel(const float* partial, const float* sinks, float* out, uint32_t heads,
+                                         const float* inv_freq, uint32_t pos0) {
   const uint32_t head = blockIdx.x;
   const uint32_t token = blockIdx.y;
   const float* part = partial + ((uint64_t)token * heads + head) * kAttnSplits * kAttnPartial;
@@ -2182,11 +2186,46 @@ __global__ void attention_combine_kernel(const float* partial, const float* sink
     factor[s] = ms == -INFINITY ? 0.0f : expf(ms - m);
     den += factor[s] * part[s * kAttnPartial + 1];
   }
-  for (uint32_t d = threadIdx.x; d < 512; d += blockDim.x) {
-    float acc = 0.0f;
-    for (uint32_t s = 0; s < kAttnSplits; s++) acc += factor[s] * part[s * kAttnPartial + 4 + d];
-    out[((uint64_t)token * heads + head) * 512 + d] = acc / den;
+  float* row = out + ((uint64_t)token * heads + head) * 512;
+  if (!inv_freq) {
+    for (uint32_t d = threadIdx.x; d < 512; d += blockDim.x) {
+      float acc = 0.0f;
+      for (uint32_t s = 0; s < kAttnSplits; s++) acc += factor[s] * part[s * kAttnPartial + 4 + d];
+      row[d] = acc / den;
+    }
+    return;
   }
+  const uint32_t d0 = 4 * threadIdx.x;
+  float v[4];
+#pragma unroll
+  for (uint32_t i = 0; i < 4; i++) {
+    float acc = 0.0f;
+    for (uint32_t s = 0; s < kAttnSplits; s++) acc += factor[s] * part[s * kAttnPartial + 4 + d0 + i];
+    v[i] = acc / den;
+  }
+  if (d0 >= 512 - kAttnRope) {
+    const uint32_t pair0 = (d0 - (512 - kAttnRope)) / 2;
+    const uint32_t pos = pos0 + token;
+#pragma unroll
+    for (uint32_t k = 0; k < 2; k++) {
+      const float angle = (float)pos * inv_freq[pair0 + k];
+      const float c = cosf(angle);
+      const float s = -sinf(angle);
+      const float re = v[2 * k];
+      const float im = v[2 * k + 1];
+      /* rope_fp8_block's contraction of the same expressions. */
+      v[2 * k] = __builtin_fmaf(re, c, -(im * s));
+      v[2 * k + 1] = __builtin_fmaf(im, c, re * s);
+    }
+  }
+  float amax = 0.0f;
+#pragma unroll
+  for (uint32_t i = 0; i < 4; i++) amax = fmaxf(amax, fabsf(v[i]));
+#pragma unroll
+  for (int off = 1; off < 8; off <<= 1) amax = fmaxf(amax, __shfl_xor(amax, off, 32));
+  const float scale = pow2_ceil(fmaxf(amax, 1.0e-4f) / 448.0f);
+#pragma unroll
+  for (uint32_t i = 0; i < 4; i++) row[d0 + i] = round_e4m3(fminf(fmaxf(v[i] / scale, -448.0f), 448.0f)) * scale;
 }
 
 /* Block (head, token): the DSpark block attention. Keys are the ring rows of
@@ -2882,14 +2921,20 @@ extern "C" int ds41_v41_attention(float* q, const float* ring, const float* chun
     return launch_ok("attention");
   }
   if (out_half) return 1;
-  if (inv_freq && ds41_v41_rope_tail(q, n * heads, head_dim, rope_dim, inv_freq, pos0, heads, 1, 0)) return 1;
   if (split) {
+    /* The combine applies the output rotation and FP8 rounding itself. (A
+     * rotation of q in the split kernel's registers reassociated its score
+     * sums: q keeps its own pass.) */
+    const float* freq = inv_freq && rope_dim == kAttnRope ? inv_freq : nullptr;
+    if (inv_freq && ds41_v41_rope_tail(q, n * heads, head_dim, rope_dim, inv_freq, pos0, heads, 1, 0)) return 1;
     attention_split_kernel<<<dim3(heads / kAttnSplitHeads, kAttnSplits, n), 32 * kAttnSplitHeads>>>(
         q, ring, chunk, window, floor, comp, idx, k, ratio, partial, pos0, heads, scale);
     if (launch_ok("attention split")) return 1;
-    attention_combine_kernel<<<dim3(heads, n), 128>>>(partial, sinks, out, heads);
+    attention_combine_kernel<<<dim3(heads, n), 128>>>(partial, sinks, out, heads, freq, pos0);
     if (launch_ok("attention combine")) return 1;
+    if (freq) return 0;
   } else {
+    if (inv_freq && ds41_v41_rope_tail(q, n * heads, head_dim, rope_dim, inv_freq, pos0, heads, 1, 0)) return 1;
     const size_t shared = (size_t)(window + (ratio ? k : 0)) * sizeof(float);
     if (shared > 60 * 1024) return 1;
     attention_kernel<<<dim3(heads, n), kThreads, shared>>>(q, ring, chunk, window, floor, comp, idx, k, ratio, sinks,
