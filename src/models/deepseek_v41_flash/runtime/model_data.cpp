@@ -1678,6 +1678,19 @@ static void engram_open(ds41_engram_tables* e, const ds41_weights* w,
   int64_t rows = 0;
   for (int64_t n : w->engram_head_vocab)
     rows += n;
+  /* A build may link the Engram file another build published (they share
+   * one table), whose split header names its own position; say so. */
+  uint32_t engram_no = 0, engram_count = 0;
+  const uint32_t backbone_count = required_u32(backbone, "split.count");
+  if (model_get_u32(m, "split.no", &engram_no) &&
+      model_get_u32(m, "split.count", &engram_count) &&
+      (engram_count != backbone_count || engram_no + 1 != backbone_count))
+    gufo::server::Logger::LogFormatted(
+        gufo::server::LogLevel::kWarn, "ds41",
+        "Engram %s is labelled shard %u of %u but serves as shard %u of %u of "
+        "this build (a table shared with another build)",
+        path.c_str(), engram_no + 1, engram_count, backbone_count,
+        backbone_count);
   ds41_tensor* t = required_tensor(m, "per_layer_token_embd.weight");
   tensor_expect_dims(t, 2, DS41_ENGRAM_HEAD_DIM, (uint64_t)rows, 0);
   if (t->type != DS41_TENSOR_IQ4_NL && t->type != DS41_TENSOR_Q8_0)
