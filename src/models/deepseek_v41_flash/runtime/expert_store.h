@@ -55,13 +55,17 @@ bool ds41_expert_store_seed(ds41_expert_store* store, const char* path);
 
 /* Routes are device [n_tokens][6]. The returned gate, up and down tables map
  * each expert index to its device weights and stay valid until the next call.
- * Engine evaluations are serialized, including joint verification. */
+ * Engine evaluations are serialized, including joint verification. With
+ * routes_ready, an event recorded on the null stream once the routes are
+ * written, the routes are read without waiting for work queued after it;
+ * that work must not touch the expert stage, slots or tables. */
 bool ds41_expert_store_prepare(ds41_expert_store* store, uint32_t layer,
                                const int32_t* routes, uint32_t n_tokens,
                                const void** gate, const void** up,
                                const void** down,
                                bool (*overlap)(void*, const ds41_expert_overlap*) = nullptr,
-                               void* overlap_context = nullptr);
+                               void* overlap_context = nullptr,
+                               hipEvent_t routes_ready = nullptr);
 
 /* Queue a background read of the given uncached experts of `layer` into the
  * stage set the layer's next prepare consumes, without displacing anything.

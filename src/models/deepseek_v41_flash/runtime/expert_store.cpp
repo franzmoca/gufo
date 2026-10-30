@@ -561,12 +561,17 @@ struct ds41_expert_store {
    * route rows of the current prepare call (hit rows, then miss rows) with
    * their pinned staging. A layer's table is uploaded only when it changes,
    * which a warm cache almost never does; the uploads are asynchronous, as
-   * the blocking routes copy of the next prepare orders them before any
-   * mirror is rewritten. */
+   * the next prepare's routes copy (blocking, or after a routes_ready event
+   * recorded behind them) orders them before any mirror is rewritten. */
   std::array<const uint8_t**, 3> table_host{};
   std::array<const uint8_t**, 3> table{};
   int32_t* split = nullptr;
   int32_t* split_host = nullptr;
+  /* With a routes_ready event, prepare copies the routes here on its own
+   * stream, so work queued after the router keeps the device busy. */
+  hipStream_t routes_stream = nullptr;
+  int32_t* routes_host = nullptr;
+  size_t routes_capacity = 0;
   std::array<int, DS41_MAX_SHARDS> direct_fds = [] {
     std::array<int, DS41_MAX_SHARDS> fds;
     fds.fill(-1);
@@ -620,6 +625,10 @@ struct ds41_expert_store {
       (void)hipFree(split);
     if (split_host)
       (void)hipHostFree(split_host);
+    if (routes_host)
+      (void)hipHostFree(routes_host);
+    if (routes_stream)
+      (void)hipStreamDestroy(routes_stream);
   }
 
   bool grow(uint32_t size_class) {
@@ -1095,16 +1104,37 @@ bool ds41_expert_store_prepare(ds41_expert_store* store, uint32_t layer,
                                const void** gate, const void** up,
                                const void** down,
                                bool (*overlap)(void*, const ds41_expert_overlap*),
-                               void* overlap_context) {
+                               void* overlap_context, hipEvent_t routes_ready) {
   if (!store || layer >= DS41_N_LAYER || !routes || !n_tokens || !gate || !up ||
       !down)
     return false;
   const auto start = std::chrono::steady_clock::now();
   const size_t n_routes = static_cast<size_t>(n_tokens) * DS41_N_EXPERT_USED;
   std::vector<int32_t> ids(n_routes);
-  if (hipMemcpy(ids.data(), routes, n_routes * sizeof(int32_t),
-                hipMemcpyDeviceToHost) != hipSuccess)
+  if (routes_ready) {
+    if (!store->routes_stream &&
+        hipStreamCreateWithFlags(&store->routes_stream, hipStreamNonBlocking) != hipSuccess)
+      return false;
+    if (store->routes_capacity < n_routes) {
+      if (store->routes_host)
+        (void)hipHostFree(store->routes_host);
+      store->routes_host = nullptr;
+      store->routes_capacity = 0;
+      if (hipHostMalloc(reinterpret_cast<void**>(&store->routes_host),
+                        n_routes * sizeof(int32_t)) != hipSuccess)
+        return false;
+      store->routes_capacity = n_routes;
+    }
+    if (hipStreamWaitEvent(store->routes_stream, routes_ready, 0) != hipSuccess ||
+        hipMemcpyAsync(store->routes_host, routes, n_routes * sizeof(int32_t),
+                       hipMemcpyDeviceToHost, store->routes_stream) != hipSuccess ||
+        hipStreamSynchronize(store->routes_stream) != hipSuccess)
+      return false;
+    std::copy_n(store->routes_host, n_routes, ids.begin());
+  } else if (hipMemcpy(ids.data(), routes, n_routes * sizeof(int32_t),
+                       hipMemcpyDeviceToHost) != hipSuccess) {
     return false;
+  }
   std::array<uint32_t, DS41_N_EXPERT> counts{}, recent{};
   for (size_t i = 0; i < ids.size(); ++i) {
     const int32_t id = ids[i];
