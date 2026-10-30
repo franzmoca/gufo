@@ -34,6 +34,15 @@ using ds41_gemv_tasks::HalfBits;
 
 constexpr int kWave = 32;
 constexpr int kWaves = 8;
+/* A pointer read from a table, marked as global memory: as a generic pointer
+ * its loads compile to flat loads, whose completion the LDS codebook waits
+ * then wait for too. */
+__device__ __forceinline__ const uint8_t* table_row(const uint8_t* const* table, int32_t id) {
+  typedef const __attribute__((address_space(1))) uint8_t global_byte;
+  global_byte* p = reinterpret_cast<global_byte* const*>(table)[id];
+  return (const uint8_t*)p;
+}
+
 /* An expert id the ungrouped kernel skips: a grouped launch computes the slot. */
 constexpr int32_t kSkipSlot = INT32_MIN;
 
@@ -491,8 +500,8 @@ __global__ void __launch_bounds__(kWave* kWaves)
    * choice here rescheduled the IQ2 loops with dependency delays. */
   const uint64_t row_bytes = (uint64_t)row * blocks_per_row * F::kBlockBytes;
   const uint64_t offset = (uint64_t)id * expert_bytes + row_bytes;
-  const uint8_t* base = kTable ? w_table[id] + row_bytes : w + offset;
-  const uint8_t* base_up = kSwiGLU ? (kTable ? w_up_table[id] + row_bytes : w_up + offset)
+  const uint8_t* base = kTable ? table_row(w_table, id) + row_bytes : w + offset;
+  const uint8_t* base_up = kSwiGLU ? (kTable ? table_row(w_up_table, id) + row_bytes : w_up + offset)
                            : kPair  ? base + (uint64_t)4 * blocks_per_row * F::kBlockBytes
                                     : nullptr;
   float acc = 0.0f;
@@ -685,9 +694,9 @@ __global__ void __launch_bounds__(kWave* kWaves)
   const uint32_t blocks_per_row = k / 256;
   const uint64_t row_bytes = (uint64_t)row * blocks_per_row * F::kBlockBytes;
   const uint64_t offset = (uint64_t)id * expert_bytes + row_bytes;
-  const uint8_t* base = kTable ? w_table[id] + row_bytes : w + offset;
+  const uint8_t* base = kTable ? table_row(w_table, id) + row_bytes : w + offset;
   const uint8_t* base_up =
-      kSwiGLU ? (kTable ? w_up_table[id] + row_bytes : w_up + offset) : nullptr;
+      kSwiGLU ? (kTable ? table_row(w_up_table, id) + row_bytes : w_up + offset) : nullptr;
   float acc[kCols] = {};
   float acc_up[kCols] = {};
   uint32_t blk = 0;
