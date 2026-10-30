@@ -1931,3 +1931,22 @@ A synthetic dependent chain (`hipcc`, gfx1151) gives a tiny kernel 1.9 us
 after a 2,048-block working kernel and 5-11 us after 64-1,024-block ones,
 so the profile's ~7 us gaps after the large-grid GEMVs are not explained
 by grid size.
+
+## E55 — decode: HC mix kernel (rejected)
+
+`hc_mix_small` (24 rows of `fn`, 2 MB FP32, plus the Sinkhorn tail) runs
+twice per layer. A standalone loop over 64 rotated `fn` buffers (beyond
+the MALL) times one-token calls at 13.98 us; a 2 MB streaming read in the
+same loop takes 10.3 us at any grid from 80 to 960 blocks, and an empty
+launch 1.9 us. Without the last-block reduction and Sinkhorn the kernel
+takes 11.8 us; with one Sinkhorn iteration instead of 20 it takes 13.27 us.
+At most ~3 us per call (~0.25 ms per token) is above the read.
+
+Rejected:
+
+- 2, 3, 4 or 6 mix rows per block, loading `h` once: 14.2, 14.6, 15.0 and
+  15.6 us at one token (faster only at four tokens), and the compiler
+  contracted the row dot products differently.
+
+A four-lane Sinkhorn could save part of the 2.2 us tail; at about 0.1% of
+a token it was not attempted.
