@@ -276,7 +276,7 @@ struct gguf_type_info {
 };
 
 static constexpr auto gguf_types = [] {
-  std::array<gguf_type_info, 40> types{};
+  std::array<gguf_type_info, 44> types{};
   types[0] = {"f32", 1, 4};
   types[1] = {"f16", 1, 2};
   types[2] = {"q4_0", 32, 18};
@@ -307,6 +307,7 @@ static constexpr auto gguf_types = [] {
   types[29] = {"iq1_m", 256, 56};
   types[30] = {"bf16", 1, 2};
   types[39] = {"mxfp4", 32, 17};
+  types[43] = {"mxfp8", 32, 33};
   return types;
 }();
 
@@ -1666,7 +1667,8 @@ static void warn_free_cma(void) {
  * Engram Tables.
  * =========================================================================
  *
- * The two n-gram tables (about 110 GB at IQ4_NL) never become resident. They
+ * The two n-gram tables (about 110 GB at IQ4_NL, 203 GB at MXFP8, the
+ * checkpoint's own format) never become resident. They
  * stay mapped read-only and rows are read on demand; the kernel is told the
  * access pattern is random so read-ahead does not fill memory.
  */
@@ -1702,7 +1704,8 @@ static void engram_open(ds41_engram_tables* e, const ds41_weights* w,
         backbone_count);
   ds41_tensor* t = required_tensor(m, "per_layer_token_embd.weight");
   tensor_expect_dims(t, 2, DS41_ENGRAM_HEAD_DIM, (uint64_t)rows, 0);
-  if (t->type != DS41_TENSOR_IQ4_NL && t->type != DS41_TENSOR_Q8_0)
+  if (t->type != DS41_TENSOR_IQ4_NL && t->type != DS41_TENSOR_Q5_K &&
+      t->type != DS41_TENSOR_Q8_0 && t->type != DS41_TENSOR_MXFP8)
     tensor_reject(t, "has an unsupported Engram row type");
   e->table = t;
   e->row_bytes = t->bytes / (uint64_t)rows;
