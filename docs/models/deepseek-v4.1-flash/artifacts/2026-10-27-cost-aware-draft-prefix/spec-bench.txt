@@ -1,0 +1,16 @@
+spec-bench n=1 at 307: median 43.4 ms min 43.1 ms
+spec-bench n=2 at 314: median 58.0 ms min 56.1 ms
+spec-bench n=3 at 321: median 69.8 ms min 68.4 ms
+spec-bench n=4 at 328: median 78.8 ms min 77.3 ms
+spec-bench n=5 at 335: median 96.6 ms min 91.6 ms
+spec-bench n=6 at 342: median 107.5 ms min 103.9 ms
+spec-bench n=7 at 349: median 120.4 ms min 117.9 ms
+spec-bench n=8 at 356: median 133.8 ms min 130.9 ms
+spec-bench n=1 at 307: median 41.1 ms min 40.9 ms
+spec-bench n=2 at 314: median 52.8 ms min 52.3 ms
+spec-bench n=3 at 321: median 65.5 ms min 63.2 ms
+spec-bench n=4 at 328: median 75.7 ms min 74.1 ms
+spec-bench n=5 at 335: median 87.0 ms min 85.8 ms
+spec-bench n=6 at 342: median 98.3 ms min 96.9 ms
+spec-bench n=7 at 349: median 113.5 ms min 112.9 ms
+spec-bench n=8 at 356: median 123.6 ms min 122.1 ms

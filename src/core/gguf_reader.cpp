@@ -211,14 +211,25 @@ std::unique_ptr<GgufReader> GgufReader::OpenSplitFileSet(
 
   const auto architecture =
       shards[0]->GetMetadataString("general.architecture");
+  // Every DeepSeek V4.1 build of one model shares a single Engram table file
+  // as its last shard, so that shard's own split position is the one of the
+  // build it was published with; it belongs here when it holds just the
+  // table and counts the same tensors.
+  const auto shared_engram = [&](const GgufReader& shard) {
+    return architecture == "deepseek41" && shard.tensors_.size() == 1 &&
+           shard.tensors_.front().name == "per_layer_token_embd.weight" &&
+           shard.GetMetadataUint64("split.tensors.count") == total_tensor_count;
+  };
   for (std::uint32_t i = 0; i < split_count; ++i) {
     const auto shard_no = shards[i]->GetMetadataUint32("split.no");
     const auto shard_count = shards[i]->GetMetadataUint32("split.count");
     const auto shard_architecture =
         shards[i]->GetMetadataString("general.architecture");
-    if (!shard_no.has_value() || *shard_no != i || !shard_count.has_value() ||
-        *shard_count != split_count ||
-        shards[i]->GetVersion() != shards[0]->GetVersion() ||
+    const bool position_ok =
+        (shard_no.has_value() && *shard_no == i && shard_count.has_value() &&
+         *shard_count == split_count) ||
+        (i + 1 == split_count && shared_engram(*shards[i]));
+    if (!position_ok || shards[i]->GetVersion() != shards[0]->GetVersion() ||
         (shard_architecture.has_value() &&
          shard_architecture != architecture)) {
       if (error_msg != nullptr) {
@@ -705,9 +716,10 @@ bool GgufReader::ParseHeaders(std::string* error_msg) {
     tensors_.push_back(std::move(info));
   }
 
-  // Align data payload base to alignment boundary
+  // Align data payload base to alignment boundary. A shard without tensors
+  // (split metadata only) may end at its metadata, without the padding.
   const auto padding = (alignment_ - offset % alignment_) % alignment_;
-  if (offset > size_ || padding > size_ - offset)
+  if (offset > size_ || (padding > size_ - offset && !tensors_.empty()))
     return false;
   const std::size_t data_base = offset + padding;
   for (auto& tensor : tensors_) {

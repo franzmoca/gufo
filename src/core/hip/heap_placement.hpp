@@ -8,11 +8,18 @@ namespace gufo::hip {
 /// Keep this much free in the device heap for driver command submission.
 inline constexpr std::uint64_t kDispatchReserve = 4ull << 30;
 
+/// Component-cache backing (pinned host pages, which the device heap also
+/// counts) may grow until this much is free: below the dispatch reserve, so
+/// a cache can work when the weights leave less than it, while keeping room
+/// for driver submission and the sessions' lazy buffers.
+inline constexpr std::uint64_t kCacheBackingReserve = 1ull << 30;
+
 /// True when `bytes` can be taken from `free_bytes` and still leave
-/// kDispatchReserve.
-[[nodiscard]] inline bool HeapFitsAboveReserve(std::uint64_t free_bytes,
-                                               std::uint64_t bytes) {
-  return bytes <= free_bytes && free_bytes - bytes >= kDispatchReserve;
+/// `reserve` (kDispatchReserve by default).
+[[nodiscard]] inline bool HeapFitsAboveReserve(
+    std::uint64_t free_bytes, std::uint64_t bytes,
+    std::uint64_t reserve = kDispatchReserve) {
+  return bytes <= free_bytes && free_bytes - bytes >= reserve;
 }
 
 enum class Placement { kMalloc, kManaged };

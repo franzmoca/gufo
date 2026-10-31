@@ -170,6 +170,7 @@ endfunction()
 
 if (ENGINE_ENABLE_HIP)
   add_subdirectory(src/models/deepseek_v4_flash)
+  add_subdirectory(src/models/deepseek_v41_flash)
 endif()
 
 # Qwen3.8-Flash-Next — model-private CPU reference plus ROCm runtime.
@@ -356,6 +357,7 @@ add_subdirectory(src/models/qwen_image_21)
 target_link_libraries(gufo_qwen3_tts PUBLIC gufo_core)
 if (ENGINE_ENABLE_HIP)
   target_link_libraries(gufo_deepseek_v4_flash PUBLIC gufo_core)
+  target_link_libraries(gufo_deepseek_v41_flash PUBLIC gufo_core)
 endif()
 
 find_package(OpenMP)
@@ -395,7 +397,7 @@ target_link_libraries(gufo_llm_cli PUBLIC gufo_core gufo_qwen38_flash_next)
 if(ENGINE_ENABLE_HIP)
   target_sources(gufo_llm_cli PRIVATE src/cli/prompt/gemma4_prompt.cpp)
   target_link_libraries(gufo_llm_cli PUBLIC gufo_deepseek_v4_flash
-    gufo_qwen38_flash_next gufo_gemma4)
+    gufo_deepseek_v41_flash gufo_qwen38_flash_next gufo_gemma4)
 endif()
 
 add_library(gufo_logging STATIC src/cli/serve/logging.cpp src/cli/serve/trace.cpp)
@@ -407,6 +409,7 @@ target_compile_features(gufo_logging PUBLIC cxx_std_20)
 # the threshold that `--log-level` arms. The Gemma 4 loader warns through it.
 if (ENGINE_ENABLE_HIP)
   target_link_libraries(gufo_deepseek_v4_flash PUBLIC gufo_logging)
+  target_link_libraries(gufo_deepseek_v41_flash PUBLIC gufo_logging)
   target_link_libraries(gufo_gemma4 PUBLIC gufo_logging)
 endif()
 
@@ -425,9 +428,10 @@ add_library(gufo_http STATIC
   src/cli/serve/asr_websocket.cpp
   src/cli/serve/tts_websocket.cpp
   src/cli/serve/openai_chat.cpp
-  # The DeepSeek tool-call scanner lives with its model; its renderer stays in
-  # the engine library, so no translation unit is linked twice.
+  # The DeepSeek tool-call scanners live with their models; their renderers
+  # stay in the engine libraries, so no translation unit is linked twice.
   src/models/deepseek_v4_flash/tool_calls.cpp
+  src/models/deepseek_v41_flash/tool_calls.cpp
 )
 target_link_libraries(gufo_http PUBLIC gufo_logging gufo_core gufo_gemma4 gufo_qwen3_tts gufo_qwen3_asr gufo_qwen_image_21 gufo_embedding_gemma2)
 
@@ -457,7 +461,8 @@ target_compile_definitions(gufo PRIVATE
   GUFO_H3_INSTALLED_SOURCE_MANIFEST="${CMAKE_INSTALL_PREFIX}/share/gufo/models/minimax_h3/MINIMAX_H3_FL2VA_BF16.source-manifest.json")
 
 if (ENGINE_ENABLE_HIP)
-  target_link_libraries(gufo PRIVATE gufo_cache_hip gufo_deepseek_v4_flash)
+  target_link_libraries(gufo PRIVATE gufo_cache_hip gufo_deepseek_v4_flash
+    gufo_deepseek_v41_flash)
 endif()
 target_link_libraries(gufo PRIVATE gufo_qwen3_tts gufo_qwen3_asr gufo_embedding_gemma2)
 
@@ -651,6 +656,7 @@ if (BUILD_TESTING)
     src/cli/serve/openai_chat.cpp
     src/models/deepseek_v4_flash/chat_template.cpp
     src/models/deepseek_v4_flash/tool_calls.cpp
+    src/models/deepseek_v41_flash/tool_calls.cpp
   )
   target_link_libraries(openai_chat_test PRIVATE gufo_core gufo_gemma4)
   add_test(NAME openai_chat_test COMMAND openai_chat_test)
@@ -728,6 +734,7 @@ if (BUILD_TESTING)
   endif()
 
   add_subdirectory(tests/models/deepseek_v4_flash)
+  add_subdirectory(tests/models/deepseek_v41_flash)
   add_subdirectory(tests/models/qwen38_flash_next)
   add_subdirectory(tests/models/gemma4)
 

@@ -1,0 +1,234 @@
+#ifndef GUFO_MODELS_DEEPSEEK_V41_FLASH_ENGINE_HPP_
+#define GUFO_MODELS_DEEPSEEK_V41_FLASH_ENGINE_HPP_
+
+#include <cstddef>
+#include <cstdint>
+#include <functional>
+#include <memory>
+#include <span>
+#include <string>
+#include <string_view>
+#include <vector>
+
+#include "src/core/session_mode.hpp"
+#include "src/models/deepseek_v41_flash/chat_template.hpp"
+#include "src/models/deepseek_v41_flash/runtime/model.h"
+
+namespace gufo::models::deepseek_v41_flash {
+
+struct ModelOptions {
+  std::uint32_t max_context = 4096;
+  /// Most prompt tokens per prefill batch (16 to 4096; 0 is the default,
+  /// 2048). 4096 prefills about 5% faster for 1.2 GiB more activations.
+  std::uint32_t prefill_batch = 0;
+  /// Run every decoder layer over every prompt token instead of the decoder
+  /// SWA bounded replay over each prompt's last 140 tokens (about half the
+  /// prefill time).
+  bool exact_prefill = false;
+  /// Keep dense weights resident and stream routed experts from the SSD;
+  /// without it, a model that does not fit available memory fails to load.
+  bool stream_experts = false;
+  /// Streamed expert cache bytes (0 sizes it from available memory).
+  std::uint64_t expert_cache_bytes = 0;
+  /// Optional DSpark support model. Empty leaves speculative decoding off.
+  std::string dspark_model_path;
+};
+
+class ContinuationAdapter;
+class Session;
+class SessionSnapshot;
+
+struct SessionBatchItem {
+  Session* session = nullptr;
+  int token = 0;
+};
+
+struct SessionDsparkBatchItem {
+  Session* session = nullptr;
+  std::size_t max_tokens = 32;
+  std::uint32_t max_draft_tokens = 5;
+  std::vector<int>* emitted = nullptr;
+  /// Request sampler for a sampled cycle; null runs the greedy cycle.
+  const ds41_dspark_sampler* sampler = nullptr;
+  /// Request generation leaves EOS unconsumed; fixed-length benchmarks do not.
+  bool stop_at_eos = false;
+};
+
+/// GPU operations, including session creation/destruction, share scratch
+/// storage and must be serialized. Use the batch APIs to advance concurrent
+/// requests; the server scheduler owns and serializes their dispatch.
+class Model final : public std::enable_shared_from_this<Model> {
+public:
+  ~Model();
+
+  Model(const Model&) = delete;
+  Model& operator=(const Model&) = delete;
+  Model(Model&&) = delete;
+  Model& operator=(Model&&) = delete;
+
+  [[nodiscard]] static std::shared_ptr<Model> Load(
+      const std::string& model_path, const ModelOptions& options,
+      std::string* error_msg = nullptr);
+
+  [[nodiscard]] std::unique_ptr<Session> CreateSession(
+      core::SessionMode mode, std::uint32_t max_context,
+      std::string* error_msg = nullptr);
+  // On cancellation, interrupted is true and no session has been mutated.
+  // Callers may retry the remaining sessions independently.
+  [[nodiscard]] bool EvaluateBatch(std::span<const SessionBatchItem> items,
+                                   std::string* error_msg = nullptr,
+                                   bool* interrupted = nullptr) const;
+  [[nodiscard]] bool DsparkStepBatch(
+      std::span<const SessionDsparkBatchItem> items,
+      std::string* error_msg = nullptr, bool* interrupted = nullptr) const;
+  [[nodiscard]] std::vector<int> Tokenize(
+      std::string_view text, bool parse_special_tokens = false) const;
+  [[nodiscard]] std::vector<int> EncodeChat(std::string_view system_prompt,
+                                            std::string_view user_prompt) const;
+  [[nodiscard]] std::vector<int> EncodeChat(
+      std::span<const ChatMessage> messages,
+      const ChatTemplateOptions& options = {}) const;
+  [[nodiscard]] std::vector<int> EncodeChat(
+      std::span<const ChatMessage> messages, std::span<const ChatTool> tools,
+      const ChatTemplateOptions& options = {}) const;
+  [[nodiscard]] std::string DecodeToken(int token) const;
+  [[nodiscard]] bool IsStopToken(int token) const;
+  [[nodiscard]] int EosToken() const;
+  [[nodiscard]] int VocabSize() const;
+  [[nodiscard]] std::string ModelName() const;
+  [[nodiscard]] std::uint32_t MaxContext() const noexcept;
+  [[nodiscard]] bool HasDspark() const;
+  [[nodiscard]] bool ExactPrefill() const;
+  /// Routes image positions with the MoE gates' image bias, for image
+  /// prompts; enable it before creating sessions.
+  [[nodiscard]] bool EnableImageRouting(std::string* error_msg = nullptr);
+
+private:
+  Model(ds41_engine* engine, ModelOptions options);
+
+  ds41_engine* engine_ = nullptr;
+  ModelOptions options_;
+
+  friend class Session;
+};
+
+class Session final {
+public:
+  using CancellationCheck = std::function<bool()>;
+
+  ~Session();
+
+  Session(const Session&) = delete;
+  Session& operator=(const Session&) = delete;
+  Session(Session&&) = delete;
+  Session& operator=(Session&&) = delete;
+
+  // Evaluates the prompt from the longest evaluated prefix. `prompt` is the
+  // first part of a prompt ending at `prompt_end` (0: its own end), which
+  // bounds the decoder layers' replay to its last tokens; a state synced to
+  // a shorter part only continues to that same end. `images` hold the input
+  // embeddings of the image spans (the positions holding DS41_IMAGE_TOKEN)
+  // that this part evaluates; they need EnableImageRouting.
+  [[nodiscard]] bool Sync(std::span<const int> prompt,
+                          std::string* error_msg = nullptr,
+                          std::size_t prompt_end = 0,
+                          std::span<const ds41_image_span> images = {});
+  [[nodiscard]] int SelectNext(float temperature, std::uint64_t* rng_state,
+                               int top_k = 0, float top_p = 1.0F,
+                               float min_p = 0.0F) const;
+  [[nodiscard]] bool Evaluate(int token, std::string* error_msg = nullptr);
+  /// True when this session has a DSpark drafter attached.
+  [[nodiscard]] bool DsparkEnabled() const;
+  /// Reset request statistics and draft policy, retaining a restored prefix.
+  void BeginRequest();
+  /// Discards DSpark-only request state before exact multi-session execution.
+  void PrepareBatchExecution();
+  /// Runs one greedy speculative cycle and appends the emitted tokens.
+  [[nodiscard]] bool DsparkStep(std::vector<int>* emitted,
+                                std::string* error_msg = nullptr);
+  /// Runs one greedy speculative cycle without committing more than max_tokens.
+  [[nodiscard]] bool DsparkStep(std::size_t max_tokens,
+                                std::vector<int>* emitted,
+                                std::string* error_msg = nullptr);
+  /// Runs one speculative cycle; a sampler makes it a sampled cycle. A cycle
+  /// verifies prompt-lookup copies where the context repeats earlier tokens,
+  /// otherwise the drafter's block; without either it is a plain step. Also
+  /// valid for sessions without a drafter.
+  [[nodiscard]] bool DsparkStep(std::size_t max_tokens,
+                                std::uint32_t max_draft_tokens,
+                                std::vector<int>* emitted,
+                                std::string* error_msg = nullptr,
+                                const ds41_dspark_sampler* sampler = nullptr,
+                                bool stop_at_eos = false);
+  /// A speculative step's last emitted token stays unevaluated until the next
+  /// step. Evaluates it so that plain steps (Evaluate) can continue.
+  [[nodiscard]] bool EvaluatePending(std::string* error_msg = nullptr);
+  struct DsparkStats {
+    std::uint64_t verifier_rows{0};
+    std::uint64_t verifier_accepted{0};
+    std::uint64_t support_drafted{0};
+    std::uint64_t support_accepted{0};
+    std::uint64_t positional_accepted{0};
+    std::uint64_t anchors{0};
+    std::uint64_t full_blocks{0};
+    std::uint64_t steps{0};
+    std::uint64_t skipped{0};
+    std::uint32_t context_tokens{0};
+    /// Prompt-lookup cycles, the tokens they copied and the copies accepted.
+    std::uint64_t lookup_cycles{0};
+    std::uint64_t lookup_copied{0};
+    std::uint64_t lookup_accepted{0};
+    bool operator==(const DsparkStats&) const = default;
+  };
+  [[nodiscard]] DsparkStats DsparkStatistics() const;
+  [[nodiscard]] std::vector<float> CopyLogits(
+      std::string* error_msg = nullptr) const;
+  [[nodiscard]] std::unique_ptr<SessionSnapshot> SaveSnapshot(
+      std::string* error_msg = nullptr) const;
+  [[nodiscard]] bool RestoreSnapshot(const SessionSnapshot& snapshot,
+                                     std::string* error_msg = nullptr);
+  [[nodiscard]] bool RestoreSnapshot(std::span<const std::uint8_t> payload,
+                                     std::string* error_msg = nullptr);
+  void SetCancellationCheck(CancellationCheck is_cancelled);
+  void Invalidate() noexcept;
+
+  [[nodiscard]] int Position() const;
+  [[nodiscard]] int ContextSize() const;
+  [[nodiscard]] std::uint32_t PrefillCapacity() const;
+  [[nodiscard]] std::uint64_t PayloadBytes() const;
+
+private:
+  Session(std::shared_ptr<Model> model, ds41_session* session);
+
+  std::shared_ptr<Model> model_;
+  ds41_session* session_ = nullptr;
+  CancellationCheck is_cancelled_;
+
+  friend class Model;
+  friend class ContinuationAdapter;
+};
+
+class SessionSnapshot final {
+public:
+  ~SessionSnapshot();
+
+  SessionSnapshot(const SessionSnapshot&) = delete;
+  SessionSnapshot& operator=(const SessionSnapshot&) = delete;
+  SessionSnapshot(SessionSnapshot&&) = delete;
+  SessionSnapshot& operator=(SessionSnapshot&&) = delete;
+
+  [[nodiscard]] std::uint64_t SizeBytes() const noexcept;
+  [[nodiscard]] std::span<const std::uint8_t> bytes() const noexcept;
+  [[nodiscard]] bool CopyTo(std::span<std::uint8_t> destination) const noexcept;
+
+private:
+  explicit SessionSnapshot(ds41_session_snapshot snapshot);
+
+  ds41_session_snapshot snapshot_{};
+
+  friend class Session;
+};
+
+}  // namespace gufo::models::deepseek_v41_flash
+
+#endif  // GUFO_MODELS_DEEPSEEK_V41_FLASH_ENGINE_HPP_

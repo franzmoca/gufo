@@ -24,7 +24,7 @@ def registry():
     for name, asset in data['assets'].items():
         if not re.fullmatch('[0-9a-f]{40}', asset['revision']):
             raise ValueError('Unpinned asset: ' + name)
-        for path in asset['required']:
+        for path in [*asset['required'], *asset.get('links', {}), *asset.get('links', {}).values()]:
             if PurePosixPath(path).is_absolute() or '..' in PurePosixPath(path).parts:
                 raise ValueError('Invalid asset path: ' + path)
     return data
@@ -62,6 +62,10 @@ def download(plan, cache, data):
                 if attempt == 2:
                     raise
                 time.sleep(2)
+        # Files a build opens under another name, e.g. a shard shared by several builds.
+        for name, target in asset.get('links', {}).items():
+            if not (destination / name).is_symlink():
+                (destination / name).symlink_to(target)
         for name in asset['required']:
             path = destination / name
             if not path.is_file() or not path.stat().st_size:
@@ -78,8 +82,9 @@ def llm_command(model_id, binary, assets, *, mode=None, context=32768, sessions=
     root = Path(assets[model['asset']])
     command = [str(binary), 'serve', 'llm', '--model', str(root / model['target']),
                '--speculative', mode or model['mode'], '--context', str(context),
-               '--sessions', str(sessions), model['draft_option'],
-               str(Path(assets[model['draft_asset']]) / model['draft'])]
+               '--sessions', str(sessions)]
+    if 'draft_asset' in model:
+        command += [model['draft_option'], str(Path(assets[model['draft_asset']]) / model['draft'])]
     if model.get('projector'):
         command += ['--mmproj', str(root / model['projector'])]
     return command

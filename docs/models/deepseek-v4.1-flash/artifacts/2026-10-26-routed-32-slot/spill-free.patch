@@ -1,0 +1,143 @@
+diff --git a/src/models/deepseek_v41_flash/kernels/rocm/ds41_routed_f16.hip.cpp b/src/models/deepseek_v41_flash/kernels/rocm/ds41_routed_f16.hip.cpp
+index fd690240..eb2aca83 100644
+--- a/src/models/deepseek_v41_flash/kernels/rocm/ds41_routed_f16.hip.cpp
++++ b/src/models/deepseek_v41_flash/kernels/rocm/ds41_routed_f16.hip.cpp
+@@ -216,7 +216,7 @@ struct Format<16> {
+ 
+ __device__ __forceinline__ float finite_or_zero(float v) { return __builtin_isfinite(v) ? v : 0.0f; }
+ 
+-template <int kType, bool kPair, bool kHalfOut>
++template <int kType, bool kPair, bool kHalfOut, int kTileSlots>
+ __global__ __launch_bounds__(256) void routed_f16_kernel(
+     const uint8_t* __restrict__ w0, const uint8_t* __restrict__ w1, uint64_t expert_bytes,
+     const uint16_t* __restrict__ x, uint32_t x_div, const int32_t* __restrict__ rows,
+@@ -225,18 +225,23 @@ __global__ __launch_bounds__(256) void routed_f16_kernel(
+   using F = Format<kType>;
+   using Block = Raw<F::kWords>;
+   __shared__ typename F::Tables tables;
+-  __shared__ __attribute__((aligned(16))) _Float16 act[kSlots * kActPitch];
+-  __shared__ int32_t slot_of[kSlots];
++  __shared__ __attribute__((aligned(16))) _Float16 act[kTileSlots * kActPitch];
++  __shared__ int32_t slot_of[kTileSlots];
+   const int tile = tiles[blockIdx.y];
+   if (tile < 0) return;  // unused entries in a bounded device-planned grid
+   const int expert = tile & 0xffff;
+   const int t0 = (tile >> 16) * kSlots;
+   const int begin = bounds[expert] + t0;
+-  const int count = min(kSlots, bounds[expert + 1] - begin);
++  int count = min(kSlots, bounds[expert + 1] - begin);
++  // Both grids consume the same 64-slot plan; each live tile has one owner.
++  if ((count > 32) != (kTileSlots == 64)) return;
++  // Hide the owner's range from the optimizer: a known live >= 3 reschedules
++  // the 64-slot body into register spills.
++  asm volatile("" : "+s"(count));
+   const int live = (count + 15) / 16;
+   const int tid = threadIdx.x, wave = tid / 32, lane = tid % 32;
+   F::fill(tables, tid);
+-  if (tid < kSlots) slot_of[tid] = tid < count ? rows[begin + tid] : -1;
++  if (tid < kTileSlots) slot_of[tid] = tid < count ? rows[begin + tid] : -1;
+ 
+   constexpr int kWaveRows = kPair ? 16 : 32;
+   const uint32_t r_wave = blockIdx.x * 8 * kWaveRows + wave * kWaveRows;
+@@ -250,19 +255,20 @@ __global__ __launch_bounds__(256) void routed_f16_kernel(
+     wp[p] = base + (uint64_t)(row[p] < m ? row[p] : m - 1) * row_bytes;
+   }
+ 
+-  float8 acc[2][4];
++  float8 acc[2][kTileSlots / 16];
+ #pragma unroll
+   for (int p = 0; p < 2; ++p)
+ #pragma unroll
+-    for (int t = 0; t < 4; ++t) acc[p][t] = float8{};
++    for (int t = 0; t < kTileSlots / 16; ++t) acc[p][t] = float8{};
+ 
+   /* Activation staging: a quarter of the stage (32 values) of one slot per
+    * thread, consecutive slots in consecutive lanes. */
+-  const int st = tid % kSlots, sq = tid / kSlots;
++  constexpr int kPer = kStageK * kTileSlots / 256;
++  const int st = tid % kTileSlots, sq = tid / kTileSlots;
+   __syncthreads();
+   const int32_t s_slot = slot_of[st];
+-  const uint16_t* xs = s_slot >= 0 ? x + (uint64_t)(s_slot / (int)x_div) * k + 32 * sq : nullptr;
+-  _Float16* as = act + st * kActPitch + 32 * sq;
++  const uint16_t* xs = s_slot >= 0 ? x + (uint64_t)(s_slot / (int)x_div) * k + kPer * sq : nullptr;
++  _Float16* as = act + st * kActPitch + kPer * sq;
+ 
+   /* Weights: half-wave h loads the blocks of projection h (gate or up, or
+    * the second 16 rows) two blocks ahead; the halves swap their words across
+@@ -298,11 +304,11 @@ __global__ __launch_bounds__(256) void routed_f16_kernel(
+       __syncthreads();
+       if (xs) {
+         const uint4* src = reinterpret_cast<const uint4*>(xs + k0);
+-        uint4 v[4];
++        uint4 v[kPer / 8];
+ #pragma unroll
+-        for (int c = 0; c < 4; ++c) v[c] = src[c];
++        for (int c = 0; c < kPer / 8; ++c) v[c] = src[c];
+ #pragma unroll
+-        for (int c = 0; c < 4; ++c) reinterpret_cast<uint4*>(as)[c] = v[c];
++        for (int c = 0; c < kPer / 8; ++c) reinterpret_cast<uint4*>(as)[c] = v[c];
+       }
+       __syncthreads();
+ #pragma unroll
+@@ -329,7 +335,7 @@ __global__ __launch_bounds__(256) void routed_f16_kernel(
+           }
+           const int kk = jj * 32 + e2 * 16;
+ #pragma unroll
+-          for (int t = 0; t < 4; ++t) {
++          for (int t = 0; t < kTileSlots / 16; ++t) {
+             if (t < live) {
+               const _Float16* ar = act + (t * 16 + lane % 16) * kActPitch + kk;
+               typedef _Float16 half8 __attribute__((ext_vector_type(8)));
+@@ -348,7 +354,7 @@ __global__ __launch_bounds__(256) void routed_f16_kernel(
+ 
+   /* Accumulator element e of a lane is (slot 2 e + lane / 16, row lane % 16). */
+ #pragma unroll
+-  for (int t = 0; t < 4; ++t) {
++  for (int t = 0; t < kTileSlots / 16; ++t) {
+     if (t >= live) continue;
+ #pragma unroll
+     for (int e = 0; e < 8; ++e) {
+@@ -375,18 +381,18 @@ __global__ __launch_bounds__(256) void routed_f16_kernel(
+   }
+ }
+ 
+-template <int kType>
++template <int kType, int kTileSlots>
+ void launch_routed(const uint8_t* w, const uint8_t* w_up, uint64_t expert_bytes, const uint16_t* x, uint32_t x_div,
+                    const int32_t* rows, const int32_t* bounds, const int32_t* tiles, uint32_t n_tiles,
+                    const float* route_w, float limit, void* y, int y_half, uint32_t m, uint32_t k) {
+   if (w_up && y_half)
+-    routed_f16_kernel<kType, true, true><<<dim3((m + 127) / 128, n_tiles), 256>>>(
++    routed_f16_kernel<kType, true, true, kTileSlots><<<dim3((m + 127) / 128, n_tiles), 256>>>(
+         w, w_up, expert_bytes, x, x_div, rows, bounds, tiles, route_w, limit, y, m, k);
+   else if (w_up)
+-    routed_f16_kernel<kType, true, false><<<dim3((m + 127) / 128, n_tiles), 256>>>(
++    routed_f16_kernel<kType, true, false, kTileSlots><<<dim3((m + 127) / 128, n_tiles), 256>>>(
+         w, w_up, expert_bytes, x, x_div, rows, bounds, tiles, route_w, limit, y, m, k);
+   else
+-    routed_f16_kernel<kType, false, false><<<dim3((m + 255) / 256, n_tiles), 256>>>(
++    routed_f16_kernel<kType, false, false, kTileSlots><<<dim3((m + 255) / 256, n_tiles), 256>>>(
+         w, nullptr, expert_bytes, x, x_div, rows, bounds, tiles, nullptr, 0.0f, y, m, k);
+ }
+ 
+@@ -401,13 +407,16 @@ extern "C" int ds41_v41_routed_f16(int type, const void* w, const void* w_up, ui
+   const auto* b = static_cast<const uint8_t*>(w_up);
+   switch (type) {
+   case 19:
+-    launch_routed<19>(a, b, expert_bytes, x, x_div, rows, bounds, tiles, n_tiles, route_w, limit, y, y_half, m, k);
++    launch_routed<19, 32>(a, b, expert_bytes, x, x_div, rows, bounds, tiles, n_tiles, route_w, limit, y, y_half, m, k);
++    launch_routed<19, 64>(a, b, expert_bytes, x, x_div, rows, bounds, tiles, n_tiles, route_w, limit, y, y_half, m, k);
+     break;
+   case 29:
+-    launch_routed<29>(a, b, expert_bytes, x, x_div, rows, bounds, tiles, n_tiles, route_w, limit, y, y_half, m, k);
++    launch_routed<29, 32>(a, b, expert_bytes, x, x_div, rows, bounds, tiles, n_tiles, route_w, limit, y, y_half, m, k);
++    launch_routed<29, 64>(a, b, expert_bytes, x, x_div, rows, bounds, tiles, n_tiles, route_w, limit, y, y_half, m, k);
+     break;
+   case 16:
+-    launch_routed<16>(a, b, expert_bytes, x, x_div, rows, bounds, tiles, n_tiles, route_w, limit, y, y_half, m, k);
++    launch_routed<16, 32>(a, b, expert_bytes, x, x_div, rows, bounds, tiles, n_tiles, route_w, limit, y, y_half, m, k);
++    launch_routed<16, 64>(a, b, expert_bytes, x, x_div, rows, bounds, tiles, n_tiles, route_w, limit, y, y_half, m, k);
+     break;
+   default:
+     return 1;

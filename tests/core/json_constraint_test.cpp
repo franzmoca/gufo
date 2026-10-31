@@ -1115,17 +1115,25 @@ void TestAutomaticTools() {
   const auto schema = parse(R"({"type":"object","properties":{
     "text":{"type":"string"},"optional":{"type":"integer"}},
     "required":["text"],"additionalProperties":false})");
-  for (const auto format : {Format::kQwen, Format::kDeepSeek}) {
-    const std::string opener =
-        format == Format::kQwen ? "<tool_call>" : "<｜DSML｜tool_calls>";
+  for (const auto format :
+       {Format::kQwen, Format::kDeepSeek, Format::kDeepSeek41}) {
+    const std::string opener = format == Format::kQwen ? "<tool_call>"
+                               : format == Format::kDeepSeek
+                                   ? "<｜DSML｜tool_calls>"
+                                   : "<｜DSML｜ calls>";
     const std::string call =
         format == Format::kQwen
             ? "\n<function=f>\n<parameter=text>\nalpha\n</parameter>\n"
               "</function>\n</tool_call>"
-            : "\n<｜DSML｜invoke name=\"f\">\n"
+        : format == Format::kDeepSeek
+            ? "\n<｜DSML｜invoke name=\"f\">\n"
               "<｜DSML｜parameter name=\"text\" string=\"true\">alpha"
               "</｜DSML｜parameter>\n</｜DSML｜invoke>\n"
-              "</｜DSML｜tool_calls>";
+              "</｜DSML｜tool_calls>"
+            : "\n<｜DSML｜ invoke name=\"f\">\n"
+              "<｜DSML｜ parameter name=\"text\" string=\"true\">alpha"
+              "</｜DSML｜ parameter>\n</｜DSML｜ invoke>\n"
+              "</｜DSML｜ calls>";
     const auto automatic = JsonConstraint::WithTools(
         nullptr, {{"f", JsonConstraint::ToolParameters(schema, false, format)}},
         false, true, format);
@@ -1191,7 +1199,7 @@ void TestAutomaticTools() {
         // Parallel Qwen calls may follow each other; DeepSeek's share a block.
         assert(sampler.NeedsConstraintMask());
         assert(!sampler.CanSelectArgmax('a', /*penalties_applied=*/true));
-        if (format == Format::kDeepSeek)
+        if (format != Format::kQwen)
           assert(!sampler.CanSelectArgmax(258, /*penalties_applied=*/true));
         std::vector<float> after_call(259, -INFINITY);
         after_call['a'] = 1;

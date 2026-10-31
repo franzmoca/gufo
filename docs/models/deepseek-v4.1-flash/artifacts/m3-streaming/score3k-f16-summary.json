@@ -1,0 +1,11 @@
+{
+  "positions": 2999,
+  "gpu_perplexity": 6.004146927826145,
+  "oracle_perplexity": 6.027980804443359,
+  "argmax_agreement": 0.9563187729243081,
+  "mean_abs_nll_difference": 0.08254373417900936,
+  "gpu_top1": 0.5881960653551184,
+  "oracle_top1": 0.5848616205401801,
+  "prior_gpu_argmax_agreement": 0.9839946648882961,
+  "prior_gpu_mean_abs_nll_difference": 0.03373158352784262
+}

@@ -1,0 +1,89 @@
+Start testing: Oct 26 04:41 CET
+----------------------------------------------------------
+210/250 Testing: ds41.attention
+210/250 Test: ds41.attention
+Command: "/home/franz/projects/gufo/build/gpu-test/tests/models/deepseek_v41_flash/ds41_attention_test"
+Directory: /home/franz/projects/gufo/build/gpu-test/tests/models/deepseek_v41_flash
+"ds41.attention" start time: Oct 26 04:41 CET
+Output:
+----------------------------------------------------------
+pos0=12 n=1 ratio=0 comp=0 rope=0 floor=0 rel_err=1.03e-07
+pos0=12 n=1 ratio=2 comp=6 rope=0 floor=0 rel_err=1.25e-07
+pos0=700 n=1 ratio=2 comp=350 rope=0 floor=0 rel_err=2.62e-07
+pos0=2047 n=1 ratio=1 comp=2048 rope=0 floor=0 rel_err=2.65e-07
+pos0=3000 n=3 ratio=1 comp=3003 rope=0 floor=0 rel_err=3.30e-07
+pos0=0 n=37 ratio=2 comp=18 rope=0 floor=0 rel_err=3.20e-04
+pos0=200 n=64 ratio=1 comp=264 rope=0 floor=0 rel_err=3.91e-04
+pos0=2048 n=40 ratio=1 comp=2088 rope=0 floor=0 rel_err=4.17e-04
+pos0=300 n=9 ratio=0 comp=0 rope=0 floor=0 rel_err=2.86e-04
+pos0=700 n=1 ratio=2 comp=350 rope=1 floor=0 rel_err=2.46e-04
+pos0=3000 n=3 ratio=1 comp=3003 rope=1 floor=0 rel_err=6.86e-04
+pos0=0 n=37 ratio=2 comp=18 rope=1 floor=0 rel_err=5.27e-03
+pos0=2048 n=40 ratio=1 comp=2088 rope=1 floor=0 rel_err=5.76e-03
+pos0=2000 n=40 ratio=1 comp=2040 rope=1 floor=1990 rel_err=5.65e-03
+pos0=1000 n=20 ratio=1 comp=1020 rope=0 floor=1010 rel_err=4.27e-04
+pos0=3000 n=3 ratio=1 comp=3003 rope=0 floor=2950 rel_err=3.18e-07
+indexer pos0=2047 n=1 ratio=1 rel_err=1.75e-07
+indexer pos0=101 n=3 ratio=2 rel_err=2.27e-07
+indexer pos0=3000 n=4 ratio=1 rel_err=2.28e-07
+indexer pos0=500 n=20 ratio=1 rel_err=2.45e-04
+q kv norm n=1 max_abs_diff=0.00e+00
+q kv norm n=37 max_abs_diff=0.00e+00
+bf16 matmul rows=384 k=5120 n=1 rel_err=2.51e-07
+bf16 matmul rows=384 k=5120 n=37 rel_err=5.83e-07
+bf16 matmul rows=512 k=5120 n=200 rel_err=6.87e-07
+bf16 matmul rows=4096 k=1280 n=64 rel_err=4.31e-07
+dspark attention first=1743 ring=128 block=5 rel_err=5.62e-07
+dspark attention first=0 ring=3 block=5 rel_err=1.84e-07
+dspark attention first=60 ring=61 block=2 rel_err=3.34e-07
+dspark hc mean exact, argmax 5000 (expect 5000), none -1 (expect -1)
+f16 matmul and gather bit-identical to f32
+fp4 row format mismatches 0
+PASS
+<end of output>
+Test time =   7.06 sec
+----------------------------------------------------------
+Test Passed.
+"ds41.attention" end time: Oct 26 04:41 CET
+"ds41.attention" time elapsed: 00:00:07
+----------------------------------------------------------
+
+212/250 Testing: ds41.candidate_mask
+212/250 Test: ds41.candidate_mask
+Command: "/home/franz/projects/gufo/build/gpu-test/tests/models/deepseek_v41_flash/ds41_candidate_mask_test"
+Directory: /home/franz/projects/gufo/build/gpu-test/tests/models/deepseek_v41_flash
+"ds41.candidate_mask" start time: Oct 26 04:41 CET
+Output:
+----------------------------------------------------------
+candidate scores pos0=22 n=3 kept=2: 0 mismatches, FP64 relative 1.57e-07
+candidate scores pos0=16382 n=4 kept=2048: 0 mismatches, FP64 relative 2.19e-07
+candidate scores pos0=32765 n=1 kept=2048: 0 mismatches, FP64 relative 1.87e-07
+candidate scores pos0=32765 n=4 kept=2048: 0 mismatches, FP64 relative 2.00e-07
+pos0      0 n   64 ratio 1 block 8 topk    4: 640 rows dropped, 0 mismatches
+pos0    100 n   37 ratio 2 block 8 topk    3: 1440 rows dropped, 0 mismatches
+pos0  16370 n   40 ratio 1 block 8 topk 2048: 448 rows dropped, 0 mismatches
+pos0  18431 n    1 ratio 1 block 8 topk 2048: 2048 rows dropped, 0 mismatches
+pos0  40000 n    3 ratio 1 block 8 topk 2048: 70872 rows dropped, 0 mismatches
+topk pos0      0 n 600 k  512 levels 7: 0 mismatched tokens
+topk pos0   2047 n   2 k  512 levels 5: 0 mismatched tokens
+topk pos0  70000 n   2 k  512 levels 1000000: 0 mismatched tokens
+PASS
+<end of output>
+Test time =   1.66 sec
+----------------------------------------------------------
+Test Passed.
+"ds41.candidate_mask" end time: Oct 26 04:41 CET
+"ds41.candidate_mask" time elapsed: 00:00:01
+----------------------------------------------------------
+
+End testing: Oct 26 04:41 CET
+
+ds41 =   8.72 sec*proc
+
+gfx1151 =   8.72 sec*proc
+
+gpu =   8.72 sec*proc
+
+hip =   8.72 sec*proc
+
+quality =   8.72 sec*proc

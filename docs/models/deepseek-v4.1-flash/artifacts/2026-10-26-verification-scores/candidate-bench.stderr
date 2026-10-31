@@ -1,0 +1,86 @@
+2026-10-26 05:39:01 [INFO] [ds41] DeepSeek V4.1 Flash: 4 backbone shard(s), 112.00 GiB resident weights; Engram /mnt/data/models/ds41/ista-gsq-rco-gguf/DeepSeek-V4.1-Flash-Engram-IQ4_NL.gguf (103.00 GiB, 144 B rows, read from disk)
+2026-10-26 05:39:01 [INFO] [ds4] backend initialized on AMD Radeon 8060S Graphics (sm_115)
+2026-10-26 05:39:01 [INFO] [ds4] native MMQ enabled
+2026-10-26 05:39:01 [INFO] [ds4] loading model tensors into device cache
+2026-10-26 05:39:04 [INFO] [ds4] loading model tensors 16.48 GiB cached
+2026-10-26 05:39:06 [INFO] [ds4] loading model tensors 32.33 GiB cached
+2026-10-26 05:39:08 [INFO] [ds4] loading model tensors 48.55 GiB cached
+2026-10-26 05:39:11 [INFO] [ds4] loading model tensors 64.57 GiB cached
+2026-10-26 05:39:13 [INFO] [ds4] loading model tensors 80.72 GiB cached
+2026-10-26 05:39:16 [INFO] [ds4] loading model tensors 96.74 GiB cached
+2026-10-26 05:39:18 [INFO] [ds4] loading model tensors 112.00 GiB cached
+2026-10-26 05:39:18 [INFO] [ds4] ROCm startup model cache prepared 112.00 GiB of tensor spans in 17.303s
+2026-10-26 05:39:20 [INFO] [ds41] DSpark drafter /mnt/data/models/ds41/dspark-lucebox-q2k/DeepSeek-V4.1-Flash-1017-DSpark-draft-Q2K-Q4K.gguf: 4.59 GiB resident
+DeepSeek pp depth=0 payload_bytes=13665360
+ds41: DSpark pos=16 drafted=3 accepted=2 draft=15.5ms verify=86.0ms
+ds41: DSpark pos=19 drafted=2 accepted=0 draft=9.1ms verify=71.6ms
+ds41: DSpark pos=20 drafted=2 accepted=1 draft=9.1ms verify=64.6ms
+ds41: DSpark pos=22 drafted=2 accepted=2 draft=9.1ms verify=63.8ms
+ds41: DSpark pos=25 drafted=2 accepted=0 draft=9.7ms verify=91.3ms
+ds41: DSpark pos=26 drafted=2 accepted=2 draft=9.2ms verify=66.4ms
+ds41: DSpark pos=29 drafted=2 accepted=2 draft=9.2ms verify=65.6ms
+ds41: DSpark pos=32 drafted=2 accepted=2 draft=9.3ms verify=65.0ms
+ds41: DSpark pos=35 drafted=2 accepted=0 draft=9.3ms verify=66.8ms
+ds41: DSpark pos=36 drafted=2 accepted=0 draft=9.2ms verify=66.2ms
+ds41: DSpark pos=37 drafted=2 accepted=0 draft=9.2ms verify=67.4ms
+ds41: DSpark pos=38 drafted=2 accepted=1 draft=15.5ms verify=71.4ms
+ds41: DSpark pos=40 drafted=2 accepted=2 draft=27.8ms verify=65.8ms
+ds41: DSpark pos=43 drafted=2 accepted=0 draft=9.4ms verify=68.9ms
+ds41: DSpark pos=44 drafted=2 accepted=2 draft=10.0ms verify=65.3ms
+ds41: DSpark pos=47 drafted=2 accepted=0 draft=9.4ms verify=65.4ms
+ds41: DSpark pos=48 drafted=2 accepted=2 draft=9.2ms verify=65.3ms
+ds41: DSpark pos=51 drafted=2 accepted=1 draft=9.3ms verify=66.9ms
+ds41: DSpark pos=53 drafted=2 accepted=1 draft=10.0ms verify=66.4ms
+ds41: DSpark pos=55 drafted=2 accepted=1 draft=10.3ms verify=66.0ms
+ds41: DSpark pos=57 drafted=2 accepted=1 draft=9.2ms verify=64.4ms
+ds41: DSpark pos=59 drafted=2 accepted=2 draft=10.3ms verify=66.4ms
+ds41: DSpark pos=62 drafted=2 accepted=1 draft=9.4ms verify=66.2ms
+ds41: DSpark pos=64 drafted=2 accepted=0 draft=9.3ms verify=64.4ms
+ds41: DSpark pos=65 drafted=2 accepted=0 draft=10.4ms verify=65.8ms
+ds41: DSpark pos=66 drafted=2 accepted=0 draft=9.4ms verify=66.6ms
+ds41: DSpark pos=67 drafted=2 accepted=0 draft=9.4ms verify=65.5ms
+ds41: DSpark pos=71 drafted=1 accepted=1 draft=8.7ms verify=54.9ms
+ds41: DSpark pos=73 drafted=2 accepted=1 draft=9.4ms verify=66.6ms
+ds41: DSpark pos=75 drafted=2 accepted=0 draft=10.2ms verify=66.5ms
+ds41: DSpark pos=79 drafted=1 accepted=0 draft=8.9ms verify=54.7ms
+ds41: DSpark pos=87 drafted=1 accepted=1 draft=9.2ms verify=54.7ms
+ds41: DSpark pos=104 drafted=1 accepted=1 draft=9.3ms verify=53.7ms
+ds41: DSpark pos=106 drafted=2 accepted=2 draft=9.7ms verify=67.1ms
+ds41: DSpark pos=109 drafted=2 accepted=2 draft=9.5ms verify=64.9ms
+ds41: DSpark pos=112 drafted=2 accepted=0 draft=9.6ms verify=68.1ms
+ds41: DSpark pos=113 drafted=2 accepted=2 draft=9.5ms verify=68.1ms
+ds41: DSpark pos=116 drafted=2 accepted=2 draft=9.6ms verify=67.2ms
+ds41: DSpark pos=119 drafted=2 accepted=1 draft=9.6ms verify=64.3ms
+ds41: DSpark pos=121 drafted=2 accepted=1 draft=9.7ms verify=66.6ms
+ds41: DSpark pos=123 drafted=2 accepted=0 draft=9.7ms verify=65.0ms
+ds41: DSpark pos=124 drafted=2 accepted=2 draft=10.5ms verify=69.2ms
+ds41: DSpark pos=127 drafted=2 accepted=2 draft=9.8ms verify=67.2ms
+ds41: DSpark pos=130 drafted=2 accepted=1 draft=10.6ms verify=66.7ms
+ds41: DSpark pos=132 drafted=2 accepted=1 draft=9.7ms verify=67.3ms
+ds41: DSpark pos=134 drafted=2 accepted=2 draft=9.6ms verify=65.4ms
+ds41: DSpark pos=137 drafted=2 accepted=1 draft=9.8ms verify=66.5ms
+ds41: DSpark pos=139 drafted=2 accepted=2 draft=9.6ms verify=66.5ms
+DeepSeek tg C=1 depth=0 request=0 accepted=50 drafted=93 steps=48 skipped=0 output_sha256=70d5a48a260f87451697c19615b718329d1bbf1806b84f00c9f57699e31b1b15
+Prepared DeepSeek depth 32768 snapshot_bytes=41374800
+DeepSeek pp depth=32768 payload_bytes=43222096
+ds41: DSpark pos=32768 drafted=3 accepted=3 draft=10.4ms verify=86.0ms
+ds41: DSpark pos=32772 drafted=3 accepted=3 draft=10.8ms verify=85.6ms
+ds41: DSpark pos=32776 drafted=4 accepted=4 draft=11.4ms verify=99.2ms
+ds41: lookup pos=32781 copied=6 accepted=6 verify=120.4ms
+ds41: lookup pos=32788 copied=6 accepted=6 verify=123.8ms
+ds41: lookup pos=32795 copied=6 accepted=6 verify=122.8ms
+ds41: lookup pos=32802 copied=6 accepted=6 verify=121.2ms
+ds41: lookup pos=32809 copied=6 accepted=6 verify=138.3ms
+ds41: lookup pos=32816 copied=6 accepted=6 verify=125.7ms
+ds41: lookup pos=32823 copied=6 accepted=6 verify=123.3ms
+ds41: lookup pos=32830 copied=6 accepted=6 verify=125.0ms
+ds41: lookup pos=32837 copied=6 accepted=6 verify=124.0ms
+ds41: lookup pos=32844 copied=6 accepted=6 verify=121.0ms
+ds41: lookup pos=32851 copied=6 accepted=6 verify=124.6ms
+ds41: lookup pos=32858 copied=6 accepted=6 verify=124.3ms
+ds41: lookup pos=32865 copied=6 accepted=6 verify=121.7ms
+ds41: lookup pos=32872 copied=6 accepted=6 verify=124.3ms
+ds41: lookup pos=32879 copied=6 accepted=6 verify=144.4ms
+ds41: lookup pos=32886 copied=6 accepted=6 verify=123.6ms
+ds41: lookup pos=32893 copied=1 accepted=1 verify=59.6ms
+DeepSeek tg C=1 depth=32768 request=0 accepted=10 drafted=10 steps=20 skipped=0 output_sha256=45eabce9e4bf40ce3c2d3b240c34b9545d0209829f0dbfed556c41b7f57f847f

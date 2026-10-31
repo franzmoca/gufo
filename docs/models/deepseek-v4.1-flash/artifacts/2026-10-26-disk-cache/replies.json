@@ -1,0 +1,18 @@
+{
+ "cold": [
+  "The cache keeps model state across requests so a conversation's shared prefix is reused instead of re-prefilled, using an opaque snapshot that is only reusable when it is an exact prefix of the new prompt. It has an always-on in-memory tier plus an optional disk tier, prefers live frontiers over snapshots, and",
+  "The **Releasing** document covers releases."
+ ],
+ "term": [
+  "The cache keeps model state across requests so a conversation's shared prefix is reused instead of re-prefilled, using an opaque snapshot that is only reusable when it is an exact prefix of the new prompt. It has an always-on in-memory tier plus an optional disk tier, prefers live frontiers over snapshots, and",
+  "The **Releasing** document covers releases."
+ ],
+ "kill": [
+  "The cache keeps model state across requests so a conversation's shared prefix is reused instead of re-prefilled, using an opaque snapshot that is only reusable when it is an exact prefix of the new prompt. It has an always-on in-memory tier plus an optional disk tier, prefers live frontiers over snapshots, and",
+  "The **Releasing** document covers releases."
+ ],
+ "uncached": [
+  "The cache keeps model state across requests so a conversation's shared prefix is reused instead of re-prefilled, using an opaque snapshot that is only reusable when it is an exact prefix of the new prompt. It has an always-on in-memory tier plus an optional disk tier, prefers live frontiers over snapshots, and",
+  "The \"Releasing\" document covers releases."
+ ]
+}

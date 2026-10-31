@@ -1,0 +1,5 @@
+threads: exit=0 threads rsize=3072KiB qd=4 rand: 4.903 GB/s  1559 IOPS  p50 2.99 ms  p99 3.02 ms 
+uring: exit=0 uring rsize=3072KiB qd=4 rand: 4.925 GB/s  1566 IOPS  p50 2.99 ms  p99 3.01 ms 
+sqpoll: exit=0 sqpoll rsize=3072KiB qd=4 rand: 4.922 GB/s  1565 IOPS  p50 2.95 ms  p99 3.00 ms 
+uring: exit=0 uring rsize=3072KiB qd=4 rand: 4.923 GB/s  1565 IOPS  p50 2.95 ms  p99 3.00 ms 
+threads: exit=0 threads rsize=3072KiB qd=4 rand: 4.923 GB/s  1565 IOPS  p50 2.99 ms  p99 3.02 ms 

@@ -30,6 +30,12 @@ struct BenchOptions {
   std::string draft_trace_path;
   /// Gemma 4 prefill weight copies (ParsePrefillWeights); empty is off.
   std::string prefill_weights;
+  /// DeepSeek V4.1 Flash prefill batch tokens; 0 is the model default.
+  std::uint32_t prefill_batch{0};
+  bool exact_prefill{false};
+  /// DeepSeek V4.1 Flash routed expert streaming and its cache bytes.
+  bool stream_experts{false};
+  std::size_t expert_cache_bytes{0};
   std::string dspark_model_path;
   std::uint32_t draft_tokens{7};
   /// --draft-tokens was given (Gemma 4 otherwise uses its own default).

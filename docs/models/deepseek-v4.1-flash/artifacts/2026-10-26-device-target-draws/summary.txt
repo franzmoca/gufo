@@ -1,0 +1,31 @@
+== cycle split before the change (coding, seed 73, E11 build, medians per 6-row cycle)
+greedy: forward 103.8 ms, logits copy 0.07, host verify loop 0.66, commit+inject 0.55, bonus draw 0.06
+sampled: forward 100.5 ms, logits copy 0.07, host verify loop 3.04, commit+inject 1.31, bonus draw 0.61
+host sampler per row (microbenchmark): build 0.22 ms, FP64 exp+sum 0.32, normalize 0.05, residual on rejection +0.45
+
+== verify time per draft width, coding seed 73 (E11 -> device draws)
+w2 69.0 -> 65.6 ms, w3 81.2 -> 77.2, w4 94.5 -> 89.0, w5 106.0 -> 101.1
+
+== 12-pair sampled protocol
+coding   seed= 11 rep=0   42.52 ->   43.28 ( +1.8%)  acc 0.86->0.86 same=True
+explain  seed= 11 rep=0   29.98 ->   30.64 ( +2.2%)  acc 0.64->0.64 same=True
+prose    seed= 11 rep=0   24.63 ->   24.98 ( +1.4%)  acc 0.46->0.46 same=True
+rust     seed= 11 rep=0   36.51 ->   37.18 ( +1.8%)  acc 0.73->0.73 same=True
+coding   seed= 29 rep=0   42.90 ->   43.99 ( +2.5%)  acc 0.85->0.85 same=True
+explain  seed= 29 rep=0   29.35 ->   29.87 ( +1.8%)  acc 0.61->0.61 same=True
+prose    seed= 29 rep=0   25.67 ->   26.07 ( +1.6%)  acc 0.55->0.55 same=True
+rust     seed= 29 rep=0   38.26 ->   39.13 ( +2.3%)  acc 0.79->0.79 same=True
+coding   seed= 73 rep=0   40.96 ->   42.34 ( +3.4%)  acc 0.79->0.79 same=True
+explain  seed= 73 rep=0   30.18 ->   30.78 ( +2.0%)  acc 0.62->0.62 same=True
+prose    seed= 73 rep=0   26.08 ->   26.38 ( +1.2%)  acc 0.57->0.57 same=True
+rust     seed= 73 rep=0   39.92 ->   40.70 ( +1.9%)  acc 0.81->0.81 same=True
+coding   geomean +2.56% n=3
+explain  geomean +2.00% n=3
+prose    geomean +1.38% n=3
+rust     geomean +2.02% n=3
+ALL geomean +1.99%  wins 12/12  sd 0.6%
+e11: pooled tok/s 32.58 acceptance 0.693 drafted 2736 accepted/step 2.06
+devdraw: pooled tok/s 33.21 acceptance 0.693 drafted 2736 accepted/step 2.06
+
+== greedy spot check (explain, 256 tokens): hash d09262b3 identical to E11
+== functional (DSpark, --sessions 4, tier pr): sampling-defaults, sampling-ranges, batch, stops, tools passed

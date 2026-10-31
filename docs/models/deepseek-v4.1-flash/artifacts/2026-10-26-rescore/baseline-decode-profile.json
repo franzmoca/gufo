@@ -1,0 +1,144 @@
+{
+  "scope": "8 decode evaluations after the last prefill; starts at first hc_mix after last dense_q5k_f16",
+  "dispatches": 7799,
+  "gpu_ms": 327.269685,
+  "span_ms": 362.235661,
+  "kernels": {
+    "hc_mix_small_kernel<4u>": [
+      640,
+      9.098666000000007
+    ],
+    "hc_collapse_norm_kernel<4u>": [
+      648,
+      2.7250130000000024
+    ],
+    "gemv_kernel<8, 4, false, 1>": [
+      320,
+      14.850355000000002
+    ],
+    "q_kv_norm_kernel": [
+      320,
+      1.117857
+    ],
+    "gemv_kernel<13, 2, false, 1>": [
+      640,
+      53.411098999999965
+    ],
+    "rope_tail_kernel": [
+      424,
+      0.5721539999999996
+    ],
+    "attention_split_kernel": [
+      320,
+      8.544009999999998
+    ],
+    "attention_combine_kernel": [
+      320,
+      1.8186549999999997
+    ],
+    "rope_fp8_kernel": [
+      320,
+      0.7152830000000002
+    ],
+    "__amd_rocclr_copyBuffer": [
+      335,
+      0.42861599999999944
+    ],
+    "gemv_kernel<13, 8, false, 1>": [
+      664,
+      99.78831999999998
+    ],
+    "hc_expand_kernel": [
+      320,
+      1.0185370000000007
+    ],
+    "matmul_bf16_vec8_kernel": [
+      524,
+      13.747893999999997
+    ],
+    "route_kernel": [
+      320,
+      2.315561999999999
+    ],
+    "expert_gemv_kernel<19, 2, true>": [
+      224,
+      30.41618599999999
+    ],
+    "expert_gemv_kernel<19, 2, false>": [
+      216,
+      17.574874999999995
+    ],
+    "gemv_kernel<13, 4, true, 1>": [
+      320,
+      23.769322000000003
+    ],
+    "hc_expand_sum_kernel": [
+      320,
+      1.4623210000000004
+    ],
+    "engram_gate_kernel": [
+      16,
+      0.09700399999999999
+    ],
+    "compress_pool_kernel": [
+      24,
+      0.04080500000000001
+    ],
+    "fp4_fake_quant_kernel": [
+      104,
+      0.5105019999999997
+    ],
+    "indexer_score_small_kernel": [
+      64,
+      7.1860560000000016
+    ],
+    "topk_kernel": [
+      72,
+      2.608046
+    ],
+    "expert_gemv_kernel<22, 1, false>": [
+      16,
+      2.453688
+    ],
+    "expert_gemv_kernel<16, 1, true>": [
+      72,
+      17.718886000000005
+    ],
+    "expert_gemv_kernel<16, 1, false>": [
+      16,
+      2.2631959999999998
+    ],
+    "expert_gemv_kernel<29, 1, false>": [
+      72,
+      6.587545
+    ],
+    "rms_norm_kernel": [
+      40,
+      0.07628199999999999
+    ],
+    "clear_mask_kernel": [
+      8,
+      0.00828
+    ],
+    "block_max_kernel": [
+      8,
+      0.013603000000000002
+    ],
+    "fill_mask_kernel": [
+      8,
+      0.009640999999999999
+    ],
+    "apply_mask_kernel": [
+      32,
+      0.05024399999999999
+    ],
+    "expert_gemv_kernel<29, 1, true>": [
+      24,
+      4.232219
+    ],
+    "__amd_rocclr_copyBufferRectAligned": [
+      28,
+      0.03896299999999999
+    ]
+  }
+}

@@ -372,6 +372,60 @@ void TestSplitGgufDiscovery() {
   std::filesystem::remove_all(temp_dir);
 }
 
+/* A DeepSeek V4.1 split: a metadata-only first shard without trailing
+ * padding (as Unsloth writes them) and, as the last shard, the Engram file a
+ * 6-shard build published, still labelled shard 6 of 6. Other architectures
+ * keep the strict position check. */
+void TestSharedEngramShard() {
+  const auto temp_dir =
+      std::filesystem::temp_directory_path() /
+      ("gufo-gguf-engram-" + std::to_string(static_cast<long>(getpid())));
+  std::filesystem::create_directories(temp_dir);
+  for (const std::string_view architecture : {"deepseek41", "qwen35"}) {
+    GgufBuilder first;
+    first.AddMetadataString("general.architecture", architecture);
+    first.AddMetadataUint32("split.no", 0);
+    first.AddMetadataUint32("split.count", 3);
+    first.AddMetadataInt32("split.tensors.count", 2);
+    first.AddMetadataString("general.name", "x");
+    auto first_bytes = first.Build(0);
+    while (first_bytes.back() == 0)
+      first_bytes.pop_back();
+    Expect(first_bytes.size() % 32 != 0, "First shard ends unpadded");
+
+    GgufBuilder second;
+    second.AddMetadataUint32("split.no", 1);
+    second.AddMetadataUint32("split.count", 3);
+    second.AddMetadataInt32("split.tensors.count", 2);
+    second.AddTensor("output_norm.weight", {4}, gufo::core::GgmlType::kF32, 0);
+
+    GgufBuilder engram;
+    engram.AddMetadataUint32("split.no", 5);
+    engram.AddMetadataUint32("split.count", 6);
+    engram.AddMetadataInt32("split.tensors.count", 2);
+    engram.AddTensor("per_layer_token_embd.weight", {32, 2},
+                     gufo::core::GgmlType::kF32, 0);
+
+    WriteBinaryFile(temp_dir / "m-00001-of-00003.gguf", first_bytes);
+    WriteBinaryFile(temp_dir / "m-00002-of-00003.gguf", second.Build(128));
+    WriteBinaryFile(temp_dir / "m-00003-of-00003.gguf", engram.Build(256));
+
+    std::string err;
+    const auto reader = gufo::core::GgufReader::OpenFile(
+        temp_dir / "m-00001-of-00003.gguf", &err);
+    if (architecture == "deepseek41") {
+      Expect(reader != nullptr, "DS4.1 split takes a shared Engram: " + err);
+      Expect(reader->FindTensor("per_layer_token_embd.weight") != nullptr,
+             "Engram table found");
+    } else {
+      Expect(reader == nullptr &&
+                 err.find("Inconsistent split") != std::string::npos,
+             "Other architectures reject a mislabelled shard: " + err);
+    }
+  }
+  std::filesystem::remove_all(temp_dir);
+}
+
 void TestVisionExclusionValidation() {
   GgufBuilder builder;
   builder.AddMetadataString("general.architecture", "qwen35");
@@ -674,6 +728,7 @@ int main() {
   TestBasicGgufParsing();
   TestQwen38_27BParsing();
   TestSplitGgufDiscovery();
+  TestSharedEngramShard();
   TestVisionExclusionValidation();
   TestQuantizationLabel();
   TestMalformedGgufRejection();

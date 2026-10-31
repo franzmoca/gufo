@@ -22,6 +22,13 @@ namespace gufo::models::deepseek_v4_flash {
 class Model;
 }
 
+namespace gufo::models::deepseek_v41_flash {
+class Model;
+namespace vision {
+class Encoder;
+}  // namespace vision
+}  // namespace gufo::models::deepseek_v41_flash
+
 namespace gufo::models::gemma4 {
 class Model;
 namespace vision {
@@ -93,6 +100,20 @@ public:
   void set_gemma_prefill_weights(std::string mode) {
     gemma_prefill_weights_ = std::move(mode);
   }
+  /// DeepSeek V4.1 Flash --prefill-batch for the next load (0 is the default).
+  /// DeepSeek V4.1 Flash --exact-prefill for the next load.
+  void set_deepseek_exact_prefill(bool exact) {
+    deepseek_exact_prefill_ = exact;
+  }
+  /// DeepSeek V4.1 Flash --stream-experts and --expert-cache-bytes for the
+  /// next load.
+  void set_deepseek_expert_streaming(bool enabled, std::uint64_t cache_bytes) {
+    deepseek_stream_experts_ = enabled;
+    deepseek_expert_cache_bytes_ = cache_bytes;
+  }
+  void set_deepseek_prefill_batch(std::uint32_t tokens) {
+    deepseek_prefill_batch_ = tokens;
+  }
 
   /// Loads weights from a GGUF file. Returns false and sets *error on failure.
   /// `enable_yarn` opts Flash-Next into static YaRN, required for (and only
@@ -127,6 +148,17 @@ public:
             TextSpeculativeConfig speculative_config = {},
             TextDiskCacheConfig disk_cache_config = {},
             TextRunnerRamCacheOptions ram_cache_config = {});
+  /// `vision` (opt-in) is the --mmproj sidecar's encoder; loading uploads
+  /// it and sets the model's image routing bias.
+  bool load(
+      std::shared_ptr<models::deepseek_v41_flash::Model> model,
+      std::string* error, std::uint32_t max_context = 0,
+      std::size_t session_count = 1, TextPrefillPolicy prefill_policy = {},
+      TextSchedulerPolicy scheduler_policy = {},
+      TextSpeculativeConfig speculative_config = {},
+      TextDiskCacheConfig disk_cache_config = {},
+      TextRunnerRamCacheOptions ram_cache_config = {},
+      std::shared_ptr<models::deepseek_v41_flash::vision::Encoder> vision = {});
 
   /// Installs a previously loaded Qwen3.8-Flash-Next model with
   /// request-owned sessions, the model's tokenizer, and host-memory
@@ -226,9 +258,23 @@ public:
       const ChatRequest& request) const override;
 
 private:
+  template<class Ds>
+  bool LoadDeepSeek(
+      std::shared_ptr<typename Ds::Model> model, std::string* error,
+      std::uint32_t max_context, std::size_t session_count,
+      TextPrefillPolicy prefill_policy, TextSchedulerPolicy scheduler_policy,
+      TextSpeculativeConfig speculative_config,
+      TextDiskCacheConfig disk_cache_config,
+      TextRunnerRamCacheOptions ram_cache_config,
+      std::shared_ptr<models::deepseek_v41_flash::vision::Encoder> vision = {});
+
   struct Impl;
   std::unique_ptr<Impl> impl_;
   std::string gemma_prefill_weights_;
+  std::uint32_t deepseek_prefill_batch_ = 0;
+  bool deepseek_exact_prefill_ = false;
+  bool deepseek_stream_experts_ = false;
+  std::uint64_t deepseek_expert_cache_bytes_ = 0;
 };
 
 }  // namespace gufo::server

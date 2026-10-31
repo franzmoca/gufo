@@ -1,0 +1,22 @@
+2026-10-27 12:20:11 [INFO] [ds41] DeepSeek V4.1 Flash: 4 backbone shard(s), 128.32 GiB device-eligible weights; Engram /mnt/data/models/ds41/ista-gsq-rco-gguf/DeepSeek-V4.1-Flash-Engram-IQ4_NL.gguf (103.00 GiB, 144 B rows, read from disk)
+2026-10-27 12:20:11 [INFO] [ds4] backend initialized on AMD Radeon 8060S Graphics (sm_115)
+2026-10-27 12:20:11 [INFO] [ds4] native MMQ enabled
+2026-10-27 12:20:11 [INFO] [ds41] streaming routed experts: 5.31 GiB dense weights, 120.74 GiB available unified memory
+ds41: ROCm weights (128.76 GiB) do not fit the device heap above its 4.00 GiB dispatch reserve; placing them in managed memory
+2026-10-27 12:20:11 [INFO] [ds4] loading model tensors into device cache
+2026-10-27 12:20:12 [INFO] [ds4] ROCm startup model cache prepared 5.31 GiB of tensor spans in 1.125s
+2026-10-27 12:20:13 [INFO] [ds41] DSpark drafter /mnt/data/models/ds41/dspark-lucebox-q2k/DeepSeek-V4.1-Flash-1017-DSpark-draft-Q2K-Q4K.gguf: 4.59 GiB resident
+2026-10-27 12:20:31 [INFO] [ds41] expert seed (built-in V4.1 ranking): cached 9737 of 9737 ranked experts from 77.94 GiB in 18.17 s
+2026-10-27 12:20:34 [INFO] [ds41] expert cache interval: 78.3% route hits, 4.65 MiB read/token (48.7% prefetched), 1.24 ms host wait/token, 93.42 GiB allocated
+[Model Load]: 20.3016 s
+| model                            |       size | backend    |               test |                   t/s |
+| -------------------------------- | ---------- | ---------- | ------------------ | --------------------- |
+DeepSeek pp depth=0 payload_bytes=13665360
+| DeepSeek V4.1 Flash              | 128.75 GiB | ROCm (HIP) |             pp2048 |        748.18 ± 0.00 |
+2026-10-27 12:20:37 [INFO] [ds41] expert cache interval: 87.4% route hits, 180.12 MiB read/token (0.0% prefetched), 47.02 ms host wait/token, 93.42 GiB allocated
+2026-10-27 12:20:40 [INFO] [ds41] expert cache interval: 94.1% route hits, 106.44 MiB read/token (0.0% prefetched), 35.89 ms host wait/token, 93.42 GiB allocated
+DeepSeek tg C=1 depth=0 request=0 accepted=71 drafted=107 steps=37 skipped=0 output_sha256=04842be74b153c8e90e0b6082faae0eec55b930762e9e0ca8132d1c502540254
+| DeepSeek V4.1 Flash              | 128.75 GiB | ROCm (HIP) |              tg128 |         17.86 ± 0.00 |
+2026-10-27 12:20:42 [INFO] [ds41] expert cache total: 80.2% route hits, 14.69 MiB read/token, 4.37 ms host wait/token, 93.42 GiB allocated, 4.53 GiB prefetched (0.22 GiB dropped)
+2026-10-27 12:20:42 [INFO] [ds41] expert reads: 22771 direct, 0 buffered
+

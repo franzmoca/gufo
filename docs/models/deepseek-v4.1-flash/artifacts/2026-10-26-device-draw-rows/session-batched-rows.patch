@@ -1,0 +1,178 @@
+--- /dev/fd/63	2026-10-26 14:28:29.344212975 +0100
++++ /tmp/ds41-review/v41_session.batchdraw.cpp	2026-10-26 14:24:21.466932812 +0100
+@@ -32,6 +32,9 @@
+   int context = 0;
+   std::vector<int> tokens;
+   std::vector<float> logits;
++  /* The decoder's resident logit row that logits holds, or -1 (restored or
++   * externally written logits). */
++  int logits_row = -1;
+   bool valid = false;
+   ds41_session_cancel_fn cancel = nullptr;
+   void* cancel_data = nullptr;
+@@ -111,7 +114,9 @@
+   const int rc = prompt_end
+                      ? ds41_decoder_eval_prompt(s->decoder, tokens, n, prompt_end, s->logits.data(), kept ? 1 : 0)
+                      : ds41_decoder_eval(s->decoder, tokens, n, s->logits.data(), 1, nullptr, nullptr);
++  s->logits_row = !prompt_end || kept ? 0 : -1;
+   if (rc != 0) {
++    s->logits_row = -1;
+     set_error(error, capacity, "ROCm evaluation failed");
+     s->valid = false;
+     return false;
+@@ -318,32 +323,52 @@
+   return sampler->sample(sampler->ctx, row, vocab(s));
+ }
+ 
+-/* Draws row `row` of the last evaluation on the device when the request's
+- * selection is plain softmax sampling (ds41_v41_sample_row): q's exact p/q
+- * acceptance or residual draw, or a plain draw without q (or for a point
+- * mass). It consumes the uniforms the host sampler would and records the
+- * token. False leaves the request unchanged for the host sampler. */
+-bool device_draw(ds41_session* s, const ds41_dspark_sampler* sampler, uint32_t row, const ds41_v41_proposal* q,
+-                 int* token, int* argmax) {
+-  if (!sampler || !sampler->device_temperature) return false;
+-  const float temperature = sampler->device_temperature(sampler->ctx);
+-  if (!(temperature > 0.0f)) return false;
+-  const uint64_t start = sampler->rng(sampler->ctx);
+-  const double u = sampler->uniform(sampler->ctx);
+-  const uint64_t one = sampler->rng(sampler->ctx);
+-  const double u2 = sampler->uniform(sampler->ctx);
+-  ds41_v41_sample_result r{};
+-  if (!ds41_decoder_sample(s->decoder, row, q, temperature, u, u2, &r) || r.degenerate || r.token < 0 ||
+-      r.token >= (int)vocab(s)) {
+-    sampler->set_rng(sampler->ctx, start);
+-    return false;
++/* Device draws of the last evaluation's rows while the request's selection
++ * is plain softmax sampling (ds41_v41_sample_rows): q's exact p/q acceptance
++ * or residual draw for rows with a proposal, else a plain draw. All rows are
++ * drawn at once with the uniforms the host sampler would use in row order;
++ * Take hands them out in that order, consuming those uniforms and recording
++ * the token. Once it declines (the request no longer permits device draws, or
++ * the host would draw a row without a uniform), the request's RNG is where
++ * the host continues. */
++struct DeviceDraws {
++  const ds41_dspark_sampler* sampler = nullptr;
++  float temperature = 0.0f;
++  bool drawn = false, active = false;
++  uint64_t state[DS41_V41_SAMPLE_MAX_ROWS + 2] = {};  // the RNG after k uniforms
++  ds41_v41_sample_result result[DS41_V41_SAMPLE_MAX_ROWS] = {};
++
++  DeviceDraws(ds41_session* s, const ds41_dspark_sampler* sampler, uint32_t rows, const ds41_v41_proposal* q,
++              uint32_t q_rows)
++      : sampler(sampler) {
++    if (!sampler || !sampler->device_temperature || rows > DS41_V41_SAMPLE_MAX_ROWS) return;
++    temperature = sampler->device_temperature(sampler->ctx);
++    if (!(temperature > 0.0f)) return;
++    double u[DS41_V41_SAMPLE_MAX_ROWS + 1];
++    state[0] = sampler->rng(sampler->ctx);
++    for (uint32_t k = 0; k <= rows; k++) {
++      u[k] = sampler->uniform(sampler->ctx);
++      state[k + 1] = sampler->rng(sampler->ctx);
++    }
++    sampler->set_rng(sampler->ctx, state[0]);
++    drawn = active = ds41_decoder_sample(s->decoder, 0, rows, q, q_rows, temperature, u, result);
++  }
++
++  /* Row `row`'s draw (rows in order, each previous one taken with one uniform). */
++  bool Take(uint32_t row, uint32_t n_vocab, int* token) {
++    if (!active) return false;
++    const ds41_v41_sample_result& r = result[row];
++    if (sampler->device_temperature(sampler->ctx) != temperature || r.degenerate || r.token < 0 ||
++        r.token >= (int)n_vocab) {
++      active = false;
++      return false;
++    }
++    sampler->set_rng(sampler->ctx, state[row + r.uniforms]);
++    sampler->accept(sampler->ctx, r.token);
++    *token = r.token;
++    return true;
+   }
+-  if (r.uniforms == 1) sampler->set_rng(sampler->ctx, one);
+-  sampler->accept(sampler->ctx, r.token);
+-  *token = r.token;
+-  *argmax = r.argmax;
+-  return true;
+-}
++};
+ 
+ /* One cycle. The anchor is the emitted token the session has not evaluated
+  * yet (s->next), drawn here on a request's first cycle. The cycle verifies
+@@ -456,21 +481,18 @@
+   uint32_t accepted = 1;
+   uint32_t positional = 0;
+   int next = -1;
++  /* Rows 0 .. m - 2 verify the block; row m - 1 is the bonus row. */
+   const ds41_v41_proposal* proposals =
+       stochastic && copied == 0 && s->dspark ? ds41_dspark_proposals(s->dspark) : nullptr;
++  DeviceDraws device(s, sampler, m, proposals, proposals ? m - 1 : 0);
+   for (uint32_t i = 1; i < m; i++) {
+     const float* row = rows + (uint64_t)(i - 1) * n_vocab;
+-    if (next >= 0) {
+-      positional += ds41_sample_argmax(row, n_vocab) == block[i];
+-      continue;
+-    }
+-    int drawn = -1, argmax = -1;
+-    if (!device_draw(s, sampler, i - 1, proposals ? proposals + (i - 1) : nullptr, &drawn, &argmax)) {
+-      argmax = ds41_sample_argmax(row, n_vocab);
++    positional += (device.drawn ? device.result[i - 1].argmax : ds41_sample_argmax(row, n_vocab)) == block[i];
++    if (next >= 0) continue;
++    int drawn = -1;
++    if (!device.Take(i - 1, n_vocab, &drawn))
+       drawn = stochastic && copied == 0 ? sampler->verify(sampler->ctx, i - 1, row, n_vocab, block[i])
+                                         : draw(s, sampler, row);
+-    }
+-    positional += argmax == block[i];
+     if (drawn != block[i] || ends(drawn) || block[i] == stop)
+       next = drawn;
+     else
+@@ -484,6 +506,7 @@
+     }
+     s->tokens.insert(s->tokens.end(), block, block + accepted);
+     memcpy(s->logits.data(), rows + (uint64_t)(accepted - 1) * n_vocab, n_vocab * sizeof(float));
++    s->logits_row = (int)accepted - 1;
+     if (s->dspark && !ds41_dspark_inject(s->dspark, first, accepted)) {
+       set_error(error, capacity, "DSpark feature injection failed");
+       s->valid = false;
+@@ -491,9 +514,7 @@
+     }
+   }
+   /* The token after a fully accepted block (or a plain step): the last row. */
+-  int bonus_argmax = -1;
+-  if (next < 0 && !device_draw(s, sampler, m - 1, nullptr, &next, &bonus_argmax))
+-    next = draw(s, sampler, s->logits.data());
++  if (next < 0 && !device.Take(m - 1, n_vocab, &next)) next = draw(s, sampler, s->logits.data());
+   if (next < 0 || next >= (int)n_vocab) {
+     set_error(error, capacity, "DSpark target logits contain no finite values");
+     s->valid = false;
+@@ -645,6 +666,7 @@
+   const uint8_t* at = snapshot->ptr + sizeof(header);
+   s->tokens.assign((const int*)at, (const int*)at + header[1]);
+   memcpy(s->logits.data(), at + header[1] * sizeof(int), header[2] * sizeof(float));
++  s->logits_row = -1;
+   s->valid = true;
+   s->next = -1;
+   s->lookup.Restore(lookup);
+@@ -684,7 +706,21 @@
+ 
+ const int* ds41_session_tokens(const ds41_session* s) { return s ? s->tokens.data() : nullptr; }
+ 
+-float* ds41_session_logits(ds41_session* s) { return s ? s->logits.data() : nullptr; }
++float* ds41_session_logits(ds41_session* s) {
++  if (!s) return nullptr;
++  s->logits_row = -1;  // callers may write them
++  return s->logits.data();
++}
++
++int ds41_session_sample_device(ds41_session* s, float temperature, double u) {
++  if (!s || !s->valid || s->logits_row < 0) return -1;
++  const double uniforms[2] = {u, 0.0};
++  ds41_v41_sample_result r{};
++  if (!ds41_decoder_sample(s->decoder, (uint32_t)s->logits_row, 1, nullptr, 0, temperature, uniforms, &r) ||
++      r.degenerate || r.token < 0 || r.token >= (int)vocab(s))
++    return -1;
++  return r.token;
++}
+ 
+ int* ds41_session_begin_restore(ds41_session* s, uint32_t n) {
+   if (!s || n == 0 || n >= (uint32_t)s->context) return nullptr;

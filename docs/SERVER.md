@@ -227,8 +227,9 @@ at 32 GiB and half the available host RAM after model/state allocation, respecti
 container limits. Available RAM is `MemAvailable` minus `CmaFree`: free CMA
 pages, such as the kernel's KHO scratch area on Ubuntu 26.04, only hold
 movable pages, not GPU allocations. 27B also checks HIP free memory. A
-positive value sets a byte cap that may exceed the automatic budget, up to the
-available host RAM minus 4 GiB; the startup line reports both as
+positive value sets a byte cap: any value up to the automatic budget is
+accepted, and larger ones up to the available host RAM minus 4 GiB; the
+startup line reports both as
 `automatic_bytes` and `max_bytes`.
 On Qwen27B and Flash-Next, the pinned disk staging buffer comes out of that ceiling, and
 `max_bytes` excludes it. Other models' disk staging and temporary disk-save
@@ -298,15 +299,30 @@ With `preserve_thinking=false`, a new user turn removes reasoning from the
 preceding tool cycle. Gufo retains the state before that cycle and processes
 its changed suffix again.
 
-A loaded Qwen or Gemma 4 vision sidecar is prepared while the model loads,
-before the RAM cache is sized and before readiness: Gufo hashes the complete sidecar for image
-cache identities and uploads the encoder weights, so neither happens in the
-first image request and admission's free device memory already excludes them.
+A loaded Qwen, Gemma 4 or DeepSeek V4.1 vision sidecar is prepared while the
+model loads, before the RAM cache is sized and before readiness: Gufo hashes
+the complete sidecar for image cache identities and uploads the encoder
+weights, so neither happens in the first image request and admission's free
+device memory already excludes them.
 The weights stay resident even if no image arrives, including a sidecar
 auto-discovered as `mmproj-BF16.gguf` in the model's directory or its parent.
 The startup line `event=vision_prepared` reports `resident_bytes`,
 `identity_ms` and `upload_ms`. Startup fails if the upload does not fit. Image
 encoding scratch is still allocated per image.
+
+DeepSeek V4.1 Flash loads its vision tower only with an explicit `--mmproj`
+(0.90 GiB; never discovered): ISTA-DASLab's
+`mmproj-DeepSeek-V4.1-Flash-1017-BF16.gguf` or unsloth's `mmproj-BF16.gguf`.
+Image positions select experts with each MoE gate's image routing bias, which
+the backbone GGUF carries:
+
+```sh
+gufo serve llm --model DeepSeek-V4.1-Flash-1017-GSQ-RCO-IQ1_M-00001-of-00006.gguf \
+  --mmproj mmproj-DeepSeek-V4.1-Flash-1017-BF16.gguf
+```
+
+Image input works over HTTP; `gufo prompt` does not take images for this
+model.
 
 `SIGINT` and `SIGTERM` cancel active requests and drain accepted disk writes
 before exiting. `--cache-disk DIR` defaults to 8 GiB retained on disk.

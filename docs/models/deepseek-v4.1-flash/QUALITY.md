@@ -1,0 +1,550 @@
+# DeepSeek V4.1 Flash Quality
+
+Correctness of the ROCm decoder against the CPU/torch oracle in `tools/ds41/`.
+The oracle ports the official `inference/model.py` and `inference/engram.py`,
+dequantizes the same GGUF and keeps the official KV fake quantization
+(FP8 window, FP4 compressed and indexer KV). Parity therefore measures the
+engine, not the quantization.
+
+Artifact: ISTA-DASLab GSQ-RCO `IQ1_M` with
+`DeepSeek-V4.1-Flash-Engram-IQ4_NL.gguf`. Hardware: one Strix Halo (gfx1151).
+Results before the section on the llama.cpp layout used ISTA's earlier
+four-shard files; their quantized weights are the same bytes.
+
+## Token parity
+
+Greedy continuation of "The capital of France is Paris. The capital of Germany
+is" (13 prompt tokens, 8 generated). Both engines produce
+" Berlin. The capital of Italy is Rome".
+
+| Step | Top-1 equal | KL(oracle ‖ GPU) | p(top), oracle / GPU |
+|---:|:---:|---:|---|
+| 0 | yes | 1.2e-4 | 0.986 / 0.985 |
+| 1 | yes | 9.7e-5 | 0.876 / 0.874 |
+| 2 | yes | 4.9e-4 | 0.850 / 0.848 |
+| 3 | yes | 1.8e-4 | 0.992 / 0.992 |
+| 4 | yes | 7.4e-5 | 0.997 / 0.997 |
+| 5 | yes | 7.4e-4 | 0.647 / 0.644 |
+| 6 | yes | 2.4e-5 | 0.998 / 0.998 |
+| 7 | yes | 3.0e-5 | 0.998 / 0.997 |
+| 8 | yes | 4.4e-5 | 0.862 / 0.860 |
+
+## Teacher-forced 3K tokens
+
+2,999 positions of `docs/KV-CACHE.md`, scored token by token. This range uses
+the indexer's top-512 selection on every compressed-attention layer.
+
+| Positions | Oracle NLL | GPU NLL | Oracle top-1 | GPU top-1 | Argmax agreement |
+|---|---:|---:|---:|---:|---:|
+| 0-511 | 2.479 | 2.479 | 0.494 | 0.484 | 0.951 |
+| 512-1023 | 1.420 | 1.416 | 0.664 | 0.658 | 0.977 |
+| 1024-2047 | 1.573 | 1.577 | 0.634 | 0.629 | 0.955 |
+| 2048-2998 | 2.016 | 2.012 | 0.528 | 0.530 | 0.955 |
+| all | | | | | 0.958 |
+
+Perplexity: oracle 6.309, GPU 6.306; mean |ΔNLL| 0.078 per position.
+
+## Teacher-forced 18.5K tokens and candidate blocks
+
+18,499 positions of repository documentation (`docs/KV-CACHE.md`,
+`docs/TESTING.md` and following), scored through 2048-token batches. Past
+16,384 tokens layer 20's candidate blocks (top 2048 of the 8-row blocks) start
+masking the rescoring layers.
+
+| Positions | Oracle NLL | GPU NLL | Oracle top-1 | GPU top-1 | Argmax agreement | Mean \|ΔNLL\| |
+|---|---:|---:|---:|---:|---:|---:|
+| 0-2047 | 1.761 | 1.762 | 0.604 | 0.601 | 0.959 | 0.077 |
+| 2048-8191 | 2.095 | 2.096 | 0.531 | 0.530 | 0.947 | 0.085 |
+| 8192-14335 | 1.681 | 1.681 | 0.627 | 0.627 | 0.964 | 0.069 |
+| 14336-16382 | 1.502 | 1.504 | 0.666 | 0.668 | 0.962 | 0.063 |
+| 16383-17399 | 1.472 | 1.469 | 0.636 | 0.640 | 0.964 | 0.075 |
+| 17400-18498 | 2.338 | 2.347 | 0.532 | 0.534 | 0.956 | 0.090 |
+| all | | | | | 0.958 | 0.076 |
+
+Perplexity: oracle 6.267, GPU 6.271. Long-context parity holds past the
+threshold. The score alone does not prove the mask: with the GPU mask
+disabled the same run also gives perplexity 6.271 and agreement 95.7%, because
+at 18.5K tokens the dropped blocks are rarely in a top-512. The mask is
+therefore checked directly: `ds41.candidate_mask` compares the GPU mask and the
+masked scores with a host port of the reference selection, exactly, for
+prefill batches below, at and across 16,384 rows and for decode tokens up to
+40K rows (up to 70,872 dropped rows per case).
+
+The same positions scored at the native 1M context (576-token batches,
+indexer scores in 64-token groups, per-block mask): perplexity 6.273,
+agreement 95.9%, mean |ΔNLL| 0.075; 97.2% agreement over 16,383-17,399.
+
+## Chat template
+
+`tests/models/deepseek_v41_flash/fixtures/encoding-1017.json` holds 12
+conversations rendered by the official `encoding/encoding.py`
+(SHA-256 `13231c59…`), with the deepseek-recipe serving conventions: request
+tools join a leading system message, and `developer` is a system message.
+The cases cover chat and thinking modes, every reasoning-effort level, history
+with and without tools, parallel calls whose results arrive out of order, a
+mid-conversation system message, Unicode, and escapes. `ds41.template` renders
+all 12 byte-for-byte.
+
+## Serving
+
+`gufo serve` on IQ1_M, 16K context:
+
+| Request | Result |
+|---|---|
+| Chat, no thinking: capital of France | "The capital of France is Paris." |
+| Thinking, low effort: bat-and-ball puzzle | correct reasoning, answer $0.05 |
+| Tool call: Rome weather for 3 days | `get_weather {"city":"Rome","days":3}`, `finish_reason=tool_calls` |
+| Tool result returned | summarizes the three forecast days; 390 of 466 prompt tokens reused |
+
+Measured at M1, before the M2 performance work: decode 12-14 tok/s with
+short prompts, prefill one token at a time. Current speeds are in
+[BENCHMARKS.md](BENCHMARKS.md).
+
+### Functional suites after M2
+
+`tests/functional/run.py` with the `deepseek4` sampling preset (V4.1 is
+served with the V4 defaults), 32K context, 2 sessions, against the M2 build:
+
+| Suites | Result |
+|---|---|
+| discovery, responses, stops, conversation, tools, tool-edges, tool-streaming, structured, sampling-defaults, long-context | passed |
+| cache (RAM and disk, restart, disk checkpoint spacing) | passed |
+| tool-reasoning | 8 of 9 cases pass; the first case fails |
+
+The failing case asks the model to quote a corrupted docstring containing a
+literal `<tool_call>` opener and then call `edit`, with 1,024 output tokens at
+low effort. V4.1 IQ1_M is still reasoning when it reaches the limit. With 4,096
+tokens it calls `edit` with the exact arguments after 2,529 tokens at low
+effort and 1,953 at high. The fixture budget is unchanged.
+
+`tests/functional/pi_agent.py` (Pi 0.87.0, server sampling defaults): 13 of
+15 tasks pass, covering simple, tools, edit, creation, bugfix,
+literal-protocol and wide-tool. Two of three `tools` runs wrote `hello.txt`
+as `bonjour` plus a newline where the task asks for exactly `bonjour`. The
+model generates that newline inside the string parameter. The official
+`encoding.py` and `deepseek-recipe` both keep string parameter values
+verbatim, as Gufo does.
+
+### Component cache (M4)
+
+Sessions serve the component cache: compressed-KV and index-K rows of the
+four KV source layers are lent rows, the window rings, compressor frontiers
+and frontier logits private state, and the Engram history is rebuilt from
+the tokens. Capture cost on a 55K-token conversation (65K context):
+
+| Capture | Whole-state snapshot | Component cache |
+|---|---:|---:|
+| 55,014-token prompt | 284 MB, 274 ms | 119 MB, 9.1 ms |
+| 10-token follow-up turn | 182 MB, 140 ms | 25 MB, 1.5 ms |
+
+Functional suites (32K context, 2 sessions) against the whole-state
+snapshot build: `cache` (RAM and disk, restart, disk checkpoint spacing)
+passes qualification. cache-edits, cache-rotation, cache-shared-prefix and
+cache-concurrency pass on both builds with the same outputs. Per request,
+captures take a median 0.066 of the old time and restores 0.44; prefill
+and decode medians are unchanged (0.998). cache-growth and cache-depth fail
+on both builds with the same replies: V4.1 answers a trivial turn without
+thinking, and the depth fixture is 16,210 tokens with this tokenizer, below
+its 16,384 floor.
+
+Flags that remain, from alternating runs:
+
+- One rotation return reuses 2 more tokens (8,470 instead of 8,468) and
+  prefills 216 ms instead of 202: its 7-token batch takes 136 ms where the
+  old 9-token batch took 120, also without a restore
+  (7- and 8-token batches since moved to the batched paths, [E32](EXPERIMENTS.md#e32-batched-paths-for-7--and-8-token-prompt-batches-retained)).
+- Restores queue 5-6 ms longer in cache-shared-prefix (`long_tasks_1-3`),
+  outside the restore itself; a fresh server with few checkpoints shows no
+  difference. Time to first token is still lower than before.
+- The first token now comes before the capture completes, so single-token
+  and concurrent decodes count up to one step more while the requests end
+  sooner (cache-concurrency `identical`: 8,107 against 8,124-8,140 ms).
+
+## Disk prompt cache
+
+Production setup: native 1M context, one session, DSpark Q2_K/Q4_K,
+`--cache-disk` on an NVMe SSD, build `495d7056`
+([artifacts](artifacts/2026-10-26-disk-cache/requests.txt)). An
+11,930-token conversation and a continuation, then the server was stopped
+with SIGTERM, restarted, replayed, killed with SIGKILL and replayed again:
+
+| Request | Reuse | Cached tokens | Restore | TTFT | Reply vs uncached |
+|---|---|---:|---:|---:|---|
+| Cold turn 1 | none | 0 | | 12,059 ms | identical |
+| After SIGTERM, turn 1 | disk | 11,927 | 13.9 ms | 110 ms | identical |
+| After SIGKILL, turn 1 | disk | 11,927 | 12.9 ms | 110 ms | identical |
+| Uncached control (`cache_prompt: false`) | none | 0 | | 11,803 ms | |
+
+Each continuation (turn 2) reuses the live slot, 11,993 tokens, and the
+cold, SIGTERM and SIGKILL runs reply identically to one another. The
+uncached control differs in one word (`"Releasing"` for `**Releasing**`):
+a cold prompt runs the decoder layers over its last 140 rows only, while
+the live slot decoded the 64 reply tokens in full. With `--exact-prefill`
+the continuation and the uncached control are identical, so the difference
+comes from bounded replay, not from the cache.
+
+With the disk cache enabled, 1.68-1.75 GiB of host memory is available at
+ready and at least 1.33 GiB while serving; the transfer staging stays at
+1 MiB. The first start with `--cache-disk` fingerprints the weights:
+49.9 s for the backbone and 2.1 s for the drafter, ready after 70.8 s
+([log](artifacts/2026-10-26-disk-cache/fresh-fingerprint.txt)). Later
+starts reuse the stored hashes and are ready in 19 s.
+
+`tests/functional/run.py --suite cache` with DSpark (32K context, two
+sessions) passes RAM, disk, restart and disk checkpoint spacing; after the
+restart ten requests restore from disk in about 9 ms
+([report](artifacts/2026-10-26-disk-cache/functional-cache-report.json)).
+
+## DSpark drafter (M5)
+
+`tools/ds41/dspark_reference.py` recomputes a draft on the CPU from the
+features and anchor that `ds41_load_probe --dspark-dump` writes, following
+the official DSpark block. On the 1,871-token roadmap prompt with the
+unsloth Q8_0 drafter (MXFP4 experts) the five drafts match the GPU exactly;
+head logits before the Markov bias agree to cosine 0.9995-0.9998 (max
+|diff| 0.3-0.7 on logits up to 13-21).
+
+Drafts never change the output: the target evaluates the anchor and the
+drafts in one batch with decode numerics, the request's sampler draws every
+row, and the first rejected draw becomes the next token. Greedy generation
+with DSpark is token-identical to plain decoding in every probe run (128,
+256 and 384 tokens, both drafters, every draft width) and over HTTP, also
+when the request follows a sampled one and restores from the cache.
+
+Served through the component cache (`cache` functional suite, 32K
+context, 2 sessions, Q2_K/Q4_K drafter) every case passes, and 29 of 33
+replies are byte-identical to the run without a drafter. The other four are
+sampled cancellation cases interrupted after a fixed time: DSpark samples in
+a different order and generates more tokens before the cut, so the partial
+reply and its follow-up differ; each passes its exact-continuation check.
+
+Prompt-lookup copies are verified the same way, in batches of at most
+16 rows. Up to seven rows only did before, as eight rows took the batched
+attention kernel (max |diff| 11.6, same argmax). Speculative evaluations
+now keep the per-row split attention up to 16 rows, and
+`ds41_load_probe --spec-check 16 --spec-width W` keeps bit-identical logits
+against single-token decode for widths 8, 12 and 16, and at width 16 on
+3,000- and 18,500-token histories
+([evidence](artifacts/2026-10-26-wide-verification/summary.txt)). Greedy generation with lookup is
+token-identical to plain decoding on the file-edit, roadmap and chat
+prompts, and the `cache` suite with the drafter passes every case with all
+30 completed replies byte-identical to the run without lookup. The lookup
+state that the tokens cannot rebuild (resume point, request start) travels
+in snapshots and in the component cache metadata.
+
+Each step now emits the token after its accepted proposals before
+evaluating it; the next step verifies it as its first row. Greedy output
+stays token-identical to plain decoding with and without the drafter (file
+edit, 512 tokens), and seeded sampled `gufo prompt` output (temperature 1.0,
+160 tokens) is byte-identical to the previous build with DSpark and without
+a drafter. A reply's last token is then evaluated by the next turn's
+prefill, as in plain decoding, so DSpark follow-ups prefill one token more
+than before (cached 187 → 186 tokens) and three cancellation follow-ups in
+the `cache` suite changed their sampled text; every case passes. Without a
+drafter all 30 completed `cache` replies are byte-identical to the previous
+build.
+
+`ds41.attention` checks the drafter's block attention (ring rows with
+wrap-around plus every block row, with sinks) against an fp64 reference
+(≤ 7e-7 relative), the hc mean exactly and the Markov argmax (first index
+of equal maxima, non-finite values skipped).
+
+## Decoder SWA bounded replay (M5)
+
+Prompts run the decoder layers (20-39) over their last 140 positions only,
+as DeepSeek's DeepInfer does with its V4.1 defaults (`compact` mode, 140
+kept tokens: the 128-row window plus 12 rows of backtracking). Layer 20
+still compresses every position, so the global KV and index keys are
+complete; the replayed rows' windows start at the first replayed position.
+In serve each prefill segment between cache stops is one such prompt, so a
+state is only captured where its windows are complete, and a restored
+prefix continues exactly as the cold request did.
+
+`ds41_load_probe --replay-check 256` prefills the ids but the last 256
+once exactly and once with bounded replay, then scores the last 256
+teacher-forced after each:
+
+| Prompt | NLL exact | NLL replay | Top-1 agreement | Mean KL (max) |
+|---|---:|---:|---:|---:|
+| `docs/KV-CACHE.md`, 8,863 tokens | 1.9495 | 1.9488 | 255 / 256 | 0.00097 (0.0135) |
+| `v41_decode.cpp`, 8,192 tokens | 0.4029 | 0.4106 | 254 / 256 | 0.0023 (0.10) |
+| `v41_decode.cpp`, 23,848 tokens | 0.2147 | 0.2159 | 254 / 256 | 0.00021 (0.0073) |
+
+Top-1 hits on the reference token: 148/148, 229/230 and 240/240.
+`ds41.attention` checks the window floor against the fp64 reference in the
+batched, scalar and split kernels.
+
+Served (32K context) against the previous build, the `long-context`,
+`conversation` and `cache` suites pass every case. The needle is still
+recovered, and its cancelled thinking replay and resume give the same
+answer with shorter reasoning (27 → 17 tokens), still identical to each
+other; three sampled thinking-tool cancellation replies changed text and
+pass their exact-continuation checks. 876 of 878 per-request timings pass,
+two decode max inter-token gaps are inconclusive (42.9 → 46.1 and
+43.9 → 46.9 ms).
+
+With the DSpark drafter (Q2_K/Q4_K), whose features now come from the
+replayed rows only, greedy output after the 8,863- and 8,192-token prompts
+stays token-identical to plain decoding (256 tokens each, bounded replay
+and `--exact-prefill`): 50.77 and 42.46 tok/s against 52.72 and 32.75
+with exact prefill, which continues with different text. Served with the
+drafter against the previous build, `long-context` and `cache` pass every
+case with the same output changes as above; over all requests the same 116
+draft rounds accepted 75.7% of drafts (68.3% before) and decode took
+8.22 s (9.02 s). 59 of 602 timings are inconclusive: short replies (5-8
+tokens) that took one draft round more or fewer than before.
+
+`--exact-prefill` (`serve`, `bench`, `prompt`) evaluates every decoder row:
+against the build before bounded replay, all 70 request outputs of the
+`long-context`, `conversation` and `cache` suites are byte-identical.
+
+## Vision (M6)
+
+**Encoder against the official forward.** `tools/ds41/vision_reference.py`
+runs the official preprocessing, ViT and aligner on the CPU in the official
+BF16 default dtype (and in FP32 with `--fp32`, as a precision yardstick);
+`ds41_vision_probe` writes the GPU span. Every grid matches the reference
+and the padded pixels are byte-identical to PIL:
+
+| Image | Padded | Tokens | Relative RMS to BF16 reference | Median row cosine | Worst row cosine |
+|---|---|---:|---:|---:|---:|
+| carrots.jpeg (official example) | 1036 × 714 | 444 | 4.26% | 0.99994 | 0.780 |
+| corn.jpeg (official example, enlarged) | 658 × 462 | 189 | 1.81% | 0.99995 | 0.992 |
+| 2000 × 300 synthetic | 2002 × 308 | 394 | 2.92% | 0.99991 | 0.960 |
+| 250 × 1900 synthetic | 252 × 1904 | 324 | 2.60% | 0.99992 | 0.972 |
+| 97 × 61 synthetic (enlarged) | 686 × 434 | 200 | 1.49% | 0.99995 | 0.995 |
+| 4000 × 3000 synthetic (token cap) | 1512 × 1134 | 1,001 | 2.42% | 0.99992 | 0.925 |
+
+The differences are BF16 rounding sensitivity, not an error: on carrots the
+official BF16 forward itself is 5.66% from the FP32 forward (worst row
+0.842), and the GPU span is 5.55% from it (worst row 0.890). The few
+divergent rows are scattered over the image.
+
+**Image routing bias.** No published GGUF carries the gates' `bias_vl`, so
+image positions would otherwise route with the text bias (layer 3: up to 4.9
+apart, correlation −0.22). Eleven greedy questions on the two official
+examples and four synthetic images (text transcription, counting, a bar
+chart, digits; `--reasoning-effort none`): with the image bias, all nine
+questions with a reference answer are right; with the text bias in its place
+(a control sidecar), eight are, and the carrots are counted as 5 instead of
+4. Three of the eleven answers change. One differing answer is too little to
+size the effect.
+
+**Serving.** `tests/functional/run.py` (`deepseek4` preset, 32K context, two
+sessions, `--mmproj`): `discovery` (text and image inputs), `image-inputs`,
+`tool-images`, `image-count` (with cancellation and disk replay) and
+`messages-image-counts` pass. A follow-up turn after an image restores the
+image prefix from the cache (219 of 232 tokens). The text suites
+`conversation`, `tools` and `cache` (RAM, disk and restart) without
+`--mmproj` pass their assertions. The report still fails one measurement
+check: with `--speculative off` the harness expects zero drafts, and two
+`tools` requests verified prompt-lookup copies (16 and 28 copied, 15 and 27
+accepted). The build before M6 reports the same. Drafter-less prompt lookup
+stays on in `off` mode by choice, so this check does not apply to this model.
+
+## Batched prefill and M2 kernels
+
+The same 3K positions scored through 2048-token batches (matrix-core
+attention and indexer, bounded routed MoE tiles): perplexity 6.310 against
+the oracle's 6.309, argmax agreement 95.8%, mean |ΔNLL| 0.080. Scored token by
+token through the decode path (split-row attention, FP32-activation dense
+GEMV): perplexity 6.303, agreement 96.1%, mean |ΔNLL| 0.077. Across the M2 changes the batched perplexity moved within
+6.296-6.319: half-precision attention operands and the FP8 fake quantization
+of the attention output turn rounding-level differences into small logit
+changes. The smoke continuation keeps all 9 greedy tokens, KL ≤ 5.4e-3 per step.
+
+Kernel checks: `ds41.candidate_mask` (above, plus the indexer top-k with tied scores); `ds41.attention` compares both attention paths with an fp64
+reference (split decode 1.6e-7, batched 3e-4 relative error), the indexer scores (fp32
+decode 2.4e-7, matrix-core batches 3.7e-4) and the fused q_a/KV norm against the separate launches;
+`ds41.mmq_typed` compares batched, bounded-routed and grouped matvec launches
+with the matvec path for every V4.1 weight type, and the single-token Q5_K/Q8_0
+GEMV with an fp64 dot of the dequantized rows, and the IQ routed-expert GEMV
+with the ggml matvec (shared and per-slot inputs, dropped slots write zeros);
+the fused gate/up SwiGLU passes match the unfused ones.
+With it the decode path scores perplexity 6.305 on the 3K positions,
+agreement 96.5%, mean |ΔNLL| 0.075; the smoke continuation keeps all 9 greedy
+tokens, KL ≤ 1.6e-3 per step. With the hc collapse fused into the following RMSNorm (a different
+summation order) the decode path scores 6.291, agreement 96.0%, mean |ΔNLL|
+0.073, and the batched path 6.324, agreement 95.9%, mean |ΔNLL| 0.078; the
+smoke continuation keeps all 9 greedy tokens, KL ≤ 3.2e-3 per step. With batched routed gate/up stored
+through the SwiGLU epilogue of one MMQ pair (one-ulp SwiGLU differences) the
+batched path scores 6.300, agreement 96.1%, mean |ΔNLL| 0.081. With a routed tile width per expert (rounding-level
+differences in the expert projections) the batched 3K run scores 6.307,
+agreement 95.5%, and the batched 18.5K run 6.277, agreement 95.9% (oracle
+6.267).
+
+
+## Post-M6 E1: compact small-batch candidate rescoring
+
+`ds41.attention` and `ds41.candidate_mask` pass on gfx1151. New compact-score
+cases cover 1/3/4 rows, the 16K candidate boundary, different masks per query,
+a partial newest block, zero-query ties, varying packed FP4 scales and
+allocations ending at the last valid row. Every selected FP32 score and all
+512 selected indices (including order) match the original dense/masked path
+bitwise. Independent FP64 score relative RMS error is at most 2.2e-7 in the
+correctness cases; no tolerances were relaxed.
+
+The candidate's exact-prefill teacher-forced controls retain perplexity
+6.319756 over 2,999 positions and 6.273347 over 18,499. The current independent
+18.5K oracle has SHA-256
+`427ac78c8676624c6eb8c321113b84adb0a05a6cbb5fe9f6eac1cb98deb4e7b0`;
+the complete 18.5K control has 96.23% argmax agreement, mean absolute NLL
+difference 0.07031 and oracle perplexity 6.266872. The archived 3K oracle
+uses an earlier reference revision; the retained artifact also reports a
+comparison to the matching input prefix of the current 18.5K oracle,
+without replacing the archived reference or changing a quality gate.
+
+`ds41_load_probe --spec-check 8 --spec-width 4` on the same 18.5K-token
+history exercises each commit length 1–4 twice. All 20 retained rows have
+bit-identical full logits to serial decode and between clean/corrupted
+rejected-suffix passes (maximum absolute difference zero).
+
+Concurrent DSpark sessions verify in one joint evaluation of up to 16 rows.
+`ds41_load_probe --joint-check N` runs N sessions (prompt prefixes) through
+speculative cycles of 1–6 rows, jointly and each on its own decoder; all 328
+rows of a four-session run (up to 16 rows per batch) have bit-identical
+logits, and `gufo bench -c 2,4` outputs match the serial sessions exactly.
+
+The `long-context` API suite passes at 22,591 actual prompt tokens in AR and
+Q2_K/Q4_K DSpark modes, covering greedy/sample replay, cache reuse,
+cancellation, resume and stop handling. Reply/coverage comparisons find no
+changes. AR timing qualification passes all 124 measurements. DSpark timing
+qualification remains inconclusive after three alternating pairs and an
+unchanged-baseline control (86 passed, 38 inconclusive, zero confirmed
+slowdowns); it is not a performance pass. Loaded mode and actual draft
+execution are recorded for each run. See [E1's retained evidence](artifacts/2026-10-26-rescore/README.md).
+
+
+Post-M6 E4: a 128-row target history produces identical DSpark proposal
+prefixes at every requested width 1–5. Unused caller output slots remain
+untouched; widths 0 and 6 fail. All three production 256-token runs emit
+identical coding hashes and identical prose hashes at temperature/top-p 1.0,
+seed 73. Target arithmetic, verification and rollback are unchanged.
+[Evidence](artifacts/2026-10-26-markov-tail/summary.json).
+
+
+Post-M6 E6 makes the verification indexer explicitly use the serial FP32
+score/reduction in groups of at most four; prefill retains WMMA. The strict
+probe now fails on non-finite values or serial-logit mismatches. At 18.5K,
+width six matches serial on all 21 retained rows; at 3K, width seven matches
+all 28. Every commit length and corrupted rejected suffix passes, with zero
+maximum logit difference. Baseline width six also passes on the same 18.5K
+history, so no existing model bug is demonstrated by these cases. Matched
+production tg128 outputs have identical token hashes at depth zero and 32K.
+No claim extends this qualification to eight-row attention or wider projections.
+[Evidence](artifacts/2026-10-26-verification-scores/summary.json).
+
+
+Post-M6 E7: stable device route plans match every valid row, bound and tile
+entry of the host plan, including skew, invalid IDs, exact allocations and
+partial tiles. All three FP16 expert formats pass the existing routed numeric
+checks with a bounded grid of live/unused tiles. A matched 3K model control
+preserves all 2,999 argmax and NLL records (six-decimal NLL output), perplexity
+6.319756; production tg128 token hashes also match. This is not a new full-logit
+bitwise claim. No quantization, expert accumulation or route weights changed.
+[Evidence](artifacts/2026-10-26-device-route-plan/summary.json).
+
+## llama.cpp GGUF layout (2026-10-27 republication)
+
+ISTA-DASLab republished the GSQ-RCO files in llama.cpp's `deepseek41` layout,
+converted locally with the repository's `convert_ds41_upstream.py`. The
+converter copies every quantized tensor byte for byte (checked again here for
+all tensors under 50M elements of IQ1_M) and folds the BF16 Engram `q` and `k`
+into the F32 `engram_gate`, bit-for-bit equal to their product.
+
+With the Engram gate fed the old BF16 `q`/`k` and the old product order, the
+new loader reproduces the previous 3K score files byte for byte: IQ1_M
+resident and IQ2_XXS streamed. That covers the metadata hash constants, the
+absolute rows of the shared Engram table, the shard split and the streamed
+expert reads. Production reads the folded gate. The old kernel's fast-math
+evaluated `((h·q)·key)·k`; the folded weight gives `(h·(q·k))·key`, the
+official `h * weight * key`. That rounding change moves the scores:
+
+| Build | Perplexity, old / new | GPU argmax changed | Target top-1, old / new | Agreement with IQ2 oracle, old / new |
+| --- | ---: | ---: | ---: | ---: |
+| IQ1_M resident | 6.320 / 6.296 | 120 of 2,999 | 57.7% / 58.0% | — |
+| IQ2_XXS streamed | 6.004 / 6.022 | 136 of 2,999 | 58.8% / 58.5% | 95.63% / 95.30% |
+
+The IQ2_XXS oracle scores 6.028; mean \|ΔNLL\| to it is 0.0825 before and
+0.0844 after. Neither order is closer to the oracle on both measures.
+
+## Streamed IQ2_XXS (M3, preliminary)
+
+The ISTA IQ2_XXS build mixes IQ1_M, IQ2_XXS and IQ2_XS expert tensors. On
+gfx1151, the independent oracle and streamed decoder scored the same 2,999
+positions of `docs/KV-CACHE.md`. The GPU ran exact prefill in 2,048- and
+952-token batches. IQ1_M's previously retained oracle score is included as a
+quantization comparison, not as a comparison of two identical backends.
+
+| Build and path | Perplexity | Target top-1 | Agreement with IQ2 oracle |
+| --- | ---: | ---: | ---: |
+| IQ1_M oracle | 6.309 | 58.2% | — |
+| IQ2_XXS oracle | 6.028 | 58.5% | — |
+| IQ2_XXS streamed GPU | 6.009 | 58.7% | 95.3% |
+
+Mean absolute NLL difference between the IQ2 paths is 0.0815. Four logits
+from the capital-of-France continuation have the same argmax; their KL
+divergences range from 0.000042 to 0.00125. The IQ2_XS NumPy and Torch
+dequantizers match llama.cpp bit-for-bit on 2,048 random blocks, and the GPU
+operator test checks an analytic IQ2_XS dot product and batched dispatch.
+
+Six-row speculative verification preserves all 10 retained logit rows
+bit-for-bit against single-token decode. Two joint sessions preserve all 28
+rows against their isolated evaluations. With the Lucebox drafter, a short
+greedy replay produced 27 drafts, accepted 23, and matched plain decoding on
+all 32 tokens.
+[Scores and probe logs](artifacts/m3-streaming/score3k-summary.json),
+[oracle manifest](artifacts/m3-streaming/iq2-oracle-manifest.json),
+[verification](artifacts/m3-streaming/spec-check.log),
+[joint sessions](artifacts/m3-streaming/joint-check.log),
+[DSpark](artifacts/m3-streaming/dspark-check.log).
+
+### Overlapped staging keeps the streamed outputs bit-identical
+
+The October 27 staging change (per-expert weight tables, split hit/miss
+launches, per-reader upload streams) only moves bytes between kernels; every
+route row keeps the arithmetic of a single-launch evaluation. The streamed
+tg128 outputs hash `04842be7…40254` on both the previous and the changed
+build, autoregressive and with the Lucebox drafter (110 drafted, 71 accepted
+in both). `ds41.expert_store` verifies the table contents, eviction, I/O
+failure, the split hit/miss rows and scan-resistant admission on synthetic
+shards; `ds41.mmq_typed` and the extended `ds41_gemv_bench` table mode check
+the IQ1/IQ2 kernels against their packed-layout outputs bit for bit. At the
+native 1M-context budget `ds41_load_probe` peaks at 106.4 GiB RSS with
+8.7 GiB available after generation. The tools, conversation,
+sampling-defaults and batch HTTP suites pass against `gufo serve` with the
+Lucebox drafter (the model's normal mode). The oracle perplexity table
+above is unchanged by construction.
+[AR + DSpark runs](artifacts/m3-streaming/bench-iq2-tables-ar1.log),
+[DSpark](artifacts/m3-streaming/bench-iq2-tables-dspark1.log).
+
+## Benchmark card (2026-10-29)
+
+[BENCHMARKS.md](BENCHMARKS.md) was measured with
+`tools/bench/model-bench.py --model deepseek-v4.1-flash` (`run --target gufo
+--fresh`, one warmed sample per point) on the production `nix build` of
+`cd8b92c1` (binary SHA-256 `fd5cd916…`), sequentially with nothing else on
+the GPU. Files: GSQ-RCO `IQ1_M` and `IQ2_XXS` in the llama.cpp layout (first
+shard of six; Engram `IQ4_NL` as shard 6) and the Lucebox Q2_K/Q4_K
+drafter. The `iq2xxs` variant adds `--stream-experts`; its routed experts
+were read from a Samsung 990 PRO. Loading dropped the page cache
+(`sync; echo 3 > /proc/sys/vm/drop_caches`) before each launch. This host
+exposes no ACPI platform profile; Tctl was 44–71 °C during the sweeps.
+
+Exactness checks of the card's own outputs:
+
+- Single user: the greedy DSpark completion equals the AR completion at
+  all eight depths of both quantizations (16 of 16 hashes).
+- Multiple users: every AR cohort (C1–C8) matches its isolated C1, and
+  every DSpark cohort, mixed and repetitive, matches the isolated C1 AR
+  reference of its quantization. The October 26 AR references predated the
+  folded Engram gate's rounding change ([llama.cpp GGUF
+  layout](#llamacpp-gguf-layout-2026-10-27-republication)) and no longer
+  matched current AR output (`4f19f5c1…` against `7a765f6d…` for IQ1_M
+  mixed), so all four references were regenerated with this build before
+  the DSpark tables ran; each mixed reference equals that quantization's
+  single-user d0 AR completion.
+
+These hashes show that speculative and concurrent execution reproduce plain
+decoding; they do not measure accuracy against the original model (see the
+teacher-forced sections above).

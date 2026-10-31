@@ -1,0 +1,14 @@
+2026-10-26 08:00:46 [INFO] [ds41] DeepSeek V4.1 Flash: 4 backbone shard(s), 112.00 GiB resident weights; Engram /mnt/data/models/ds41/ista-gsq-rco-gguf/DeepSeek-V4.1-Flash-Engram-IQ4_NL.gguf (103.00 GiB, 144 B rows, read from disk)
+2026-10-26 08:00:46 [INFO] [ds4] backend initialized on AMD Radeon 8060S Graphics (sm_115)
+2026-10-26 08:00:46 [INFO] [ds4] native MMQ enabled
+2026-10-26 08:00:46 [INFO] [ds4] loading model tensors into device cache
+2026-10-26 08:00:49 [INFO] [ds4] loading model tensors 16.48 GiB cached
+2026-10-26 08:00:51 [INFO] [ds4] loading model tensors 32.33 GiB cached
+2026-10-26 08:00:54 [INFO] [ds4] loading model tensors 48.55 GiB cached
+2026-10-26 08:00:56 [INFO] [ds4] loading model tensors 64.57 GiB cached
+2026-10-26 08:00:59 [INFO] [ds4] loading model tensors 80.72 GiB cached
+2026-10-26 08:01:01 [INFO] [ds4] loading model tensors 96.74 GiB cached
+2026-10-26 08:01:03 [INFO] [ds4] loading model tensors 112.00 GiB cached
+2026-10-26 08:01:04 [INFO] [ds4] ROCm startup model cache prepared 112.00 GiB of tensor spans in 17.303s
+DeepSeek pp depth=0 payload_bytes=12878912
+DeepSeek tg C=1 depth=0 request=0 accepted=0 drafted=0 steps=0 skipped=0 output_sha256=70d5a48a260f87451697c19615b718329d1bbf1806b84f00c9f57699e31b1b15

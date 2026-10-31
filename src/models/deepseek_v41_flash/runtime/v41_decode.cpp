@@ -1,0 +1,2219 @@
+/* DeepSeek V4.1 Flash decoder.
+ *
+ * Follows the official inference/model.py: Engram (layers 1 and 14), shifted
+ * mHC, CSA2 KV/index sharing, sparse attention with sinks, and the routed +
+ * shared MoE. A batch of tokens runs layer-major, so prompts share every
+ * weight read; decode is a batch of one. Quantized projections run on the
+ * vendored mmvq (up to 8 tokens) and mmq kernels; everything else runs on
+ * the kernels in kernels/rocm/ds41_v41.hip.cpp. */
+#include <hip/hip_runtime_api.h>
+#include <unistd.h>
+
+#include <algorithm>
+#include <array>
+#include <cmath>
+#include <cstdio>
+#include <atomic>
+#include <cstring>
+#include <future>
+#include <memory>
+#include <mutex>
+#include <thread>
+#include <utility>
+#include <vector>
+
+#include "ds41_v41.h"
+#include "expert_store.h"
+#include "mmq/ds41_mmq.h"
+#include "resident_api.h"
+#include "model.h"
+#include "model_data_internal.h"
+#include "native_internal.h"
+#include "tensor_types.h"
+#include "v41_dspark.h"
+
+namespace {
+
+constexpr uint32_t kHc = DS41_N_HC;
+constexpr uint32_t kDim = DS41_N_EMBD;
+constexpr uint32_t kHeadDim = DS41_N_HEAD_DIM;
+constexpr uint32_t kRot = DS41_N_ROT;
+constexpr uint32_t kQDim = DS41_N_HEAD * DS41_N_HEAD_DIM;
+constexpr uint32_t kIndexQDim = DS41_N_INDEXER_HEAD * DS41_N_INDEXER_HEAD_DIM;
+constexpr uint32_t kGroupDim = DS41_N_HEAD_DIM * (DS41_N_HEAD / DS41_N_OUT_GROUP);
+constexpr uint32_t kMixes = 2 * kHc + kHc * kHc;
+constexpr uint32_t kEngramIn = DS41_ENGRAM_COLS * DS41_ENGRAM_HEAD_DIM;
+constexpr uint32_t kEngramOut = kDim * (kHc + 1);
+constexpr uint32_t kMinCapacity = 16;  // the smallest batch capacity
+/* Bytes per FP4 compressed row (ds41_fp4_rows): KV block 16, index-K block 32. */
+constexpr uint32_t kCompCodeBytes = kHeadDim / 2, kCompScaleBytes = kHeadDim / 16;
+constexpr uint32_t kIndexCodeBytes = DS41_N_INDEXER_HEAD_DIM / 2, kIndexScaleBytes = DS41_N_INDEXER_HEAD_DIM / 32;
+constexpr uint64_t kEngramRowsPerThread = 4;
+constexpr float kSwigluLimit = DS41_SWIGLU_CLAMP_EXP;
+constexpr uint32_t kDecodeRows = 8;  // see ds41_decoder::decode_rows
+/* Prompt batches need no single-token arithmetic: from 7 rows the batched
+ * paths are faster (7 rows 108 -> 99 ms, 8 rows 122 -> 99 ms). */
+constexpr uint32_t kPromptDecodeRows = 6;
+/* Batches of at least this many tokens predict the next layer's routed
+ * experts and prefetch them during this layer's compute (the store's
+ * adoption gate mirrors this threshold); single tokens predict for decode. */
+constexpr uint32_t kPrefillPredictTokens = 1024;
+
+float half_to_float(uint16_t h) {
+  const uint32_t sign = (uint32_t)(h & 0x8000u) << 16;
+  const uint32_t exp = (h >> 10) & 0x1fu;
+  uint32_t mant = h & 0x3ffu;
+  uint32_t bits;
+  if (exp == 0) {
+    if (mant == 0) {
+      bits = sign;
+    } else {
+      int e = -1;
+      do {
+        e++;
+        mant <<= 1;
+      } while ((mant & 0x400u) == 0);
+      bits = sign | (uint32_t)(127 - 15 - e) << 23 | (mant & 0x3ffu) << 13;
+    }
+  } else if (exp == 31) {
+    bits = sign | 0x7f800000u | mant << 13;
+  } else {
+    bits = sign | (exp + 127 - 15) << 23 | mant << 13;
+  }
+  float f;
+  memcpy(&f, &bits, sizeof(f));
+  return f;
+}
+
+uint16_t read_u16(const uint8_t* p) { return (uint16_t)(p[0] | p[1] << 8); }
+
+void scale_min_k4(int j, const uint8_t* q, uint8_t* d, uint8_t* m) {
+  if (j < 4) {
+    *d = q[j] & 63;
+    *m = q[j + 4] & 63;
+  } else {
+    *d = (q[j + 4] & 0xf) | ((q[j - 4] >> 6) << 4);
+    *m = (q[j + 4] >> 4) | ((q[j] >> 6) << 4);
+  }
+}
+
+/* Host dequantization of one row; enough for the embedding and Engram rows. */
+bool dequant_row(uint32_t type, const uint8_t* src, float* out, uint32_t n) {
+  switch (type) {
+  case DS41_TENSOR_F32:
+    memcpy(out, src, n * sizeof(float));
+    return true;
+  case DS41_TENSOR_Q8_0:
+    for (uint32_t b = 0; b < n / 32; b++, src += 34) {
+      const float d = half_to_float(read_u16(src));
+      for (int i = 0; i < 32; i++) out[b * 32 + i] = d * (float)(int8_t)src[2 + i];
+    }
+    return true;
+  case DS41_TENSOR_IQ4_NL: {
+    static const int8_t kValues[16] = {-127, -104, -83, -65, -49, -35, -22, -10, 1, 13, 25, 38, 53, 69, 89, 113};
+    for (uint32_t b = 0; b < n / 32; b++, src += 18) {
+      const float d = half_to_float(read_u16(src));
+      for (int i = 0; i < 16; i++) {
+        out[b * 32 + i] = d * kValues[src[2 + i] & 0xf];
+        out[b * 32 + 16 + i] = d * kValues[src[2 + i] >> 4];
+      }
+    }
+    return true;
+  }
+  case DS41_TENSOR_MXFP8: {
+    /* OCP MX: 2^(e - 127) times E4M3FN (no infinities, S.1111.111 is NaN). */
+    static const std::array<float, 256> kValues = [] {
+      std::array<float, 256> v{};
+      for (int c = 0; c < 256; c++) {
+        const int e = (c >> 3) & 15, m = c & 7;
+        const float x = e == 0 ? ldexpf((float)m, -9) : ldexpf((float)(8 + m), e - 10);
+        v[c] = (e == 15 && m == 7) ? NAN : (c & 0x80 ? -x : x);
+      }
+      return v;
+    }();
+    for (uint32_t b = 0; b < n / 32; b++, src += 33) {
+      const int e = (int)src[0] - 127;
+      for (int i = 0; i < 32; i++) out[b * 32 + i] = ldexpf(kValues[src[1 + i]], e);
+    }
+    return true;
+  }
+  case DS41_TENSOR_Q5_K:
+    for (uint32_t b = 0; b < n / 256; b++, src += 176) {
+      const float d = half_to_float(read_u16(src));
+      const float dmin = half_to_float(read_u16(src + 2));
+      const uint8_t* scales = src + 4;
+      const uint8_t* qh = src + 16;
+      const uint8_t* ql = src + 48;
+      float* y = out + b * 256;
+      uint8_t u1 = 1;
+      uint8_t u2 = 2;
+      for (int j = 0, is = 0; j < 256; j += 64, is += 2) {
+        uint8_t sc;
+        uint8_t m;
+        scale_min_k4(is, scales, &sc, &m);
+        const float d1 = d * sc;
+        const float m1 = dmin * m;
+        scale_min_k4(is + 1, scales, &sc, &m);
+        const float d2 = d * sc;
+        const float m2 = dmin * m;
+        for (int l = 0; l < 32; l++) *y++ = d1 * ((ql[l] & 0xf) + (qh[l] & u1 ? 16 : 0)) - m1;
+        for (int l = 0; l < 32; l++) *y++ = d2 * ((ql[l] >> 4) + (qh[l] & u2 ? 16 : 0)) - m2;
+        ql += 32;
+        u1 <<= 2;
+        u2 <<= 2;
+      }
+    }
+    return true;
+  case DS41_TENSOR_Q6_K:
+    for (uint32_t b = 0; b < n / 256; b++, src += 210) {
+      const float d = half_to_float(read_u16(src + 208));
+      const uint8_t* ql = src;
+      const uint8_t* qh = src + 128;
+      const int8_t* sc = (const int8_t*)(src + 192);
+      float* y = out + b * 256;
+      for (int half = 0; half < 2; half++, ql += 64, qh += 32, sc += 8, y += 128) {
+        for (int l = 0; l < 32; l++) {
+          const int is = l / 16;
+          const int q1 = (int)((ql[l] & 0xf) | ((qh[l] & 3) << 4)) - 32;
+          const int q2 = (int)((ql[l + 32] & 0xf) | (((qh[l] >> 2) & 3) << 4)) - 32;
+          const int q3 = (int)((ql[l] >> 4) | (((qh[l] >> 4) & 3) << 4)) - 32;
+          const int q4 = (int)((ql[l + 32] >> 4) | (((qh[l] >> 6) & 3) << 4)) - 32;
+          y[l] = d * sc[is] * q1;
+          y[l + 32] = d * sc[is + 2] * q2;
+          y[l + 64] = d * sc[is + 4] * q3;
+          y[l + 96] = d * sc[is + 6] * q4;
+        }
+      }
+    }
+    return true;
+  default:
+    return false;
+  }
+}
+
+/* Official precompute_freqs_cis inverse frequencies, YaRN when original_ctx > 0. */
+std::vector<float> rope_inv_freq(float base, uint64_t original_ctx) {
+  const uint32_t dim = kRot;
+  std::vector<float> freqs(dim / 2);
+  for (uint32_t i = 0; i < dim / 2; i++) freqs[i] = 1.0f / powf(base, (float)(2 * i) / (float)dim);
+  if (original_ctx > 0) {
+    auto corrected = [&](double rotations) {
+      return dim * std::log((double)original_ctx / (rotations * 2 * M_PI)) / (2 * std::log((double)base));
+    };
+    const double low = std::max(std::floor(corrected(DS41_ROPE_YARN_BETA_FAST)), 0.0);
+    const double high = std::min(std::ceil(corrected(DS41_ROPE_YARN_BETA_SLOW)), (double)dim - 1);
+    for (uint32_t i = 0; i < dim / 2; i++) {
+      const float ramp =
+          std::clamp(((float)i - (float)low) / (float)std::max(high - low, 1e-3), 0.0f, 1.0f);
+      const float smooth = 1.0f - ramp;
+      freqs[i] = freqs[i] / DS41_ROPE_SCALE_FACTOR * (1.0f - smooth) + freqs[i] * smooth;
+    }
+  }
+  return freqs;
+}
+
+struct LayerState {
+  float* window = nullptr;    // [DS41_N_SWA, head_dim] ring, slot pos % DS41_N_SWA
+  /* KV sources: [context / ratio] compressed KV and index-K rows as FP4 (ds41_fp4_rows). */
+  uint8_t *comp = nullptr, *comp_scale = nullptr;
+  uint8_t *index_k = nullptr, *index_scale = nullptr;
+  float* pool_kv = nullptr;   // [ratio, head_dim] compressor frontier
+  float* pool_score = nullptr;
+};
+
+/* Batch capacity: up to the engine's prefill batch (2048 tokens by default,
+ * where the routed expert tiles average 32 rows per expert), fewer when the
+ * activations (about 0.6 MiB per token) would leave less than kDeviceReserve
+ * of device memory free. On gfx1151 the
+ * reported free memory runs about 1 GiB below MemAvailable, so this keeps
+ * about 2 GiB of RAM for the MMQ scratch and the rest of the system. */
+constexpr uint32_t kMaxBatch = DS41_MAX_PREFILL_BATCH;
+constexpr uint64_t kDeviceReserve = 1ull << 30;
+
+/* Indexer score rows (context + 1 floats per token) run in groups of up to
+ * this many tokens, bounding the score buffer to 256 MiB at any context. */
+uint32_t score_rows(uint64_t score_stride) {
+  const uint64_t rows = (256ull << 20) / (score_stride * sizeof(float));
+  return (uint32_t)std::clamp<uint64_t>(rows / 16 * 16, 16, kMaxBatch);
+}
+
+constexpr uint32_t kLogitRows = 64;  // output projection rows per pass
+
+/* Batch scratch, `capacity` rows per activation. No scratch value outlives
+ * an evaluation and the engine serializes evaluations, so every decoder of
+ * one engine and context shares one set. */
+struct Activations {
+  uint32_t capacity = 0;
+  uint32_t score_rows = 0;  // tokens per indexer score group
+  float *h = nullptr, *h2 = nullptr, *xn = nullptr;
+  float *mixes = nullptr, *pre[2] = {}, *post = nullptr, *comb = nullptr, *ffn_post = nullptr, *ffn_comb = nullptr;
+  float *qa = nullptr, *qr = nullptr, *q = nullptr, *kv = nullptr, *kvn = nullptr;
+  float *ckv = nullptr, *cscore = nullptr, *craw = nullptr, *latent = nullptr;
+  float *ik = nullptr, *ikn = nullptr, *iq = nullptr, *iw = nullptr;
+  float *scores = nullptr, *block_scores = nullptr;  // score_rows rows each
+  uint32_t* candidates = nullptr;  // [capacity, mask_words] candidate-block bits
+  uint32_t *topk = nullptr, *block_select = nullptr;
+  float *attn_partial = nullptr;
+  float *o = nullptr, *o_group = nullptr, *oa_group = nullptr, *oa = nullptr, *attn_out = nullptr;
+  float* rope = nullptr;  // [cap, kRot / 2] (cos, sin) for the batched attention
+  float *router = nullptr, *route_w = nullptr;
+  int32_t* route_ids = nullptr;
+  uint8_t* expert_class = nullptr;  // routed tile-width class per expert
+  int32_t* routed_plan = nullptr;   // ds41_v41_routed_plan rows, bounds and tiles
+  int32_t* expert_plan = nullptr;   // ds41_v41_expert_plan groups of a small batch
+  /* The streamed store's split gate+up passes: the resident-expert plan that
+   * overlaps the projection reads, and the read-expert plan after them. */
+  int32_t* expert_plan_split[2] = {nullptr, nullptr};
+  float *g6 = nullptr, *u6 = nullptr, *mid6 = nullptr, *down6 = nullptr;
+  float *sg = nullptr, *su = nullptr, *sm = nullptr, *sd = nullptr;
+  float *engram_in = nullptr, *engram_kv = nullptr, *logits = nullptr;
+  /* Pinned staging for the Engram rows of a batch (capacity rows), per
+   * Engram layer, so the upload does not wait for the queue to drain and no
+   * evaluation allocates host rows. Each evaluation ends with a device
+   * synchronize, so the next one finds the buffers idle. */
+  float* engram_pinned[DS41_N_ENGRAM_LAYER] = {};
+  /* Pinned staging for a batch's embeddings (capacity rows) followed by its
+   * layer-0 one-hot pre-mix (capacity * kHc), uploaded the same way. */
+  float* embd_pinned = nullptr;
+};
+
+struct SharedActivations {
+  ds41_engine* engine = nullptr;
+  uint32_t context = 0;
+  Activations views;
+  std::vector<void*> device;
+  uint64_t logits_gen = 0;  // evaluations whose logits views.logits held
+  ~SharedActivations() {
+    for (void* p : device) (void)hipFree(p);
+    for (float* p : views.engram_pinned)
+      if (p) (void)hipHostFree(p);
+    if (views.embd_pinned) (void)hipHostFree(views.embd_pinned);
+  }
+};
+
+std::mutex g_shared_mutex;
+std::vector<std::weak_ptr<SharedActivations>> g_shared;
+
+}  // namespace
+
+struct ds41_decoder : Activations {
+  ds41_engine* engine = nullptr;
+  uint32_t context = 0;
+  uint32_t pos = 0;
+  uint64_t score_stride = 0;
+  uint64_t block_stride = 0;
+  uint64_t mask_words = 0;
+  std::vector<void*> allocations;  // decoder state
+  std::shared_ptr<SharedActivations> shared;
+  LayerState layer[DS41_N_LAYER];
+  float* freq_plain = nullptr;
+  float* freq_compress = nullptr;
+
+  int comp_layer = -1;
+  /* During a bounded-replay prompt evaluation, the decoder layers' first
+   * visible window position; 0 otherwise. */
+  uint32_t window_floor = 0;
+  /* A speculative batch of spec_n rows from spec_pos0 holds every layer's
+   * window rows and the KV source layers' compressor inputs (kv, score)
+   * here until ds41_decoder_commit; spec_n is 0 otherwise. spec_eval marks
+   * the evaluation of that batch. */
+  uint32_t spec_pos0 = 0, spec_n = 0;
+  bool spec_eval = false;
+  float* spec_window = nullptr;  // [layer][DS41_DECODER_MAX_SPECULATIVE][head_dim]
+  float* spec_pool = nullptr;    // [layer][kv, score][DS41_DECODER_MAX_SPECULATIVE][head_dim]
+  /* DSpark target features: [DS41_DSPARK_FEATURE_ROWS][3 * dim] hc-means of
+   * the target layers' inputs for positions feature_pos0 .. + feature_rows. */
+  float* features = nullptr;
+  uint32_t feature_pos0 = 0, feature_rows = 0;
+  /* Rows of the last evaluation's logits still resident in the shared
+   * logits (all of them up to one output pass, until another decoder of the
+   * engine evaluates), and ds41_decoder_sample's scratch. */
+  uint32_t resident_logits = 0;
+  uint32_t logits_row0 = 0;  // their first row there
+  uint64_t logits_gen = 0;   // the evaluation that left them
+  void* sample_scratch = nullptr;
+  /* Rows' device argmax for the speculative evaluations (row_argmax), and
+   * where eval_rows leaves them on the host (null: not wanted). */
+  int32_t* row_argmax = nullptr;
+  int32_t* argmax_out = nullptr;
+  /* Streamed-expert prefetch (expert_store.h): the next layer's router is
+   * evaluated one layer early on this layer's FFN input, and the store's
+   * thread submits a background read when each prediction's ids land. The
+   * per-layer pinned rows and events keep concurrent predictions valid. */
+  int32_t* pred_ids = nullptr;    // device [capacity][DS41_N_EXPERT_USED]
+  float* pred_w = nullptr;        // device [capacity][DS41_N_EXPERT_USED]
+  int32_t* pred_pinned = nullptr;  // pinned [DS41_N_LAYER][capacity][DS41_N_EXPERT_USED]
+  hipEvent_t pred_events[DS41_N_LAYER] = {};
+  bool pred_ok = true;
+  /* Recorded after the router so the store reads the routes while the
+   * shared expert runs; without it the store's copy waits for the stream. */
+  hipEvent_t routes_ready = nullptr;
+  /* hc_mix's side stream: mixes overlap the projections of their half. */
+  hipStream_t mix_stream = nullptr;
+  hipEvent_t mix_start = nullptr, mix_done = nullptr;
+  /* Batches of up to this many rows take the decode paths (FP32 GEMV,
+   * grouped experts, per-row state mixes), where each row sees the
+   * arithmetic of a single-token evaluation; up to
+   * DS41_V41_GEMV_MAX_TOKENS for joint evaluations of independent rows. */
+  uint32_t decode_rows = kDecodeRows;
+  std::vector<int64_t> engram_history;
+  /* Image spans (ds41_decoder_set_images) and, during an evaluation, its
+   * runs of image positions as [first, end) pairs. */
+  std::vector<ds41_image_span> images;
+  std::vector<std::pair<uint32_t, uint32_t>> image_runs;
+  std::vector<float> host_h;
+  std::vector<int32_t> host_ids;
+};
+
+namespace {
+
+template <typename T>
+T* alloc(std::vector<void*>& owned, uint64_t count) {
+  void* p = nullptr;
+  if (hipMalloc(&p, count * sizeof(T)) != hipSuccess) return nullptr;
+  (void)hipMemset(p, 0, count * sizeof(T));
+  owned.push_back(p);
+  return static_cast<T*>(p);
+}
+
+const ds41_model* model(const ds41_decoder* d) { return d->engine->model; }
+
+const void* dev(const ds41_decoder* d, const ds41_tensor* t) {
+  return ds41_gpu_model_ptr(model(d)->map, t->abs_offset, t->bytes);
+}
+
+const uint8_t* host(const ds41_decoder* d, const ds41_tensor* t) { return model(d)->map + t->abs_offset; }
+
+bool mmq_batched(uint32_t type) {
+  switch (type) {
+  case DS41_TENSOR_Q8_0:
+  case DS41_TENSOR_Q5_K:
+  case DS41_TENSOR_Q6_K:
+  case DS41_TENSOR_IQ1_S:
+  case DS41_TENSOR_IQ1_M:
+  case DS41_TENSOR_IQ2_XXS:
+  case DS41_TENSOR_IQ2_XS:
+  case DS41_TENSOR_IQ2_S:
+    return true;
+  default:
+    return false;
+  }
+}
+
+/* Waves per row group of the single-token GEMV, from a slice sweep over the
+ * V4.1 shapes: short rows split fewer ways, so more rows run per block. */
+int gemv_slices(uint32_t rows, uint32_t k) {
+  if (k <= 2304) return 2;
+  if (k <= 5120 && rows <= 4096) return 4;
+  return 8;
+}
+
+bool gemv_type(uint32_t type) {
+  return type == DS41_TENSOR_Q5_K || type == DS41_TENSOR_Q6_K || type == DS41_TENSOR_Q8_0;
+}
+
+/* Batches of Q5_K, Q6_K and Q8_0 rows run on the FP16 matrix cores (ds41_v41_dense_f16). */
+bool dense_f16(uint32_t type, uint32_t rows, uint32_t k, uint32_t n) {
+  return n > 8 && (type == DS41_TENSOR_Q5_K || type == DS41_TENSOR_Q6_K || type == DS41_TENSOR_Q8_0) &&
+         rows % 256 == 0 && k % 256 == 0;
+}
+
+/* Whether out1 = W1 x and out2 = W2 x fit one ds41_v41_dense_f16_pair launch. */
+bool dense_f16_pair(const ds41_tensor* w1, const ds41_tensor* w2, uint32_t n) {
+  const uint32_t k = (uint32_t)w1->dim[0];
+  return w1->type == w2->type && w2->dim[0] == k && dense_f16(w1->type, (uint32_t)(w1->elements / k), k, n) &&
+         dense_f16(w2->type, (uint32_t)(w2->elements / k), k, n);
+}
+
+bool run_dense_f16_pair(const ds41_decoder* d, const ds41_tensor* w1, void* out1, const ds41_tensor* w2, void* out2,
+                        const void* x, uint32_t n, uint32_t io) {
+  const uint32_t k = (uint32_t)w1->dim[0];
+  const void* p1 = dev(d, w1);
+  const void* p2 = dev(d, w2);
+  return p1 && p2 &&
+         ds41_v41_dense_f16_pair((int)w1->type, p1, out1, (uint32_t)(w1->elements / k), p2, out2,
+                                 (uint32_t)(w2->elements / k), x, n, k, io) == 0;
+}
+
+/* out[t] = W x[t] for n tokens and a [rows, k] weight at `p` of `type`. */
+bool linear_raw(uint32_t type, const void* p, uint32_t rows, uint32_t k, const float* x, float* out, uint32_t n,
+                uint32_t decode_rows = kDecodeRows) {
+  if (!p) return false;
+  switch (type) {
+  case DS41_TENSOR_BF16:
+    /* Decode batches keep the per-row kernel: from 16 rows WMMA tiles take over. */
+    if (n > kDecodeRows && n <= decode_rows) {
+      for (uint32_t t = 0; t < n; t += kDecodeRows)
+        if (ds41_v41_matmul_bf16((const uint16_t*)p, x + (uint64_t)t * k, out + (uint64_t)t * rows, rows, k,
+                                 std::min(kDecodeRows, n - t)))
+          return false;
+      return true;
+    }
+    return ds41_v41_matmul_bf16((const uint16_t*)p, x, out, rows, k, n) == 0;
+  case DS41_TENSOR_F32:
+    return ds41_v41_matmul_f32((const float*)p, x, out, rows, k, n) == 0;
+  case DS41_TENSOR_F16:
+    return ds41_v41_matmul_f16((const uint16_t*)p, x, out, rows, k, n) == 0;
+  default:
+    /* Decode batches: FP32 activations, no Q8_1 pass, each weight read once. */
+    if (n <= decode_rows && gemv_type(type))
+      return ds41_v41_gemv((int)type, p, x, out, rows, k, 0, gemv_slices(rows, k), n, k, rows) == 0;
+    if (dense_f16(type, rows, k, n)) return ds41_v41_dense_f16((int)type, p, x, out, rows, n, k, 1, 0) == 0;
+    if (n > decode_rows && mmq_batched(type))
+      return ds41_mmq_dense_typed((int)type, p, x, out, (int)rows, (int)n, (int)k, 0) == 0;
+    for (uint32_t t = 0; t < n; t += 8) {
+      const uint32_t cols = std::min(8u, n - t);
+      if (ds41_mmq_dense_vec_typed((int)type, p, x + (uint64_t)t * k, out + (uint64_t)t * rows, (int)rows, (int)cols,
+                                   (int)k, 0))
+        return false;
+    }
+    return true;
+  }
+}
+
+bool linear(const ds41_decoder* d, const ds41_tensor* w, const float* x, float* out, uint32_t n) {
+  const uint32_t k = (uint32_t)w->dim[0];
+  return linear_raw(w->type, dev(d, w), (uint32_t)(w->elements / k), k, x, out, n, d->decode_rows);
+}
+
+/* out1 = W1 x and out2 = W2 x; batches of one MMQ type quantize x once. */
+bool linear_pair(const ds41_decoder* d, const ds41_tensor* w1, float* out1, const ds41_tensor* w2, float* out2,
+                 const float* x, uint32_t n) {
+  const uint32_t k = (uint32_t)w1->dim[0];
+  if (n > d->decode_rows && dense_f16_pair(w1, w2, n)) return run_dense_f16_pair(d, w1, out1, w2, out2, x, n, 0);
+  if (n > d->decode_rows && w1->type == w2->type && w2->dim[0] == k && mmq_batched(w1->type) &&
+      !dense_f16(w1->type, (uint32_t)(w1->elements / k), k, n)) {
+    const void* p1 = dev(d, w1);
+    const void* p2 = dev(d, w2);
+    return p1 && p2 &&
+           ds41_mmq_dense_pair_typed((int)w1->type, p1, out1, (int)(w1->elements / k), p2, out2,
+                                     (int)(w2->elements / k), x, (int)n, (int)k, 0) == 0;
+  }
+  return linear(d, w1, x, out1, n) && linear(d, w2, x, out2, n);
+}
+
+const float* f32(const ds41_decoder* d, const ds41_tensor* t) { return (const float*)dev(d, t); }
+
+const float* layer_freq(const ds41_decoder* d, uint32_t il) {
+  return ds41_layer_compress_ratio(il) ? d->freq_compress : d->freq_plain;
+}
+
+/* NgramHashState's cache entry for an image position. */
+constexpr int64_t kEngramDead = -1;
+
+bool is_image(const ds41_decoder* d, int token) { return d->engine->image_bias && token == DS41_IMAGE_TOKEN; }
+
+/* Engram row ids for the newest token; mirrors NgramHashState.forward,
+ * whose look-back stops at image positions. */
+void engram_hash(ds41_decoder* d, int token, int64_t (*rows)[DS41_ENGRAM_COLS]) {
+  const ds41_weights* w = d->engine->weights;
+  const int32_t* token_map = w->engram_token_map;
+  const int64_t* primes = w->engram_head_vocab;
+  const int64_t* offsets = w->engram_head_offsets;
+  const int64_t* multipliers = w->engram_multipliers;
+  const int64_t pad = token_map[DS41_ENGRAM_PAD_TOKEN];
+  d->engram_history.push_back(is_image(d, token) ? kEngramDead : token_map[token]);
+  const int64_t p = (int64_t)d->engram_history.size() - 1;
+  int64_t grams[DS41_ENGRAM_MAX_NGRAM];
+  bool blocked = false;
+  for (int64_t shift = 0; shift < DS41_ENGRAM_MAX_NGRAM; shift++) {
+    blocked = blocked || p < shift || d->engram_history[p - shift] == kEngramDead;
+    grams[shift] = blocked ? pad : d->engram_history[p - shift];
+  }
+  for (uint32_t layer = 0; layer < DS41_N_ENGRAM_LAYER; layer++) {
+    const int64_t* mult = multipliers + layer * DS41_ENGRAM_MAX_NGRAM;
+    int64_t rolling = grams[0] * mult[0];
+    for (uint32_t i = 1; i < DS41_ENGRAM_MAX_NGRAM; i++) {
+      rolling ^= grams[i] * mult[i];
+      for (uint32_t head = 0; head < DS41_ENGRAM_HEADS; head++) {
+        const uint32_t col = (i - 1) * DS41_ENGRAM_HEADS + head;
+        rows[layer][col] = rolling % primes[layer * DS41_ENGRAM_COLS + col] + offsets[layer * DS41_ENGRAM_COLS + col];
+      }
+    }
+  }
+}
+
+/* Reads and dequantizes the n * DS41_ENGRAM_COLS table rows of a layer into
+ * out; a negative row id (an image position) reads zeros, whose Engram term
+ * is exactly zero, as the official masked gate. Reads run on parallel threads: each is a small random read, so
+ * throughput comes from queue depth. Touches only immutable engine state, so
+ * it can run while the GPU works on earlier layers. */
+bool engram_read(const ds41_decoder* d, const int64_t* rows, uint32_t n, float* out) {
+  const ds41_engram_tables* e = d->engine->engram;
+  const ds41_tensor* table = e->table;
+  const uint64_t base = table->abs_offset - e->file.shard_offset[0];
+  const uint64_t count = (uint64_t)n * DS41_ENGRAM_COLS;
+  std::atomic<uint64_t> next{0};
+  std::atomic<bool> ok{true};
+  auto worker = [&] {
+    std::vector<uint8_t> raw(e->row_bytes);
+    for (uint64_t i = next++; i < count && ok; i = next++) {
+      if (rows[i] < 0) {
+        std::fill_n(out + i * DS41_ENGRAM_HEAD_DIM, DS41_ENGRAM_HEAD_DIM, 0.0f);
+        continue;
+      }
+      const off_t at = (off_t)(base + (uint64_t)rows[i] * e->row_bytes);
+      if (pread(e->file.shard_fd[0], raw.data(), raw.size(), at) != (ssize_t)raw.size() ||
+          !dequant_row(table->type, raw.data(), out + i * DS41_ENGRAM_HEAD_DIM, DS41_ENGRAM_HEAD_DIM))
+        ok = false;
+    }
+  };
+  const uint32_t threads = (uint32_t)std::min<uint64_t>(32, (count + kEngramRowsPerThread - 1) / kEngramRowsPerThread);
+  std::vector<std::thread> pool;
+  for (uint32_t t = 1; t < threads; t++) pool.emplace_back(worker);
+  worker();
+  for (auto& t : pool) t.join();
+  if (!ok) fprintf(stderr, "ds41: Engram row read failed\n");
+  return ok;
+}
+
+/* Adds layer il's Engram term from rows read by engram_read. */
+bool engram(ds41_decoder* d, uint32_t il, const float* rows, uint32_t n) {
+  const ds41_layer_weights* l = &d->engine->weights->layer[il];
+  const uint64_t bytes = (uint64_t)n * DS41_ENGRAM_COLS * DS41_ENGRAM_HEAD_DIM * sizeof(float);
+  if (hipMemcpyAsync(d->engram_in, rows, bytes, hipMemcpyHostToDevice, 0) != hipSuccess) return false;
+  if (!linear(d, l->engram_kv, d->engram_in, d->engram_kv, n)) return false;
+  return ds41_v41_engram_gate(d->h, d->engram_kv, f32(d, l->engram_gate), kHc, kDim, DS41_RMS_EPS, n) == 0;
+}
+
+/* Up to this many tokens hc_mix is one kernel, which can run on mix_stream. */
+constexpr uint32_t kMixStreamTokens = 16;
+
+/* With a side stream (mix_stream, up to kMixStreamTokens), the mix runs there
+ * once the null stream reaches it; the mixes feed only the expand closing
+ * their half, which waits for mix_done first (join_mix). */
+bool hc_mix(ds41_decoder* d, const ds41_tensor* fn, const ds41_tensor* scale, const ds41_tensor* base,
+            const float* h, float* pre, float* post, float* comb, uint32_t n) {
+  const bool side = d->mix_stream && n <= kMixStreamTokens;
+  hipStream_t stream = side ? d->mix_stream : nullptr;
+  if (side && (hipEventRecord(d->mix_start, nullptr) != hipSuccess ||
+               hipStreamWaitEvent(stream, d->mix_start, 0) != hipSuccess))
+    return false;
+  return ds41_v41_hc_mix(f32(d, fn), h, f32(d, scale), f32(d, base), d->mixes, pre, post, comb, kHc, kDim,
+                         DS41_RMS_EPS, DS41_N_HC_SINKHORN_ITER, DS41_HC_EPS, n, stream) == 0 &&
+         (!side || hipEventRecord(d->mix_done, stream) == hipSuccess);
+}
+
+bool join_mix(ds41_decoder* d, uint32_t n) {
+  return !d->mix_stream || n > kMixStreamTokens || hipStreamWaitEvent(nullptr, d->mix_done, 0) == hipSuccess;
+}
+
+bool copy_dev(float* dst, const float* src, uint64_t count) {
+  return count == 0 ||
+         hipMemcpyAsync(dst, src, count * sizeof(float), hipMemcpyDeviceToDevice, 0) == hipSuccess;
+}
+
+/* Device copies launched together (ds41_v41_copy_many): each small copy
+ * on its own costs a dependent launch. */
+struct CopyQueue {
+  ds41_v41_copy_list list{};
+  bool ok = true;
+  void add(float* dst, const float* src, uint64_t count) {
+    if (count == 0) return;
+    if (list.count == DS41_V41_COPY_LIST) flush();
+    list.copy[list.count++] = {dst, src, (uint32_t)count};
+  }
+  bool flush() {
+    ok = ok && ds41_v41_copy_many(&list) == 0;
+    list.count = 0;
+    return ok;
+  }
+};
+
+/* Queues the newest DS41_N_SWA of the batch's window rows into the ring. */
+void queue_window(CopyQueue& q, LayerState& s, const float* rows, uint32_t pos0, uint32_t n) {
+  const uint32_t first = n > DS41_N_SWA ? n - DS41_N_SWA : 0;
+  for (uint32_t t = first; t < n;) {
+    const uint32_t slot = (pos0 + t) % DS41_N_SWA;
+    const uint32_t run = std::min(n - t, DS41_N_SWA - slot);
+    q.add(s.window + (uint64_t)slot * kHeadDim, rows + (uint64_t)t * kHeadDim, (uint64_t)run * kHeadDim);
+    t += run;
+  }
+}
+
+/* Keeps the newest DS41_N_SWA of the batch's window rows in the ring. */
+bool store_window(LayerState& s, const float* rows, uint32_t pos0, uint32_t n) {
+  CopyQueue q;
+  queue_window(q, s, rows, pos0, n);
+  return q.flush();
+}
+
+/* Layer il's pending rows of a speculative buffer; `part` selects kv or score of spec_pool. */
+float* spec_rows(const ds41_decoder* d, float* base, uint32_t il, uint32_t part) {
+  const uint64_t parts = base == d->spec_pool ? 2 : 1;
+  return base + ((uint64_t)il * parts + part) * DS41_DECODER_MAX_SPECULATIVE * kHeadDim;
+}
+
+/* Stores the compressed rows r0 .. r0 + rows - 1 of KV source layer il from
+ * their unrotated latent in d->latent: the index keys (index sources) and
+ * the rotated FP4 KV rows. */
+bool store_compressed(ds41_decoder* d, uint32_t il, uint32_t r0, uint32_t rows, uint32_t ratio) {
+  const ds41_layer_weights* l = &d->engine->weights->layer[il];
+  LayerState& s = d->layer[il];
+  const float* freq = layer_freq(d, il);
+  const float eps = DS41_RMS_EPS;
+  if (ds41_layer_is_index_source(il) &&
+      (!linear(d, l->indexer_attn_k, d->latent, d->ik, rows) ||
+       ds41_v41_rms_norm(d->ik, f32(d, l->indexer_k_norm), d->ikn, rows, DS41_N_INDEXER_HEAD_DIM, eps) ||
+       ds41_v41_rope_tail(d->ikn, rows, DS41_N_INDEXER_HEAD_DIM, kRot, freq, r0 * ratio, 1, ratio, 0) ||
+       ds41_v41_fp4_store(d->ikn, s.index_k + (uint64_t)r0 * kIndexCodeBytes,
+                          s.index_scale + (uint64_t)r0 * kIndexScaleBytes, rows * DS41_N_INDEXER_HEAD_DIM, 32, 0)))
+    return false;
+  return ds41_v41_rope_tail(d->latent, rows, kHeadDim, kRot, freq, r0 * ratio, 1, ratio, 0) == 0 &&
+         ds41_v41_fp4_store(d->latent, s.comp + (uint64_t)r0 * kCompCodeBytes,
+                            s.comp_scale + (uint64_t)r0 * kCompScaleBytes, rows * kHeadDim, 16, 1) == 0;
+}
+
+/* The views of a with every per-row buffer advanced by r rows. */
+Activations rows_view(const Activations& a, uint64_t mask_words, uint64_t r) {
+  const uint64_t hd = (uint64_t)kHc * kDim;
+  const uint64_t routed = (uint64_t)DS41_N_EXPERT_USED * DS41_N_FF_EXP;
+  Activations v = a;
+  for (float** p : {&v.h, &v.h2}) *p += r * hd;
+  for (float** p : {&v.xn, &v.attn_out, &v.sd}) *p += r * kDim;
+  v.mixes += r * kMixes;
+  for (float** p : {&v.pre[0], &v.pre[1], &v.post, &v.ffn_post}) *p += r * kHc;
+  for (float** p : {&v.comb, &v.ffn_comb}) *p += r * kHc * kHc;
+  for (float** p : {&v.qa, &v.qr}) *p += r * DS41_N_LORA_Q;
+  for (float** p : {&v.q, &v.o}) *p += r * kQDim;
+  for (float** p : {&v.kv, &v.kvn, &v.ckv, &v.cscore, &v.craw, &v.latent}) *p += r * kHeadDim;
+  for (float** p : {&v.ik, &v.ikn}) *p += r * DS41_N_INDEXER_HEAD_DIM;
+  v.iq += r * kIndexQDim;
+  v.iw += r * DS41_N_INDEXER_HEAD;
+  v.candidates += r * mask_words;
+  v.topk += r * DS41_N_INDEXER_TOP_K;
+  v.oa += r * DS41_N_OUT_GROUP * DS41_N_LORA_O;
+  v.rope += r * kRot;
+  v.router += r * DS41_N_EXPERT;
+  v.route_w += r * DS41_N_EXPERT_USED;
+  v.route_ids += r * DS41_N_EXPERT_USED;
+  for (float** p : {&v.g6, &v.u6, &v.mid6}) *p += r * routed;
+  v.down6 += r * DS41_N_EXPERT_USED * kDim;
+  for (float** p : {&v.sg, &v.su, &v.sm}) *p += r * DS41_N_FF_EXP;
+  v.engram_in += r * kEngramIn;
+  v.engram_kv += r * kEngramOut;
+  return v;
+}
+
+/* A joint evaluation of independent sessions: session i's rows follow those
+ * of the sessions before it, and d[i]'s views start at its first row. */
+struct Joint {
+  ds41_decoder* const* d;
+  const uint32_t* n;
+  uint32_t count;
+};
+
+/* Projections run over all n rows of d; the phases that depend on a
+ * session's positions and state run per session of `joint`. */
+bool attention(ds41_decoder* d, uint32_t il, uint32_t n, const Joint* joint) {
+  const ds41_layer_weights* l = &d->engine->weights->layer[il];
+  const uint32_t ratio = ds41_layer_compress_ratio(il);
+  const float* freq = layer_freq(d, il);
+  const float eps = DS41_RMS_EPS;
+  const auto each = [&](auto&& fn) {
+    if (!joint) return fn(d, n);
+    for (uint32_t i = 0; i < joint->count; i++)
+      if (!fn(joint->d[i], joint->n[i])) return false;
+    return true;
+  };
+
+  /* q_a and kv share the input; one token takes both in one launch. */
+  const ds41_tensor* wqa = l->attn_q_a;
+  const ds41_tensor* wkv = l->attn_kv;
+  const bool pair = n <= d->decode_rows && wqa->type == wkv->type && wqa->dim[0] == wkv->dim[0] &&
+                    gemv_type(wqa->type);
+  if (pair) {
+    const uint32_t k = (uint32_t)wqa->dim[0];
+    const uint32_t m = (uint32_t)((wqa->elements + wkv->elements) / k);
+    if (ds41_v41_gemv_pair((int)wqa->type, dev(d, wqa), d->qa, DS41_N_LORA_Q, dev(d, wkv), d->kv, kHeadDim, d->xn, k,
+                           gemv_slices(m, k), n))
+      return false;
+  } else if (n > d->decode_rows && dense_f16_pair(wqa, wkv, n)) {
+    /* FP16 rows of xn (rounded as the kernel would stage them) in o, idle
+     * until the attention writes it: half the bytes per staged tile. */
+    auto* x16 = reinterpret_cast<uint16_t*>(d->o);
+    if (ds41_v41_to_half(d->xn, x16, (uint64_t)n * wqa->dim[0]) ||
+        !run_dense_f16_pair(d, wqa, d->qa, wkv, d->kv, x16, n, DS41_V41_DENSE_X_HALF))
+      return false;
+  } else if (!linear_pair(d, wqa, d->qa, wkv, d->kv, d->xn, n)) {
+    return false;
+  }
+  /* A single batch on the matrix cores also gets qr as FP16 rows for q_b
+   * (rounded as the dense kernel would stage them), in o: idle until the
+   * attention writes it. */
+  const ds41_tensor* wqb = l->attn_q_b;
+  const uint32_t qb_k = (uint32_t)wqb->dim[0], qb_rows = (uint32_t)(wqb->elements / qb_k);
+  uint16_t* qr16 =
+      !joint && n > d->decode_rows && dense_f16(wqb->type, qb_rows, qb_k, n) ? reinterpret_cast<uint16_t*>(d->o) : nullptr;
+  if (!each([&](ds41_decoder* e, uint32_t m) {
+        return ds41_v41_q_kv_norm(e->qa, f32(e, l->attn_q_a_norm), e->qr, qr16, DS41_N_LORA_Q, e->kv,
+                                  f32(e, l->attn_kv_a_norm), e->kvn, kHeadDim, kRot, freq, e->pos, m, eps) == 0;
+      }))
+    return false;
+  if (qr16 ? !dev(d, wqb) || ds41_v41_dense_f16((int)wqb->type, dev(d, wqb), qr16, d->q, qb_rows, n, qb_k, 1,
+                                                DS41_V41_DENSE_X_HALF)
+           : !linear(d, wqb, d->qr, d->q, n))
+    return false;
+
+  if (ratio && ds41_layer_is_kv_source(il)) {
+    CopyQueue pending;
+    if (!linear(d, l->attn_compressor_kv, d->xn, d->ckv, n) ||
+        (ratio > 1 && !linear(d, l->attn_compressor_gate, d->xn, d->cscore, n)) ||
+        !each([&](ds41_decoder* e, uint32_t m) {
+          LayerState& s = e->layer[il];
+          /* Compressed rows r0 .. r0 + emitted - 1 complete inside this batch. */
+          const uint32_t r0 = e->pos / ratio;
+          const uint32_t emitted = (e->pos + m) / ratio - r0;
+          if (ratio == 1) {
+            if (ds41_v41_rms_norm(e->ckv, f32(e, l->attn_compressor_norm), e->latent, m, kHeadDim, eps)) return false;
+          } else if (e->spec_eval) {
+            pending.add(spec_rows(e, e->spec_pool, il, 0), e->ckv, (uint64_t)m * kHeadDim);
+            pending.add(spec_rows(e, e->spec_pool, il, 1), e->cscore, (uint64_t)m * kHeadDim);
+          }
+          if (ratio > 1 && (ds41_v41_compress_pool(e->ckv, e->cscore, s.pool_kv, s.pool_score, e->pos, m, ratio, e->craw,
+                                            kHeadDim) ||
+                            ds41_v41_rms_norm(e->craw, f32(e, l->attn_compressor_norm), e->latent, emitted,
+                                              kHeadDim, eps)))
+            return false;
+          if (emitted && !store_compressed(e, il, r0, emitted, ratio)) return false;
+          e->comp_layer = (int)il;
+          return true;
+        }) ||
+        !pending.flush())
+      return false;
+  }
+  if (ratio && ds41_layer_is_index_source(il)) {
+    const float w_scale = 1.0f / sqrtf((float)DS41_N_INDEXER_HEAD_DIM) / sqrtf((float)DS41_N_INDEXER_HEAD);
+    if (!linear(d, l->indexer_attn_q_b, d->qr, d->iq, n) || !each([&](ds41_decoder* e, uint32_t m) {
+          return ds41_v41_rope_tail(e->iq, m * DS41_N_INDEXER_HEAD, DS41_N_INDEXER_HEAD_DIM, kRot, freq, e->pos,
+                                    DS41_N_INDEXER_HEAD, 1, 0) == 0;
+        }) ||
+        ds41_v41_fp4_fake_quant(d->iq, n * kIndexQDim, 32, 0) || !linear(d, l->indexer_proj, d->xn, d->iw, n))
+      return false;
+    const bool scored = each([&](ds41_decoder* e, uint32_t n) {
+      const LayerState& source = e->layer[e->comp_layer];
+      // Verification retains the FP32 score/reduction used by serial decode.
+      // Prefill may use the wider WMMA scorer; grouping by at most four rows
+      // also keeps compact candidate rescoring active for wider verifications.
+      const uint32_t score_rows = e->spec_eval ? std::min(e->score_rows, 4u) : e->score_rows;
+      for (uint32_t t0 = 0; t0 < n; t0 += score_rows) {
+        const uint32_t m = std::min(score_rows, n - t0);
+        const uint32_t p0 = e->pos + t0;
+        uint32_t* mask = e->candidates + t0 * e->mask_words;
+        const bool compact = il > DS41_CANDIDATE_SOURCE_LAYER && m <= 4 &&
+                             p0 / ratio >= DS41_CANDIDATE_TOPK_BLOCKS * DS41_CANDIDATE_BLOCK_SIZE;
+        if (compact) {
+          if (ds41_v41_indexer_score_candidates(e->iq + (uint64_t)t0 * kIndexQDim,
+                                                {source.index_k, source.index_scale},
+                                                e->iw + (uint64_t)t0 * DS41_N_INDEXER_HEAD, w_scale, e->scores,
+                                                e->score_stride, mask, e->mask_words, e->block_select,
+                                                DS41_CANDIDATE_TOPK_BLOCKS, p0, m, ratio))
+            return false;
+        } else {
+          if (ds41_v41_indexer_score(e->iq + (uint64_t)t0 * kIndexQDim, {source.index_k, source.index_scale},
+                                     e->iw + (uint64_t)t0 * DS41_N_INDEXER_HEAD, w_scale, e->scores, e->score_stride,
+                                     p0, m, ratio, DS41_N_INDEXER_HEAD, DS41_N_INDEXER_HEAD_DIM))
+            return false;
+          if (il == DS41_CANDIDATE_SOURCE_LAYER) {
+            if (ds41_v41_candidate_mask(e->scores, e->score_stride, mask, e->mask_words, e->block_scores,
+                                        e->block_stride, e->block_select, p0, m, ratio, DS41_CANDIDATE_BLOCK_SIZE,
+                                        DS41_CANDIDATE_TOPK_BLOCKS))
+              return false;
+          } else if (il > DS41_CANDIDATE_SOURCE_LAYER &&
+                     ds41_v41_apply_mask(e->scores, e->score_stride, mask, e->mask_words, p0, m, ratio,
+                                         DS41_CANDIDATE_BLOCK_SIZE)) {
+            return false;
+          }
+        }
+        if (ds41_v41_topk(e->scores, e->score_stride, e->topk + (uint64_t)t0 * DS41_N_INDEXER_TOP_K,
+                          DS41_N_INDEXER_TOP_K, p0, m, ratio, 1))
+          return false;
+      }
+      return true;
+    });
+    if (!scored) return false;
+  }
+
+  /* A single batch on the matrix cores leaves its output as FP16 rows in o
+   * when the FP16 output projections take them (they round them so too). */
+  const ds41_tensor* wo_a = l->attn_output_a;
+  const ds41_tensor* wo_b = l->attn_output_b;
+  const bool o_half = !joint && n >= DS41_V41_ATTN_SPLIT_TOKENS && n > d->decode_rows &&
+                      dense_f16(wo_a->type, DS41_N_LORA_O, kGroupDim, n);
+  const bool oa_half = o_half && dense_f16(wo_b->type, (uint32_t)(wo_b->elements / wo_b->dim[0]),
+                                           (uint32_t)wo_b->dim[0], n);
+  /* Speculative window rows wait for the commit; the ring keeps the rows
+   * that rejected positions would overwrite. */
+  CopyQueue windows;
+  if (!each([&](ds41_decoder* e, uint32_t m) {
+        LayerState& s = e->layer[il];
+        ds41_fp4_rows comp{};
+        if (ratio) comp = {e->layer[e->comp_layer].comp, e->layer[e->comp_layer].comp_scale};
+        const uint32_t floor = il >= DS41_FIRST_DECODER_LAYER ? e->window_floor : 0;
+        /* Decode batches keep the split form's single-row arithmetic. */
+        float* partial = m < DS41_V41_ATTN_SPLIT_TOKENS || m <= e->decode_rows ? e->attn_partial : nullptr;
+        return ds41_v41_attention(e->q, s.window, e->kvn, DS41_N_SWA, floor, comp, e->topk, DS41_N_INDEXER_TOP_K,
+                                  ratio, f32(e, l->attn_sinks), e->o,
+                                  o_half ? reinterpret_cast<uint16_t*>(e->o) : nullptr, partial, e->pos, m,
+                                  DS41_N_HEAD, kHeadDim, 1.0f / sqrtf((float)kHeadDim), freq, kRot, e->rope) == 0 &&
+               (e->spec_eval ? (windows.add(spec_rows(e, e->spec_window, il, 0), e->kvn, (uint64_t)m * kHeadDim), true)
+                             : (queue_window(windows, s, e->kvn, e->pos, m), true));
+      }) ||
+      !windows.flush())
+    return false;
+
+  /* Grouped LoRA output: group g maps head slice g of every token. */
+  const uint64_t group_bytes = wo_a->bytes / DS41_N_OUT_GROUP;
+  const uint8_t* wo_a_dev = (const uint8_t*)dev(d, wo_a);
+  if (!wo_a_dev) return false;
+  /* Small batches take all groups in one matvec launch. */
+  if (n <= d->decode_rows && gemv_type(wo_a->type)) {
+    if (ds41_v41_gemv((int)wo_a->type, wo_a_dev, d->o, d->oa, DS41_N_OUT_GROUP * DS41_N_LORA_O, kGroupDim,
+                      DS41_N_LORA_O, gemv_slices(DS41_N_OUT_GROUP * DS41_N_LORA_O, kGroupDim), n, kQDim,
+                      DS41_N_OUT_GROUP * DS41_N_LORA_O))
+      return false;
+    return linear(d, l->attn_output_b, d->oa, d->attn_out, n);
+  }
+  if (n <= 8 && mmq_batched(wo_a->type)) {
+    if (ds41_mmq_grouped_vec_typed((int)wo_a->type, wo_a_dev, d->o, d->oa, DS41_N_LORA_O, (int)n, kGroupDim,
+                                   DS41_N_OUT_GROUP, 0))
+      return false;
+    return linear(d, l->attn_output_b, d->oa, d->attn_out, n);
+  }
+  /* Batches take all groups in one launch: the FP16 kernel's grid groups,
+   * or MMQ channels with one input quantization. */
+  if (dense_f16(wo_a->type, DS41_N_LORA_O, kGroupDim, n)) {
+    if (ds41_v41_dense_f16((int)wo_a->type, wo_a_dev, d->o, d->oa, DS41_N_LORA_O, n, kGroupDim, DS41_N_OUT_GROUP,
+                           (o_half ? DS41_V41_DENSE_X_HALF : 0) | (oa_half ? DS41_V41_DENSE_OUT_HALF : 0)))
+      return false;
+    if (!oa_half) return linear(d, wo_b, d->oa, d->attn_out, n);
+    const void* wo_b_dev = dev(d, wo_b);
+    return wo_b_dev && ds41_v41_dense_f16((int)wo_b->type, wo_b_dev, d->oa, d->attn_out,
+                                          (uint32_t)(wo_b->elements / wo_b->dim[0]), n, (uint32_t)wo_b->dim[0], 1,
+                                          DS41_V41_DENSE_X_HALF) == 0;
+  }
+  if (n > 8 && mmq_batched(wo_a->type)) {
+    if (ds41_mmq_dense_grouped_typed((int)wo_a->type, wo_a_dev, d->o, d->oa, DS41_N_LORA_O, (int)n, kGroupDim,
+                                     DS41_N_OUT_GROUP, 0))
+      return false;
+    return linear(d, l->attn_output_b, d->oa, d->attn_out, n);
+  }
+  for (uint32_t g = 0; g < DS41_N_OUT_GROUP; g++) {
+    const float* in = d->o + (uint64_t)g * kGroupDim;
+    float* out = d->oa + (uint64_t)g * DS41_N_LORA_O;
+    if (n > 1) {
+      if (ds41_v41_copy_rows(d->o_group, kGroupDim, in, kQDim, n, kGroupDim)) return false;
+      in = d->o_group;
+      out = d->oa_group;
+    }
+    if (!linear_raw(wo_a->type, wo_a_dev + g * group_bytes, DS41_N_LORA_O, kGroupDim, in, out, n)) return false;
+    if (n > 1 && ds41_v41_copy_rows(d->oa + (uint64_t)g * DS41_N_LORA_O, (uint64_t)DS41_N_OUT_GROUP * DS41_N_LORA_O,
+                                    d->oa_group, DS41_N_LORA_O, n, DS41_N_LORA_O))
+      return false;
+  }
+  return linear(d, l->attn_output_b, d->oa, d->attn_out, n);
+}
+
+/* Batched routed projections on the FP16 matrix cores (ds41_v41_routed_f16). */
+bool routed_f16_type(int type) {
+  return type == (int)DS41_TENSOR_IQ1_S || type == (int)DS41_TENSOR_IQ1_M ||
+         type == (int)DS41_TENSOR_IQ2_XXS || type == (int)DS41_TENSOR_IQ2_XS || type == (int)DS41_TENSOR_IQ2_S;
+}
+
+/* ds41_v41_routed_plan's rows, bounds and tiles for batches up to cap tokens. */
+uint64_t routed_plan_ints(uint64_t cap) {
+  const uint64_t slots = cap * DS41_N_EXPERT_USED;
+  return slots + (DS41_N_EXPERT + 1) + (slots / 64 + DS41_N_EXPERT);
+}
+
+uint64_t expert_block_bytes(int type) {
+  switch ((uint32_t)type) {
+  case DS41_TENSOR_IQ1_S:
+    return 50;
+  case DS41_TENSOR_IQ1_M:
+    return 56;
+  case DS41_TENSOR_IQ2_XXS:
+    return 66;
+  case DS41_TENSOR_IQ2_XS:
+    return 74;
+  case DS41_TENSOR_IQ2_S:
+    return 82;
+  default:
+    return 0;
+  }
+}
+
+/* Single-token expert projection through the FP32-activation expert GEMV
+ * where it measured faster than mmvq: IQ1 always, IQ2 with one input per slot
+ * (down). Returns false to fall back to mmvq. */
+bool expert_gemv(int type, const void* w, const int32_t* ids, uint32_t slots, const float* x, bool per_slot, float* y,
+                 uint32_t m, uint32_t k, int* status, const void* const* w_table = nullptr,
+                 int zero_dropped = 1) {
+  const uint64_t block = expert_block_bytes(type);
+  const bool iq1 = type == (int)DS41_TENSOR_IQ1_S || type == (int)DS41_TENSOR_IQ1_M;
+  if (block == 0 || (!per_slot && !iq1)) return false;
+  *status = ds41_v41_gemv_experts(type, w, (uint64_t)m * k / 256 * block, ids, slots, x, per_slot ? k : 0, 1, y, m,
+                                  k, w_table, zero_dropped);
+  return true;
+}
+
+/* Decode batches of 2 or more rows take the routed experts through the
+ * grouped expert GEMV: each expert's weights are read once for its tokens,
+ * with the single-token arithmetic and no host round trip for a plan. */
+static_assert(DS41_V41_GEMV_MAX_TOKENS <= DS41_V41_EXPERT_PLAN_COLS &&
+              DS41_V41_GEMV_MAX_TOKENS * DS41_N_EXPERT_USED <= DS41_V41_EXPERT_PLAN_SLOTS);
+
+/* x16, when set, is the FFN input as FP16 rows (the dense FP16 kernel takes
+ * those as it would round xn). */
+bool shared_moe(ds41_decoder* d, const ds41_layer_weights* l, uint32_t n, const uint16_t* x16) {
+  const ds41_tensor* sg = l->ffn_gate_shexp;
+  const ds41_tensor* su = l->ffn_up_shexp;
+  if (x16 && dense_f16_pair(sg, su, n)) {
+    if (!run_dense_f16_pair(d, sg, d->sg, su, d->su, x16, n, DS41_V41_DENSE_X_HALF) ||
+        ds41_v41_swiglu(d->sg, d->su, nullptr, d->sm, n, DS41_N_FF_EXP, kSwigluLimit))
+      return false;
+  } else if (n <= d->decode_rows && sg->type == su->type && sg->elements == su->elements && gemv_type(sg->type)) {
+    const uint32_t k = (uint32_t)sg->dim[0];
+    const uint32_t m = (uint32_t)(sg->elements / k);
+    if (ds41_v41_gemv_swiglu((int)sg->type, dev(d, sg), dev(d, su), d->xn, d->sm, m, k, kSwigluLimit,
+                             gemv_slices(m, k), n))
+      return false;
+  } else if (!linear_pair(d, sg, d->sg, su, d->su, d->xn, n) ||
+             ds41_v41_swiglu(d->sg, d->su, nullptr, d->sm, n, DS41_N_FF_EXP, kSwigluLimit)) {
+    return false;
+  }
+  return linear(d, l->ffn_down_shexp, d->sm, d->sd, n);
+}
+
+/* Enqueues the next layer's router on this layer's FFN input (one layer
+ * stale) and records the prediction; the store's thread turns the landed
+ * ids into a background read the next layer's prepare adopts, skipping the
+ * experts the batch does not route. Called from the read overlap, where the
+ * extra matvec hides in the read stall. Single tokens and verification or
+ * joint batches predict only when this layer waited on reads: misses
+ * cluster in neighbouring layers, and a prediction without a stall to hide
+ * it costs more than the read it saves. */
+/* Router logits of layer il (the narrowed BF16 copy when there is one). */
+bool router_logits(ds41_decoder* d, uint32_t il, uint32_t n) {
+  const ds41_weights* w = d->engine->weights;
+  if (!w->router_bf16) return linear(d, w->layer[il].ffn_gate_inp, d->xn, d->router, n);
+  return linear_raw(DS41_TENSOR_BF16, w->router_bf16 + (uint64_t)il * DS41_N_EXPERT * DS41_N_EMBD, DS41_N_EXPERT,
+                    DS41_N_EMBD, d->xn, d->router, n, d->decode_rows);
+}
+
+void predict_next_layer(ds41_decoder* d, uint32_t il, uint32_t n, bool misses_now) {
+  if (!d->engine->expert_store || !d->pred_ok || il + 1 >= DS41_N_LAYER)
+    return;
+  if (n > DS41_DECODER_MAX_JOINT && n < kPrefillPredictTokens)
+    return;
+  if (n <= DS41_DECODER_MAX_JOINT && !misses_now)
+    return;
+  const ds41_layer_weights* nl = &d->engine->weights->layer[il + 1];
+  const uint32_t used = DS41_N_EXPERT_USED;
+  const uint64_t rows = (uint64_t)d->capacity * DS41_N_EXPERT_USED;
+  int32_t* ids = d->pred_pinned + (size_t)(il + 1) * rows;
+  if (!router_logits(d, il + 1, n) ||
+      ds41_v41_route(d->router, f32(d, nl->ffn_exp_probs_b), d->pred_ids, d->pred_w,
+                     DS41_N_EXPERT, used, DS41_EXPERT_WEIGHT_SCALE, n) ||
+      hipMemcpyAsync(ids, d->pred_ids, (size_t)n * used * sizeof(int32_t),
+                     hipMemcpyDeviceToHost, nullptr) != hipSuccess ||
+      hipEventRecord(d->pred_events[il + 1], nullptr) != hipSuccess)
+    d->pred_ok = false;
+  else
+    (void)ds41_expert_store_predict(d->engine->expert_store, il + 1,
+                                    d->pred_events[il + 1], ids, n * used,
+                                    n >= kPrefillPredictTokens);
+}
+
+bool moe(ds41_decoder* d, uint32_t il, uint32_t n) {
+  const ds41_layer_weights* l = &d->engine->weights->layer[il];
+  const int used = (int)DS41_N_EXPERT_USED;
+  if (!router_logits(d, il, n) ||
+      ds41_v41_route(d->router, f32(d, l->ffn_exp_probs_b), d->route_ids, d->route_w, DS41_N_EXPERT, used,
+                     DS41_EXPERT_WEIGHT_SCALE, n))
+    return false;
+  /* Image positions select with the image bias (the gate's bias_vl). */
+  for (const auto& [first, end] : d->image_runs) {
+    /* This layer's rows are the positions from d->pos. */
+    const uint32_t lo = std::max(first, d->pos), hi = std::min(end, d->pos + n);
+    if (lo >= hi) continue;
+    const uint64_t r = lo - d->pos;
+    if (ds41_v41_route(d->router + r * DS41_N_EXPERT, d->engine->image_bias + (uint64_t)il * DS41_N_EXPERT,
+                       d->route_ids + r * used, d->route_w + r * used, DS41_N_EXPERT, used, DS41_EXPERT_WEIGHT_SCALE,
+                       hi - lo))
+      return false;
+  }
+  const int gate_type = (int)l->ffn_gate_exps->type;
+  const int up_type = (int)l->ffn_up_exps->type;
+  const int down_type = (int)l->ffn_down_exps->type;
+  const int rows = (int)n * used;
+  /* Small batches take gate, up and SwiGLU in one pass when gate and up share
+   * a type (the IQ2 types too: the pair runs as fast as two mmvq launches). */
+  const bool fused_pair = gate_type == up_type && (gate_type == (int)DS41_TENSOR_IQ1_S ||
+                                                   gate_type == (int)DS41_TENSOR_IQ1_M ||
+                                                   gate_type == (int)DS41_TENSOR_IQ2_XXS ||
+                                                   gate_type == (int)DS41_TENSOR_IQ2_XS);
+  const bool grouped = n > 1 && n <= d->decode_rows && expert_block_bytes(gate_type) &&
+                       expert_block_bytes(up_type) && expert_block_bytes(down_type);
+  const bool small = n == 1 || grouped;
+  const bool f16_gate = !small && gate_type == up_type && routed_f16_type(gate_type);
+  const bool f16_down = !small && routed_f16_type(down_type);
+  /* FP16 copies of the input and of the SwiGLU rows, in the buffers the
+   * MMQ path would use for the gate and up rows. The routed FP16 gate/up
+   * and the shared expert's dense projections share the input copy. */
+  auto* x16 = reinterpret_cast<uint16_t*>(d->g6);
+  auto* mid16 = reinterpret_cast<uint16_t*>(d->u6);
+  if (f16_gate && ds41_v41_to_half(d->xn, x16, (uint64_t)n * kDim)) return false;
+  const uint16_t* shared_x16 = f16_gate ? x16 : nullptr;
+  const void* gate = nullptr;
+  const void* up = nullptr;
+  const void* down = nullptr;
+  /* While the store streams the missing experts, the shared expert and the
+   * resident routed experts compute; the read rows complete the batch after
+   * the reads. */
+  struct StreamWork {
+    ds41_decoder* d;
+    const ds41_layer_weights* layer;
+    uint32_t il, n, rows, used;
+    int gate_type;
+    int32_t* plan_hit;
+    bool fused;
+    const uint16_t* x16;
+    bool gate_up_done = false;
+    bool shared_done = false;
+    ds41_expert_overlap info{};
+  };
+  StreamWork work{d,         l,          il,        n,         (uint32_t)rows, (uint32_t)used, gate_type,
+                  d->expert_plan_split[0], fused_pair, shared_x16};
+  const auto streamed_overlap = [](void* context, const ds41_expert_overlap* info) {
+    StreamWork& w = *static_cast<StreamWork*>(context);
+    if (!w.shared_done && !shared_moe(w.d, w.layer, w.n, w.x16))
+      return false;
+    predict_next_layer(w.d, w.il, w.n, info && info->miss_rows > 0);
+    if (!info || !info->hit_ids || info->miss_rows == 0 || info->miss_rows == info->rows || !w.fused)
+      return true;
+    w.info = *info;
+    w.gate_up_done = true;
+    const uint64_t expert_bytes =
+        (uint64_t)DS41_N_FF_EXP * kDim / 256 * expert_block_bytes(w.gate_type);
+    if (w.n == 1)
+      return ds41_v41_gemv_experts_swiglu(w.gate_type, info->table[0], info->table[1], expert_bytes,
+                                          info->hit_ids, w.used, w.d->xn, 0, 1, w.d->route_w, kSwigluLimit,
+                                          w.d->mid6, DS41_N_FF_EXP, kDim,
+                                          static_cast<const void* const*>(info->table[0]),
+                                          static_cast<const void* const*>(info->table[1]), 1) == 0;
+    if (ds41_v41_expert_plan(info->hit_ids, w.rows, w.plan_hit))
+      return false;
+    return ds41_v41_gemv_experts_grouped(w.gate_type, info->table[0], info->table[1], w.d->route_w,
+                                         kSwigluLimit, expert_bytes, w.plan_hit, w.rows, w.n, w.d->xn, kDim,
+                                         w.used, w.d->mid6, DS41_N_FF_EXP, kDim,
+                                         static_cast<const void* const*>(info->table[0]),
+                                         static_cast<const void* const*>(info->table[1]), 1) == 0;
+  };
+  if (d->engine->expert_store) {
+    /* Decode batches queue the shared expert, which reads none of the
+     * store's buffers, so it runs while the host reads the routes and plans
+     * the layer. Prefill keeps it in the read overlap, where the gap is
+     * small next to its reads. */
+    if (small && d->routes_ready) {
+      if (hipEventRecord(d->routes_ready, nullptr) != hipSuccess || !shared_moe(d, l, n, shared_x16)) return false;
+      work.shared_done = true;
+    }
+    if (!ds41_expert_store_prepare(d->engine->expert_store, il, d->route_ids, n, &gate, &up, &down,
+                                   streamed_overlap, &work, work.shared_done ? d->routes_ready : nullptr))
+      return false;
+  } else {
+    gate = dev(d, l->ffn_gate_exps);
+    up = dev(d, l->ffn_up_exps);
+    down = dev(d, l->ffn_down_exps);
+  }
+  if (!gate || !up || !down) return false;
+  /* The streamed tables map each expert index to its device weights; the
+   * resident path passes packed tensor bases instead. */
+  const void* const* gate_table =
+      d->engine->expert_store ? static_cast<const void* const*>(gate) : nullptr;
+  const void* const* up_table =
+      d->engine->expert_store ? static_cast<const void* const*>(up) : nullptr;
+  const void* const* down_table =
+      d->engine->expert_store ? static_cast<const void* const*>(down) : nullptr;
+  /* Batched passes size their tiles from the real expert buckets: at 512
+   * tokens over 384 experts the mean bucket is 8 rows. */
+  struct RoutedBounds {
+    ~RoutedBounds() {
+      ds41_mmq_set_routed_max_expert_rows(0);
+      ds41_mmq_set_routed_tile_cols(0);
+      ds41_mmq_set_routed_classes(nullptr, 0, nullptr, nullptr);
+    }
+  } routed_bounds;
+  if (grouped && ds41_v41_expert_plan(d->route_ids, (uint32_t)rows, d->expert_plan)) return false;
+  /* y = W x over the planned slots (with w_up: the routed SwiGLU into mid6). */
+  const auto grouped_gemv = [&](int type, const void* w, const void* w_up, const float* x, uint32_t x_slot,
+                                uint32_t slots_per_x, float* y, uint32_t m, uint32_t k,
+                                const void* const* w_table = nullptr, const void* const* w_up_table = nullptr) {
+    return ds41_v41_gemv_experts_grouped(type, w, w_up, w_up ? d->route_w : nullptr, w_up ? kSwigluLimit : 0.0f,
+                                         (uint64_t)m * k / 256 * expert_block_bytes(type), d->expert_plan,
+                                         (uint32_t)rows, n, x, x_slot, slots_per_x, y, m, k, w_table, w_up_table,
+                                         1) == 0;
+  };
+  const int32_t* plan_rows = d->routed_plan;
+  int32_t* plan_bounds = d->routed_plan + rows;
+  int32_t* plan_tiles = plan_bounds + DS41_N_EXPERT + 1;
+  uint32_t n_tiles = 0;
+  if (f16_gate && f16_down) {
+    // Both projections consume the device plan; MMQ's host bucket classes
+    // and maximum-row bounds are unused on this path.
+    n_tiles = (uint32_t)rows / 64 + DS41_N_EXPERT;
+    if (ds41_v41_routed_plan_device(d->route_ids, (uint32_t)rows, DS41_N_EXPERT, d->routed_plan,
+                                     plan_bounds, plan_tiles))
+      return false;
+  } else if (!small) {
+    std::vector<int32_t> ids((size_t)rows);
+    std::vector<unsigned int> counts(DS41_N_EXPERT, 0u);
+    if (hipMemcpy(ids.data(), d->route_ids, ids.size() * sizeof(int32_t), hipMemcpyDeviceToHost) != hipSuccess)
+      return false;
+    unsigned int most = 0;
+    for (const int32_t e : ids)
+      if (e >= 0 && e < (int32_t)DS41_N_EXPERT) most = std::max(most, ++counts[(size_t)e]);
+    ds41_mmq_set_routed_max_expert_rows((int)most);
+    ds41_mmq_set_routed_tile_cols(ds41_mmq_routed_tile_cols_for_counts(counts.data(), DS41_N_EXPERT));
+    /* Each expert's tiles take the width that suits its bucket (16 to 64 columns). */
+    uint8_t classes[DS41_N_EXPERT];
+    int widths[3], class_rows[3];
+    const int n_classes =
+        ds41_mmq_routed_classes_for_counts(counts.data(), DS41_N_EXPERT, classes, widths, class_rows);
+    if (n_classes > 0) {
+      if (hipMemcpy(d->expert_class, classes, sizeof(classes), hipMemcpyHostToDevice) != hipSuccess) return false;
+      ds41_mmq_set_routed_classes(d->expert_class, n_classes, widths, class_rows);
+    }
+    if (f16_gate || f16_down) {
+      std::vector<int32_t> plan(routed_plan_ints(n));
+      int32_t* bounds = plan.data() + rows;
+      n_tiles = ds41_v41_routed_plan(ids.data(), (uint32_t)rows, DS41_N_EXPERT, plan.data(), bounds,
+                                     bounds + DS41_N_EXPERT + 1);
+      const size_t used_ints = (size_t)rows + DS41_N_EXPERT + 1 + n_tiles;
+      if (n_tiles == 0 || hipMemcpy(d->routed_plan, plan.data(), used_ints * sizeof(int32_t),
+                                    hipMemcpyHostToDevice) != hipSuccess)
+        return false;
+    }
+  }
+  /* The streamed store already ran the resident experts' gate+up during the
+   * reads; finish with the rows the reads filled, in place of the zeros the
+   * overlapped launch left. A batch without reads keeps one full pass. */
+  const bool streamed = d->engine->expert_store != nullptr;
+  if (streamed && small && fused_pair) {
+    const uint64_t expert_bytes =
+        (uint64_t)DS41_N_FF_EXP * kDim / 256 * expert_block_bytes(gate_type);
+    const int32_t* ids = work.gate_up_done ? work.info.miss_ids : d->route_ids;
+    if (n == 1) {
+      if (ds41_v41_gemv_experts_swiglu(gate_type, gate, up, expert_bytes, ids, used, d->xn, 0, 1,
+                                       d->route_w, kSwigluLimit, d->mid6, DS41_N_FF_EXP, kDim, gate_table,
+                                       up_table, work.gate_up_done ? 0 : 1))
+        return false;
+    } else {
+      if (ds41_v41_expert_plan(ids, (uint32_t)rows, d->expert_plan_split[1])) return false;
+      if (ds41_v41_gemv_experts_grouped(gate_type, gate, up, d->route_w, kSwigluLimit, expert_bytes,
+                                        d->expert_plan_split[1], (uint32_t)rows, n, d->xn, kDim, used,
+                                        d->mid6, DS41_N_FF_EXP, kDim, gate_table, up_table,
+                                        work.gate_up_done ? 0 : 1))
+        return false;
+    }
+  } else if (grouped && gate_type == up_type) {
+    if (!grouped_gemv(gate_type, gate, up, d->xn, kDim, used, d->mid6, DS41_N_FF_EXP, kDim, gate_table, up_table))
+      return false;
+  } else if (grouped) {
+    if (!grouped_gemv(gate_type, gate, nullptr, d->xn, kDim, used, d->g6, DS41_N_FF_EXP, kDim,
+                      gate_table) ||
+        !grouped_gemv(up_type, up, nullptr, d->xn, kDim, used, d->u6, DS41_N_FF_EXP, kDim, up_table))
+      return false;
+  } else if (n == 1 && fused_pair) {
+    if (ds41_v41_gemv_experts_swiglu(gate_type, gate, up,
+                                     (uint64_t)DS41_N_FF_EXP * kDim / 256 * expert_block_bytes(gate_type),
+                                     d->route_ids, used, d->xn, 0, 1, d->route_w, kSwigluLimit, d->mid6,
+                                     DS41_N_FF_EXP, kDim))
+      return false;
+  } else if (small) {
+    int status = 0;
+    if (!expert_gemv(gate_type, gate, d->route_ids, rows, d->xn, false, d->g6, DS41_N_FF_EXP, kDim, &status,
+                     gate_table))
+      status = streamed ? 1
+                       : ds41_mmq_moe_vec_typed(gate_type, gate, d->xn, d->route_ids, d->g6, DS41_N_FF_EXP, kDim,
+                                                (int)n, DS41_N_EXPERT, used, 0);
+    if (status) return false;
+    if (!expert_gemv(up_type, up, d->route_ids, rows, d->xn, false, d->u6, DS41_N_FF_EXP, kDim, &status,
+                     up_table))
+      status = streamed ? 1
+                        : ds41_mmq_moe_vec_typed(up_type, up, d->xn, d->route_ids, d->u6, DS41_N_FF_EXP, kDim,
+                                                 (int)n, DS41_N_EXPERT, used, 0);
+    if (status) return false;
+  } else if (f16_gate) {
+    const uint64_t expert_bytes = (uint64_t)DS41_N_FF_EXP * kDim / 256 * expert_block_bytes(gate_type);
+    if (ds41_v41_routed_f16(gate_type, gate, up, expert_bytes, x16, (uint32_t)used, plan_rows, plan_bounds,
+                            plan_tiles, n_tiles, d->route_w, kSwigluLimit, f16_down ? (void*)mid16 : (void*)d->mid6,
+                            f16_down, DS41_N_FF_EXP, kDim, gate_table, up_table))
+      return false;
+  } else if (!streamed && gate_type == up_type) {
+    /* Batches quantize the input once and store SwiGLU from the up pass. */
+    if (ds41_mmq_moe_swiglu_typed(gate_type, gate, up, d->xn, d->route_ids, d->route_w, d->g6, d->mid6,
+                                  DS41_N_FF_EXP, kDim, (int)n, DS41_N_EXPERT, used, kSwigluLimit, 0))
+      return false;
+  } else if (streamed) {
+    return false;  // no table-indexed kernel for this shape
+  } else if (ds41_mmq_moe_typed(gate_type, gate, d->xn, d->route_ids, d->g6, DS41_N_FF_EXP, kDim, (int)n,
+                                DS41_N_EXPERT, used, 0) ||
+             ds41_mmq_moe_typed(up_type, up, d->xn, d->route_ids, d->u6, DS41_N_FF_EXP, kDim, (int)n, DS41_N_EXPERT,
+                                used, 0)) {
+    return false;
+  }
+  const bool mid_done =
+      (n == 1 && fused_pair) || (grouped && gate_type == up_type) || (!small && gate_type == up_type);
+  if (!mid_done && ds41_v41_swiglu(d->g6, d->u6, d->route_w, d->mid6, rows, DS41_N_FF_EXP, kSwigluLimit))
+    return false;
+  /* An FP16 down pass after an MMQ gate/up pass takes its rows in FP16. */
+  if (f16_down && !f16_gate && ds41_v41_to_half(d->mid6, mid16, (uint64_t)rows * DS41_N_FF_EXP)) return false;
+  /* Each (token, slot) row multiplies its own expert's down projection. */
+  if (grouped) {
+    if (!grouped_gemv(down_type, down, nullptr, d->mid6, DS41_N_FF_EXP, 1, d->down6, kDim, DS41_N_FF_EXP,
+                      down_table))
+      return false;
+  } else if (small) {
+    int status = 0;
+    if (!expert_gemv(down_type, down, d->route_ids, rows, d->mid6, true, d->down6, kDim, DS41_N_FF_EXP, &status,
+                     down_table))
+      status = streamed ? 1
+                        : ds41_mmq_moe_vec_typed(down_type, down, d->mid6, d->route_ids, d->down6, kDim,
+                                                 DS41_N_FF_EXP, rows, DS41_N_EXPERT, 1, 0);
+    if (status) return false;
+  } else if (f16_down) {
+    const uint64_t expert_bytes = (uint64_t)DS41_N_FF_EXP * kDim / 256 * expert_block_bytes(down_type);
+    if (ds41_v41_routed_f16(down_type, down, nullptr, expert_bytes, mid16, 1, plan_rows, plan_bounds, plan_tiles,
+                            n_tiles, nullptr, 0.0f, d->down6, 0, kDim, DS41_N_FF_EXP, down_table,
+                            nullptr))
+      return false;
+  } else if (!streamed && ds41_mmq_moe_typed(down_type, down, d->mid6, d->route_ids, d->down6, kDim, DS41_N_FF_EXP,
+                                             rows, DS41_N_EXPERT, 1, 0)) {
+    return false;
+  } else if (streamed) {
+    /* No FP16 tile kernel for this type: each row through the
+     * table-indexed expert GEMV. */
+    int status = 0;
+    if (!expert_gemv(down_type, down, d->route_ids, rows, d->mid6, true, d->down6, kDim, DS41_N_FF_EXP, &status,
+                     down_table) ||
+        status)
+      return false;
+  }
+  /* The routed rows (down6) and the shared output (sd) are summed by block()'s hc expand. */
+  return d->engine->expert_store || shared_moe(d, l, n, shared_x16);
+}
+
+/* Tokens from which block() fuses the batched state passes. */
+constexpr uint32_t kStatePassTokens = 16;
+
+/* Runs layer il on n rows. `then`, when set, is layer il + 1, which runs
+ * next on the same h: a batch then closes with that layer's attention state
+ * pass (mixes and xn) on the expanded state, and *mixed tells the next call
+ * to skip its own; nothing may change h in between. */
+bool block(ds41_decoder* d, uint32_t il, int prev, int next, uint32_t n, const Joint* joint = nullptr,
+           bool* mixed = nullptr, const ds41_layer_weights* then = nullptr) {
+  const ds41_layer_weights* l = &d->engine->weights->layer[il];
+  const float eps = DS41_RMS_EPS;
+  const bool entered = mixed && *mixed;
+  if (mixed) *mixed = false;
+  /* Batches read each state once for its mixes and collapse (the FFN's
+   * after the attention expand); the collapse uses the pre-mix that was
+   * known before the mix. */
+  if (n >= kStatePassTokens && n > d->decode_rows) {
+    const auto sinkhorn = [&](const ds41_tensor* scale, const ds41_tensor* base, float* pre, float* post,
+                              float* comb) {
+      return ds41_v41_hc_sinkhorn(d->mixes, f32(d, scale), f32(d, base), pre, post, comb, kHc,
+                                  DS41_N_HC_SINKHORN_ITER, DS41_HC_EPS, n) == 0;
+    };
+    if (!(entered || ds41_v41_hc_state_pass(nullptr, nullptr, 0, nullptr, nullptr, d->h, nullptr, d->pre[prev],
+                                            f32(d, l->attn_norm), d->xn, f32(d, l->hc_attn_fn), d->mixes, kHc,
+                                            kDim, eps, n) == 0) ||
+        !sinkhorn(l->hc_attn_scale, l->hc_attn_base, d->pre[next], d->post, d->comb) ||
+        !attention(d, il, n, joint) ||
+        ds41_v41_hc_state_pass(d->attn_out, nullptr, 0, d->post, d->comb, d->h, d->h2, d->pre[next],
+                               f32(d, l->ffn_norm), d->xn, f32(d, l->hc_ffn_fn), d->mixes, kHc, kDim, eps, n) ||
+        !sinkhorn(l->hc_ffn_scale, l->hc_ffn_base, d->pre[prev], d->ffn_post, d->ffn_comb) || !moe(d, il, n))
+      return false;
+    if (!then)
+      return ds41_v41_hc_expand_sum(d->down6, d->sd, DS41_N_EXPERT_USED, d->h2, d->ffn_post, d->ffn_comb, d->h, kHc,
+                                    kDim, n) == 0;
+    /* The next layer's attention collapse uses this FFN's pre-mix. */
+    if (ds41_v41_hc_state_pass(d->sd, d->down6, DS41_N_EXPERT_USED, d->ffn_post, d->ffn_comb, d->h2, d->h,
+                               d->pre[prev], f32(d, then->attn_norm), d->xn, f32(d, then->hc_attn_fn), d->mixes, kHc,
+                               kDim, eps, n))
+      return false;
+    *mixed = true;
+    return true;
+  }
+  if (entered) return false;
+  /* Attention uses the pre-mix of the previous FFN (shifted mHC). */
+  if (!hc_mix(d, l->hc_attn_fn, l->hc_attn_scale, l->hc_attn_base, d->h, d->pre[next], d->post, d->comb, n) ||
+      ds41_v41_hc_collapse_norm(d->h, d->pre[prev], f32(d, l->attn_norm), d->xn, kHc, kDim, eps, n) ||
+      !attention(d, il, n, joint) || !join_mix(d, n) ||
+      ds41_v41_hc_expand(d->attn_out, d->h, d->post, d->comb, d->h2, kHc, kDim, n))
+    return false;
+  /* The FFN uses this layer's attention pre-mix; its own pre-mix feeds the next attention. */
+  if (!hc_mix(d, l->hc_ffn_fn, l->hc_ffn_scale, l->hc_ffn_base, d->h2, d->pre[prev], d->ffn_post, d->ffn_comb, n) ||
+      ds41_v41_hc_collapse_norm(d->h2, d->pre[next], f32(d, l->ffn_norm), d->xn, kHc, kDim, eps, n) ||
+      !moe(d, il, n) || !join_mix(d, n) ||
+      ds41_v41_hc_expand_sum(d->down6, d->sd, DS41_N_EXPERT_USED, d->h2, d->ffn_post, d->ffn_comb, d->h, kHc, kDim,
+                             n))
+    return false;
+  return true;
+}
+
+/* Layer il + 1 for block()'s fused close when it runs next on the same rows
+ * and nothing changes h in between: no Engram add or replay boundary. */
+const ds41_layer_weights* next_layer(const ds41_decoder* d, uint32_t il, bool boundary) {
+  const uint32_t nl = il + 1;
+  if (nl >= DS41_N_LAYER || ds41_layer_engram_slot(nl) >= 0 || (boundary && nl == DS41_FIRST_DECODER_LAYER))
+    return nullptr;
+  return &d->engine->weights->layer[nl];
+}
+
+/* Allocates the batch scratch, sizing the batch from the memory left after
+ * the decoder state. */
+std::shared_ptr<SharedActivations> make_activations(ds41_engine* engine, uint32_t context, uint64_t score_stride,
+                                                    uint64_t block_stride) {
+  auto sh = std::make_shared<SharedActivations>();
+  sh->engine = engine;
+  sh->context = context;
+  Activations& a = sh->views;
+  const uint64_t hd = (uint64_t)kHc * kDim;
+  const uint64_t routed = (uint64_t)DS41_N_EXPERT_USED * DS41_N_FF_EXP;
+  /* Buffers of one phase are dead outside it, so the three phases overlay
+   * one region: attention (dead after its hc expand), the FFN (dead after
+   * the closing hc expand) and the Engram add. */
+  enum Phase { kOwn, kAttention, kFfn, kEngram, kPhases };
+  struct Buf {
+    float** p;
+    uint64_t n;
+    Phase phase = kOwn;
+  };
+  const auto float_buffers = [&](uint64_t cap, uint64_t rows) -> std::vector<Buf> {
+    return {
+        {&a.h, cap * hd},
+        {&a.h2, cap * hd},
+        {&a.xn, cap * kDim},
+        {&a.mixes, cap * kMixes},
+        {&a.pre[0], cap * kHc},
+        {&a.pre[1], cap * kHc},
+        {&a.post, cap * kHc},
+        {&a.comb, cap * kHc * kHc},
+        {&a.ffn_post, cap * kHc},
+        {&a.ffn_comb, cap * kHc * kHc},
+        {&a.qa, cap * DS41_N_LORA_Q, kAttention},
+        {&a.qr, cap * DS41_N_LORA_Q, kAttention},
+        {&a.q, cap * kQDim, kAttention},
+        {&a.kv, cap * kHeadDim, kAttention},
+        {&a.kvn, cap * kHeadDim, kAttention},
+        {&a.ckv, cap * kHeadDim, kAttention},
+        {&a.cscore, cap * kHeadDim, kAttention},
+        {&a.craw, cap * kHeadDim, kAttention},
+        {&a.latent, cap * kHeadDim, kAttention},
+        {&a.ik, cap * DS41_N_INDEXER_HEAD_DIM, kAttention},
+        {&a.ikn, cap * DS41_N_INDEXER_HEAD_DIM, kAttention},
+        {&a.iq, cap * kIndexQDim, kAttention},
+        {&a.iw, cap * DS41_N_INDEXER_HEAD, kAttention},
+        {&a.scores, rows * score_stride},
+        {&a.block_scores, rows * block_stride},
+        {&a.o, cap * kQDim, kAttention},
+        {&a.o_group, cap * kGroupDim, kAttention},
+        {&a.oa_group, cap * DS41_N_LORA_O, kAttention},
+        {&a.oa, cap * DS41_N_OUT_GROUP * DS41_N_LORA_O, kAttention},
+        {&a.attn_out, cap * kDim, kAttention},
+        {&a.rope, cap * kRot, kAttention},
+        {&a.router, cap * DS41_N_EXPERT, kFfn},
+        {&a.route_w, cap * DS41_N_EXPERT_USED, kFfn},
+        {&a.g6, cap * routed, kFfn},
+        {&a.u6, cap * routed, kFfn},
+        {&a.mid6, cap * routed, kFfn},
+        {&a.down6, cap * DS41_N_EXPERT_USED * kDim, kFfn},
+        {&a.sg, cap * DS41_N_FF_EXP, kFfn},
+        {&a.su, cap * DS41_N_FF_EXP, kFfn},
+        {&a.sm, cap * DS41_N_FF_EXP, kFfn},
+        {&a.sd, cap * kDim, kFfn},
+        {&a.engram_in, cap * kEngramIn, kEngram},
+        {&a.engram_kv, cap * kEngramOut, kEngram},
+        {&a.logits, (uint64_t)kLogitRows * DS41_N_VOCAB},
+        {&a.attn_partial, (uint64_t)DS41_V41_ATTN_SPLIT_MAX_TOKENS * DS41_N_HEAD * DS41_V41_ATTN_PARTIAL_PER_HEAD},
+    };
+  };
+  const auto padded = [](uint64_t n) { return (n + 63) / 64 * 64; };  // 256-byte offsets in the region
+  /* Floats of the separate buffers and of the shared region. */
+  const auto counts = [&](uint64_t cap, uint64_t rows, uint64_t* region) {
+    uint64_t own = 0, phase[kPhases] = {};
+    for (const Buf& b : float_buffers(cap, rows))
+      if (b.phase == kOwn)
+        own += b.n;
+      else
+        phase[b.phase] += padded(b.n);
+    *region = std::max({phase[kAttention], phase[kFfn], phase[kEngram]});
+    return own;
+  };
+  const auto float_count = [&](uint64_t cap, uint64_t rows) {
+    uint64_t region = 0;
+    const uint64_t own = counts(cap, rows, &region);
+    return own + region;
+  };
+  /* Size the batch from the memory left after the KV state: per token, the
+   * float activations, the candidate mask, top-k and route ids, and the
+   * host embedding rows. */
+  const uint32_t rows = score_rows(score_stride);
+  const uint64_t per_token = (float_count(1, rows) - float_count(0, rows)) * sizeof(float) +
+                             (block_stride + 31) / 32 * sizeof(uint32_t) +
+                             DS41_N_INDEXER_TOP_K * sizeof(uint32_t) + DS41_N_EXPERT_USED * sizeof(int32_t) +
+                             (routed_plan_ints(1) - routed_plan_ints(0)) * sizeof(int32_t) + kDim * sizeof(float);
+  const uint64_t fixed = float_count(0, rows) * sizeof(float) + rows * DS41_CANDIDATE_TOPK_BLOCKS * sizeof(uint32_t);
+  size_t free_bytes = 0, total_bytes = 0;
+  bool ok = hipMemGetInfo(&free_bytes, &total_bytes) == hipSuccess;
+  const uint64_t budget = free_bytes > kDeviceReserve + fixed ? free_bytes - kDeviceReserve - fixed : 0;
+  a.capacity = (uint32_t)std::clamp<uint64_t>(budget / per_token / 16 * 16, kMinCapacity,
+                                                     engine->prefill_batch / 16 * 16);
+  a.score_rows = std::min(rows, a.capacity);
+  const uint64_t cap = a.capacity;
+  uint64_t region_floats = 0;
+  (void)counts(cap, a.score_rows, &region_floats);
+  float* region = ok ? alloc<float>(sh->device, region_floats) : nullptr;
+  ok = ok && region;
+  uint64_t offset[kPhases] = {};
+  for (const Buf& b : float_buffers(cap, a.score_rows)) {
+    if (!ok) break;
+    if (b.phase == kOwn) {
+      *b.p = alloc<float>(sh->device, b.n);
+      ok = *b.p != nullptr;
+    } else {
+      *b.p = region + offset[b.phase];
+      offset[b.phase] += padded(b.n);
+    }
+  }
+  if (ok) {
+    a.candidates = alloc<uint32_t>(sh->device, cap * ((block_stride + 31) / 32));
+    a.topk = alloc<uint32_t>(sh->device, cap * DS41_N_INDEXER_TOP_K);
+    a.block_select = alloc<uint32_t>(sh->device, (uint64_t)a.score_rows * DS41_CANDIDATE_TOPK_BLOCKS);
+    a.route_ids = alloc<int32_t>(sh->device, cap * DS41_N_EXPERT_USED);
+    a.expert_class = alloc<uint8_t>(sh->device, DS41_N_EXPERT);
+    a.routed_plan = alloc<int32_t>(sh->device, routed_plan_ints(cap));
+    a.expert_plan = alloc<int32_t>(sh->device, DS41_V41_EXPERT_PLAN_INTS(DS41_V41_EXPERT_PLAN_SLOTS));
+    a.expert_plan_split[0] = alloc<int32_t>(sh->device, DS41_V41_EXPERT_PLAN_INTS(DS41_V41_EXPERT_PLAN_SLOTS));
+    a.expert_plan_split[1] = alloc<int32_t>(sh->device, DS41_V41_EXPERT_PLAN_INTS(DS41_V41_EXPERT_PLAN_SLOTS));
+    ok = a.candidates && a.topk && a.block_select && a.route_ids && a.expert_class && a.routed_plan &&
+         a.expert_plan && a.expert_plan_split[0] && a.expert_plan_split[1];
+  }
+  for (uint32_t slot = 0; slot < DS41_N_ENGRAM_LAYER && ok; slot++)
+    ok = hipHostMalloc(&a.engram_pinned[slot], cap * kEngramIn * sizeof(float)) == hipSuccess;
+  ok = ok && hipHostMalloc(&a.embd_pinned, cap * (kDim + kHc) * sizeof(float)) == hipSuccess;
+  return ok ? sh : nullptr;
+}
+
+/* The scratch of a live decoder with this engine and context, or a new one. */
+std::shared_ptr<SharedActivations> shared_activations(ds41_engine* engine, uint32_t context, uint64_t score_stride,
+                                                      uint64_t block_stride) {
+  const std::lock_guard<std::mutex> lock(g_shared_mutex);
+  std::erase_if(g_shared, [](const std::weak_ptr<SharedActivations>& w) { return w.expired(); });
+  for (const auto& w : g_shared) {
+    auto sh = w.lock();
+    if (sh && sh->engine == engine && sh->context == context) return sh;
+  }
+  auto sh = make_activations(engine, context, score_stride, block_stride);
+  if (sh) g_shared.push_back(sh);
+  return sh;
+}
+
+}  // namespace
+
+ds41_decoder* ds41_decoder_create(ds41_engine* engine, uint32_t context) {
+  if (!engine || !engine->rocm_ready || context == 0) return nullptr;
+  auto* d = new ds41_decoder();
+  d->engine = engine;
+  d->context = context;
+  d->score_stride = (uint64_t)context + 1;
+  d->block_stride = (uint64_t)context / DS41_CANDIDATE_BLOCK_SIZE + 2;
+  d->mask_words = (d->block_stride + 31) / 32;
+  bool ok = true;
+  for (uint32_t il = 0; il < DS41_N_LAYER && ok; il++) {
+    LayerState& s = d->layer[il];
+    s.window = alloc<float>(d->allocations, (uint64_t)DS41_N_SWA * kHeadDim);
+    ok = s.window != nullptr;
+    const uint32_t ratio = ds41_layer_compress_ratio(il);
+    if (ok && ds41_layer_is_kv_source(il)) {
+      const uint64_t rows = context / ratio + 1;
+      s.comp = alloc<uint8_t>(d->allocations, rows * kCompCodeBytes);
+      s.comp_scale = alloc<uint8_t>(d->allocations, rows * kCompScaleBytes);
+      s.index_k = alloc<uint8_t>(d->allocations, rows * kIndexCodeBytes);
+      s.index_scale = alloc<uint8_t>(d->allocations, rows * kIndexScaleBytes);
+      s.pool_kv = alloc<float>(d->allocations, (uint64_t)ratio * kHeadDim);
+      s.pool_score = alloc<float>(d->allocations, (uint64_t)ratio * kHeadDim);
+      ok = s.comp && s.comp_scale && s.index_k && s.index_scale && s.pool_kv && s.pool_score;
+    }
+  }
+  const uint64_t spec_floats = (uint64_t)DS41_N_LAYER * DS41_DECODER_MAX_SPECULATIVE * kHeadDim;
+  d->spec_window = ok ? alloc<float>(d->allocations, spec_floats) : nullptr;
+  d->spec_pool = ok ? alloc<float>(d->allocations, 2 * spec_floats) : nullptr;
+  ok = ok && d->spec_window && d->spec_pool;
+  const std::vector<float> plain = rope_inv_freq(DS41_ROPE_FREQ_BASE, 0);
+  const std::vector<float> compress = rope_inv_freq(DS41_COMPRESS_ROPE_FREQ_BASE, DS41_ROPE_ORIG_CTX);
+  d->freq_plain = alloc<float>(d->allocations, plain.size());
+  d->freq_compress = alloc<float>(d->allocations, compress.size());
+  ok = ok && d->freq_plain && d->freq_compress &&
+       hipMemcpy(d->freq_plain, plain.data(), plain.size() * 4, hipMemcpyHostToDevice) == hipSuccess &&
+       hipMemcpy(d->freq_compress, compress.data(), compress.size() * 4, hipMemcpyHostToDevice) == hipSuccess;
+
+  if (ok) {
+    d->shared = shared_activations(engine, context, d->score_stride, d->block_stride);
+    ok = d->shared != nullptr;
+  }
+  if (!ok) {
+    fprintf(stderr, "ds41: decoder allocation failed\n");
+    ds41_decoder_destroy(d);
+    return nullptr;
+  }
+  static_cast<Activations&>(*d) = d->shared->views;
+  if (engine->expert_store) {
+    const uint64_t rows = d->capacity;
+    d->pred_ids = alloc<int32_t>(d->allocations, rows * DS41_N_EXPERT_USED);
+    d->pred_w = alloc<float>(d->allocations, rows * DS41_N_EXPERT_USED);
+    ok = d->pred_ids && d->pred_w &&
+         hipHostMalloc(&d->pred_pinned,
+                       (size_t)DS41_N_LAYER * rows * DS41_N_EXPERT_USED *
+                           sizeof(int32_t)) == hipSuccess;
+    for (uint32_t l = 0; ok && l < DS41_N_LAYER; ++l)
+      ok = hipEventCreateWithFlags(&d->pred_events[l],
+                                   hipEventDisableTiming) == hipSuccess;
+    if (hipEventCreateWithFlags(&d->routes_ready, hipEventDisableTiming) != hipSuccess)
+      d->routes_ready = nullptr;
+  }
+  if (hipEventCreateWithFlags(&d->mix_start, hipEventDisableTiming) != hipSuccess ||
+      hipEventCreateWithFlags(&d->mix_done, hipEventDisableTiming) != hipSuccess ||
+      hipStreamCreateWithFlags(&d->mix_stream, hipStreamNonBlocking) != hipSuccess)
+    d->mix_stream = nullptr;
+  d->host_h.resize((uint64_t)kHc * kDim);
+  d->host_ids.resize(DS41_N_EXPERT_USED);
+  return d;
+}
+
+void ds41_decoder_destroy(ds41_decoder* d) {
+  if (!d) return;
+  if (d->pred_pinned && d->engine && d->engine->expert_store)
+    ds41_expert_store_predict_flush(d->engine->expert_store);
+  for (hipEvent_t event : d->pred_events)
+    if (event)
+      (void)hipEventDestroy(event);
+  if (d->routes_ready)
+    (void)hipEventDestroy(d->routes_ready);
+  if (d->mix_stream) {
+    (void)hipStreamSynchronize(d->mix_stream);
+    (void)hipStreamDestroy(d->mix_stream);
+  }
+  for (hipEvent_t event : {d->mix_start, d->mix_done})
+    if (event)
+      (void)hipEventDestroy(event);
+  if (d->pred_pinned)
+    (void)hipHostFree(d->pred_pinned);
+  for (void* p : d->allocations) (void)hipFree(p);
+  delete d;
+}
+
+uint32_t ds41_decoder_batch_capacity(const ds41_decoder* d) { return d ? d->capacity : 0; }
+
+uint32_t ds41_decoder_pos(const ds41_decoder* d) { return d ? d->pos : 0; }
+
+uint32_t ds41_decoder_context(const ds41_decoder* d) { return d ? d->context : 0; }
+
+namespace {
+
+/* Every device range that carries state across steps, with its live bytes. */
+template <typename Fn>
+bool for_each_state(const ds41_decoder* d, uint32_t pos, Fn&& fn) {
+  for (uint32_t il = 0; il < DS41_N_LAYER; il++) {
+    const LayerState& s = d->layer[il];
+    const uint32_t ratio = ds41_layer_compress_ratio(il);
+    if (!fn(s.window, (uint64_t)DS41_N_SWA * kHeadDim * sizeof(float))) return false;
+    if (!s.comp) continue;
+    const uint64_t rows = pos / ratio;
+    if (!fn(s.comp, rows * kCompCodeBytes) || !fn(s.comp_scale, rows * kCompScaleBytes) ||
+        !fn(s.index_k, rows * kIndexCodeBytes) || !fn(s.index_scale, rows * kIndexScaleBytes) ||
+        !fn(s.pool_kv, (uint64_t)ratio * kHeadDim * sizeof(float)) ||
+        !fn(s.pool_score, (uint64_t)ratio * kHeadDim * sizeof(float)))
+      return false;
+  }
+  return true;
+}
+
+constexpr uint64_t kStateMagic = 0x3376615453313453ull;  // "S4STav3": FP4 compressed rows
+
+}  // namespace
+
+uint64_t ds41_decoder_state_bytes(const ds41_decoder* d) {
+  if (!d) return 0;
+  uint64_t bytes = 4 * sizeof(uint64_t) + d->engram_history.size() * sizeof(int64_t);
+  (void)for_each_state(d, d->pos, [&](void*, uint64_t n) {
+    bytes += n;
+    return true;
+  });
+  return bytes;
+}
+
+int ds41_decoder_save(const ds41_decoder* d, std::vector<uint8_t>* out) {
+  if (!d || !out || d->spec_n) return 1;
+  const uint64_t header[4] = {kStateMagic, d->pos, (uint64_t)(int64_t)d->comp_layer,
+                              (uint64_t)d->engram_history.size()};
+  out->insert(out->end(), (const uint8_t*)header, (const uint8_t*)(header + 4));
+  out->insert(out->end(), (const uint8_t*)d->engram_history.data(),
+              (const uint8_t*)(d->engram_history.data() + d->engram_history.size()));
+  return for_each_state(d, d->pos, [&](void* p, uint64_t bytes) {
+           const size_t at = out->size();
+           out->resize(at + bytes);
+           return hipMemcpy(out->data() + at, p, bytes, hipMemcpyDeviceToHost) == hipSuccess;
+         })
+             ? 0
+             : 1;
+}
+
+int ds41_decoder_load(ds41_decoder* d, const uint8_t* data, uint64_t size, uint64_t* consumed) {
+  if (!d || !data || size < 32) return 1;
+  uint64_t header[4];
+  memcpy(header, data, sizeof(header));
+  if (header[0] != kStateMagic || header[1] > d->context || header[3] != header[1]) return 1;
+  uint64_t at = sizeof(header);
+  if (size - at < header[3] * sizeof(int64_t)) return 1;
+  std::vector<int64_t> history(header[3]);
+  memcpy(history.data(), data + at, header[3] * sizeof(int64_t));
+  at += header[3] * sizeof(int64_t);
+  const bool ok = for_each_state(d, (uint32_t)header[1], [&](void* p, uint64_t bytes) {
+    if (size - at < bytes) return false;
+    const bool copied = hipMemcpy(p, data + at, bytes, hipMemcpyHostToDevice) == hipSuccess;
+    at += bytes;
+    return copied;
+  });
+  if (!ok) return 1;
+  d->pos = (uint32_t)header[1];
+  d->spec_n = 0;
+  d->feature_rows = 0;
+  d->comp_layer = (int)(int64_t)header[2];
+  d->engram_history = std::move(history);
+  if (consumed) *consumed = at;
+  return 0;
+}
+
+uint32_t ds41_layer_state_ratio(uint32_t layer) {
+  return layer < DS41_N_LAYER && ds41_layer_is_kv_source(layer) ? ds41_layer_compress_ratio(layer) : 0;
+}
+
+void* ds41_decoder_state_part(ds41_decoder* d, uint32_t layer, int part, uint64_t* bytes) {
+  if (!d || layer >= DS41_N_LAYER || !bytes) return nullptr;
+  LayerState& s = d->layer[layer];
+  const uint64_t frontier = (uint64_t)ds41_layer_state_ratio(layer) * kHeadDim * sizeof(float);
+  switch (part) {
+  case DS41_STATE_WINDOW:
+    *bytes = (uint64_t)DS41_N_SWA * kHeadDim * sizeof(float);
+    return s.window;
+  case DS41_STATE_COMP:
+    *bytes = kCompCodeBytes;
+    return s.comp;
+  case DS41_STATE_COMP_SCALE:
+    *bytes = kCompScaleBytes;
+    return s.comp_scale;
+  case DS41_STATE_INDEX_K:
+    *bytes = kIndexCodeBytes;
+    return s.index_k;
+  case DS41_STATE_INDEX_SCALE:
+    *bytes = kIndexScaleBytes;
+    return s.index_scale;
+  case DS41_STATE_POOL_KV:
+    *bytes = frontier;
+    return s.pool_kv;
+  case DS41_STATE_POOL_SCORE:
+    *bytes = frontier;
+    return s.pool_score;
+  default:
+    return nullptr;
+  }
+}
+
+int ds41_decoder_adopt(ds41_decoder* d, const int* tokens, uint32_t n) {
+  if (!d || n > d->context || (n && !tokens)) return 1;
+  const int32_t* token_map = d->engine->weights->engram_token_map;
+  d->engram_history.resize(n);
+  for (uint32_t i = 0; i < n; i++) {
+    if (tokens[i] < 0 || tokens[i] >= DS41_N_VOCAB) return 1;
+    d->engram_history[i] = is_image(d, tokens[i]) ? kEngramDead : token_map[tokens[i]];
+  }
+  d->spec_n = 0;
+  /* Every evaluation leaves the last KV source layer here. */
+  d->comp_layer = -1;
+  for (uint32_t il = 0; n && il < DS41_N_LAYER; il++)
+    if (ds41_layer_is_kv_source(il)) d->comp_layer = (int)il;
+  d->pos = n;
+  d->feature_rows = 0;
+  return 0;
+}
+
+int ds41_decoder_reset(ds41_decoder* d) {
+  if (!d) return 1;
+  for (uint32_t il = 0; il < DS41_N_LAYER; il++) {
+    const LayerState& s = d->layer[il];
+    const uint32_t ratio = ds41_layer_compress_ratio(il);
+    if (hipMemset(s.window, 0, (size_t)DS41_N_SWA * kHeadDim * sizeof(float)) != hipSuccess) return 1;
+    if (s.pool_kv && (hipMemset(s.pool_kv, 0, (size_t)ratio * kHeadDim * sizeof(float)) != hipSuccess ||
+                      hipMemset(s.pool_score, 0, (size_t)ratio * kHeadDim * sizeof(float)) != hipSuccess))
+      return 1;
+  }
+  d->pos = 0;
+  d->spec_n = 0;
+  d->feature_rows = 0;
+  d->comp_layer = -1;
+  d->engram_history.clear();
+  return 0;
+}
+
+namespace {
+
+static_assert(DS41_FIRST_DECODER_LAYER == DS41_CANDIDATE_SOURCE_LAYER &&
+                  DS41_KV_SOURCE_LAYERS[DS41_N_KV_SOURCE - 1] == DS41_FIRST_DECODER_LAYER,
+              "bounded replay compresses the first decoder layer's rows");
+static_assert(DS41_ENGRAM_LAYERS[DS41_N_ENGRAM_LAYER - 1] < DS41_FIRST_DECODER_LAYER &&
+                  DS41_DSPARK_TARGET_LAYER[0] >= DS41_FIRST_DECODER_LAYER,
+              "Engram runs every row, DSpark features the replayed ones");
+
+/* The first `skip` rows reach the first decoder layer but no decoder layer
+ * runs them: that layer only compresses them (global KV and index keys).
+ * The remaining rows move to the front of the batch. */
+bool replay_boundary(ds41_decoder* d, uint32_t il, int prev, uint32_t skip, uint32_t n) {
+  const ds41_layer_weights* l = &d->engine->weights->layer[il];
+  const uint64_t hd = (uint64_t)kHc * kDim;
+  const uint32_t kept = n - skip;
+  /* The attention input as block() derives it for this many rows. */
+  const bool collapsed =
+      skip >= kStatePassTokens
+          ? ds41_v41_hc_state_pass(nullptr, nullptr, 0, nullptr, nullptr, d->h, nullptr, d->pre[prev],
+                                   f32(d, l->attn_norm), d->xn, f32(d, l->hc_attn_fn), d->mixes, kHc, kDim,
+                                   DS41_RMS_EPS, skip) == 0
+          : ds41_v41_hc_collapse_norm(d->h, d->pre[prev], f32(d, l->attn_norm), d->xn, kHc, kDim, DS41_RMS_EPS,
+                                      skip) == 0;
+  if (!collapsed || !linear(d, l->attn_compressor_kv, d->xn, d->ckv, skip) ||
+      ds41_v41_rms_norm(d->ckv, f32(d, l->attn_compressor_norm), d->latent, skip, kHeadDim, DS41_RMS_EPS) ||
+      !store_compressed(d, il, d->pos, skip, 1))
+    return false;
+  /* h2 and the other pre-mix are free between blocks. */
+  if (!copy_dev(d->h2, d->h + skip * hd, kept * hd) || !copy_dev(d->h, d->h2, kept * hd) ||
+      !copy_dev(d->pre[prev ^ 1], d->pre[prev] + (uint64_t)skip * kHc, (uint64_t)kept * kHc) ||
+      !copy_dev(d->pre[prev], d->pre[prev ^ 1], (uint64_t)kept * kHc))
+    return false;
+  d->pos += skip;
+  return true;
+}
+
+/* Evaluates n tokens; the decoder layers run the positions from keep_from
+ * on (bounded replay; 0 runs every row), whose windows start there. */
+int eval_rows(ds41_decoder* d, const int* tokens, uint32_t n, uint32_t keep_from, float* logits,
+              uint32_t logit_rows, ds41_decoder_layer_fn layer_fn, void* ctx) {
+  if (!d || !tokens || n == 0 || n > d->capacity || logit_rows > n || (logit_rows && !logits) ||
+      d->pos + n > d->context || d->spec_n)
+    return 1;
+  d->resident_logits = 0;
+  const uint32_t pos0 = d->pos;
+  const uint32_t skip = std::clamp(keep_from, pos0, pos0 + n) - pos0;
+  const uint32_t kept = n - skip;
+  if (logit_rows > kept) return 1;
+  for (uint32_t t = 0; t < n; t++)
+    if (tokens[t] < 0 || tokens[t] >= (int)DS41_N_VOCAB) return 1;
+  const ds41_weights* w = d->engine->weights;
+  const uint64_t hd = (uint64_t)kHc * kDim;
+  const size_t history = d->engram_history.size();
+
+  /* Engram rows, [layer][token][column]; image positions read none. */
+  std::vector<int64_t> engram_rows((uint64_t)DS41_N_ENGRAM_LAYER * n * DS41_ENGRAM_COLS);
+  d->image_runs.clear();
+  for (uint32_t t = 0; t < n; t++) {
+    int64_t rows[DS41_N_ENGRAM_LAYER][DS41_ENGRAM_COLS];
+    engram_hash(d, tokens[t], rows);
+    const bool image = is_image(d, tokens[t]);
+    if (image) {
+      std::fill_n(&rows[0][0], DS41_N_ENGRAM_LAYER * DS41_ENGRAM_COLS, int64_t{-1});
+      if (!d->image_runs.empty() && d->image_runs.back().second == pos0 + t)
+        d->image_runs.back().second++;
+      else
+        d->image_runs.emplace_back(pos0 + t, pos0 + t + 1);
+    }
+    for (uint32_t layer = 0; layer < DS41_N_ENGRAM_LAYER; layer++)
+      memcpy(&engram_rows[((uint64_t)layer * n + t) * DS41_ENGRAM_COLS], rows[layer], sizeof(rows[layer]));
+  }
+
+  /* Every Engram layer's rows are read while the GPU runs the layers before it. */
+  std::future<bool> engram_reads[DS41_N_ENGRAM_LAYER];
+  for (uint32_t il = 0; il < DS41_N_LAYER; il++) {
+    const int slot = ds41_layer_engram_slot(il);
+    if (slot < 0) continue;
+    engram_reads[slot] = std::async(std::launch::async, engram_read, d,
+                                    &engram_rows[(uint64_t)slot * n * DS41_ENGRAM_COLS], n, d->engram_pinned[slot]);
+  }
+
+  /* Embedding, replicated over the hc residual streams; layer 0 pre-mix is one-hot. */
+  const ds41_tensor* embd = w->token_embd;
+  const uint64_t row_bytes = embd->bytes / DS41_N_VOCAB;
+  float* embd_rows = d->embd_pinned;
+  float* one_hot = embd_rows + (uint64_t)n * kDim;
+  memset(one_hot, 0, (uint64_t)n * kHc * sizeof(float));
+  /* Long batches dequantize their rows on a few threads. */
+  auto dequant_rows = [&](uint32_t begin, uint32_t end) {
+    bool rows_ok = true;
+    for (uint32_t t = begin; t < end && rows_ok; t++)
+      rows_ok = dequant_row(embd->type, host(d, embd) + (uint64_t)tokens[t] * row_bytes, embd_rows + t * kDim, kDim);
+    return rows_ok;
+  };
+  constexpr uint32_t kDequantThreads = 4, kDequantMinRows = 256;
+  const uint32_t parts = n >= kDequantMinRows ? kDequantThreads : 1, step = (n + parts - 1) / parts;
+  std::future<bool> dequant_parts[kDequantThreads - 1];
+  for (uint32_t i = 1; i < parts; i++)
+    dequant_parts[i - 1] = std::async(std::launch::async, dequant_rows, std::min(n, i * step), std::min(n, (i + 1) * step));
+  bool ok = dequant_rows(0, std::min(n, step));
+  for (uint32_t i = 1; i < parts; i++) ok = dequant_parts[i - 1].get() && ok;
+  for (uint32_t t = 0; t < n; t++) one_hot[(uint64_t)t * kHc] = 1.0f;
+  /* One upload into xn (free until the first block), then a device copy per stream. */
+  ok = ok && hipMemcpyAsync(d->xn, embd_rows, (uint64_t)n * kDim * sizeof(float), hipMemcpyHostToDevice, 0) ==
+                 hipSuccess;
+  /* Image rows replace their placeholder embeddings (merge_image_embeddings). */
+  for (const ds41_image_span& image : d->images) {
+    const uint32_t first = std::max(image.pos, pos0), end = std::min(image.pos + image.rows, pos0 + n);
+    if (first < end && ok)
+      ok = hipMemcpyAsync(d->xn + (uint64_t)(first - pos0) * kDim, image.data + (uint64_t)(first - image.pos) * kDim,
+                          (uint64_t)(end - first) * kDim * sizeof(float), hipMemcpyDeviceToDevice, 0) == hipSuccess;
+  }
+  for (uint32_t c = 0; c < kHc && ok; c++)
+    ok = hipMemcpy2DAsync(d->h + c * kDim, hd * sizeof(float), d->xn, kDim * sizeof(float), kDim * sizeof(float), n,
+                          hipMemcpyDeviceToDevice, 0) == hipSuccess;
+  ok = ok && hipMemcpyAsync(d->pre[0], one_hot, (uint64_t)n * kHc * sizeof(float), hipMemcpyHostToDevice, 0) ==
+                 hipSuccess;
+
+  const int prev = 0;
+  const uint32_t feature_rows = std::min(kept, DS41_DSPARK_FEATURE_ROWS);
+  d->feature_rows = 0;
+  d->window_floor = keep_from;
+  uint32_t rows = n;    // rows of the current layer
+  bool mixed = false;  // the previous block made this layer's attention mixes
+  for (uint32_t il = 0; il < DS41_N_LAYER && ok; il++) {
+    if (il == DS41_FIRST_DECODER_LAYER && skip) {
+      ok = replay_boundary(d, il, prev, skip, n);
+      rows = kept;
+      if (!ok || !kept) break;
+    }
+    const int slot = ds41_layer_engram_slot(il);
+    if (slot >= 0) ok = engram_reads[slot].get() && engram(d, il, d->engram_pinned[slot], n);
+    if (d->features) {
+      for (uint32_t f = 0; f < DS41_DSPARK_TARGET_LAYERS && ok; f++)
+        if (il == DS41_DSPARK_TARGET_LAYER[f])
+          ok = ds41_v41_hc_mean(d->h + (uint64_t)(rows - feature_rows) * hd, d->features + (uint64_t)f * kDim,
+                                (uint64_t)DS41_DSPARK_TARGET_LAYERS * kDim, kHc, kDim, feature_rows) == 0;
+    }
+    /* block() leaves this layer's FFN pre-mix in pre[prev]. */
+    ok = ok && block(d, il, prev, prev ^ 1, rows, nullptr, &mixed, next_layer(d, il, skip != 0));
+    if (ok && layer_fn) {
+      ok = hipMemcpy(d->host_h.data(), d->h + (rows - 1) * hd, hd * sizeof(float), hipMemcpyDeviceToHost) ==
+               hipSuccess &&
+           hipMemcpy(d->host_ids.data(), d->route_ids + (uint64_t)(rows - 1) * DS41_N_EXPERT_USED,
+                     d->host_ids.size() * sizeof(int32_t), hipMemcpyDeviceToHost) == hipSuccess;
+      if (ok) layer_fn(ctx, il, d->host_h.data(), d->host_ids.data());
+    }
+  }
+  d->window_floor = 0;
+
+  /* Final mix and norm for the requested rows, then the vocabulary projection in passes. */
+  const uint32_t first = rows - logit_rows;
+  if (ok && logit_rows) {
+    ok = ds41_v41_hc_collapse_norm(d->h + first * hd, d->pre[prev] + (uint64_t)first * kHc, f32(d, w->output_norm),
+                                   d->xn, kHc, kDim, DS41_RMS_EPS, logit_rows) == 0;
+    for (uint32_t r = 0; r < logit_rows && ok; r += kLogitRows) {
+      const uint32_t rows = std::min(kLogitRows, logit_rows - r);
+      ok = linear(d, w->output, d->xn + (uint64_t)r * kDim, d->logits, rows) &&
+           (!d->argmax_out || ds41_v41_argmax_rows(d->logits, DS41_N_VOCAB, rows, d->row_argmax + r) == 0) &&
+           hipMemcpy(logits + (uint64_t)r * DS41_N_VOCAB, d->logits, (uint64_t)rows * DS41_N_VOCAB * sizeof(float),
+                     hipMemcpyDeviceToHost) == hipSuccess;
+    }
+    ok = ok && (!d->argmax_out || hipMemcpy(d->argmax_out, d->row_argmax, logit_rows * sizeof(int32_t),
+                                            hipMemcpyDeviceToHost) == hipSuccess);
+  }
+  ok = ok && hipDeviceSynchronize() == hipSuccess;
+  if (!ok) {
+    /* The device state is partial; callers reset or reload before reuse. */
+    d->engram_history.resize(history);
+    d->pos = pos0;
+    return 1;
+  }
+  d->resident_logits = logit_rows <= kLogitRows ? logit_rows : 0;
+  d->logits_row0 = 0;
+  d->logits_gen = ++d->shared->logits_gen;
+  if (d->features) {
+    d->feature_pos0 = pos0 + n - feature_rows;
+    d->feature_rows = feature_rows;
+  }
+  d->pos = pos0 + n;
+  return 0;
+}
+
+}  // namespace
+
+void ds41_decoder_set_images(ds41_decoder* d, const ds41_image_span* images, size_t n_images) {
+  if (d) d->images.assign(images, images + (images ? n_images : 0));
+}
+
+int ds41_decoder_eval(ds41_decoder* d, const int* tokens, uint32_t n, float* logits, uint32_t logit_rows,
+                      ds41_decoder_layer_fn layer_fn, void* ctx) {
+  return eval_rows(d, tokens, n, 0, logits, logit_rows, layer_fn, ctx);
+}
+
+int ds41_decoder_eval_prompt(ds41_decoder* d, const int* tokens, uint32_t n, uint32_t prompt_end, float* logits,
+                             uint32_t logit_rows) {
+  if (!d || prompt_end < d->pos + n) return 1;
+  const uint32_t keep_from = prompt_end > DS41_DECODER_REPLAY_ROWS ? prompt_end - DS41_DECODER_REPLAY_ROWS : 0;
+  d->decode_rows = kPromptDecodeRows;
+  const int rc = eval_rows(d, tokens, n, keep_from, logits, logit_rows, nullptr, nullptr);
+  d->decode_rows = kDecodeRows;
+  return rc;
+}
+
+/* The device rows for row_argmax, allocated on first use. */
+static bool ensure_row_argmax(ds41_decoder* d) {
+  if (!d->row_argmax) d->row_argmax = alloc<int32_t>(d->allocations, kLogitRows);
+  return d->row_argmax != nullptr;
+}
+
+int ds41_decoder_eval_speculative(ds41_decoder* d, const int* tokens, uint32_t n, float* logits, int32_t* argmax) {
+  static_assert(DS41_DECODER_MAX_SPECULATIVE <= DS41_V41_GEMV_MAX_TOKENS &&
+                DS41_DECODER_MAX_SPECULATIVE <= DS41_V41_ATTN_SPLIT_MAX_TOKENS &&
+                DS41_DECODER_MAX_SPECULATIVE <= kLogitRows);
+  if (!d || d->spec_n || n == 0 || n > DS41_DECODER_MAX_SPECULATIVE || (argmax && !ensure_row_argmax(d))) return 1;
+  d->spec_pos0 = d->pos;
+  d->spec_eval = true;
+  d->argmax_out = argmax;
+  /* Every row keeps single-token arithmetic, as serial decode would. */
+  d->decode_rows = DS41_DECODER_MAX_SPECULATIVE;
+  const int rc = ds41_decoder_eval(d, tokens, n, logits, n, nullptr, nullptr);
+  d->decode_rows = kDecodeRows;
+  d->spec_eval = false;
+  d->argmax_out = nullptr;
+  if (rc == 0) d->spec_n = n;
+  return rc;
+}
+
+int ds41_decoder_eval_joint(ds41_decoder* const* ds, const int* const* tokens, const uint32_t* ns, uint32_t count,
+                            float* const* logits, int32_t* const* argmax) {
+  static_assert(DS41_DECODER_MAX_JOINT <= DS41_V41_GEMV_MAX_TOKENS && DS41_DECODER_MAX_JOINT <= kMinCapacity &&
+                DS41_DECODER_MAX_JOINT <= kLogitRows && DS41_DECODER_MAX_JOINT <= DS41_V41_ATTN_SPLIT_MAX_TOKENS);
+  if (!ds || !tokens || !ns || !logits || count == 0) return 1;
+  ds41_decoder* lead = ds[0];
+  uint32_t total = 0;
+  for (uint32_t i = 0; i < count; i++) {
+    ds41_decoder* d = ds[i];
+    if (!d || !tokens[i] || !logits[i] || d->spec_n || ns[i] == 0 || ns[i] > DS41_DECODER_MAX_SPECULATIVE ||
+        d->pos + ns[i] > d->context)
+      return 1;
+    for (uint32_t j = 0; j < i; j++)
+      if (ds[j] == d) return 1;
+    for (uint32_t t = 0; t < ns[i]; t++)
+      if (tokens[i][t] < 0 || tokens[i][t] >= (int)DS41_N_VOCAB) return 1;
+    if (d->shared != lead->shared) return 2;
+    for (uint32_t t = 0; t < ns[i]; t++)
+      if (is_image(d, tokens[i][t])) return 2;
+    total += ns[i];
+  }
+  if (total > DS41_DECODER_MAX_JOINT || total > lead->capacity) return 2;
+  const ds41_weights* w = lead->engine->weights;
+  const uint64_t hd = (uint64_t)kHc * kDim;
+
+  /* Engram rows, [layer][row][column], from each session's history. */
+  std::vector<uint32_t> first(count);
+  std::vector<size_t> history(count);
+  std::vector<int64_t> engram_rows((uint64_t)DS41_N_ENGRAM_LAYER * total * DS41_ENGRAM_COLS);
+  for (uint32_t i = 0, r = 0; i < count; r += ns[i++]) {
+    ds41_decoder* d = ds[i];
+    first[i] = r;
+    history[i] = d->engram_history.size();
+    for (uint32_t t = 0; t < ns[i]; t++) {
+      int64_t rows[DS41_N_ENGRAM_LAYER][DS41_ENGRAM_COLS];
+      engram_hash(d, tokens[i][t], rows);
+      for (uint32_t layer = 0; layer < DS41_N_ENGRAM_LAYER; layer++)
+        memcpy(&engram_rows[((uint64_t)layer * total + r + t) * DS41_ENGRAM_COLS], rows[layer], sizeof(rows[layer]));
+    }
+  }
+  std::future<bool> engram_reads[DS41_N_ENGRAM_LAYER];
+  for (uint32_t il = 0; il < DS41_N_LAYER; il++) {
+    const int slot = ds41_layer_engram_slot(il);
+    if (slot >= 0)
+      engram_reads[slot] = std::async(std::launch::async, engram_read, lead,
+                                      &engram_rows[(uint64_t)slot * total * DS41_ENGRAM_COLS], total,
+                                      lead->engram_pinned[slot]);
+  }
+
+  /* Embedding, replicated over the hc residual streams; layer 0 pre-mix is one-hot. */
+  const ds41_tensor* embd = w->token_embd;
+  const uint64_t row_bytes = embd->bytes / DS41_N_VOCAB;
+  float* embd_rows = lead->embd_pinned;
+  float* one_hot = embd_rows + (uint64_t)total * kDim;
+  memset(one_hot, 0, (uint64_t)total * kHc * sizeof(float));
+  bool ok = true;
+  for (uint32_t i = 0; i < count && ok; i++)
+    for (uint32_t t = 0; t < ns[i] && ok; t++) {
+      const uint64_t r = first[i] + t;
+      ok = dequant_row(embd->type, host(lead, embd) + (uint64_t)tokens[i][t] * row_bytes, embd_rows + r * kDim,
+                       kDim);
+      one_hot[r * kHc] = 1.0f;
+    }
+  ok = ok && hipMemcpyAsync(lead->xn, embd_rows, (uint64_t)total * kDim * sizeof(float), hipMemcpyHostToDevice,
+                            0) == hipSuccess;
+  for (uint32_t c = 0; c < kHc && ok; c++)
+    ok = hipMemcpy2DAsync(lead->h + c * kDim, hd * sizeof(float), lead->xn, kDim * sizeof(float),
+                          kDim * sizeof(float), total, hipMemcpyDeviceToDevice, 0) == hipSuccess;
+  ok = ok && hipMemcpyAsync(lead->pre[0], one_hot, (uint64_t)total * kHc * sizeof(float), hipMemcpyHostToDevice,
+                            0) == hipSuccess;
+
+  /* Each session's views start at its rows; every one takes the decode paths. */
+  for (uint32_t i = 0; i < count; i++) {
+    ds41_decoder* d = ds[i];
+    static_cast<Activations&>(*d) = rows_view(d->shared->views, d->mask_words, first[i]);
+    d->decode_rows = DS41_DECODER_MAX_JOINT;
+    d->spec_pos0 = d->pos;
+    d->spec_eval = true;
+    d->resident_logits = 0;
+    d->feature_rows = 0;
+    d->image_runs.clear();
+  }
+  const Joint joint{ds, ns, count};
+  const int prev = 0;
+  bool mixed = false;  // the previous block made this layer's attention mixes
+  for (uint32_t il = 0; il < DS41_N_LAYER && ok; il++) {
+    const int slot = ds41_layer_engram_slot(il);
+    if (slot >= 0) ok = engram_reads[slot].get() && engram(lead, il, lead->engram_pinned[slot], total);
+    for (uint32_t i = 0; i < count && ok; i++) {
+      ds41_decoder* d = ds[i];
+      const uint32_t feature_rows = std::min(ns[i], DS41_DSPARK_FEATURE_ROWS);
+      for (uint32_t f = 0; d->features && f < DS41_DSPARK_TARGET_LAYERS && ok; f++)
+        if (il == DS41_DSPARK_TARGET_LAYER[f])
+          ok = ds41_v41_hc_mean(d->h + (uint64_t)(ns[i] - feature_rows) * hd, d->features + (uint64_t)f * kDim,
+                                (uint64_t)DS41_DSPARK_TARGET_LAYERS * kDim, kHc, kDim, feature_rows) == 0;
+    }
+    ok = ok && block(lead, il, prev, prev ^ 1, total, &joint, &mixed, next_layer(lead, il, false));
+  }
+  for (uint32_t slot = 0; slot < DS41_N_ENGRAM_LAYER; slot++)
+    if (engram_reads[slot].valid()) engram_reads[slot].wait();
+
+  /* Final mix and norm, the vocabulary projection, and each session's rows. */
+  if (ok)
+    ok = ds41_v41_hc_collapse_norm(lead->h, lead->pre[prev], f32(lead, w->output_norm), lead->xn, kHc, kDim,
+                                   DS41_RMS_EPS, total) == 0 &&
+         linear(lead, w->output, lead->xn, lead->logits, total);
+  int32_t ids[DS41_DECODER_MAX_JOINT];
+  ok = ok && (!argmax || (ensure_row_argmax(lead) &&
+                          ds41_v41_argmax_rows(lead->logits, DS41_N_VOCAB, total, lead->row_argmax) == 0));
+  for (uint32_t i = 0; i < count && ok; i++)
+    ok = hipMemcpy(logits[i], lead->logits + (uint64_t)first[i] * DS41_N_VOCAB,
+                   (uint64_t)ns[i] * DS41_N_VOCAB * sizeof(float), hipMemcpyDeviceToHost) == hipSuccess;
+  ok = ok && (!argmax || hipMemcpy(ids, lead->row_argmax, total * sizeof(int32_t), hipMemcpyDeviceToHost) == hipSuccess);
+  for (uint32_t i = 0; i < count && ok && argmax; i++)
+    if (argmax[i]) memcpy(argmax[i], ids + first[i], ns[i] * sizeof(int32_t));
+  ok = ok && hipDeviceSynchronize() == hipSuccess;
+  const uint64_t gen = ok ? ++lead->shared->logits_gen : 0;
+  for (uint32_t i = 0; i < count; i++) {
+    ds41_decoder* d = ds[i];
+    static_cast<Activations&>(*d) = d->shared->views;
+    d->decode_rows = kDecodeRows;
+    d->spec_eval = false;
+    if (!ok) {
+      /* The device state is partial; callers reset or reload before reuse. */
+      d->engram_history.resize(history[i]);
+      continue;
+    }
+    d->resident_logits = ns[i];
+    d->logits_row0 = first[i];
+    d->logits_gen = gen;
+    if (d->features) {
+      const uint32_t feature_rows = std::min(ns[i], DS41_DSPARK_FEATURE_ROWS);
+      d->feature_pos0 = d->pos + ns[i] - feature_rows;
+      d->feature_rows = feature_rows;
+    }
+    d->pos += ns[i];
+    d->spec_n = ns[i];
+  }
+  return ok ? 0 : 1;
+}
+
+int ds41_decoder_commit(ds41_decoder* d, uint32_t keep) {
+  if (!d || !d->spec_n || keep == 0 || keep > d->spec_n) return 1;
+  const uint32_t pos0 = d->spec_pos0;
+  const uint32_t end = pos0 + keep;
+  d->spec_n = 0;
+  CopyQueue q;
+  for (uint32_t il = 0; il < DS41_N_LAYER; il++) {
+    LayerState& s = d->layer[il];
+    queue_window(q, s, spec_rows(d, d->spec_window, il, 0), pos0, keep);
+    const uint32_t ratio = ds41_layer_compress_ratio(il);
+    if (!s.pool_kv || ratio < 2) continue;
+    /* The frontier holds the positions of the kept tokens' unfinished group,
+     * slot pos % ratio. Ratio 2 keeps at most the last kept token, which is
+     * in the batch; older pending positions would need the earlier frontier. */
+    for (uint32_t pos = end - end % ratio; pos < end; pos++) {
+      if (pos < pos0) return 1;
+      const uint64_t row = (uint64_t)(pos - pos0) * kHeadDim;
+      const uint64_t slot = (uint64_t)(pos % ratio) * kHeadDim;
+      q.add(s.pool_kv + slot, spec_rows(d, d->spec_pool, il, 0) + row, kHeadDim);
+      q.add(s.pool_score + slot, spec_rows(d, d->spec_pool, il, 1) + row, kHeadDim);
+    }
+  }
+  /* The copies stay queued ahead of the next evaluation; a batch's sessions
+   * do their host work meanwhile. */
+  if (!q.flush()) return 1;
+  d->pos = end;
+  d->engram_history.resize(end);
+  return 0;
+}
+
+int ds41_decoder_step(ds41_decoder* d, int token, float* logits, ds41_decoder_layer_fn layer_fn, void* ctx) {
+  return ds41_decoder_eval(d, &token, 1, logits, logits ? 1 : 0, layer_fn, ctx);
+}
+
+bool ds41_decoder_sample(ds41_decoder* d, uint32_t row, const ds41_v41_proposal* q, float temperature, double u,
+                         double u2, ds41_v41_sample_result* out) {
+  if (!d || row >= d->resident_logits || d->logits_gen != d->shared->logits_gen) return false;
+  if (!d->sample_scratch) d->sample_scratch = alloc<uint8_t>(d->allocations, DS41_V41_SAMPLE_SCRATCH_BYTES);
+  const float* logits = d->shared->views.logits + (uint64_t)(d->logits_row0 + row) * DS41_N_VOCAB;
+  return d->sample_scratch &&
+         ds41_v41_sample_row(logits, DS41_N_VOCAB, q, temperature, u, u2, d->sample_scratch, out) == 0;
+}
+
+bool ds41_decoder_enable_features(ds41_decoder* d) {
+  if (!d) return false;
+  if (!d->features)
+    d->features =
+        alloc<float>(d->allocations, (uint64_t)DS41_DSPARK_FEATURE_ROWS * DS41_DSPARK_TARGET_LAYERS * kDim);
+  d->feature_rows = 0;
+  return d->features != nullptr;
+}
+
+const float* ds41_decoder_features(const ds41_decoder* d, uint32_t* pos0, uint32_t* rows) {
+  *pos0 = d->feature_pos0;
+  *rows = d->feature_rows;
+  return d->features;
+}
+
+bool ds41_v41_linear(uint32_t type, const void* w, uint32_t rows, uint32_t k, const float* x, float* out, uint32_t n) {
+  return linear_raw(type, w, rows, k, x, out, n);
+}
+
+bool ds41_decoder_output_head(const ds41_decoder* d, const float* x, float* logits, uint32_t n) {
+  return linear(d, d->engine->weights->output, x, logits, n);
+}
+
+bool ds41_decoder_embed(const ds41_decoder* d, const int* tokens, uint32_t n, float* host_rows) {
+  const ds41_tensor* embd = d->engine->weights->token_embd;
+  const uint64_t row_bytes = embd->bytes / DS41_N_VOCAB;
+  for (uint32_t t = 0; t < n; t++)
+    if (tokens[t] < 0 || tokens[t] >= (int)DS41_N_VOCAB ||
+        !dequant_row(embd->type, host(d, embd) + (uint64_t)tokens[t] * row_bytes, host_rows + (uint64_t)t * kDim,
+                     kDim))
+      return false;
+  return true;
+}
+
+const float* ds41_decoder_freq_plain(const ds41_decoder* d) { return d->freq_plain; }

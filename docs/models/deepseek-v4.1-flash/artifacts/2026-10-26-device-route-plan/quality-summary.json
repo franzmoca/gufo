@@ -1,0 +1,6 @@
+{
+  "positions": 2999,
+  "argmax_and_nll_columns_identical": true,
+  "nll_precision": "six decimal places in existing probe output",
+  "ppl": 6.319756489194667
+}

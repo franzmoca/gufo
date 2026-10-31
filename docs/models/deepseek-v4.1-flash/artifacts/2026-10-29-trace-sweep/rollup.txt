@@ -1,0 +1,20 @@
+## iq1m pp: busy 2924.15 ms, span 3075.03 ms, 2882 launches per pass
+   moe: routed wmma (prefill) 1189.97, dense: fp16 wmma 835.59, attention 301.04, hyperconnections 258.68, dense: mmq 139.24, dense: bf16 (router/indexer) 104.67
+## iq1m ar-greedy: busy 39.04 ms, span 41.93 ms, 975 launches per token
+   dense: gemv 23.98, moe: routed gemv (decode) 9.73, hyperconnections 1.78, dense: bf16 (router/indexer) 1.78, attention 1.02
+## iq1m ar-sampled: busy 38.44 ms, span 41.38 ms, 978 launches per token
+   dense: gemv 23.91, moe: routed gemv (decode) 9.28, hyperconnections 1.77, dense: bf16 (router/indexer) 1.75, attention 0.93
+## iq1m ds-greedy: busy 24.04 ms, span 25.60 ms, 363 launches per token
+   moe: routed gemv (decode) 9.99, dense: gemv 9.08, dense: bf16 (router/indexer) 0.94, attention 0.92, hyperconnections 0.77, draft: dense 0.64, draft: experts 0.57
+## iq1m ds-sampled: busy 24.58 ms, span 26.03 ms, 371 launches per token
+   moe: routed gemv (decode) 10.08, dense: gemv 9.39, dense: bf16 (router/indexer) 0.93, attention 0.91, hyperconnections 0.81, draft: dense 0.66, draft: experts 0.58
+## iq2xxs pp: busy 3017.18 ms, span 3547.63 ms, 3223 launches per pass
+   moe: routed wmma (prefill) 1287.66, dense: fp16 wmma 831.79, attention 303.44, hyperconnections 256.73, dense: bf16 (router/indexer) 156.66, dense: mmq 84.67
+## iq2xxs ar-greedy: busy 40.41 ms, span 45.79 ms, 1015 launches per token
+   dense: gemv 23.85, moe: routed gemv (decode) 11.19, dense: bf16 (router/indexer) 1.76, hyperconnections 1.76, attention 1.02
+## iq2xxs ar-sampled: busy 40.04 ms, span 45.40 ms, 1026 launches per token
+   dense: gemv 23.97, moe: routed gemv (decode) 10.75, dense: bf16 (router/indexer) 1.75, hyperconnections 1.74, attention 0.95
+## iq2xxs ds-greedy: busy 26.44 ms, span 29.52 ms, 426 launches per token
+   moe: routed gemv (decode) 11.31, dense: gemv 9.74, dense: bf16 (router/indexer) 1.06, attention 0.96, hyperconnections 0.82, draft: dense 0.68, draft: experts 0.61
+## iq2xxs ds-sampled: busy 26.31 ms, span 29.23 ms, 425 launches per token
+   moe: routed gemv (decode) 11.23, dense: gemv 9.66, dense: bf16 (router/indexer) 1.04, attention 0.94, hyperconnections 0.80, draft: dense 0.68, draft: experts 0.62

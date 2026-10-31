@@ -344,10 +344,15 @@ struct ComponentTextCache::Impl {
           resources->pinned_bytes ? resources->pinned_bytes() : 0;
       const auto measured = claim.retained_snapshot_capacity_bytes.value_or(0);
       const auto automatic = measured + pinned / 2;
-      const auto ceiling =
-          claim.retained_snapshot_ceiling_bytes.value_or(measured) + pinned;
       automatic_bytes =
           std::min(TextRunnerRamCacheOptions::kAutomaticMaxBytes, automatic);
+      auto ceiling =
+          claim.retained_snapshot_ceiling_bytes.value_or(measured) + pinned;
+      // The automatic budget may use the host reserve, as whole-state
+      // snapshots do. An explicit limit may reach it too, so a limit below
+      // the automatic budget is never refused; larger ones stop at the
+      // ceiling.
+      ceiling = std::max(ceiling, automatic_bytes);
       // Staging is pinned host memory too, so the host keeps its reserve
       // only if both fit under the ceiling.
       const auto staging = ledger.Limits().staging_bytes;

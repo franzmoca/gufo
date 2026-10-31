@@ -1,0 +1,2 @@
+warning: Git tree '/home/franz/projects/gufo' has uncommitted changes
+PASS: Checked 778 C++ files

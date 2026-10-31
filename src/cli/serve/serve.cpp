@@ -208,7 +208,8 @@ void AddCacheRamOption(gufo::cli::ArgParser& parser,
   parser.AddCustomOption(
       "", "--cache-ram-bytes", "N|off",
       "Retained RAM-cache byte budget (default: 0 = auto: half of free "
-      "RAM, at most 32 GiB; explicit values may use free RAM minus 4 GiB). "
+      "RAM, at most 32 GiB; explicit values may use the larger of that and "
+      "free RAM minus 4 GiB). "
       "off keeps no RAM checkpoints and commits no cache memory; "
       "sessions still reuse their own live state, and --cache-disk still "
       "works (Qwen and Flash-Next then use up to 512 MiB of backing for "
@@ -602,6 +603,10 @@ void PrintServeHelp(std::string_view program_name,
     std::string draft_calibration;
     std::string draft_trace_path;
     std::string prefill_weights;
+    std::uint32_t prefill_batch = 0;
+    bool exact_prefill = false;
+    bool stream_experts = false;
+    std::size_t expert_cache_bytes = 0;
     std::string dspark_model_path;
     std::string mtp_model_path;
     std::string vision_model_path;
@@ -637,7 +642,8 @@ void PrintServeHelp(std::string_view program_name,
                      "Path to GGUF model file (required)", "Model", &model);
     parser.AddOption("", "--mmproj", "PATH",
                      "BF16 vision sidecar for Qwen3.8 or Gemma 4 "
-                     "(auto-discovered beside model)",
+                     "(auto-discovered beside model), or DeepSeek V4.1 "
+                     "(opt-in)",
                      "Model", &vision_model_path);
     parser.AddOption(
         "", "--prefill-weights", "MODE",
@@ -646,6 +652,31 @@ void PrintServeHelp(std::string_view program_name,
         "copy of the weights) or decoded (binary16 where it pays; about 2.3 "
         "copies) (default: off)",
         "Model", &prefill_weights);
+    parser.AddOption(
+        "", "--prefill-batch", "N",
+        "DeepSeek V4.1 Flash: most prompt tokens per prefill batch, 16 to "
+        "4096; 4096 prefills 2-3% faster, but its larger scratch leaves the "
+        "prompt cache no memory at the native context (default: 2048)",
+        "Model", &prefill_batch);
+    parser.AddFlag(
+        "", "--exact-prefill",
+        "DeepSeek V4.1 Flash: run every decoder layer over every prompt "
+        "token instead of only each prompt's last 140 (decoder SWA bounded "
+        "replay; about twice the prefill time)",
+        "Model", &exact_prefill);
+    parser.AddFlag(
+        "", "--stream-experts",
+        "DeepSeek V4.1 Flash: keep dense weights resident and stream routed "
+        "experts from the SSD through a bounded cache; needed for IQ2_XXS, "
+        "and runs IQ1_M in less memory, more slowly. Without it, a model "
+        "that does not fit available memory fails to load",
+        "Model", &stream_experts);
+    parser.AddOption(
+        "", "--expert-cache-bytes", "N",
+        "DeepSeek V4.1 Flash with --stream-experts: streamed expert cache "
+        "bytes; smaller leaves more memory free and reads more from the SSD "
+        "(default: 0 = available memory minus 4 GiB)",
+        "Model", &expert_cache_bytes);
     parser.AddOption("", "--image-tokens", "N",
                      "Gemma 4 soft tokens per image: 70, 140, 280, 560 or "
                      "1120 (default: 280)",
@@ -710,9 +741,10 @@ void PrintServeHelp(std::string_view program_name,
                      "Gemma 4 MTP: append one JSON line per verification "
                      "cycle (prices, estimates, outcome, stage times) to PATH",
                      "Speculative", &draft_trace_path);
-    parser.AddOption("", "--dspark-model", "PATH",
-                     "Path to DeepSeek V4 Flash DSpark support GGUF file",
-                     "Speculative", &dspark_model_path);
+    parser.AddOption(
+        "", "--dspark-model", "PATH",
+        "Path to the DeepSeek V4 or V4.1 Flash DSpark support GGUF file",
+        "Speculative", &dspark_model_path);
     parser.AddOption("", "--mtp-model", "PATH",
                      "Path to the Qwen MTP draft GGUF (Qwen3.8-Flash-Next: the "
                      "mtp-...-shared-*.gguf sidecar)",
@@ -1239,6 +1271,10 @@ int RunServe(std::span<const char* const> args) {
     std::string draft_calibration;
     std::string draft_trace_path;
     std::string prefill_weights;
+    std::uint32_t prefill_batch = 0;
+    bool exact_prefill = false;
+    bool stream_experts = false;
+    std::size_t expert_cache_bytes = 0;
     std::string dspark_model_path;
     std::string mtp_model_path;
     std::string vision_model_path;
@@ -1275,7 +1311,8 @@ int RunServe(std::span<const char* const> args) {
                          "Path to GGUF model file (required)", "Model", &model);
     llm_parser.AddOption("", "--mmproj", "PATH",
                          "BF16 vision sidecar for Qwen3.8 or Gemma 4 "
-                         "(auto-discovered beside model)",
+                         "(auto-discovered beside model), or DeepSeek V4.1 "
+                         "(opt-in)",
                          "Model", &vision_model_path);
     llm_parser.AddOption(
         "", "--prefill-weights", "MODE",
@@ -1284,6 +1321,31 @@ int RunServe(std::span<const char* const> args) {
         "copy of the weights) or decoded (binary16 where it pays; about 2.3 "
         "copies) (default: off)",
         "Model", &prefill_weights);
+    llm_parser.AddOption(
+        "", "--prefill-batch", "N",
+        "DeepSeek V4.1 Flash: most prompt tokens per prefill batch, 16 to "
+        "4096; 4096 prefills 2-3% faster, but its larger scratch leaves the "
+        "prompt cache no memory at the native context (default: 2048)",
+        "Model", &prefill_batch);
+    llm_parser.AddFlag(
+        "", "--exact-prefill",
+        "DeepSeek V4.1 Flash: run every decoder layer over every prompt "
+        "token instead of only each prompt's last 140 (decoder SWA bounded "
+        "replay; about twice the prefill time)",
+        "Model", &exact_prefill);
+    llm_parser.AddFlag(
+        "", "--stream-experts",
+        "DeepSeek V4.1 Flash: keep dense weights resident and stream routed "
+        "experts from the SSD through a bounded cache; needed for IQ2_XXS, "
+        "and runs IQ1_M in less memory, more slowly. Without it, a model "
+        "that does not fit available memory fails to load",
+        "Model", &stream_experts);
+    llm_parser.AddOption(
+        "", "--expert-cache-bytes", "N",
+        "DeepSeek V4.1 Flash with --stream-experts: streamed expert cache "
+        "bytes; smaller leaves more memory free and reads more from the SSD "
+        "(default: 0 = available memory minus 4 GiB)",
+        "Model", &expert_cache_bytes);
     llm_parser.AddOption("", "--image-tokens", "N",
                          "Gemma 4 soft tokens per image: 70, 140, 280, 560 or "
                          "1120 (default: 280)",
@@ -1355,9 +1417,10 @@ int RunServe(std::span<const char* const> args) {
         "Gemma 4 MTP: append one JSON line per verification cycle (prices, "
         "estimates, outcome, stage times) to PATH",
         "Speculative", &draft_trace_path);
-    llm_parser.AddOption("", "--dspark-model", "PATH",
-                         "Path to DeepSeek V4 Flash DSpark support GGUF file",
-                         "Speculative", &dspark_model_path);
+    llm_parser.AddOption(
+        "", "--dspark-model", "PATH",
+        "Path to the DeepSeek V4 or V4.1 Flash DSpark support GGUF file",
+        "Speculative", &dspark_model_path);
     llm_parser.AddOption(
         "", "--mtp-model", "PATH",
         "Path to the Qwen MTP draft GGUF (Qwen3.8-Flash-Next: the "
@@ -1584,6 +1647,9 @@ int RunServe(std::span<const char* const> args) {
     // so supervisors see a loading server rather than a refused connection.
     server::LoadingResponder loading(host, port);
     backend->set_gemma_prefill_weights(prefill_weights);
+    backend->set_deepseek_prefill_batch(prefill_batch);
+    backend->set_deepseek_exact_prefill(exact_prefill);
+    backend->set_deepseek_expert_streaming(stream_experts, expert_cache_bytes);
     const bool load_ok = backend->load(
         model, &err, max_context, session_count,
         server::TextPrefillPolicy{

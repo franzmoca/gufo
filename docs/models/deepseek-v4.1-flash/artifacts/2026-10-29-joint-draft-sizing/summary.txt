@@ -1,0 +1,45 @@
+== E27: one joint verification for concurrent DSpark sessions
+
+Builds: base 648974b2; v1 = per-session row cap (retained); v2 = trim after
+drafting; v3 = batch plan before drafting (+ fast acceptance updates,
+full-width probes, lookup-informed acceptance). IQ1_M resident, Lucebox
+Q2K/Q4K drafter, --sessions 8, context 4096, greedy, tg128.
+
+== card workload (model-bench multi-dspark, same pp2048 prompt for every user)
+decode tok/s; v1/v3 means of 3 runs unless marked (1)
+mixed       base(1)   v1      v2(1)   v3      AR today(1)
+  C4        42.62     51.44   51.88   58.03   62.91
+  C6        43.68     54.95   54.93   60.96   59.98
+  C8        44.65     57.78   54.49   62.93   51.76
+repetitive  base(1)   v1      v2(1)   v3
+  C4        75.43     89.16   86.54   85.99
+  C6        74.86     97.38   92.37   99.48(1)
+  C8        74.77     92.31   90.90   88.50(1)
+Every completion matched the isolated C1 AR hashes (regenerated with base;
+the card's 2026-10-26 hashes no longer match after the prefill commits).
+AR identical between base and v1 (62.91/59.98/51.76 vs 62.98/59.99/51.74).
+
+== lockstep (repetitive C4, traced joint passes)
+v1: 34 passes, 16-row passes 165.8-167.1 ms
+v3: 37 passes, 16-row passes 184.3-185.8 ms
+Same prompt for every user keeps v1's sessions at identical positions, so a
+16-row pass holds four copies of the same tokens and shares their experts.
+v3's first session takes the spare rows and the sessions drift apart.
+
+== distinct prompts (serving_bench, qwen3.8-27b speculative-corpus.json,
+   11 prompts, --corpus-layout distinct, aggregate output tok/s incl. prefill)
+            base    v1      v3      AR
+  C1        32.60   32.72   32.67   24.57
+  C4        40.63   47.56   47.32   46.01
+  C8        42.13   51.48   52.01   54.63
+All C4/C8 completions matched their C1 completions.
+
+== step costs (served, C4, 2K context)
+drafter forward 8-10 ms per session (serial); joint pass 4 rows ~63-68 ms,
+8 rows ~110-120, 16 rows ~166-185.
+
+== functional (DSpark, --sessions 4, tier pr, record-baseline)
+batch failed with the first v1 (cross-endpoint seeded completion at
+temperature 0.7 differed from its serial run: capped sampled drafts change
+which draws a block consumes); sampled drafts are now exempt from the cap.
+After that: batch, sampling-defaults, sampling-ranges, stops, tools pass.

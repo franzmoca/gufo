@@ -1,0 +1,19 @@
+2026-10-27 07:02:04 [INFO] [ds41] DeepSeek V4.1 Flash: 4 backbone shard(s), 128.32 GiB device-eligible weights; Engram /mnt/data/models/ds41/ista-gsq-rco-gguf/DeepSeek-V4.1-Flash-Engram-IQ4_NL.gguf (103.00 GiB, 144 B rows, read from disk)
+2026-10-27 07:02:04 [INFO] [ds4] backend initialized on AMD Radeon 8060S Graphics (sm_115)
+2026-10-27 07:02:04 [INFO] [ds4] native MMQ enabled
+2026-10-27 07:02:04 [INFO] [ds41] streaming routed experts: 5.31 GiB dense weights, 121.65 GiB available unified memory
+ds41: ROCm weights (128.76 GiB) do not fit the device heap above its 4.00 GiB dispatch reserve; placing them in managed memory
+2026-10-27 07:02:04 [INFO] [ds4] loading model tensors into device cache
+2026-10-27 07:02:05 [INFO] [ds4] ROCm startup model cache prepared 5.31 GiB of tensor spans in 0.922s
+2026-10-27 07:02:24 [INFO] [ds41] expert seed (built-in V4.1 ranking): cached 10240 of 10240 ranked experts from 81.96 GiB in 18.82 s
+2026-10-27 07:02:27 [INFO] [ds41] expert cache interval: 81.2% route hits, 3.14 MiB read/token, 1.43 ms host wait/token, 102.52 GiB allocated
+[Model Load]: 19.8408 s
+| model                            |       size | backend    |               test |                   t/s |
+| -------------------------------- | ---------- | ---------- | ------------------ | --------------------- |
+| DeepSeek V4.1 Flash              | 128.75 GiB | ROCm (HIP) |             pp2048 |        664.03 ± 0.00 |
+2026-10-27 07:02:31 [INFO] [ds41] expert cache interval: 92.9% route hits, 130.06 MiB read/token, 55.33 ms host wait/token, 102.52 GiB allocated
+2026-10-27 07:02:34 [INFO] [ds41] expert cache interval: 96.8% route hits, 63.48 MiB read/token, 51.56 ms host wait/token, 102.53 GiB allocated
+| DeepSeek V4.1 Flash              | 128.75 GiB | ROCm (HIP) |              tg128 |         16.70 ± 0.00 |
+2026-10-27 07:02:35 [INFO] [ds41] expert cache total: 82.8% route hits, 9.13 MiB read/token, 4.84 ms host wait/token, 102.54 GiB allocated
+2026-10-27 07:02:35 [INFO] [ds41] expert reads: 17651 direct, 0 buffered
+

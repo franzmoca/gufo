@@ -1,0 +1,103 @@
+{
+  "decision": "retained as device route-planning groundwork; no throughput gain qualified",
+  "baseline_revision": "cae1c4ec",
+  "scope": "Large batches whose gate/up and down both use routed FP16 kernels; all small batches and mixed MMQ layers retain their paths. Stable grouped rows and 64-slot tile order; bounded tile grid with -1 sentinels. Existing plan allocation reused; no extra scratch allocation.",
+  "layers": {
+    "eligible": 38,
+    "total": 40,
+    "mixed_cpu_fallback": 2
+  },
+  "model": "ISTA GSQ-RCO IQ1_M with IQ4_NL Engram, no drafter",
+  "flake_lock_sha256": "f071dd2d0a8a96e7ff0998844ce3bbea2c8e580c5ac8c08ba762900fd381de5e",
+  "operator_check": "18 stable-plan cases, including skew, invalid IDs, all-invalid, 63/64/65 slots and 1/7/384/512 experts, plus IQ1_S/IQ1_M/IQ2_XXS fused gate/up and down checks; all pass.",
+  "quality": {
+    "positions": 2999,
+    "argmax_and_nll_columns_identical": true,
+    "nll_precision": "six decimal places in existing probe output",
+    "ppl": 6.319756489194667
+  },
+  "benchmarks": {
+    "baseline": {
+      "pp2048": 1205.51,
+      "tg128": 23.99,
+      "pp16": 71.31,
+      "pp128": 362.46
+    },
+    "candidate": {
+      "pp2048": 1205.8,
+      "tg128": 24.01,
+      "pp16": 72.41,
+      "pp128": 362.58
+    }
+  },
+  "per_phase_comparison": {
+    "pp2048": {
+      "baseline_tps": 1205.51,
+      "candidate_tps": 1205.8,
+      "baseline_ms_from_rounded_rate": 1698.8660400992112,
+      "candidate_ms_from_rounded_rate": 1698.4574556311163,
+      "relative_wall_change": -0.0002405042295571258,
+      "exceeds_5pct_and_3ms_slowdown": false
+    },
+    "tg128": {
+      "baseline_tps": 23.99,
+      "candidate_tps": 24.01,
+      "baseline_ms_from_rounded_rate": 5335.556481867445,
+      "candidate_ms_from_rounded_rate": 5331.112036651395,
+      "relative_wall_change": -0.0008329862557268086,
+      "exceeds_5pct_and_3ms_slowdown": false
+    },
+    "pp16": {
+      "baseline_tps": 71.31,
+      "candidate_tps": 72.41,
+      "baseline_ms_from_rounded_rate": 224.37245828074603,
+      "candidate_ms_from_rounded_rate": 220.96395525479906,
+      "relative_wall_change": -0.015191271923767458,
+      "exceeds_5pct_and_3ms_slowdown": false
+    },
+    "pp128": {
+      "baseline_tps": 362.46,
+      "candidate_tps": 362.58,
+      "baseline_ms_from_rounded_rate": 353.1424157148375,
+      "candidate_ms_from_rounded_rate": 353.0255391913509,
+      "relative_wall_change": -0.0003309614429918284,
+      "exceeds_5pct_and_3ms_slowdown": false
+    }
+  },
+  "profiles": {
+    "baseline": {
+      "total_ms": 1624.487717,
+      "wall_ms": 1651.561608,
+      "dispatches": 1282,
+      "scope": "GPU pass 2 with 20 ms gap splitting; excludes loading/setup"
+    },
+    "candidate": {
+      "total_ms": 1621.793334,
+      "wall_ms": 1645.07137,
+      "dispatches": 1320,
+      "scope": "GPU pass 2 with 20 ms gap splitting; excludes loading/setup"
+    }
+  },
+  "qualification": "One matched unprofiled production pair per shape; all timings retained. No result exceeds both 5% and 3 ms slowdown gates. Throughput is effectively flat, not a speed qualification.",
+  "token_hashes": {
+    "baseline": "70d5a48a260f87451697c19615b718329d1bbf1806b84f00c9f57699e31b1b15",
+    "candidate": "70d5a48a260f87451697c19615b718329d1bbf1806b84f00c9f57699e31b1b15"
+  },
+  "device_planner": {
+    "routed_counts_kernel": {
+      "calls": 38,
+      "ms": 0.345454,
+      "shape": "blocks=384x1x1 wg=256"
+    },
+    "routed_bounds_kernel": {
+      "calls": 38,
+      "ms": 0.21553,
+      "shape": "blocks=1x1x1 wg=512"
+    },
+    "routed_rows_kernel": {
+      "calls": 38,
+      "ms": 0.619832,
+      "shape": "blocks=384x1x1 wg=256"
+    }
+  }
+}

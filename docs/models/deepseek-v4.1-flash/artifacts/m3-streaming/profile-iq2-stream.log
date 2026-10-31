@@ -1,0 +1,114 @@
+warning: ignoring untrusted flake configuration setting 'extra-substituters'.
+Pass '--accept-flake-config' to trust it
+warning: ignoring untrusted flake configuration setting 'extra-trusted-public-keys'.
+Pass '--accept-flake-config' to trust it
+W20261026 23:32:26.760124 140736957767936 simple_timer.cpp:55] [rocprofv3] tool initialization ::     0.000471 sec
+W20261026 23:32:26.771868 140736957767936 simple_timer.cpp:55] [rocprofv3] 'build/release/gufo bench -m /mnt/data/models/ds41/ista-gsq-rco-gguf/DeepSeek-V4.1-Flash-1017-GSQ-RCO-IQ2_XXS-00001-of-00004.gguf -p 140 -n 16 -r 1' ::     0.000000 sec
+W20261026 23:32:26.791761 140736957767936 tool.cpp:2424] HSA version 1.18.0 initialized (instance=0)
+2026-10-26 23:32:26 [INFO] [ds41] DeepSeek V4.1 Flash: 4 backbone shard(s), 128.32 GiB device-eligible weights; Engram /mnt/data/models/ds41/ista-gsq-rco-gguf/DeepSeek-V4.1-Flash-Engram-IQ4_NL.gguf (103.00 GiB, 144 B rows, read from disk)
+2026-10-26 23:32:26 [INFO] [ds4] backend initialized on AMD Radeon 8060S Graphics (sm_115)
+2026-10-26 23:32:26 [INFO] [ds4] native MMQ enabled
+2026-10-26 23:32:26 [INFO] [ds41] streaming routed experts: 5.31 GiB dense weights, 121.97 GiB available unified memory
+ds41: ROCm weights (128.76 GiB) do not fit the device heap above its 4.00 GiB dispatch reserve; placing them in managed memory
+2026-10-26 23:32:26 [INFO] [ds4] loading model tensors into device cache
+2026-10-26 23:32:28 [INFO] [ds4] ROCm startup model cache prepared 5.31 GiB of tensor spans in 1.114s
+2026-10-26 23:32:35 [INFO] [ds41] expert cache interval: 0.0% route hits, 208.67 MiB read/token, 51.59 ms host wait/token, 33.69 GiB allocated
+[Model Load]: 1.28506 s
+| model                            |       size | backend    |               test |                   t/s |
+| -------------------------------- | ---------- | ---------- | ------------------ | --------------------- |
+| DeepSeek V4.1 Flash              | 128.75 GiB | ROCm (HIP) |              pp140 |         18.77 ± 0.00 |
+| DeepSeek V4.1 Flash              | 128.75 GiB | ROCm (HIP) |               tg16 |          8.33 ± 0.00 |
+2026-10-26 23:32:37 [INFO] [ds41] expert cache total: 16.3% route hits, 216.14 MiB read/token, 52.99 ms host wait/token, 43.10 GiB allocated
+W20261026 23:32:38.060953 140736957767936 simple_timer.cpp:55] [rocprofv3] 'build/release/gufo bench -m /mnt/data/models/ds41/ista-gsq-rco-gguf/DeepSeek-V4.1-Flash-1017-GSQ-RCO-IQ2_XXS-00001-of-00004.gguf -p 140 -n 16 -r 1' ::    11.289085 sec
+W20261026 23:32:38.066192 140736957767936 generateRocpd.cpp:583] writing SQL database for process 1078368 on node 775975064
+E20261026 23:32:38.067171 140736957767936 generateRocpd.cpp:606] Opened result file: /tmp/gufo-m3-profile/iq2-stream_results.db (UUID=000005b5-0cf4-7cf4-9884-c67132a2c76b)
+W20261026 23:32:38.205335 140736957767936 simple_timer.cpp:55] SQLite3 generation :: rocpd_string             ::     0.020671 sec
+W20261026 23:32:38.207331 140736957767936 simple_timer.cpp:55] SQLite3 generation :: rocpd_info_node          ::     0.001986 sec
+W20261026 23:32:38.209851 140736957767936 simple_timer.cpp:55] SQLite3 generation :: rocpd_info_process       ::     0.002513 sec
+W20261026 23:32:38.215460 140736957767936 simple_timer.cpp:55] SQLite3 generation :: rocpd_info_agent         ::     0.002083 sec
+W20261026 23:32:38.215470 140736957767936 simple_timer.cpp:55] SQLite3 generation :: rocpd_info_pmc           ::     0.000004 sec
+W20261026 23:32:38.236667 140736957767936 simple_timer.cpp:55] SQLite3 generation :: rocpd kernel info        ::     0.021193 sec
+W20261026 23:32:38.236675 140736957767936 simple_timer.cpp:55] SQLite3 generation :: rocpd_region             ::     0.000001 sec
+W20261026 23:32:38.503638 140736957767936 simple_timer.cpp:55] SQLite3 generation :: rocpd_kernel_dispatch    ::     0.266959 sec
+W20261026 23:32:38.503650 140736957767936 simple_timer.cpp:55] SQLite3 generation :: rocpd_pmc_event          ::     0.000000 sec
+W20261026 23:32:38.503652 140736957767936 simple_timer.cpp:55] SQLite3 generation :: rocpd_memory_copy        ::     0.000000 sec
+W20261026 23:32:38.503653 140736957767936 simple_timer.cpp:55] SQLite3 generation :: rocpd_memory_allocate    ::     0.000000 sec
+W20261026 23:32:38.503768 140736957767936 simple_timer.cpp:55] SQLite3 generation :: SQL indexing             ::     0.000114 sec
+W20261026 23:32:38.504682 140736957767936 simple_timer.cpp:55] SQLite3 generation :: total                    ::     0.438491 sec
+W20261026 23:32:38.504906 140736957767936 simple_timer.cpp:55] [rocprofv3] output generation ::     0.442435 sec
+W20261026 23:32:38.505084 140736957767936 simple_timer.cpp:55] [rocprofv3] tool finalization ::     0.442628 sec
+
+database: /tmp/gufo-m3-profile/iq2-stream_results.db
+
+dispatches      : 19391
+kernel time sum :    1375.03 ms
+gpu busy (union):    1375.03 ms
+wall span       :   11033.51 ms
+idle in span    :    9658.47 ms  (87.5% of span -- launch or host bound if large)
+
+-- pipeline stages --
+stage                          calls   total ms       %
+other                          17426    1357.03   98.7%
+runtime: fill                    333      15.35    1.1%
+runtime: copy                   1632       2.66    0.2%
+
+-- kernels (top 35) --
+kernel                                                calls   total ms   mean us       %  shape
+gemv_kernel<13, 8, false, 1>                           1330     203.89    153.30   14.8%  blocks=32320x1x1 wg=256  (+3 other shapes)
+mul_mat_q<(ggml_type)17, 16, false, true, false>         36     126.06   3501.77    9.2%  blocks=36x1x384 wg=128  (+1 other shapes)
+gemv_kernel<13, 2, false, 1>                           1280     109.49     85.54    8.0%  blocks=2048x1x1 wg=256  (+1 other shapes)
+routed_f16_kernel<16, true, true>                        28      93.53   3340.24    6.8%  blocks=18x397x1 wg=256  (+1 other shapes)
+dense_q5k_f16_kernel<true>                              242      83.59    345.43    6.1%  blocks=100x1x1 wg=512  (+4 other shapes)
+routed_f16_kernel<29, true, true>                        32      76.19   2381.02    5.5%  blocks=18x397x1 wg=256  (+1 other shapes)
+routed_f16_kernel<29, false, false>                      56      75.89   1355.21    5.5%  blocks=20x134x1 wg=256  (+10 other shapes)
+expert_gemv_kernel<16, 1, true>                         272      74.40    273.53    5.4%  blocks=72x6x1 wg=256
+dense_q5k_f16_kernel<false>                             484      56.71    117.18    4.1%  blocks=100x1x1 wg=512  (+4 other shapes)
+expert_gemv_kernel<29, 1, true>                         256      54.45    212.68    4.0%  blocks=72x6x1 wg=256
+gemv_kernel<13, 4, true, 1>                             640      53.12     82.99    3.9%  blocks=288x1x1 wg=256
+expert_gemv_kernel<29, 1, false>                        448      43.29     96.64    3.1%  blocks=160x6x1 wg=256
+expert_gemv_kernel<17, 1, true>                         112      31.83    284.23    2.3%  blocks=72x6x1 wg=256
+gemv_kernel<8, 4, false, 1>                             640      31.00     48.44    2.3%  blocks=224x1x1 wg=256
+matmul_bf16_vec8_kernel                                1067      28.63     26.83    2.1%  blocks=4x18x1 wg=256  (+6 other shapes)
+routed_f16_kernel<16, false, false>                      16      25.27   1579.52    1.8%  blocks=20x115x1 wg=256  (+3 other shapes)
+matmul_bf16_wmma_kernel                                 115      23.91    207.87    1.7%  blocks=8x3x1 wg=256  (+8 other shapes)
+routed_f16_kernel<16, true, false>                        6      22.23   3704.68    1.6%  blocks=18x117x1 wg=256  (+5 other shapes)
+hc_mix_small_kernel<4u>                                1280      18.56     14.50    1.3%  blocks=192x1x1 wg=256
+expert_gemv_kernel<16, 1, false>                        128      18.43    144.00    1.3%  blocks=160x6x1 wg=256
+__amd_rocclr_fillBufferAligned                          333      15.35     46.10    1.1%  blocks=20x1x1 wg=256  (+8 other shapes)
+hc_expand_sum_kernel                                    720      10.98     15.25    0.8%  blocks=20x140x1 wg=256  (+2 other shapes)
+mul_mat_q<(ggml_type)17, 32, false, true, false>         18      10.97    609.63    0.8%  blocks=80x3x384 wg=128  (+3 other shapes)
+attention_f16_kernel                                     80      10.90    136.31    0.8%  blocks=140x2x1 wg=256  (+1 other shapes)
+expert_gemv_kernel<17, 1, false>                         64       9.59    149.77    0.7%  blocks=160x6x1 wg=256
+mul_mat_q<(ggml_type)17, 64, false, true, false>         18       7.99    443.91    0.6%  blocks=80x2x384 wg=128  (+4 other shapes)
+mul_mat_q<(ggml_type)8, 80, false, true, false>          80       7.54     94.28    0.5%  blocks=20x2x1 wg=128  (+1 other shapes)
+hc_state_pass_kernel<true>                               80       6.09     76.18    0.4%  blocks=70x1x1 wg=640  (+1 other shapes)
+hc_collapse_norm_kernel<4u>                            1298       5.58      4.30    0.4%  blocks=1x1x1 wg=1024
+route_kernel                                            720       5.26      7.31    0.4%  blocks=140x1x1 wg=256  (+2 other shapes)
+attention_split_kernel                                  640       3.80      5.94    0.3%  blocks=4x20x1 wg=512
+attention_combine_kernel                                640       3.75      5.86    0.3%  blocks=64x1x1 wg=128
+hc_state_pass_kernel<false>                              80       3.73     46.66    0.3%  blocks=70x1x1 wg=640  (+1 other shapes)
+mul_mat_q<(ggml_type)8, 16, false, true, false>          80       3.10     38.74    0.2%  blocks=20x1x1 wg=128  (+1 other shapes)
+q_kv_norm_kernel                                        720       2.77      3.85    0.2%  blocks=2x140x1 wg=256  (+2 other shapes)
+
+-- largest idle gaps (top 20) --
+    gap us  after -> before
+ 1164115.3  __amd_rocclr_fillBufferAligned -> __amd_rocclr_fillBufferAligned
+  331754.0  __amd_rocclr_copyBuffer -> __amd_rocclr_copyBuffer
+  308912.1  __amd_rocclr_copyBuffer -> routed_counts_kernel
+  285601.7  __amd_rocclr_copyBuffer -> routed_counts_kernel
+  249291.7  __amd_rocclr_copyBuffer -> __amd_rocclr_copyBuffer
+  239401.2  __amd_rocclr_copyBuffer -> routed_counts_kernel
+  223868.9  __amd_rocclr_copyBuffer -> __amd_rocclr_copyBuffer
+  220023.4  __amd_rocclr_copyBuffer -> routed_counts_kernel
+  218634.8  __amd_rocclr_copyBuffer -> __amd_rocclr_copyBuffer
+  214968.9  __amd_rocclr_copyBuffer -> routed_counts_kernel
+  212671.3  __amd_rocclr_copyBuffer -> routed_counts_kernel
+  203645.5  __amd_rocclr_copyBuffer -> __amd_rocclr_copyBuffer
+  196506.3  __amd_rocclr_copyBuffer -> routed_counts_kernel
+  192748.4  __amd_rocclr_copyBuffer -> routed_counts_kernel
+  190876.4  __amd_rocclr_copyBuffer -> routed_counts_kernel
+  186675.0  __amd_rocclr_copyBuffer -> routed_counts_kernel
+  181502.9  __amd_rocclr_copyBuffer -> routed_counts_kernel
+  174958.7  __amd_rocclr_copyBuffer -> __amd_rocclr_copyBuffer
+  173584.6  __amd_rocclr_copyBuffer -> routed_counts_kernel
+  170620.5  __amd_rocclr_copyBuffer -> routed_counts_kernel

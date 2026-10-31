@@ -1,0 +1,44 @@
+== E14: joint evaluation of concurrent DSpark sessions
+
+== kernel rows (ds41_mmq_typed_test, 12 and 16 rows against one launch per row)
+dense GEMV (plain, pair, SwiGLU; Q4_K, Q8_0, Q5_K; slices 1/4/8) and grouped
+experts (IQ1_S, IQ1_M, IQ2_XXS, IQ2_S; plain, SwiGLU, grouped, per-slot):
+every case exact, full test PASS (kernel-rows.txt). The 16-column
+instantiations add no scratch; IQ1_M's 32/64 B scratch is present at every
+width.
+
+== decoder (ds41_load_probe --joint-check, 1,096-token prompt, prefixes per session)
+joint-check.txt: every row of every session bit-identical to its own
+speculative evaluation, for 2, 3 and 4 sessions (up to 16 rows, 328 rows).
+Before two fixes, 16-row batches diverged: the BF16 matmul switches to WMMA
+tiles from 16 rows, and the per-token hc mix kernel stopped at 15 rows.
+4 sessions, mean 13.7 rows: joint 201.0 ms against 292.3 ms for the four
+evaluations (-31%); 2 sessions, 7.0 rows: 122.4 against 150.5 ms.
+
+== serial speculative check (--spec-check 8 --spec-width 6)
+24 kept rows bit-identical between passes and against single-token decode.
+
+== bench, tg128 at depth 512, alternating builds (bench.txt; tok/s per user)
+greedy   C1 34.75 -> 34.80 / 34.77   C2 17.36 -> 24.27 (+39.8%)   C4 8.64 -> 13.83 (+60.1%)
+sampled  C1 27.13 -> 27.23           C2 13.64 -> 19.11 (+40.1%)   C4 6.82 -> 10.99 (+61.3%)
+(the first greedy E12 C1 run, 32.95, was a cold outlier against 34.75 on its repeat)
+Every request's output hash, speculative statistics and steps are identical
+between builds, runs and concurrency levels (greedy 6952d1de, sampled seed 7
+a5d95f64).
+
+== operator test (ds41_draft_sampling_test): PASS (240 device draws)
+
+== functional (DSpark, --sessions 4, tier pr)
+sampling-defaults, sampling-ranges, batch, stops, tools: passed; no quality
+or coverage changes. Timing comparison inconclusive (functional-controls.txt):
+the C4 batch cases' queue, TTFT and inter-token times depend on the arrival
+order of concurrent requests; an E12-against-E12 control flags the same cases
+at the same magnitudes (79/800 against 73 and 69/800 for E14).
+Single-request flags: alternating sampling-defaults + tools controls give 65
+and 18 non-passing rows for E14 against 48 for E12 against itself; only
+default_thinking_effort recurs (the first request after start: 40-token
+prefill of 37 + 3 rows, 417-556 ms across E12 runs, 538-591 ms on E14). A
+direct prefill A/B (gufo bench, alternating, tok/s) is unchanged:
+pp3 44.4/44.7 -> 44.5/44.5, pp37 156.9/158.2 -> 158.1/157.9,
+pp40 174.9/175.2 -> 175.2/175.3, pp512 847.0/848.1 -> 846.3/835.4.
+The flag stays inconclusive.

@@ -1,0 +1,3 @@
+width 8: spec-check: 72 kept rows, 72 bit-identical between passes (max |diff| 0); against single-token decode: argmax matches on 72, logits bit-identical on 72 (max |diff| 0)
+width 12: spec-check: 88 kept rows, 88 bit-identical between passes (max |diff| 0); against single-token decode: argmax matches on 88, logits bit-identical on 88 (max |diff| 0)
+width 16: spec-check: 136 kept rows, 136 bit-identical between passes (max |diff| 0); against single-token decode: argmax matches on 136, logits bit-identical on 136 (max |diff| 0)

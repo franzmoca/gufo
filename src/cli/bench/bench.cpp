@@ -23,6 +23,9 @@
 #include "src/core/crypto/sha256.hpp"
 #include "src/core/gguf_reader.hpp"
 #include "src/core/sampling.hpp"
+#include "src/models/deepseek_v41_flash/artifact_hint.hpp"
+#include "src/models/deepseek_v41_flash/dspark_sampler.hpp"
+#include "src/models/deepseek_v41_flash/engine.hpp"
 #include "src/models/deepseek_v4_flash/dspark_sampler.hpp"
 #include "src/models/deepseek_v4_flash/engine.hpp"
 #include "src/models/gemma4/engine.hpp"
@@ -90,6 +93,28 @@ void RegisterBenchOptions(ArgParser& parser, BenchOptions& opt,
       "copy of the weights) or decoded (binary16 where it pays; about 2.3 "
       "copies) (default: off)",
       "Model", &opt.prefill_weights);
+  parser.AddOption(
+      "", "--prefill-batch", "N",
+      "DeepSeek V4.1 Flash: most prompt tokens per prefill batch, 16 to "
+      "4096; 4096 prefills 2-3% faster with a larger scratch buffer "
+      "(default: 2048)",
+      "Model", &opt.prefill_batch);
+  parser.AddFlag("", "--exact-prefill",
+                 "DeepSeek V4.1 Flash: run every decoder layer over every "
+                 "prompt token instead of only the prompt's last 140 (decoder "
+                 "SWA bounded replay; about twice the prefill time)",
+                 "Model", &opt.exact_prefill);
+  parser.AddFlag("", "--stream-experts",
+                 "DeepSeek V4.1 Flash: keep dense weights resident and "
+                 "stream routed experts from the SSD through a bounded cache "
+                 "(needed for IQ2_XXS; runs IQ1_M in less memory, more "
+                 "slowly)",
+                 "Model", &opt.stream_experts);
+  parser.AddOption("", "--expert-cache-bytes", "N",
+                   "DeepSeek V4.1 Flash with --stream-experts: streamed "
+                   "expert cache bytes (default: 0 = available memory minus "
+                   "4 GiB)",
+                   "Model", &opt.expert_cache_bytes);
 
   parser.AddCustomOption(
       "-p", "--n-prompt", "n,n,...",
@@ -363,12 +388,63 @@ bool ValidatePrefill(hip::QwenGpuExecutor& executor,
          sequential_token == batched_token;
 }
 
+struct DeepSeekV4FlashBench {
+  using Model = models::deepseek_v4_flash::Model;
+  using ModelOptions = models::deepseek_v4_flash::ModelOptions;
+  using Session = models::deepseek_v4_flash::Session;
+  using SessionSnapshot = models::deepseek_v4_flash::SessionSnapshot;
+  using SessionBatchItem = models::deepseek_v4_flash::SessionBatchItem;
+  using SessionDsparkBatchItem =
+      models::deepseek_v4_flash::SessionDsparkBatchItem;
+  using DsparkSamplerBridge = models::deepseek_v4_flash::DsparkSamplerBridge;
+  static constexpr std::string_view kName = "DeepSeek V4 Flash";
+};
+
+struct DeepSeekV41FlashBench {
+  using Model = models::deepseek_v41_flash::Model;
+  using ModelOptions = models::deepseek_v41_flash::ModelOptions;
+  using Session = models::deepseek_v41_flash::Session;
+  using SessionSnapshot = models::deepseek_v41_flash::SessionSnapshot;
+  using SessionBatchItem = models::deepseek_v41_flash::SessionBatchItem;
+  using SessionDsparkBatchItem =
+      models::deepseek_v41_flash::SessionDsparkBatchItem;
+  using DsparkSamplerBridge = models::deepseek_v41_flash::DsparkSamplerBridge;
+  static constexpr std::string_view kName = "DeepSeek V4.1 Flash";
+};
+
+bool IsDeepSeekV41Flash(const core::GgufReader& reader) {
+  return reader.GetMetadataString("general.architecture") == "deepseek41";
+}
+
 bool IsDeepSeekV4Flash(const core::GgufReader& reader) {
   return reader.GetMetadataString("general.architecture") == "deepseek4";
 }
 
-std::vector<int> MakeDeepSeekBenchmarkTokens(
-    const models::deepseek_v4_flash::Model& model, std::size_t count) {
+/// Model options; the prefill batch, exact prefill and expert streaming apply
+/// to DeepSeek V4.1 Flash only.
+template<typename Ds>
+typename Ds::ModelOptions DeepSeekModelOptions(std::uint32_t max_context,
+                                               std::string dspark_model_path,
+                                               std::uint32_t prefill_batch,
+                                               bool exact_prefill,
+                                               bool stream_experts,
+                                               std::size_t expert_cache_bytes) {
+  typename Ds::ModelOptions options{
+      .max_context = max_context,
+      .dspark_model_path = std::move(dspark_model_path),
+  };
+  if constexpr (requires { options.prefill_batch; }) {
+    options.prefill_batch = prefill_batch;
+    options.exact_prefill = exact_prefill;
+    options.stream_experts = stream_experts;
+    options.expert_cache_bytes = expert_cache_bytes;
+  }
+  return options;
+}
+
+template<typename Ds>
+std::vector<int> MakeDeepSeekBenchmarkTokens(const typename Ds::Model& model,
+                                             std::size_t count) {
   const auto pattern = model.Tokenize(
       "The quick brown fox jumps over the lazy dog. "
       "Strix Halo executes this deterministic benchmark sequence. ");
@@ -382,13 +458,14 @@ std::vector<int> MakeDeepSeekBenchmarkTokens(
   return tokens;
 }
 
+template<typename Ds>
 int RunDeepSeekBenchmark(
     const BenchOptions& options,
     const std::shared_ptr<const core::GgufReader>& reader,
     std::chrono::steady_clock::time_point model_load_start) {
   int device_count = 0;
   if (hipGetDeviceCount(&device_count) != hipSuccess || device_count == 0) {
-    std::cerr << "Error: no HIP GPU is available for DeepSeek V4 Flash\n";
+    std::cerr << "Error: no HIP GPU is available for " << Ds::kName << '\n';
     PrintModelLoadTime(model_load_start, false);
     return 1;
   }
@@ -430,10 +507,16 @@ int RunDeepSeekBenchmark(
   // preserves that distribution, with its own reproducible RNG trace.
   const bool sampled = !options.sampling.can_use_unmodified_argmax();
   const auto sampling_config = options.sampling;
-  const auto sample_next = [&](models::deepseek_v4_flash::Session& session,
+  const auto sample_next = [&](typename Ds::Session& session,
                                sampling::SamplerState& sampler,
                                std::string* error_msg) -> int {
-    int token = session.TakePendingDsparkToken();
+    int token = -1;
+    if constexpr (requires { session.EvaluatePending(error_msg); }) {
+      if (!session.EvaluatePending(error_msg))
+        return -1;
+    } else {
+      token = session.TakePendingDsparkToken();
+    }
     if (token < 0) {
       const auto logits = session.CopyLogits(error_msg);
       if (logits.empty())
@@ -445,21 +528,22 @@ int RunDeepSeekBenchmark(
   };
 
   std::string error;
-  auto model = models::deepseek_v4_flash::Model::Load(
-      options.model_path,
-      models::deepseek_v4_flash::ModelOptions{
-          .max_context = static_cast<std::uint32_t>(required_context),
-          .dspark_model_path = dspark ? options.dspark_model_path : "",
-      },
-      &error);
+  auto model =
+      Ds::Model::Load(options.model_path,
+                      DeepSeekModelOptions<Ds>(
+                          static_cast<std::uint32_t>(required_context),
+                          dspark ? options.dspark_model_path : "",
+                          options.prefill_batch, options.exact_prefill,
+                          options.stream_experts, options.expert_cache_bytes),
+                      &error);
   if (model == nullptr) {
-    std::cerr << "Error creating DeepSeek V4 Flash model: " << error << '\n';
+    std::cerr << "Error creating " << Ds::kName << " model: " << error << '\n';
     PrintModelLoadTime(model_load_start, false);
     return 1;
   }
   PrintModelLoadTime(model_load_start);
 
-  const auto tokens = MakeDeepSeekBenchmarkTokens(*model, required_context);
+  const auto tokens = MakeDeepSeekBenchmarkTokens<Ds>(*model, required_context);
   if (options.validate_prefill_tokens != 0) {
     auto sequential =
         model->CreateSession(options.speculative_backend.empty()
@@ -540,7 +624,7 @@ int RunDeepSeekBenchmark(
 
   for (const std::size_t concurrency : options.concurrency) {
     if (concurrency > 1) {
-      using models::deepseek_v4_flash::Session;
+      using Session = typename Ds::Session;
       for (const std::size_t depth : options.n_depths) {
         auto base = model->CreateSession(
             options.speculative_backend.empty()
@@ -600,21 +684,19 @@ int RunDeepSeekBenchmark(
               } else if (dspark) {
                 std::vector<std::vector<int>> emitted(concurrency);
                 while (true) {
-                  std::vector<models::deepseek_v4_flash::SessionDsparkBatchItem>
-                      items;
+                  std::vector<typename Ds::SessionDsparkBatchItem> items;
                   std::vector<std::size_t> active;
-                  std::vector<std::unique_ptr<
-                      models::deepseek_v4_flash::DsparkSamplerBridge>>
+                  std::vector<std::unique_ptr<typename Ds::DsparkSamplerBridge>>
                       bridges;
                   for (std::size_t i = 0; i < concurrency; ++i) {
                     if (generated[i].size() == count)
                       continue;
                     active.push_back(i);
-                    const ds4_dspark_sampler* hook = nullptr;
+                    decltype(std::declval<typename Ds::DsparkSamplerBridge&>()
+                                 .hook()) hook = nullptr;
                     if (sampled) {
                       bridges.push_back(
-                          std::make_unique<
-                              models::deepseek_v4_flash::DsparkSamplerBridge>(
+                          std::make_unique<typename Ds::DsparkSamplerBridge>(
                               samplers[i]));
                       hook = bridges.back()->hook();
                     }
@@ -652,8 +734,7 @@ int RunDeepSeekBenchmark(
                 }
               } else {
                 for (std::size_t step = 0; step < count; ++step) {
-                  std::vector<models::deepseek_v4_flash::SessionBatchItem>
-                      items;
+                  std::vector<typename Ds::SessionBatchItem> items;
                   for (std::size_t i = 0; i < concurrency; ++i) {
                     const int token =
                         sampled ? sample_next(*sessions[i], samplers[i], &error)
@@ -707,10 +788,10 @@ int RunDeepSeekBenchmark(
       }
       continue;
     }
-    std::unique_ptr<models::deepseek_v4_flash::Session> prepared_session;
+    std::unique_ptr<typename Ds::Session> prepared_session;
     std::size_t prepared_depth = 0;
     for (const std::size_t depth : options.n_depths) {
-      std::unique_ptr<models::deepseek_v4_flash::SessionSnapshot> snapshot;
+      std::unique_ptr<typename Ds::SessionSnapshot> snapshot;
       if (depth > 0) {
         if (prepared_session == nullptr || depth < prepared_depth) {
           prepared_session = model->CreateSession(
@@ -748,8 +829,8 @@ int RunDeepSeekBenchmark(
         runs.reserve(options.repetitions);
         for (std::size_t repetition = 0; repetition < options.repetitions;
              ++repetition) {
-          std::unique_ptr<models::deepseek_v4_flash::Session> local_session;
-          models::deepseek_v4_flash::Session* session = prepared_session.get();
+          std::unique_ptr<typename Ds::Session> local_session;
+          typename Ds::Session* session = prepared_session.get();
           if (snapshot == nullptr) {
             local_session = model->CreateSession(
                 options.speculative_backend.empty()
@@ -798,8 +879,8 @@ int RunDeepSeekBenchmark(
         runs.reserve(options.repetitions);
         for (std::size_t repetition = 0; repetition < options.repetitions;
              ++repetition) {
-          std::unique_ptr<models::deepseek_v4_flash::Session> local_session;
-          models::deepseek_v4_flash::Session* session = prepared_session.get();
+          std::unique_ptr<typename Ds::Session> local_session;
+          typename Ds::Session* session = prepared_session.get();
           if (snapshot == nullptr) {
             local_session = model->CreateSession(
                 options.speculative_backend.empty()
@@ -830,8 +911,7 @@ int RunDeepSeekBenchmark(
           for (std::size_t step = 0; step < generation_length;) {
             if (dspark) {
               std::vector<int> emitted;
-              std::optional<models::deepseek_v4_flash::DsparkSamplerBridge>
-                  bridge;
+              std::optional<typename Ds::DsparkSamplerBridge> bridge;
               if (sampled)
                 bridge.emplace(sampler);
               if (!session->DsparkStep(generation_length - step,
@@ -1509,6 +1589,8 @@ int RunBench(std::span<const char* const> args) {
   auto reader_owner = gufo::core::GgufReader::OpenFile(opt.model_path, &err);
   if (!reader_owner) {
     std::cerr << "Error loading GGUF model '" << opt.model_path << "': " << err
+              << models::deepseek_v41_flash::MissingEngramShardHint(
+                     opt.model_path)
               << "\n";
     PrintModelLoadTime(model_load_start, false);
     return 1;
@@ -1522,7 +1604,12 @@ int RunBench(std::span<const char* const> args) {
     return 1;
   }
   if (IsDeepSeekV4Flash(*reader)) {
-    return RunDeepSeekBenchmark(opt, reader, model_load_start);
+    return RunDeepSeekBenchmark<DeepSeekV4FlashBench>(opt, reader,
+                                                      model_load_start);
+  }
+  if (IsDeepSeekV41Flash(*reader)) {
+    return RunDeepSeekBenchmark<DeepSeekV41FlashBench>(opt, reader,
+                                                       model_load_start);
   }
   if (IsQwen38FlashNext(*reader)) {
     return RunQwen38FlashNextBenchmark(opt, reader, model_load_start);

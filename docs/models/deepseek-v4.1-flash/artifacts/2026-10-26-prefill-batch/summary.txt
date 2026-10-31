@@ -1,0 +1,28 @@
+== E16: --prefill-batch 4096 after bounded replay
+
+Release build 73bdd03b (nix build), IQ1_M + IQ4_NL Engram.
+
+== native (gufo bench -n 0 -r 1, alternating 2048/4096/4096/2048; bench.txt), tok/s
+prompt              batch 2048        batch 4096        change
+pp2048              1149.2 / 1186.6   1162.0 / 1184.5   same work
+pp2560              1242.1 / 1228.8   1268.1 / 1252.8   +2.0%
+pp4096              1311.5 / 1297.2   1330.2 / 1338.5   +2.2%
+pp8192              1344.9 / 1328.0   1366.9 / 1367.6   +2.2%
+pp2560 @ d32768     1131.8 / 1124.3   1163.4 / 1159.7   +3.0%
+pp4096 @ d32768     1197.1 / 1191.7   1228.7 / 1227.3   +2.8%
+pp8192 @ d32768     1233.0 / 1226.9   1269.4 / 1266.2   +3.1%
+Before bounded replay the same switch measured 694 -> 720 tok/s (+3.7%) on a
+4096-token prompt.
+
+== served, default resident setup (serve-memory.txt)
+gufo serve, native 1M context, one session, DSpark Q2_K/Q4_K drafter, memlock
+8 MiB; a 10,084-token chat prompt, then a 2,016-token continuation.
+                            batch 2048       batch 4096
+MemAvailable when ready     1.75 GiB         1.77 GiB
+cache backing committed     615.7 MB         0
+cache capacity              1.25 GB          0.96 GB
+captures per request        6, 3             0 (byte_capacity refused)
+10K cold prefill            1,011.6 tok/s    1,022.0 tok/s
+2K continuation             970.3 tok/s      968.5 tok/s
+At the native context the larger batch leaves the prompt cache no room:
+every capture is refused, so later conversations cannot reuse a prefix.

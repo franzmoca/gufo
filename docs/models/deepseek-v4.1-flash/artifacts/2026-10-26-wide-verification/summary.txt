@@ -1,0 +1,51 @@
+== E15: 16-row single-session verification (P1c)
+
+Baseline: dfb99c58 (E14), verification capped at 7 rows (anchor + 6 copies).
+Candidate: speculative evaluations of up to 16 rows keep single-token
+arithmetic; a session verifies the anchor with up to 15 prompt-lookup copies.
+DSpark blocks stay at 5 drafted rows.
+
+== kernel (ds41_attention_test, attention-test.txt)
+Split attention (one row per grid z) runs up to 16 rows when the caller
+passes the partial buffer. New 12- and 16-row split cases against the f32
+reference: rel_err 3.29e-7 / 3.05e-7, and 1.81e-3 with RoPE (tolerance
+2e-2; existing RoPE cases measure 2.5e-4 to 5.8e-3). PASS.
+
+== decoder (ds41_load_probe --spec-check 16 --spec-width W)
+1,096-token prompt (spec-check-1096.txt): widths 8 / 12 / 16 keep 72 / 88 /
+136 rows, all bit-identical to single-token decode (max |diff| 0). Before,
+width 8 took the matrix-core attention and differed by up to 11.6 in logits.
+3,000- and 18,500-token histories at width 16 (spec-check-score*-width16.txt):
+136 / 136 rows bit-identical, max |diff| 0.
+
+== verification cost (--spec-bench N at 1,103 positions, spec-bench.txt)
+rows    1     4     6     7     8     10    12    14    16
+ms      42.2  81.0  104.1 113.9 124.7 156.0 178.1 202.5 223.1
+Fully accepted lookup: 7 rows commit 7 tokens per 113.9 ms (61.5/s),
+16 rows commit 16 per 223.1 ms (71.7/s).
+
+== code-edit workload (edit.sh, edit-source.txt, edit-ab.txt)
+Repeat a 3,000-character C++ file with one function renamed; greedy, 900
+tokens, think off, alternating builds:
+  7 rows   58.44 / 58.62 tok/s   131 verifications, 121 lookup cycles, 726 copies
+  16 rows  67.81 / 67.36 tok/s    62 verifications,  54 lookup cycles, 806 copies
++15.6%; every lookup copy accepted in both builds; identical token hash
+(c0e64f47).
+
+== standard prompts (run.py, 256 tokens, DSpark, standard-prompts.jsonl)
+No lookup cycles occur; every output identical between builds.
+sampled seeds 7/11, first order: -0.0 to -2.2%; reversed order: -1.9 to +0.4%
+(7 of 8 within 0.4%). greedy seed 7: -0.1 to +1.9%. No regression.
+
+== prefill (gufo bench pp512/pp2048, alternating, prefill-bench.txt)
+pp512 759.3 / 765.7 -> 761.7 / 768.1; pp2048 1243.6 / 1242.5 -> 1244.5 / 1244.8.
+
+== functional (long-context + cache-edits, tier pr, 2 sessions, 32K context,
+baseline recorded on dfb99c58; functional-controls.txt)
+Every case passes; no quality or coverage changes in any run. Timing flags
+do not recur: the first run's cache_edit_last_user_initial decode (112.4 ->
+175.5 ms, 3 tokens, identical draft work) measured 111.9 / 112.0 on the two
+candidate reruns and 112.6 / 111.6 on two unchanged-build controls. The
+remaining prefill/TTFT flags are of the size an unchanged-build control
+shows (long_responses_sampled prefill 203.9 -> 232.6 ms on dfb99c58 itself)
+and are left inconclusive; direct prefill benches are unchanged.

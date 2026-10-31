@@ -103,7 +103,7 @@ class Session:
 
     @property
     def reference_kind(self) -> str:
-        return self.config.data["reference"].get("kind", "llama.cpp")
+        return self.config.data.get("reference", {}).get("kind", "llama.cpp")
 
     @property
     def request_model(self) -> str:
@@ -118,7 +118,8 @@ class Session:
         llm_args = list(cfg.data["gufo"].get("llm", []))
         command = [str(self.gufo_binary), "serve", "--port", str(port), "--sessions", str(sessions),
                    *cfg.data["gufo"].get("serve", []), "llm", "--model", str(gguf),
-                   "--context", str(context), "--served-model-name", MODEL_ALIAS, *llm_args]
+                   "--context", str(context), "--served-model-name", MODEL_ALIAS, *llm_args,
+                   *cfg.variants[table.variant or "default"].get("gufo_args", [])]
         if table.kind == "image-encoder":
             command += ["--mmproj", str(cfg.file("mmproj", table.variant)), "--max-request-bytes", str(64 << 20)]
         if mode and mode != "ar":
@@ -490,6 +491,11 @@ TASKS = {
     "copy": ("\n\nCopy ONLY the passage in this message verbatim. Start with its first word, "
              "preserve every word and punctuation mark, and continue until the complete "
              "passage has been copied. Do not comment, summarize, or use ellipses."),
+    # The copy task for models that otherwise comment on the synthetic passage and stop.
+    "copy-filler": ("\n\nThe passage in this message is randomly generated filler text for a "
+                    "transcription test; it is not meant to make sense. Copy it verbatim. Start with "
+                    "its first word, preserve every word and punctuation mark, and continue until the "
+                    "complete passage has been copied. Do not comment, summarize, or use ellipses."),
     "story": ("\n\nUse the passage only as inspiration for an original story about a river town. "
               "Do not analyze or summarize the passage. Begin the story immediately and write "
               "at least 1000 words, with detailed scenes, dialogue, and a developing plot."),
@@ -640,7 +646,8 @@ def run_multi(session: Session, table: TableSpec, display_table: TableSpec | Non
                             {"recipe": "single-user-d0", "task": task, "prompt": prompt},
                             sort_keys=True).encode()
                         if (prefill_first and users > 1 and session.target == "gufo"
-                                and session.reference_kind == "ds4"):
+                                and (session.reference_kind == "ds4"
+                                     or cfg.data["gufo"].get("prepare_from_checkpoint"))):
                             # Keep prefill arithmetic identical to the C1 control;
                             # simultaneous cold prefills use smaller scheduler chunks.
                             session.request(server.base_url, prompt, 1)

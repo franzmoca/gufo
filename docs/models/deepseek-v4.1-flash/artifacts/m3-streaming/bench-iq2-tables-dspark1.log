@@ -1,0 +1,4 @@
+| DeepSeek V4.1 Flash              | 128.75 GiB | ROCm (HIP) |             pp2048 |        628.13 ± 0.00 |
+DeepSeek tg C=1 depth=0 request=0 accepted=71 drafted=110 steps=37 skipped=0 output_sha256=04842be74b153c8e90e0b6082faae0eec55b930762e9e0ca8132d1c502540254
+| DeepSeek V4.1 Flash              | 128.75 GiB | ROCm (HIP) |              tg128 |         17.94 ± 0.00 |
+2026-10-27 01:00:41 [INFO] [ds41] expert cache total: 80.7% route hits, 12.06 MiB read/token, 4.53 ms host wait/token, 97.58 GiB allocated
