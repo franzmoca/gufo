@@ -4,6 +4,87 @@
   <img src="assets/gufo-logo.jpg" alt="Gufo logo" width="180">
 </p>
 
+## About this fork: DeepSeek V4.1 Flash and Gemma 4 on Gufo
+
+This fork of [gufo-org/gufo](https://github.com/gufo-org/gufo) adds two
+native engines to Gufo, each with its own HIP kernels for prefill, decode and
+speculative verification on Strix Halo. Neither model is on upstream's
+roadmap, so both are maintained here. The default branch, `main`, runs both;
+each model also has its own branch (`ds41`, `gemma`) on top of upstream.
+
+> [!NOTE]
+> **What's new:** the [fork changelog](CHANGELOG_FORK.md) lists the fork's
+> DeepSeek V4.1 and Gemma 4 changes, newest first, with a link to each pull
+> request.
+
+### DeepSeek V4.1 Flash, on one Strix Halo
+
+The 763B-parameter **DeepSeek-V4.1-Flash-1017** runs on a single 128 GB Strix
+Halo, with its native 1M-token context:
+
+- **`IQ1_M` resident** in GPU memory: 24.5 tok/s decode, 30.7 tok/s with
+  DSpark speculative decoding on mixed text and 73.6 tok/s on repetitive
+  text, 1,228 tok/s prefill (single user, depth 0).
+- **`IQ2_XXS` with routed experts streamed from SSD:** 20.8–22.7 tok/s decode
+  across depths.
+- DSpark speculative decoding and prompt lookup, with greedy output identical
+  to plain decoding; image input; up to 86 tok/s total decode across eight
+  concurrent users.
+
+Setup, downloads, memory limits and the headless-deployment requirement are
+in [README_DEEPSEEK.md](README_DEEPSEEK.md); every number is on the
+[benchmark card](docs/models/deepseek-v4.1-flash/BENCHMARKS.md).
+
+### Gemma 4
+
+The native **Gemma 4** engine is also on this branch. Upstream
+[PR #426](https://github.com/gufo-org/gufo/pull/426) stays open for feedback.
+
+#### What it runs
+
+- **Gemma 4 26B-A4B** (mixture of experts): Unsloth UD-Q4_K_XL, UD-Q6_K_XL,
+  UD-Q8_K_XL and the QAT checkpoint.
+- **Gemma 4 31B**: Unsloth UD-Q4_K_XL and UD-Q8_K_XL, and the 31B QAT (Q4_0).
+- **Fine-tunes and uncensored versions** of both models: most quant shapes run,
+  including llama.cpp's standard K-quant mixes (Q4_K_M, Q5_K_M, Q6_K), with the
+  base model's MTP drafter. A GGUF that ships an older revision of the Gemma 4
+  chat template loads with a warning and uses the built-in template. Fine-tunes
+  are not qualified to the cards' limits; the 26B card records one fine-tune's
+  results.
+
+#### Features
+
+- MTP speculative decoding with the `gemma4-assistant` drafters, with a draft
+  length learned from how many drafts are accepted.
+- Image input through the Gemma 4 vision tower (`--mmproj`), with selectable
+  image token budgets (`--image-tokens`).
+- Gemma's reasoning channel and native tool-call syntax, with tool-call
+  arguments streamed as they are generated.
+- Gufo's serving features work with Gemma 4 too: every text endpoint, RAM and
+  disk prompt caching, and batched concurrent sessions.
+
+Benchmarks against llama.cpp and quality reports are in each model card:
+[26B-A4B](docs/models/gemma-4-26b-a4b/README.md),
+[31B](docs/models/gemma-4-31b/README.md) and
+[31B QAT](docs/models/gemma-4-31b-qat/README.md).
+
+### Status
+
+The model branches build on `shared`, which holds the fork's server, cache
+and kernel changes that are not specific to one model. All three are rebased
+onto upstream releases, and `main` merges them; they are currently based on
+v0.23.0. Like upstream, the fork is Strix Halo only (`gfx1151`, Linux).
+Everything below the line is upstream's README; its build steps apply
+unchanged ([Build from source](#build-from-source)). If a DeepSeek V4.1 or
+Gemma 4 GGUF doesn't load, open an issue on this fork with the file name. Bug reports, benchmark
+numbers from other setups, feature requests and PRs are welcome here.
+Thanks to the Gufo maintainers for the engine this builds on.
+
+---
+
+## Upstream Gufo README
+
+Gufo is a vertical local inference engine specifically built and optimized for the AMD Strix Halo hardware:
 Gufo is a vertical local inference engine for Linux and Windows, specifically built and optimized for AMD Strix Halo hardware:
 Ryzen AI MAX+ 395 systems with Radeon 8060S (`gfx1151`), up to 128 GiB of unified memory.
 
