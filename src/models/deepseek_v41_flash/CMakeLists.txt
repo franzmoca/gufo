@@ -84,6 +84,15 @@ set_source_files_properties(
   ${DEEPSEEK_V41_FLASH_ROCM_DIR}/ds41_dense_f16.hip.cpp
   PROPERTIES LANGUAGE HIP)
 
+# LLVM 24 (ROCm 10.1) generates gfx11 code with real-true16 by default and
+# moves f16 values through register halves: the IQ1_S routed expert GEMM grows
+# from 3,631 to 5,164 instructions. Without it the routed GEMMs take 13% and
+# the dense ones 2.5% less time; prefill GPU time falls by 6%.
+set_source_files_properties(
+  ${DEEPSEEK_V41_FLASH_ROCM_DIR}/ds41_routed_f16.hip.cpp
+  ${DEEPSEEK_V41_FLASH_ROCM_DIR}/ds41_dense_f16.hip.cpp
+  PROPERTIES COMPILE_OPTIONS "-Xclang;-target-feature;-Xclang;-real-true16")
+
 target_compile_definitions(gufo_deepseek_v41_flash PRIVATE
   _GNU_SOURCE
   DS41_ROCM_BUILD=1)
