@@ -116,13 +116,13 @@
           "label": "repetitive",
           "workload": "repetition",
           "depth_workloads": {
-            "4096": "copy",
-            "8192": "copy",
-            "12288": "copy",
-            "16384": "copy",
-            "32768": "copy",
-            "65536": "copy",
-            "131072": "copy"
+            "4096": "copy-filler",
+            "8192": "copy-filler",
+            "12288": "copy-filler",
+            "16384": "copy-filler",
+            "32768": "copy-filler",
+            "65536": "copy-filler",
+            "131072": "copy-filler"
           }
         }
       }
