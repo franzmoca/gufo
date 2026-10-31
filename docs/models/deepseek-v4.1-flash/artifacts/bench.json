@@ -7,7 +7,7 @@
     "label": "DS4.1 Flash"
   },
   "files": {
-    "gguf": "first GGUF shard of GSQ-RCO IQ1_M (resident) or IQ2_XXS (streamed); the Engram file sits beside it",
+    "gguf": "first GGUF shard of GSQ-RCO IQ1_M (resident), GSQ-RCO IQ2_XXS (streamed) or Unsloth UD-IQ1_M (streamed); the Engram file sits beside it",
     "dspark": "DeepSeek-V4.1-Flash-1017-DSpark-draft-Q2K-Q4K.gguf"
   },
   "variants": {
@@ -19,6 +19,15 @@
     },
     "iq2xxs": {
       "label": "IQ2_XXS streamed",
+      "requires": [
+        "gguf"
+      ],
+      "gufo_args": [
+        "--stream-experts"
+      ]
+    },
+    "udiq1m": {
+      "label": "UD-IQ1_M streamed",
       "requires": [
         "gguf"
       ],

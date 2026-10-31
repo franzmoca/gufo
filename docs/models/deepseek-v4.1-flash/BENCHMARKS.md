@@ -57,6 +57,21 @@ pp2048 / tg128; depth is the cached prefix in tokens.
 
 ![Single user, autoregressive](artifacts/charts/single-ar-iq2xxs.svg)
 
+---
+
+<!-- bench:single-ar-udiq1m -->
+| DS4.1 Flash UD-IQ1_M streamed AR<br>Depth (tokens) | Gufo pp (tok/s) | Gufo tg (tok/s) |
+| ---: | ---: | ---: |
+| 0 | TODO | TODO |
+| 4,096 | TODO | TODO |
+| 8,192 | TODO | TODO |
+| 12,288 | TODO | TODO |
+| 16,384 | TODO | TODO |
+| 32,768 | TODO | TODO |
+| 65,536 | TODO | TODO |
+| 131,072 | TODO | TODO |
+<!-- /bench -->
+
 ## Single user, DSpark
 
 pp is the highest measured rate per depth across mixed/repetitive text. The
@@ -96,6 +111,21 @@ at a time. Greedy output is identical to plain decoding.
 
 ![Single user, DSpark](artifacts/charts/single-dspark-iq2xxs.svg)
 
+---
+
+<!-- bench:single-dspark-udiq1m -->
+| DS4.1 Flash UD-IQ1_M streamed DSpark<br>Depth (tokens) | Gufo pp (tok/s) | Gufo tg mixed (tok/s) | Gufo tg repetitive (tok/s) |
+| ---: | ---: | ---: | ---: |
+| 0 | TODO | TODO | TODO |
+| 4,096 | TODO | TODO | TODO |
+| 8,192 | TODO | TODO | TODO |
+| 12,288 | TODO | TODO | TODO |
+| 16,384 | TODO | TODO | TODO |
+| 32,768 | TODO | TODO | TODO |
+| 65,536 | TODO | TODO | TODO |
+| 131,072 | TODO | TODO | TODO |
+<!-- /bench -->
+
 ## Multiple users, autoregressive
 
 Same pp2048 prose prompt as single-user d0, tg128, context 4096 per user.
@@ -129,6 +159,18 @@ in one forward; every output matches its isolated C1 reference.
 
 ![Multiple users, autoregressive](artifacts/charts/multi-ar-iq2xxs.svg)
 
+---
+
+<!-- bench:multi-ar-udiq1m -->
+| DS4.1 Flash UD-IQ1_M streamed AR<br>Users | Gufo AR (tok/s) |
+| ---: | ---: |
+| 1 | TODO |
+| 2 | TODO |
+| 4 | TODO |
+| 6 | TODO |
+| 8 | TODO |
+<!-- /bench -->
+
 ## Multiple users, DSpark
 
 Same pp2048 mixed/repetitive prompts as single-user d0, tg128, context 4096
@@ -160,6 +202,18 @@ per user. Concurrent sessions verify their blocks jointly in batches of up to
 <!-- /bench -->
 
 ![Multiple users, DSpark](artifacts/charts/multi-dspark-iq2xxs.svg)
+
+---
+
+<!-- bench:multi-dspark-udiq1m -->
+| DS4.1 Flash UD-IQ1_M streamed DSpark<br>Users | Gufo mixed (tok/s) | Gufo repetitive (tok/s) |
+| ---: | ---: | ---: |
+| 1 | TODO | TODO |
+| 2 | TODO | TODO |
+| 4 | TODO | TODO |
+| 6 | TODO | TODO |
+| 8 | TODO | TODO |
+<!-- /bench -->
 
 ## Prompt lookup
 
@@ -212,6 +266,7 @@ routed experts before it is ready.
 | --- | ---: |
 | IQ1_M | 19.67 |
 | IQ2_XXS streamed | 22.51 |
+| UD-IQ1_M streamed | TODO |
 <!-- /bench -->
 
 ![Loading time](artifacts/charts/loading.svg)
@@ -243,6 +298,15 @@ row shows the cache's size, not a requirement.
 <!-- /bench -->
 
 ![Memory occupation](artifacts/charts/memory-iq2xxs.svg)
+
+---
+
+<!-- bench:memory-udiq1m -->
+| DS4.1 Flash UD-IQ1_M streamed AR<br>Workload | Gufo GiB |
+| --- | ---: |
+| pp2048 + tg128 | TODO |
+| 16K prefix, pp4096 + tg128 | TODO |
+<!-- /bench -->
 
 Resident components (`ds41_load_probe --upload` and `gufo serve`):
 
