@@ -22,7 +22,7 @@
     "fingerprintId": "d19fe457f2791c2dec2f2de6cd1c21607a1d51ce20c58e0d686637de1fa0d0a1",
     "schemaVersion": "1.0.0"
   },
-  "measuredOn": "2026-10-29",
+  "measuredOn": "2026-10-31",
   "mode": "dspark",
   "model": {
     "id": "DeepSeek-V4.1-Flash-1017",
@@ -35,186 +35,186 @@
   "referenceName": "reference",
   "rows": {
     "0": {
-      "acceptance": 67.74,
+      "acceptance": 73.49,
       "acceptance_sd": null,
-      "accepted_per_step": 0.97,
+      "accepted_per_step": 0.91,
       "accepted_per_step_sd": null,
-      "command": "gufo serve --port 37963 --sessions 1 llm --model DeepSeek-V4.1-Flash-1017-GSQ-RCO-IQ1_M-00001-of-00006.gguf --context 133760 --served-model-name bench --think off --max-pending-per-client 8 --speculative dspark --dspark-model DeepSeek-V4.1-Flash-1017-DSpark-draft-Q2K-Q4K.gguf",
+      "command": "gufo serve --port 58195 --sessions 1 llm --model DeepSeek-V4.1-Flash-1017-GSQ-RCO-IQ1_M-00001-of-00006.gguf --context 133760 --served-model-name bench --think off --max-pending-per-client 8 --speculative dspark --dspark-model DeepSeek-V4.1-Flash-1017-DSpark-draft-Q2K-Q4K.gguf",
       "counts": [
         {
           "cache_n": 0,
-          "completion_sha256": "4f19f5c1c13ca06a4ee4a52aeb36e9e46a31b588903a1095447b55ec1d862e54",
-          "draft_n": 93,
-          "draft_n_accepted": 63,
+          "completion_sha256": "07c9344c5a9e93a44bbd011760476a73f1182dbefaf3cec2e4fc5fa089d78710",
+          "draft_n": 83,
+          "draft_n_accepted": 61,
           "predicted_n": 128,
           "prompt_n": 2035
         }
       ],
-      "pp": 1198.65,
+      "pp": 1219.56,
       "pp_sd": null,
       "samples": 1,
-      "tg": 30.66,
+      "tg": 31.06,
       "tg_sd": null,
       "workload": "prose"
     },
     "12288": {
-      "acceptance": 53.91,
+      "acceptance": 64.71,
       "acceptance_sd": null,
-      "accepted_per_step": 1.17,
+      "accepted_per_step": 1.06,
       "accepted_per_step_sd": null,
-      "command": "gufo serve --port 37963 --sessions 1 llm --model DeepSeek-V4.1-Flash-1017-GSQ-RCO-IQ1_M-00001-of-00006.gguf --context 133760 --served-model-name bench --think off --max-pending-per-client 8 --speculative dspark --dspark-model DeepSeek-V4.1-Flash-1017-DSpark-draft-Q2K-Q4K.gguf",
+      "command": "gufo serve --port 34527 --sessions 1 llm --model DeepSeek-V4.1-Flash-1017-GSQ-RCO-IQ1_M-00001-of-00006.gguf --context 133760 --served-model-name bench --think off --max-pending-per-client 8 --speculative dspark --dspark-model DeepSeek-V4.1-Flash-1017-DSpark-draft-Q2K-Q4K.gguf",
       "counts": [
         {
           "cache_n": 12241,
-          "completion_sha256": "ab6c9f3589325ada77b422811b1a4a65437dccb5ef3d7bca63f5cee9ab2dbab7",
-          "draft_n": 128,
-          "draft_n_accepted": 69,
+          "completion_sha256": "c9bf20b0c17d3614fb4833fd68c74598b99d0aa8d8e3ac8907562f80e68e3eae",
+          "draft_n": 102,
+          "draft_n_accepted": 66,
           "predicted_n": 128,
           "prompt_n": 2042
         }
       ],
-      "pp": 1169.49,
+      "pp": 1123.05,
       "pp_sd": null,
       "samples": 1,
-      "tg": 30.39,
+      "tg": 30.97,
       "tg_sd": null,
       "workload": "prose"
     },
     "131072": {
-      "acceptance": 64.22,
+      "acceptance": 58.18,
       "acceptance_sd": null,
-      "accepted_per_step": 1.21,
+      "accepted_per_step": 1.0,
       "accepted_per_step_sd": null,
-      "command": "gufo serve --port 37963 --sessions 1 llm --model DeepSeek-V4.1-Flash-1017-GSQ-RCO-IQ1_M-00001-of-00006.gguf --context 133760 --served-model-name bench --think off --max-pending-per-client 8 --speculative dspark --dspark-model DeepSeek-V4.1-Flash-1017-DSpark-draft-Q2K-Q4K.gguf",
+      "command": "gufo serve --port 58195 --sessions 1 llm --model DeepSeek-V4.1-Flash-1017-GSQ-RCO-IQ1_M-00001-of-00006.gguf --context 133760 --served-model-name bench --think off --max-pending-per-client 8 --speculative dspark --dspark-model DeepSeek-V4.1-Flash-1017-DSpark-draft-Q2K-Q4K.gguf",
       "counts": [
         {
           "cache_n": 131248,
-          "completion_sha256": "d791e6cf593b51b3667147b2b3bf28a82edee07ed631b93bddce6c840bf9949a",
-          "draft_n": 109,
-          "draft_n_accepted": 70,
+          "completion_sha256": "3a517a3ed8fa26b90befd9e506b4fb3f8d9fef3863a2679ee02afc4cfa140da5",
+          "draft_n": 110,
+          "draft_n_accepted": 64,
           "predicted_n": 128,
           "prompt_n": 2052
         }
       ],
-      "pp": 1030.02,
+      "pp": 891.8,
       "pp_sd": null,
       "samples": 1,
-      "tg": 29.88,
+      "tg": 27.86,
       "tg_sd": null,
       "workload": "prose"
     },
     "16384": {
-      "acceptance": 67.74,
+      "acceptance": 74.73,
       "acceptance_sd": null,
-      "accepted_per_step": 0.97,
+      "accepted_per_step": 1.13,
       "accepted_per_step_sd": null,
-      "command": "gufo serve --port 37963 --sessions 1 llm --model DeepSeek-V4.1-Flash-1017-GSQ-RCO-IQ1_M-00001-of-00006.gguf --context 133760 --served-model-name bench --think off --max-pending-per-client 8 --speculative dspark --dspark-model DeepSeek-V4.1-Flash-1017-DSpark-draft-Q2K-Q4K.gguf",
+      "command": "gufo serve --port 34527 --sessions 1 llm --model DeepSeek-V4.1-Flash-1017-GSQ-RCO-IQ1_M-00001-of-00006.gguf --context 133760 --served-model-name bench --think off --max-pending-per-client 8 --speculative dspark --dspark-model DeepSeek-V4.1-Flash-1017-DSpark-draft-Q2K-Q4K.gguf",
       "counts": [
         {
           "cache_n": 16364,
-          "completion_sha256": "3b35fe317e19ff7edaaf856d81aef2eec8ad660d06a924a102ff7473aa0fcc9d",
-          "draft_n": 93,
-          "draft_n_accepted": 63,
+          "completion_sha256": "b122b30be316bfb85013d029deeb0bc21ec4a66e2a1073c7d0a0f228f18c0568",
+          "draft_n": 91,
+          "draft_n_accepted": 68,
           "predicted_n": 128,
           "prompt_n": 2054
         }
       ],
-      "pp": 1114.13,
+      "pp": 1167.47,
       "pp_sd": null,
       "samples": 1,
-      "tg": 30.07,
+      "tg": 32.74,
       "tg_sd": null,
       "workload": "prose"
     },
     "32768": {
-      "acceptance": 60.0,
+      "acceptance": 62.24,
       "acceptance_sd": null,
-      "accepted_per_step": 1.06,
+      "accepted_per_step": 0.91,
       "accepted_per_step_sd": null,
-      "command": "gufo serve --port 37963 --sessions 1 llm --model DeepSeek-V4.1-Flash-1017-GSQ-RCO-IQ1_M-00001-of-00006.gguf --context 133760 --served-model-name bench --think off --max-pending-per-client 8 --speculative dspark --dspark-model DeepSeek-V4.1-Flash-1017-DSpark-draft-Q2K-Q4K.gguf",
+      "command": "gufo serve --port 58195 --sessions 1 llm --model DeepSeek-V4.1-Flash-1017-GSQ-RCO-IQ1_M-00001-of-00006.gguf --context 133760 --served-model-name bench --think off --max-pending-per-client 8 --speculative dspark --dspark-model DeepSeek-V4.1-Flash-1017-DSpark-draft-Q2K-Q4K.gguf",
       "counts": [
         {
           "cache_n": 32798,
-          "completion_sha256": "d3425319bf9bbb3454009ddb3d0d9f22b7fc4b19649abf910902fae949af280a",
-          "draft_n": 110,
-          "draft_n_accepted": 66,
+          "completion_sha256": "2bf7f84d50bee36d024f23dc8d91f2434c2c61c72f800675047e91d642226654",
+          "draft_n": 98,
+          "draft_n_accepted": 61,
           "predicted_n": 128,
           "prompt_n": 2035
         }
       ],
-      "pp": 988.73,
+      "pp": 979.26,
       "pp_sd": null,
       "samples": 1,
-      "tg": 29.8,
+      "tg": 29.09,
       "tg_sd": null,
       "workload": "prose"
     },
     "4096": {
-      "acceptance": 63.96,
+      "acceptance": 67.74,
       "acceptance_sd": null,
-      "accepted_per_step": 1.25,
+      "accepted_per_step": 0.97,
       "accepted_per_step_sd": null,
-      "command": "gufo serve --port 37963 --sessions 1 llm --model DeepSeek-V4.1-Flash-1017-GSQ-RCO-IQ1_M-00001-of-00006.gguf --context 133760 --served-model-name bench --think off --max-pending-per-client 8 --speculative dspark --dspark-model DeepSeek-V4.1-Flash-1017-DSpark-draft-Q2K-Q4K.gguf",
+      "command": "gufo serve --port 58195 --sessions 1 llm --model DeepSeek-V4.1-Flash-1017-GSQ-RCO-IQ1_M-00001-of-00006.gguf --context 133760 --served-model-name bench --think off --max-pending-per-client 8 --speculative dspark --dspark-model DeepSeek-V4.1-Flash-1017-DSpark-draft-Q2K-Q4K.gguf",
       "counts": [
         {
           "cache_n": 4116,
-          "completion_sha256": "b4a376866a0c0e42483a4b5a1f75adfe8d030a945243b6a786062c3c3c230589",
-          "draft_n": 111,
-          "draft_n_accepted": 71,
+          "completion_sha256": "96e83277bff64c35a1399a1b4ea170de720dc24e106e4f7db8bb116ca34e77da",
+          "draft_n": 93,
+          "draft_n_accepted": 63,
           "predicted_n": 128,
           "prompt_n": 2040
         }
       ],
-      "pp": 1177.91,
+      "pp": 1003.78,
       "pp_sd": null,
       "samples": 1,
-      "tg": 32.47,
+      "tg": 30.92,
       "tg_sd": null,
       "workload": "prose"
     },
     "65536": {
-      "acceptance": 82.46,
+      "acceptance": 78.69,
       "acceptance_sd": null,
-      "accepted_per_step": 0.58,
+      "accepted_per_step": 0.6,
       "accepted_per_step_sd": null,
-      "command": "gufo serve --port 37963 --sessions 1 llm --model DeepSeek-V4.1-Flash-1017-GSQ-RCO-IQ1_M-00001-of-00006.gguf --context 133760 --served-model-name bench --think off --max-pending-per-client 8 --speculative dspark --dspark-model DeepSeek-V4.1-Flash-1017-DSpark-draft-Q2K-Q4K.gguf",
+      "command": "gufo serve --port 58195 --sessions 1 llm --model DeepSeek-V4.1-Flash-1017-GSQ-RCO-IQ1_M-00001-of-00006.gguf --context 133760 --served-model-name bench --think off --max-pending-per-client 8 --speculative dspark --dspark-model DeepSeek-V4.1-Flash-1017-DSpark-draft-Q2K-Q4K.gguf",
       "counts": [
         {
           "cache_n": 65569,
-          "completion_sha256": "2f3a34a5a18fce5ce9c86400f7b8a18e03ce8739848870dc43ddade71729d686",
-          "draft_n": 57,
-          "draft_n_accepted": 47,
+          "completion_sha256": "164c05bd71ae985491171c773e7ff5ff7aaaf4b4553c5eeb5f46195597466a2c",
+          "draft_n": 61,
+          "draft_n_accepted": 48,
           "predicted_n": 128,
           "prompt_n": 2056
         }
       ],
-      "pp": 1042.21,
+      "pp": 881.96,
       "pp_sd": null,
       "samples": 1,
-      "tg": 26.76,
+      "tg": 26.88,
       "tg_sd": null,
       "workload": "story"
     },
     "8192": {
-      "acceptance": 73.86,
+      "acceptance": 74.12,
       "acceptance_sd": null,
-      "accepted_per_step": 1.03,
+      "accepted_per_step": 0.97,
       "accepted_per_step_sd": null,
-      "command": "gufo serve --port 37963 --sessions 1 llm --model DeepSeek-V4.1-Flash-1017-GSQ-RCO-IQ1_M-00001-of-00006.gguf --context 133760 --served-model-name bench --think off --max-pending-per-client 8 --speculative dspark --dspark-model DeepSeek-V4.1-Flash-1017-DSpark-draft-Q2K-Q4K.gguf",
+      "command": "gufo serve --port 34527 --sessions 1 llm --model DeepSeek-V4.1-Flash-1017-GSQ-RCO-IQ1_M-00001-of-00006.gguf --context 133760 --served-model-name bench --think off --max-pending-per-client 8 --speculative dspark --dspark-model DeepSeek-V4.1-Flash-1017-DSpark-draft-Q2K-Q4K.gguf",
       "counts": [
         {
           "cache_n": 8177,
-          "completion_sha256": "479976719801481259326406d9fefe1142aa8a03ed3ddcc52ef71aa35f1fa5b9",
-          "draft_n": 88,
-          "draft_n_accepted": 65,
+          "completion_sha256": "a338bbc916a5510db89d2b0964517c13d6d3488d827ba261f83ec21c9cc1f19b",
+          "draft_n": 85,
+          "draft_n_accepted": 63,
           "predicted_n": 128,
           "prompt_n": 2028
         }
       ],
-      "pp": 1170.21,
+      "pp": 1199.46,
       "pp_sd": null,
       "samples": 1,
-      "tg": 31.85,
+      "tg": 31.3,
       "tg_sd": null,
       "workload": "prose"
     }
@@ -225,7 +225,7 @@
       "gufo",
       "serve",
       "--port",
-      "37963",
+      "34527",
       "--sessions",
       "1",
       "llm",
@@ -247,8 +247,8 @@
   },
   "source": {
     "buildMode": "nix-release",
-    "dirty": false,
-    "revision": "cd8b92c18ac999f9b87d85f83be431aed0d572f1"
+    "dirty": true,
+    "revision": "0eb9e89ca9c2a679d6ebd9819cc497e5bf498feb"
   },
   "table": "single-dspark",
   "target": "gufo"
