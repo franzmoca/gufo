@@ -417,6 +417,15 @@ static ds41_kv* model_find_kv(const ds41_model* m, const char* key) {
  * ids that way). */
 static bool model_get_u32(const ds41_model* m, const char* key, uint32_t* out) {
   ds41_kv* kv = model_find_kv(m, key);
+  if (kv && kv->type == GGUF_VALUE_UINT16) {
+    /* llama.cpp writes split.no and split.count as u16. */
+    uint16_t v = 0;
+    ds41_cursor c = cursor_at(m, kv->value_pos);
+    if (!cursor_read(&c, &v, sizeof(v)))
+      return false;
+    *out = v;
+    return true;
+  }
   if (!kv || (kv->type != GGUF_VALUE_UINT32 && kv->type != GGUF_VALUE_INT32))
     return false;
   ds41_cursor c = cursor_at(m, kv->value_pos);
@@ -778,6 +787,39 @@ static bool tensor_device_resident(const ds41_tensor* t, const ds41_weights* wei
   if (streaming && weights)
     for (const ds41_layer_weights& l : weights->layer)
       if (t == l.ffn_gate_exps || t == l.ffn_up_exps || t == l.ffn_down_exps) return false;
+  if (weights && weights->router_bf16)
+    for (const ds41_layer_weights& l : weights->layer)
+      if (t == l.ffn_gate_inp) return false;
+  return true;
+}
+
+constexpr uint64_t kRouterElements = (uint64_t)DS41_N_EMBD * DS41_N_EXPERT;
+
+/* Narrows F32 routers to BF16 on the device when that is exact, so they run
+ * the BF16 router kernels at half the bytes. Leaves router_bf16 NULL (the
+ * F32 path) for BF16 routers or any value BF16 cannot hold. */
+static bool narrow_f32_routers(ds41_weights* w, const ds41_model* m) {
+  for (uint32_t il = 0; il < DS41_N_LAYER; il++)
+    if (w->layer[il].ffn_gate_inp->type != DS41_TENSOR_F32) return true;
+  std::vector<uint16_t> narrow((uint64_t)DS41_N_LAYER * kRouterElements);
+  for (uint32_t il = 0; il < DS41_N_LAYER; il++) {
+    const uint8_t* src = m->map + w->layer[il].ffn_gate_inp->abs_offset;
+    uint16_t* dst = narrow.data() + (uint64_t)il * kRouterElements;
+    for (uint64_t i = 0; i < kRouterElements; i++) {
+      uint32_t bits;
+      memcpy(&bits, src + 4 * i, 4);
+      if (bits & 0xffffu) return true;
+      dst[i] = (uint16_t)(bits >> 16);
+    }
+  }
+  const uint64_t bytes = narrow.size() * sizeof(uint16_t);
+  void* p = NULL;
+  if (hipMalloc(&p, bytes) != hipSuccess) return false;
+  if (hipMemcpy(p, narrow.data(), bytes, hipMemcpyHostToDevice) != hipSuccess) {
+    (void)hipFree(p);
+    return false;
+  }
+  w->router_bf16 = (uint16_t*)p;
   return true;
 }
 
@@ -1109,8 +1151,11 @@ static void weights_validate_layout(const ds41_weights* w) {
     tensor_expect(l->hc_ffn_scale, DS41_TENSOR_F32, 1, 3);
     tensor_expect(l->hc_ffn_base, DS41_TENSOR_F32, 1, hc_mix_dim);
     tensor_expect(l->ffn_norm, DS41_TENSOR_F32, 1, DS41_N_EMBD);
-    tensor_expect(l->ffn_gate_inp, DS41_TENSOR_BF16, 2, DS41_N_EMBD,
-                  DS41_N_EXPERT);
+    /* The router is BF16 in the ISTA builds and F32 in Unsloth's. */
+    tensor_expect_dims(l->ffn_gate_inp, 2, DS41_N_EMBD, DS41_N_EXPERT, 0);
+    if (l->ffn_gate_inp->type != DS41_TENSOR_BF16 &&
+        l->ffn_gate_inp->type != DS41_TENSOR_F32)
+      tensor_reject(l->ffn_gate_inp, "has an unsupported router type");
     tensor_expect(l->ffn_exp_probs_b, DS41_TENSOR_F32, 1, DS41_N_EXPERT);
     tensor_expect(l->ffn_exp_probs_b_vl, DS41_TENSOR_F32, 1, DS41_N_EXPERT);
     tensor_expect_routed_expert(l->ffn_gate_exps, DS41_N_EMBD, DS41_N_FF_EXP);
@@ -1644,6 +1689,19 @@ static void engram_open(ds41_engram_tables* e, const ds41_weights* w,
   int64_t rows = 0;
   for (int64_t n : w->engram_head_vocab)
     rows += n;
+  /* A build may link the Engram file another build published (they share
+   * one table), whose split header names its own position; say so. */
+  uint32_t engram_no = 0, engram_count = 0;
+  const uint32_t backbone_count = backbone->n_shards + 1;
+  if (model_get_u32(m, "split.no", &engram_no) &&
+      model_get_u32(m, "split.count", &engram_count) &&
+      (engram_count != backbone_count || engram_no + 1 != backbone_count))
+    gufo::server::Logger::LogFormatted(
+        gufo::server::LogLevel::kWarn, "ds41",
+        "Engram %s is labelled shard %u of %u but serves as shard %u of %u of "
+        "this build (a table shared with another build)",
+        path.c_str(), engram_no + 1, engram_count, backbone_count,
+        backbone_count);
   ds41_tensor* t = required_tensor(m, "per_layer_token_embd.weight");
   tensor_expect_dims(t, 2, DS41_ENGRAM_HEAD_DIM, (uint64_t)rows, 0);
   if (t->type != DS41_TENSOR_IQ4_NL && t->type != DS41_TENSOR_Q5_K &&
@@ -1847,8 +1905,16 @@ int ds41_engine_open(ds41_engine** out, const ds41_engine_options* opt) {
     /* Streaming is opt-in: a silent fallback would turn a misconfigured host
      * (a small GTT limit, free CMA) into a much slower server. */
     const bool streaming = opt->stream_experts;
+    if (!narrow_f32_routers(e->weights, e->model)) {
+      fprintf(stderr, "ds41: failed to upload the BF16 routers\n");
+      ds41_engine_close(e);
+      *out = NULL;
+      return 1;
+    }
     const uint64_t available = ds41_expert_available_memory();
-    const uint64_t resident = model_resident_bytes(e->model, e->weights, streaming);
+    const uint64_t resident =
+        model_resident_bytes(e->model, e->weights, streaming) +
+        (e->weights->router_bf16 ? (uint64_t)DS41_N_LAYER * kRouterElements * sizeof(uint16_t) : 0);
     const uint64_t needed = resident + dspark_resident_bytes(e->dspark) + (2ull << 30);
     if (!streaming && available != 0 && needed > available) {
       char drafter[48] = "";
@@ -1985,6 +2051,8 @@ void ds41_engine_close(ds41_engine* e) {
     return;
   if (e->image_bias)
     (void)hipFree(e->image_bias);
+  if (e->weights && e->weights->router_bf16)
+    (void)hipFree(e->weights->router_bf16);
   ds41_expert_store_log(e->expert_store);
   ds41_expert_store_destroy(e->expert_store);
   weights_free(e->weights);

@@ -117,6 +117,18 @@ regardless of blocks per row. ~90 µs of host work starts each step
 (embedding dequant and two synchronous uploads ~70 µs); a device-side
 embedding lookup removes most of it.
 
+Streamed UD-IQ1_M (2026-10-31, tg128 after pp2048, after E56/E57): a
+layer takes ~1,046 µs over 22 launches, two open parts:
+
+- **~7 µs gaps after the 2,048-block GEMVs** (before `rope_tail`, the
+  wo_b GEMV and `hc_expand`): ~20 µs per layer, ~0.9 ms per token. A
+  synthetic dependent chain gives 1.9 µs after a 2,048-block kernel (E54),
+  so grid size alone does not explain them; check what the GEMV's tail
+  waves and the following launch wait on.
+- **~2.5 µs before every launch**: ~55 µs per layer, ~2.4 ms per token.
+  Graph replay does not remove it (E44); only fewer launches (fusions, or
+  a persistent per-layer kernel) do.
+
 ### 5. Compact selection for `--exact-prefill` rescoring
 
 Verification already rescores in groups of four rows over layer 20's
@@ -218,6 +230,12 @@ read and wait times, since rows grow up to 3.6× (E28 measured the current reads
 - **Decode expert GEMV spills.** Several `expert_group_kernel` variants
   use 256 VGPRs and still spill 80–540 bytes per lane to scratch; check
   whether fewer columns per lane or `ext_vector_type` arrays remove them.
+- **Streamed sessions at the native context.** `--stream-experts -j 8` at
+  the default 1M context sometimes fails at startup ("decoder allocation
+  failed", also on `feat/ds41`): the expert seed's 4 GiB reserve plus a
+  sixteenth covers one session, and eight 1M sessions need about 8.6 GiB
+  after it. The seed could reserve per session; `-c 4096` (the card's
+  multi-user context) starts reliably.
 
 ### 16. Multi-user AR decode below the card
 
@@ -250,6 +268,9 @@ Per AR token: hyper-connections 1.78 ms (`hc_mix_small` 80 launches of
 the BF16 router 1.0 ms (3.93 MB per layer in 24.9 µs, 158 GB/s), attention
 ~1 ms, routing and norms ~0.6 ms. Fusing launches also shortens item 4.
 Fusing the mix with the shifted collapse was slower in the model (E49).
+The mix is ~3 µs above a plain 2 MB read (E55); it now overlaps its
+half's projections on a side stream (E57, +0.6%), which hides only its
+latency since those projections are bandwidth-bound.
 
 ### 19. DSpark host round trips
 

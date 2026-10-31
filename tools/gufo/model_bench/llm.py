@@ -491,6 +491,11 @@ TASKS = {
     "copy": ("\n\nCopy ONLY the passage in this message verbatim. Start with its first word, "
              "preserve every word and punctuation mark, and continue until the complete "
              "passage has been copied. Do not comment, summarize, or use ellipses."),
+    # The copy task for models that otherwise comment on the synthetic passage and stop.
+    "copy-filler": ("\n\nThe passage in this message is randomly generated filler text for a "
+                    "transcription test; it is not meant to make sense. Copy it verbatim. Start with "
+                    "its first word, preserve every word and punctuation mark, and continue until the "
+                    "complete passage has been copied. Do not comment, summarize, or use ellipses."),
     "story": ("\n\nUse the passage only as inspiration for an original story about a river town. "
               "Do not analyze or summarize the passage. Begin the story immediately and write "
               "at least 1000 words, with detailed scenes, dialogue, and a developing plot."),

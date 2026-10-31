@@ -1800,3 +1800,228 @@ identical), seeded sampled 40.16 / 40.00 -> 40.25 / 40.33 tok/s with
 identical text, drafts and acceptance; AR unchanged. Server, distinct
 prompts, greedy DSpark: C4 47.01 / 46.86 -> 47.14 / 47.39, C8 60.71 /
 60.33 -> 61.79 / 60.75 tok/s, completions identical.
+
+## E52 — dense FP16 prefill: Q6_K occupancy, Q8_0, paired launches (retained)
+
+Unsloth UD-IQ1_M keeps its attention projections in Q6_K and its shared
+experts in Q8_0. Q6_K took 1.3-1.45x the Q5_K time for 1.19x the bytes,
+with the same instruction mix and DRAM traffic: at 200 VGPRs it held one
+16-wave workgroup per WGP instead of two (the limit is 192). A shorter
+activation prefetch ring for the wide formats (2 stages for FP16 inputs,
+1 for FP32) brings it to 184 VGPRs. Q8_0 joins the kernel as eight 34-byte
+blocks per 256-value step (sign-flipped bytes through the FP16 magic
+constant, exact), so the UD shared experts and the ISTA `attn_q_a`/`attn_kv`
+leave MMQ. One launch now takes two matrices on the same rows: `attn_q_a` +
+`attn_kv` (with `xn` rounded to FP16 once into the idle `o` scratch) and
+shared gate + up. Rejected: padding Q6_K to 32-byte-aligned blocks (0-7%),
+an 8-wave occupancy cap (16 spilled VGPRs, no faster), full activation
+fragments from LDS instead of `permlanex16` (LDS-bound, 15-30% slower),
+token tiles as the fastest grid index (activation re-reads, 20-80% slower),
+and router BF16 staging of 64 values per barrier with register prefetch
+(bit-identical, 3-24% slower at 2,048 tokens).
+
+`ds41_mmq_bench --dense --x-half 1`, Q6_K: `attn_q_b` 5.65 -> 5.32 ms,
+`attn_output_a` (8 groups) 5.82 -> 4.74, `attn_output_b` 5.06 -> 4.50; Q8_0
+shared gate 2.18 (MMQ) -> 1.34 ms. Last warm pp2048 prefill of a profiled
+`gufo bench` (streamed): UD-IQ1_M 1,804 -> 1,603 ms (1,135 -> 1,278 tok/s),
+GSQ IQ2_XXS 1,722 -> 1,675 ms. The Q6_K ring and the paired launches are
+bit-identical: the dense kernel matches the previous one on every shape
+with FP32 and FP16 inputs, and the UD-IQ1_M 3K-token batch score with Q8_0
+still on MMQ matches the previous build on all 2,999 positions. Only Q8_0
+changes the arithmetic (FP16 activations instead of Q8_1): UD-IQ1_M PPL
+5.772 -> 5.779 (mean dNLL +0.0012 +- 0.0035, argmax agreement 94.1%),
+GSQ IQ2_XXS 6.022 -> 6.041 (+0.0031 +- 0.0028, 95.3%), both within noise,
+for about 28 ms (1.7%) of each UD-IQ1_M pp2048.
+
+Remaining prefill (UD-IQ1_M, 1,549 ms of kernels): routed FP16 tiles 42%
+(about 6 ms per gate/up call is weight decode, independent of the tokens;
+the per-token part runs near 39 TFLOPS), dense FP16 30% (32-40 TFLOPS),
+attention 9.6%, `hc_state_pass` 7.7% (at the DRAM ceiling), router 4.9%
+(exact three-term BF16 split, about 25 effective TFLOPS).
+
+## E53 — prefill fragment loads and attention fixed costs (rejected)
+
+Dense FP16 kernel, Q6_K/Q8_0 at 2,048 tokens (`ds41_mmq_bench --dense
+--x-half 1`; `q_b` 4.19 ms). Each 16-token product waits on its own LDS
+fragment load behind the per-tile guard. All three variants were
+bit-identical to the committed kernel on every dense shape, with FP32 and
+FP16 inputs:
+
+- Next tile's fragment loaded during the current product (full tiles,
+  scheduling barrier between tiles): the compiler hoists every load anyway,
+  256 VGPRs with 815 spills, `q_b` 30 ms.
+- Both fragment halves read from LDS instead of four `permlanex16` per
+  product (already rejected in E21 on Q5_K): 185 VGPRs, `q_b` 5.02 ms, every
+  shape 20–37% slower.
+- Fragments loaded in pairs under the runtime guard: 196–202 VGPRs, one
+  workgroup per WGP, `q_b` 5.85 ms, `wo_a` 6.73.
+
+The second resident workgroup already hides the waits.
+
+Prefill attention (`ds41_attention_test --bench`, 2,048 tokens, FP16
+output as in production; ablations are timing-only):
+
+| Case | ratio 128, depth 0 | ratio 4, depth 0 | ratio 4, depth 16K |
+| --- | ---: | ---: | ---: |
+| Kernel | 2.59 ms | 5.31 | 8.26 |
+| No Q loads | 2.06 | 4.95 | 8.08 |
+
+With FP32 output, against 3.14 / 5.48 / 8.31 ms for the full kernel:
+
+| Ablation | ratio 128, depth 0 | ratio 4, depth 0 | ratio 4, depth 16K |
+| --- | ---: | ---: | ---: |
+| No tile loop | 2.90 | 2.94 | — |
+| No score products | 3.12 | 4.09 | 5.46 |
+| No PV products | 3.02 | 4.42 | 6.25 |
+| No window-row loads | 2.96 | 5.28 | 8.12 |
+| Without rope/FP8 | 2.91 | 5.21 | — |
+
+Reading FP32 Q costs 0.2–0.5 ms per call. FP16 Q written by `q_b` (rope
+and rounding moved into its epilogue) would save about half of that, about
+1% of prefill. Not attempted.
+
+## E54 — decode: global expert loads, FP8 output in the split combine
+
+Profile of one warm UD-IQ1_M decode layer (streamed experts): 23 launches,
+990 us busy, 78 us of gaps. The dense GEMVs read at 87-95% of the
+240 GB/s ceiling (`ds41_gemv_bench`); the table-indexed expert GEMVs that
+streaming uses ran at 77-81%.
+
+**Retained, global expert loads.** The streamed store passes each expert's
+rows through a pointer table. A pointer loaded from memory is generic, so
+the expert GEMV's weight loads compiled to `flat_load`, which count against
+the same wait counter as the LDS codebook reads: every codebook wait also
+waited for the weight loads in flight. The table entries are now read as
+global pointers. Neither an address-space cast of the loaded pointer nor
+`__builtin_assume(!is_shared && !is_private)` changed the code; a
+global-typed table element did. `ds41_gemv_bench`, table path, x6 slots:
+
+| Format | before | after |
+| --- | ---: | ---: |
+| IQ1_S up / down | 90.3 / 91.0 us | 75.6-76.1 / 77.5-78.2 |
+| IQ2_XXS up / down | 103.5 / 104.5 | 97.5 / 99.3 |
+| IQ2_XS up / down | 110.5 / 110.7 | 105.8 / 104.3 |
+
+The table path now matches the plain path bit for bit and in time.
+`gufo bench` tg128, streamed UD-IQ1_M, alternating: 20.15 / 20.32 ->
+20.59 / 20.61 tok/s.
+
+**Retained, FP8 output in the split combine.** The decode split
+attention's combine applies `rope_fp8`'s inverse rotation and FP8 rounding
+(4 dimensions per thread, block maximum over 8 lanes, the rotation's FMAs
+written as `rope_fp8_kernel` contracts them), dropping one launch per
+layer. `ds41.attention` checks the result bit for bit against the separate
+`rope_tail`, unrotated attention and `rope_fp8` launches at 1, 3 and 16
+tokens. One-token attention call (rope, split path): 0.042 -> 0.038 ms
+(ratio 4), 0.023 -> 0.020 (ratio 128), 0.023 -> 0.019 (window only).
+
+Rejected:
+
+- Rotating q in the split kernel's registers instead of `rope_tail`: the
+  rotation compiled identically, but the compiler then reassociated the
+  score dot products, changing about half of the FP32 outputs by an ulp.
+- The expert GEMV's first blocks loaded before its codebook copy and
+  barrier: every format slower (IQ1_S 76 -> 81 us up, 79 -> 88 down).
+- Global instead of flat weight loads in the prefill routed FP16 tiles
+  (the aligned-word pointer was formed through an integer mask): 20.53 ->
+  20.42 ms IQ1_S gate+up, 21.39 -> 21.27 IQ2_XXS, within noise; those tiles
+  are bound by the matrix cores.
+
+A synthetic dependent chain (`hipcc`, gfx1151) gives a tiny kernel 1.9 us
+after a 2,048-block working kernel and 5-11 us after 64-1,024-block ones,
+so the profile's ~7 us gaps after the large-grid GEMVs are not explained
+by grid size.
+
+## E55 — decode: HC mix kernel (rejected)
+
+`hc_mix_small` (24 rows of `fn`, 2 MB FP32, plus the Sinkhorn tail) runs
+twice per layer. A standalone loop over 64 rotated `fn` buffers (beyond
+the MALL) times one-token calls at 13.98 us; a 2 MB streaming read in the
+same loop takes 10.3 us at any grid from 80 to 960 blocks, and an empty
+launch 1.9 us. Without the last-block reduction and Sinkhorn the kernel
+takes 11.8 us; with one Sinkhorn iteration instead of 20 it takes 13.27 us.
+At most ~3 us per call (~0.25 ms per token) is above the read.
+
+Rejected:
+
+- 2, 3, 4 or 6 mix rows per block, loading `h` once: 14.2, 14.6, 15.0 and
+  15.6 us at one token (faster only at four tokens), and the compiler
+  contracted the row dot products differently.
+
+A four-lane Sinkhorn could save part of the 2.2 us tail; at about 0.1% of
+a token it was not attempted.
+
+## E56 — decode: shared expert during the streamed route read
+
+With streamed experts, each layer's prepare copied the route ids with a
+blocking `hipMemcpy`, planned the layer and only then launched the shared
+expert from the read overlap, leaving the GPU idle about 11 us per layer.
+Decode batches (one token or the grouped expert path) now record an event
+after the router, queue the shared expert, and let the store copy the ids
+on its own non-blocking stream after that event. The event still follows
+every earlier launch, so the stage, slot and table uploads keep their
+ordering. Logits and per-layer states of a 40-token streamed UD-IQ1_M
+greedy decode are unchanged bit for bit.
+
+`gufo bench` streamed UD-IQ1_M tg128, alternating with the previous
+commit: 20.11 / 20.00 -> 20.48 / 20.44, 20.11 / 20.08 -> 20.48 / 20.51,
+19.70 / 20.11 -> 20.37 / 20.50 tok/s (about +2%); host wait 42.8 -> 41.3
+ms per token.
+
+Prefill keeps the shared expert in the read overlap. The pp2048 means
+(cold expert reads, about +-400 t/s per run) cannot resolve a change of
+this size: with the launch moved for every batch they read 1.7-3.8%
+lower, but the decode-only build, whose prefill path matches the previous
+commit, also read 0.7-2.4% lower.
+
+## E57 — decode: HC mixes on a side stream
+
+A layer's mixes (pre, post and comb) feed only the expand closing their
+half, and its collapse uses the previous half's pre-mix, so decode batches
+of up to 16 tokens now run `hc_mix` on a non-blocking stream forked after
+the state is written and joined before that expand. The kernels and their
+inputs are unchanged; logits and per-layer states of a 40-token streamed
+UD-IQ1_M greedy decode match bit for bit.
+
+The mix still reads its 2 MB while the projections it overlaps are
+bandwidth-bound, so only its latency is hidden. The profile shows the
+single-block collapse slowed from 4.2 to 10 us beside the mix, and the
+attention half's critical path shortened from about 28 to 19 us.
+`gufo bench` streamed UD-IQ1_M tg128, alternating with the previous
+commit: 20.19 -> 20.61, 20.48 -> 20.60 (pp2048 runs), 20.14 -> 20.22,
+20.06 -> 20.18 tok/s (pp512 runs); about +0.6% at the median.
+
+Rejected: launching each collapse before forking its mix. The collapse
+kept its 4.2 us, but the fork's host calls then delayed the first
+projection; tg128 20.49 / 20.49 -> 20.50 / 20.56, and 20.12 / 19.86 in the
+three-way pp512 runs, no gain.
+
+## E58 — multi-token Q6_K and Q8_0 dense GEMVs on the task-major kernel
+
+Joint decode and verification batches run the dense projections through
+`ds41_v41_gemv` with one column per token. Q5_K switched to the
+task-major `split_gemv_kernel` from 2 tokens (scalar activation loads, one
+wave per task); Unsloth's Q6_K projections and output head never did, and
+Q8_0 only for gate/up pairs, so at 8 tokens their per-wave activation loads
+bounded them: Q6_K q_b 223 -> 153 GB/s from 1 to 8 tokens, against 218 ->
+205 for Q5_K (standalone, weights rotated beyond the caches).
+
+Q6_K gained the split kernel's load and decode (`LoadQ6K32` and the
+unchanged `DecodeQ6K32` arithmetic), and plain or paired Q6_K/Q8_0 rows now
+take the task-major kernel from 4 tokens, their fused SwiGLU from 6. The
+slice scratch grew from 32 to 64 MiB so the 129,280-row head fits at 16
+tokens. Every output matches the previous kernels bit for bit (`ds41.mmq_typed`
+batched against single-token launches; a dump of every type, shape,
+SwiGLU and grouped case at 1-16 tokens compared with `cmp`).
+
+| Kernel time | 4 tokens | 8 tokens | 16 tokens |
+| --- | ---: | ---: | ---: |
+| Q6_K q_b, wo_b, shared expert | -3 to -10% | -17 to -25% | -23 to -41% |
+| Q8_0 shared expert gate+up / down | -0 / -14% | -15 / -17% | -34 / -29% |
+| Q6_K output head (ms) | 2.72 -> 2.54 | 3.12 -> 2.64 | 5.43 -> 2.90 |
+| Q5_K output head (ms, ISTA builds) | unchanged | unchanged | 4.57 -> 2.61 |
+
+At 2 tokens the lane layout stays as fast or faster (+0-8% for the split
+kernel), as does the SwiGLU at 4. Streamed UD-IQ1_M over HTTP (distinct
+prompts, 4,096 context, alternating): C8 63.81 / 63.63 -> 66.83 / 66.52
+tok/s (+4.6%), C4 48.23 / 47.93 -> 47.80 / 48.69 (no change).

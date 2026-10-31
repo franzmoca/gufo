@@ -232,6 +232,58 @@ __device__ __forceinline__ float TaskQ6K(const std::uint8_t* block, int t,
   return Accumulate<16>(acc, w + 48, xv + 96);
 }
 
+/// Q6_K split into 8 tasks of 32 values for the decode GEMV: task t = 2 p + r
+/// takes half r of DecodeQ6K's task p (n = p / 2, h = p % 2), i.e. its
+/// groups 2 r and 2 r + 1: the low (r = 0) or high (r = 1) nibbles of the
+/// two ql vectors with qh bits 4 r and 4 r + 2. w[16 g + i] belongs to
+/// activation 128 n + 16 h + 64 r + 32 g + i.
+/// The loads of a DecodeQ6K32 task, so callers can issue them ahead of the
+/// decode: its two ql and one qh vectors, d and its two scales.
+struct RawQ6K32 {
+  uint4 a, b, h;
+  float d;
+  std::int8_t s0, s1;
+};
+
+__device__ __forceinline__ RawQ6K32 LoadQ6K32(const std::uint8_t* block,
+                                              int t) {
+  const int p = t >> 1;
+  const int r = t & 1;
+  const int n = p >> 1;
+  const int h = p & 1;
+  const auto* sc =
+      reinterpret_cast<const std::int8_t*>(block + 192) + 8 * n + h + 4 * r;
+  RawQ6K32 raw;
+  raw.d = Half(block + 208);
+  raw.s0 = sc[0];
+  raw.s1 = sc[2];
+  raw.a = *reinterpret_cast<const uint4*>(block + 64 * n + 16 * h);
+  raw.b = *reinterpret_cast<const uint4*>(block + 64 * n + 32 + 16 * h);
+  raw.h = *reinterpret_cast<const uint4*>(block + 128 + 32 * n + 16 * h);
+  return raw;
+}
+
+__device__ __forceinline__ void DecodeQ6K32(const RawQ6K32& raw, int t,
+                                            float (&w)[32]) {
+  const int r = t & 1;
+  const auto* ql_a = reinterpret_cast<const std::uint8_t*>(&raw.a);
+  const auto* ql_b = reinterpret_cast<const std::uint8_t*>(&raw.b);
+  const auto* qh = reinterpret_cast<const std::uint8_t*>(&raw.h);
+  const float s0 = raw.d * static_cast<float>(raw.s0);
+  const float s1 = raw.d * static_cast<float>(raw.s1);
+  Dequant16(ql_a, 4 * r, qh, 4 * r, 3, s0, -32.0F * s0, w);
+  Dequant16(ql_b, 4 * r, qh, 4 * r + 2, 3, s1, -32.0F * s1, w + 16);
+}
+
+__device__ __forceinline__ void DecodeQ6K32(const std::uint8_t* block, int t,
+                                            float (&w)[32]) {
+  DecodeQ6K32(LoadQ6K32(block, t), t, w);
+}
+
+__device__ __forceinline__ int OffsetQ6K32(int t) {
+  return 128 * (t >> 2) + 16 * ((t >> 1) & 1) + 64 * (t & 1);
+}
+
 /// Q8_0 block (34 bytes, 2-byte aligned inside word-aligned rows): values
 /// d * q. `odd` says the block starts two bytes past a word boundary; the
 /// nine enclosing words are loaded and the payload selected with byte

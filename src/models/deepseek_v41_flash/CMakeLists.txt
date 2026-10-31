@@ -21,7 +21,7 @@ add_library(gufo_deepseek_v41_flash_mmq STATIC
   ${DEEPSEEK_V41_FLASH_MMQ_SOURCES})
 
 # One object per V4.1 weight type outside the V4 set, from one source.
-foreach(ds41_mmq_type Q5_K IQ1_S IQ1_M IQ2_XS IQ2_S)
+foreach(ds41_mmq_type Q5_K Q6_K IQ1_S IQ1_M IQ2_XS IQ2_S)
   set(ds41_mmq_type_source
     "${CMAKE_CURRENT_BINARY_DIR}/ds41_mmq_v41_${ds41_mmq_type}.hip.cpp")
   file(GENERATE OUTPUT ${ds41_mmq_type_source} CONTENT

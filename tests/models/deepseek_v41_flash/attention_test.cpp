@@ -184,6 +184,32 @@ double Case(uint32_t pos0, uint32_t n, uint32_t ratio, uint32_t comp_rows,
   (void)hipDeviceSynchronize();
   (void)hipMemcpy(out.data(), dout, out.size() * sizeof(float),
                   hipMemcpyDeviceToHost);
+  /* The split form's in-kernel output rotation and FP8 rounding give the
+   * bits of the separate rope_tail, unrotated attention and rope_fp8
+   * launches. */
+  if (rc == 0 && !matrix && rope) {
+    float* dq_rot = Device(q);
+    float* dsep = nullptr;
+    (void)hipMalloc(&dsep, sizeof(float) * out.size());
+    rc = ds41_v41_rope_tail(dq_rot, n * kHeads, kDim, kRope, dfreq, pos0,
+                            kHeads, 1, 0) ||
+         ds41_v41_attention(dq_rot, dring, dchunk, kWindow, floor, dcomp, didx,
+                            kTopK, ratio, dsinks, dsep, nullptr, dpartial, pos0,
+                            n, kHeads, kDim, scale, nullptr, kRope, dtable) ||
+         ds41_v41_rope_fp8(dsep, n * kHeads, kDim, kRope, dfreq, pos0, kHeads,
+                           1, 1);
+    std::vector<float> sep(out.size());
+    (void)hipDeviceSynchronize();
+    (void)hipMemcpy(sep.data(), dsep, sep.size() * sizeof(float),
+                    hipMemcpyDeviceToHost);
+    if (rc == 0 &&
+        std::memcmp(sep.data(), out.data(), out.size() * sizeof(float)) != 0) {
+      std::printf("attention n=%u: fused rotation differs\n", n);
+      rc = 1;
+    }
+    (void)hipFree(dq_rot);
+    (void)hipFree(dsep);
+  }
   /* The matrix-core form's FP16 output is its FP32 output rounded. */
   if (rc == 0 && matrix) {
     uint16_t* dhalf = nullptr;

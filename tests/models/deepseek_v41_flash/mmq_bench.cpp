@@ -13,7 +13,11 @@
  *   ds41_mmq_bench [--type 19|29|16|17|22] [--counts FILE] [--line N] [--reps
  * N]
  *                  [--f16 1] [--tokens N]
- *   ds41_mmq_bench --type 13|8 --dense M,K[,GROUPS] [--tokens N] [--reps N]
+ *   ds41_mmq_bench --type 13|14|8 --dense M,K[,GROUPS] [--tokens N] [--reps N]
+ *                  [--x-half 1]
+ *
+ * --x-half 1 gives the FP16 kernel FP16 activations (as most model calls
+ * do) instead of FP32 ones.
  */
 #include <hip/hip_runtime.h>
 
@@ -114,10 +118,12 @@ std::vector<unsigned int> Counts(const char* path, int line, int tokens,
 }
 
 /* Dense projection of `kTokens` tokens (2048 by default), MMQ against the FP16
- * kernel, over `groups` [m, k] matrices with their own input columns (Q5_K or
- * Q8_0). */
-int DenseBench(int type, int m, int k, int groups, int reps, int kTokens) {
-  const int block = type == 13 ? 176 : 34, values = type == 13 ? 256 : 32;
+ * kernel, over `groups` [m, k] matrices with their own input columns (Q5_K,
+ * Q6_K or Q8_0). */
+int DenseBench(int type, int m, int k, int groups, int reps, int kTokens,
+               bool x_half) {
+  const int block = type == 13 ? 176 : type == 14 ? 210 : 34;
+  const int values = type == 8 ? 32 : 256;
   std::mt19937 rng(7);
   std::vector<uint8_t> w(static_cast<std::size_t>(groups) * m * k / values *
                          block);
@@ -125,7 +131,7 @@ int DenseBench(int type, int m, int k, int groups, int reps, int kTokens) {
     w[at] = static_cast<uint8_t>(rng());
   for (std::size_t at = 0; at < w.size(); at += block) {
     const uint16_t d = 0x2000 | (rng() & 0x03ff);
-    std::memcpy(&w[at], &d, 2);
+    std::memcpy(&w[at + (type == 14 ? 208 : 0)], &d, 2);
     if (type == 13)
       std::memcpy(&w[at + 2], &d, 2);
   }
@@ -139,6 +145,11 @@ int DenseBench(int type, int m, int k, int groups, int reps, int kTokens) {
   (void)hipMalloc(&out, static_cast<std::size_t>(kTokens) * groups * m * 4);
   (void)hipMemcpy(dw, w.data(), w.size(), hipMemcpyHostToDevice);
   (void)hipMemcpy(dx, x.data(), x.size() * 4, hipMemcpyHostToDevice);
+  void* dx16 = nullptr;
+  if (x_half)
+    (void)(hipMalloc(&dx16, x.size() * 2) ||
+           ds41_v41_to_half(static_cast<float*>(dx),
+                            static_cast<uint16_t*>(dx16), x.size()));
   hipEvent_t e0, e1;
   (void)hipEventCreate(&e0);
   (void)hipEventCreate(&e1);
@@ -148,9 +159,9 @@ int DenseBench(int type, int m, int k, int groups, int reps, int kTokens) {
       (void)hipEventRecord(e0, 0);
       int rc;
       if (path == 1)
-        rc = ds41_v41_dense_f16(type, dw, static_cast<float*>(dx),
+        rc = ds41_v41_dense_f16(type, dw, x_half ? dx16 : dx,
                                 static_cast<float*>(out), m, kTokens, k, groups,
-                                0);
+                                x_half ? DS41_V41_DENSE_X_HALF : 0);
       else if (groups > 1)
         rc = ds41_mmq_dense_grouped_typed(type, dw, static_cast<float*>(dx),
                                           static_cast<float*>(out), m, kTokens,
@@ -186,6 +197,7 @@ int DenseBench(int type, int m, int k, int groups, int reps, int kTokens) {
 int main(int argc, char** argv) {
   int type = 19, line = 0, reps = 5, f16 = 0;
   int dense_m = 0, dense_k = 0, dense_groups = 1, dense_tokens = 2048;
+  bool x_half = false;
   const char* counts_path = nullptr;
   for (int i = 1; i + 1 < argc; i += 2) {
     if (!std::strcmp(argv[i], "--type"))
@@ -198,13 +210,16 @@ int main(int argc, char** argv) {
       reps = std::atoi(argv[i + 1]);
     else if (!std::strcmp(argv[i], "--f16"))
       f16 = std::atoi(argv[i + 1]);
+    else if (!std::strcmp(argv[i], "--x-half"))
+      x_half = std::atoi(argv[i + 1]) != 0;
     else if (!std::strcmp(argv[i], "--tokens"))
       dense_tokens = std::atoi(argv[i + 1]);
     else if (!std::strcmp(argv[i], "--dense"))
       std::sscanf(argv[i + 1], "%d,%d,%d", &dense_m, &dense_k, &dense_groups);
   }
   if (dense_m > 0)
-    return DenseBench(type, dense_m, dense_k, dense_groups, reps, dense_tokens);
+    return DenseBench(type, dense_m, dense_k, dense_groups, reps, dense_tokens,
+                      x_half);
   if (!BlockBytes(type)) {
     std::fprintf(stderr, "unsupported type %d\n", type);
     return 1;

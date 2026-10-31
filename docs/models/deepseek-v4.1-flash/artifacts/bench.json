@@ -7,7 +7,7 @@
     "label": "DS4.1 Flash"
   },
   "files": {
-    "gguf": "first GGUF shard of GSQ-RCO IQ1_M (resident) or IQ2_XXS (streamed); the Engram file sits beside it",
+    "gguf": "first GGUF shard of GSQ-RCO IQ1_M (resident), GSQ-RCO IQ2_XXS (streamed) or Unsloth UD-IQ1_M (streamed); the Engram file sits beside it",
     "dspark": "DeepSeek-V4.1-Flash-1017-DSpark-draft-Q2K-Q4K.gguf"
   },
   "variants": {
@@ -19,6 +19,15 @@
     },
     "iq2xxs": {
       "label": "IQ2_XXS streamed",
+      "requires": [
+        "gguf"
+      ],
+      "gufo_args": [
+        "--stream-experts"
+      ]
+    },
+    "udiq1m": {
+      "label": "UD-IQ1_M streamed",
       "requires": [
         "gguf"
       ],
@@ -107,13 +116,13 @@
           "label": "repetitive",
           "workload": "repetition",
           "depth_workloads": {
-            "4096": "copy",
-            "8192": "copy",
-            "12288": "copy",
-            "16384": "copy",
-            "32768": "copy",
-            "65536": "copy",
-            "131072": "copy"
+            "4096": "copy-filler",
+            "8192": "copy-filler",
+            "12288": "copy-filler",
+            "16384": "copy-filler",
+            "32768": "copy-filler",
+            "65536": "copy-filler",
+            "131072": "copy-filler"
           }
         }
       }

@@ -25,9 +25,9 @@ struct TypeCase {
 };
 
 constexpr TypeCase kTypes[] = {
-    {"Q8_0", 8, 34, 32},    {"Q5_K", 13, 176, 256},   {"IQ1_S", 19, 50, 256},
-    {"IQ1_M", 29, 56, 256}, {"IQ2_XXS", 16, 66, 256}, {"IQ2_XS", 17, 74, 256},
-    {"IQ2_S", 22, 82, 256},
+    {"Q8_0", 8, 34, 32},     {"Q5_K", 13, 176, 256}, {"Q6_K", 14, 210, 256},
+    {"IQ1_S", 19, 50, 256},  {"IQ1_M", 29, 56, 256}, {"IQ2_XXS", 16, 66, 256},
+    {"IQ2_XS", 17, 74, 256}, {"IQ2_S", 22, 82, 256},
 };
 // The DSpark drafter's dense projections: GEMV cases only.
 constexpr TypeCase kQ4K = {"Q4_K", 12, 144, 256};
@@ -59,6 +59,8 @@ std::vector<uint8_t> RandomBlocks(const TypeCase& t, std::size_t blocks,
                                                            << 12);
         put(48 + 2 * i, word);
       }
+    } else if (t.type == 14) {
+      put(208, RandomHalf(rng));  // Q6_K keeps d after its scales
     } else {
       put(0, RandomHalf(rng));
       if (t.type == 13 || t.type == 12)
@@ -213,6 +215,8 @@ bool GemvCase(const TypeCase& t, int M, int K, int rows_per_x,
       gufo::quant::DequantizeQ5_K(w.data() + r * row_bytes, row.data(), K);
     else if (t.type == 12)
       gufo::quant::DequantizeQ4_K(w.data() + r * row_bytes, row.data(), K);
+    else if (t.type == 14)
+      gufo::quant::DequantizeQ6_K(w.data() + r * row_bytes, row.data(), K);
     else
       gufo::quant::DequantizeQ8_0(w.data() + r * row_bytes, row.data(), K);
     const float* xr =
@@ -791,7 +795,8 @@ bool SwigluCase(const TypeCase& t, int M, int K, std::mt19937& rng) {
   constexpr int kExperts = 8;
   constexpr int kSlots = 6;
   constexpr float kLimit = 7.0f;
-  const bool experts = t.type != 8 && t.type != 13 && t.type != 12;
+  const bool experts =
+      t.type != 8 && t.type != 13 && t.type != 12 && t.type != 14;
   const int matrices = experts ? kExperts : 1;
   const int slots = experts ? kSlots : 1;
   const std::size_t expert_bytes =
@@ -905,6 +910,31 @@ bool DenseF16Case(const TypeCase& t, int M, int N, int K, int groups,
     (void)hipFree(x16);
     (void)hipFree(y16);
     (void)hipFree(y);
+  }
+  /* One launch over the first m1 rows and the rest as a second matrix
+   * gives each part's rows of the single launch bit for bit. */
+  if (same && groups == 1 && M >= 512) {
+    const int m1 = M - 256, m2 = 256;
+    float *y1 = nullptr, *y2 = nullptr;
+    (void)hipMalloc(&y1, sizeof(float) * N * m1);
+    (void)hipMalloc(&y2, sizeof(float) * N * m2);
+    const auto* w2 =
+        static_cast<const uint8_t*>(static_cast<void*>(dw)) +
+        static_cast<std::size_t>(m1) * K / t.block_values * t.block_bytes;
+    same = ds41_v41_dense_f16_pair(t.type, dw, y1, m1, w2, y2, m2, dx, N, K,
+                                   0) == 0;
+    if (same) {
+      const auto ref = Host(got, n_out),
+                 a = Host(y1, static_cast<std::size_t>(N) * m1),
+                 b = Host(y2, static_cast<std::size_t>(N) * m2);
+      for (int token = 0; same && token < N; ++token)
+        for (int r = 0; same && r < M; ++r)
+          same = ref[static_cast<std::size_t>(token) * M + r] ==
+                 (r < m1 ? a[static_cast<std::size_t>(token) * m1 + r]
+                         : b[static_cast<std::size_t>(token) * m2 + r - m1]);
+    }
+    (void)hipFree(y1);
+    (void)hipFree(y2);
   }
   for (int token = 0; ok && token < N; ++token)
     for (int z = 0; ok && z < groups; ++z)
@@ -1105,7 +1135,8 @@ int main(int argc, char** argv) {
   ok = Iq2XsKnownCase() && ok;
   if (argc == 2 && std::strcmp(argv[1], "--routed-plan") == 0) {
     for (const auto& t : kTypes) {
-      if (t.type != 19 && t.type != 29 && t.type != 16 && t.type != 17)
+      if (t.type != 19 && t.type != 29 && t.type != 16 && t.type != 17 &&
+          t.type != 22)
         continue;
       ok = RoutedF16Case(t, 256, 1024, 200, 384, 6, true, rng) && ok;
       ok = RoutedF16Case(t, 512, 2304, 200, 384, 6, false, rng) && ok;
@@ -1126,12 +1157,12 @@ int main(int argc, char** argv) {
   for (const auto& t : kTypes) {
     ok = DenseCase(t, 256, 37, 1024, rng) && ok;
     ok = DenseCase(t, 384, 130, 2304, rng) && ok;
-    if (t.type == 13) {
+    if (t.type == 8 || t.type == 13 || t.type == 14) {
       ok = DenseF16Case(t, 256, 37, 1280, 1, rng) && ok;
       ok = DenseF16Case(t, 512, 300, 2304, 1, rng) && ok;
       ok = DenseF16Case(t, 256, 130, 512, 4, rng) && ok;
     }
-    if (t.type == 8 || t.type == 13) {
+    if (t.type == 8 || t.type == 13 || t.type == 14) {
       ok = GemvCase(t, 300, 1280, 0, rng) && ok;
       ok = GemvCase(t, 256, 4096, 64, rng) && ok;
       for (const int n : {2, 3, 5, 6, 7, 8, 12, 16}) {
@@ -1142,7 +1173,7 @@ int main(int argc, char** argv) {
       }
       ok = SwigluCase(t, 2304, 5120, rng) && ok;
     }
-    if (t.type != 8 && t.type != 13) {
+    if (t.type != 8 && t.type != 13 && t.type != 14) {
       ok = ExpertGemvCase(t, 2304, 5120, false, rng) && ok;
       ok = ExpertGemvCase(t, 512, 2304, true, rng) && ok;
       for (const int n : {2, 3, 4, 5, 6, 7, 8, 12, 16})
@@ -1160,7 +1191,8 @@ int main(int argc, char** argv) {
       ok = MoeCase(t, 256, 1024, 200, 384, 6, bounded, rng) && ok;
     }
     ok = MoeSwigluCase(t, 256, 1024, 200, 384, 6, rng) && ok;
-    if (t.type == 19 || t.type == 29 || t.type == 16 || t.type == 17) {
+    if (t.type == 19 || t.type == 29 || t.type == 16 || t.type == 17 ||
+        t.type == 22) {
       for (const int n_experts : {16, 384}) {
         ok = RoutedF16Case(t, 256, 1024, 200, n_experts, 6, true, rng) && ok;
         ok = RoutedF16Case(t, 512, 2304, 200, n_experts, 6, false, rng) && ok;

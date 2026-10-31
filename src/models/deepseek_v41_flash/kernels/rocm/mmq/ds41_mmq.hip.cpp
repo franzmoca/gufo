@@ -4427,6 +4427,7 @@ extern "C" int ds41_mmq_moe_vec_typed(int type, const void* W, const float* X,
 #define DS41_MMQ_BATCH_CASES(X) \
   X(GGML_TYPE_Q8_0)             \
   X(GGML_TYPE_Q5_K)             \
+  X(GGML_TYPE_Q6_K)             \
   X(GGML_TYPE_IQ1_S)            \
   X(GGML_TYPE_IQ1_M)            \
   X(GGML_TYPE_IQ2_XXS)          \

@@ -1,5 +1,5 @@
-/* Single-token decode projections for the V4.1 Flash dense Q5_K and Q8_0
- * weights (and the DSpark drafter's Q4_K), after the Gemma 4 K-quant GEMV (src/models/gemma4/kernels/rocm/
+/* Single-token decode projections for the V4.1 Flash dense Q5_K, Q6_K and
+ * Q8_0 weights (and the DSpark drafter's Q4_K), after the Gemma 4 K-quant GEMV (src/models/gemma4/kernels/rocm/
  * gemv.hip.cpp): weights stay in their GGUF blocks, activations stay FP32. A
  * lane's unit of work is one 16-byte vector of quantized values; lanes
  * holding the same task of different rows read the same activations, which
@@ -48,6 +48,22 @@ struct Format<12> {  // Q4_K (DSpark drafter projections)
   static __device__ __forceinline__ void Decode(const uint8_t* b, int t, float (&w)[32]) { DecodeQ45K<false>(b, t, w); }
   static __device__ __forceinline__ float Dot(float acc, const float (&w)[32], int t, const float* x) {
     return DotQ45K(acc, w, t, x);
+  }
+};
+template <>
+struct Format<14> {  // Q6_K (Unsloth's dense projections)
+  static constexpr int kBlockBytes = 210;
+  static constexpr int kTasks = 8;
+  using SplitRaw = RawQ6K32;
+  static __device__ __forceinline__ SplitRaw LoadSplit(const uint8_t* b, int t) { return LoadQ6K32(b, t); }
+  static __device__ __forceinline__ void DecodeSplit(const SplitRaw& r, int t, float (&w)[32]) {
+    DecodeQ6K32(r, t, w);
+  }
+  static __device__ __forceinline__ void Decode(const uint8_t* b, int t, float (&w)[32]) { DecodeQ6K32(b, t, w); }
+  static __device__ __forceinline__ float Dot(float acc, const float (&w)[32], int t, const float* x) {
+    const float* xv = x + OffsetQ6K32(t);
+    acc = Accumulate<16>(acc, w, xv);
+    return Accumulate<16>(acc, w + 16, xv + 32);
   }
 };
 struct RawQ8_0 {
@@ -326,9 +342,10 @@ __global__ void __launch_bounds__(kWave* kWaves)
 }
 
 /* Slice results and per-tile counters of split_gemv_kernel: every launch
- * runs on the null stream, so one buffer serves them in turn. 32 MiB holds
- * the 129,280-row output head's 8 slices for up to 8 tokens. */
-constexpr uint64_t kSplitPartFloats = 8ull * 16 * 65536;
+ * runs on the null stream, so one buffer serves them in turn. 64 MiB holds
+ * the 129,280-row output head's 8 slices for 16 tokens (DSpark verification),
+ * which took 43-47% less time than the lane layout there. */
+constexpr uint64_t kSplitPartFloats = 16ull * 16 * 65536;
 struct SplitScratch {
   float* part = nullptr;
   uint32_t* counter = nullptr;
@@ -369,10 +386,11 @@ void launch(const void* w, const void* w_up, float limit, const float* x, float*
   constexpr uint32_t kRows = (kWave / Format<kType>::kTasks) * (kWaves / S);
   const uint32_t blocks = (m + kRows - 1) / kRows;
   const auto* w2 = static_cast<const uint8_t*>(second.w);
-  if constexpr ((kType == 13 || kType == 8) && kCols > 1) {
-    /* Plain Q5_K rows from 2 tokens, the fused SwiGLU from 6 and the Q8_0
-     * pair from 4; below those the lane layout is as fast or faster. */
-    const bool split = kType == 13 ? !w_up || kCols >= 6 : second.m1 != m && kCols >= 4;
+  if constexpr ((kType == 13 || kType == 8 || kType == 14) && kCols > 1) {
+    /* Plain Q5_K rows from 2 tokens, plain and paired Q6_K/Q8_0 rows from 4,
+     * the fused SwiGLU from 6; below those the lane layout is as fast or
+     * faster. */
+    const bool split = w_up ? kCols >= 6 : kCols >= (kType == 13 ? 2 : 4);
     if (split && second.m1 % kWave == 0 &&
         (rows_per_x == m || rows_per_x % kWave == 0) &&
         (uint64_t)m * S * kCols * (w_up ? 2 : 1) <= kSplitPartFloats) {
@@ -464,6 +482,8 @@ int run(int type, const void* w, const void* w_up, float limit, const float* x, 
     return dispatch<8>(w, w_up, limit, x, y, m, k, rows_per_x, slices, second, tokens);
   case 12:
     return dispatch<12>(w, w_up, limit, x, y, m, k, rows_per_x, slices, second, tokens);
+  case 14:
+    return dispatch<14>(w, w_up, limit, x, y, m, k, rows_per_x, slices, second, tokens);
   default:
     return 1;
   }

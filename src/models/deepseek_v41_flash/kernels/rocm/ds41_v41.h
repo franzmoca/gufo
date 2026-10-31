@@ -12,6 +12,8 @@
 
 #include <stdint.h>
 
+#include <hip/hip_runtime_api.h>
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -82,7 +84,7 @@ int ds41_v41_gemv_experts_grouped(int type, const void* w, const void* w_up, con
                                   uint32_t k, const void* const* w_table = nullptr,
                                   const void* const* w_up_table = nullptr, int zero_dropped = 1);
 
-/* Batched dense projections (Q5_K) on the FP16 matrix cores: for each group
+/* Batched dense projections (Q5_K, Q6_K, Q8_0) on the FP16 matrix cores: for each group
  * z < groups, out[t, z m + r] = W_z[r] . x[t, z k : z k + k] over n tokens,
  * W_z the z-th [m][k] matrix stored back to back; x rows hold groups * k
  * floats, rounded to FP16 as they are staged, and out rows groups * m
@@ -95,7 +97,12 @@ int ds41_v41_gemv_experts_grouped(int type, const void* w, const void* w_up, con
 #define DS41_V41_DENSE_OUT_HALF 2u
 int ds41_v41_dense_f16(int type, const void* w, const void* x, void* out, uint32_t m, uint32_t n, uint32_t k,
                        uint32_t groups, uint32_t io);
-/* Batched routed experts (IQ1_S, IQ1_M, IQ2_XXS) on the FP16 matrix cores, with FP16
+/* out1 = W1 x and out2 = W2 x in one launch, as two ds41_v41_dense_f16
+ * calls of one group (the same results): W1 [m1][k] and W2 [m2][k] of one
+ * type share the x rows. m2 must be a multiple of 256 as well. */
+int ds41_v41_dense_f16_pair(int type, const void* w1, void* out1, uint32_t m1, const void* w2, void* out2,
+                            uint32_t m2, const void* x, uint32_t n, uint32_t k, uint32_t io);
+/* Batched routed experts (IQ1_S, IQ1_M, IQ2_XXS, IQ2_XS, IQ2_S) on the FP16 matrix cores, with FP16
  * activations x. rows lists the slots grouped by expert, expert e owning
  * rows[bounds[e] .. bounds[e + 1]), and tiles[0:n_tiles] names 64 of them
  * each as expert | index << 16 (see ds41_v41_routed_plan). A slot s reads x
@@ -183,10 +190,11 @@ int ds41_v41_hc_mixes(const float* fn, const float* h, float* mixes, uint32_t hc
 /* Split mixes into pre[t, hc], post[t, hc] and Sinkhorn-normalized comb[t, hc*hc]. */
 int ds41_v41_hc_sinkhorn(const float* mixes, const float* scale, const float* base, float* pre, float* post,
                          float* comb, uint32_t hc, uint32_t iters, float eps, uint32_t n);
-/* hc_mixes followed by hc_sinkhorn (iters, hc_eps); small batches run as one kernel. */
+/* hc_mixes followed by hc_sinkhorn (iters, hc_eps); up to 16 tokens run as one
+ * kernel, the only form that takes a stream (larger batches need a null one). */
 int ds41_v41_hc_mix(const float* fn, const float* h, const float* scale, const float* base, float* mixes, float* pre,
                     float* post, float* comb, uint32_t hc, uint32_t dim, float eps, uint32_t iters, float hc_eps,
-                    uint32_t n);
+                    uint32_t n, hipStream_t stream);
 /* x[t, i] = sum_c pre[t, c] * h[t, c, i]; out[t] = weight * RMSNorm(x[t]). */
 int ds41_v41_hc_collapse_norm(const float* h, const float* pre, const float* weight, float* out, uint32_t hc,
                               uint32_t dim, float eps, uint32_t n);

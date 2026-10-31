@@ -164,6 +164,28 @@ bool dequant_row(uint32_t type, const uint8_t* src, float* out, uint32_t n) {
       }
     }
     return true;
+  case DS41_TENSOR_Q6_K:
+    for (uint32_t b = 0; b < n / 256; b++, src += 210) {
+      const float d = half_to_float(read_u16(src + 208));
+      const uint8_t* ql = src;
+      const uint8_t* qh = src + 128;
+      const int8_t* sc = (const int8_t*)(src + 192);
+      float* y = out + b * 256;
+      for (int half = 0; half < 2; half++, ql += 64, qh += 32, sc += 8, y += 128) {
+        for (int l = 0; l < 32; l++) {
+          const int is = l / 16;
+          const int q1 = (int)((ql[l] & 0xf) | ((qh[l] & 3) << 4)) - 32;
+          const int q2 = (int)((ql[l + 32] & 0xf) | (((qh[l] >> 2) & 3) << 4)) - 32;
+          const int q3 = (int)((ql[l] >> 4) | (((qh[l] >> 4) & 3) << 4)) - 32;
+          const int q4 = (int)((ql[l + 32] >> 4) | (((qh[l] >> 6) & 3) << 4)) - 32;
+          y[l] = d * sc[is] * q1;
+          y[l + 32] = d * sc[is + 2] * q2;
+          y[l + 64] = d * sc[is + 4] * q3;
+          y[l + 96] = d * sc[is + 6] * q4;
+        }
+      }
+    }
+    return true;
   default:
     return false;
   }
@@ -323,6 +345,12 @@ struct ds41_decoder : Activations {
   int32_t* pred_pinned = nullptr;  // pinned [DS41_N_LAYER][capacity][DS41_N_EXPERT_USED]
   hipEvent_t pred_events[DS41_N_LAYER] = {};
   bool pred_ok = true;
+  /* Recorded after the router so the store reads the routes while the
+   * shared expert runs; without it the store's copy waits for the stream. */
+  hipEvent_t routes_ready = nullptr;
+  /* hc_mix's side stream: mixes overlap the projections of their half. */
+  hipStream_t mix_stream = nullptr;
+  hipEvent_t mix_start = nullptr, mix_done = nullptr;
   /* Batches of up to this many rows take the decode paths (FP32 GEMV,
    * grouped experts, per-row state mixes), where each row sees the
    * arithmetic of a single-token evaluation; up to
@@ -360,6 +388,7 @@ bool mmq_batched(uint32_t type) {
   switch (type) {
   case DS41_TENSOR_Q8_0:
   case DS41_TENSOR_Q5_K:
+  case DS41_TENSOR_Q6_K:
   case DS41_TENSOR_IQ1_S:
   case DS41_TENSOR_IQ1_M:
   case DS41_TENSOR_IQ2_XXS:
@@ -379,11 +408,31 @@ int gemv_slices(uint32_t rows, uint32_t k) {
   return 8;
 }
 
-bool gemv_type(uint32_t type) { return type == DS41_TENSOR_Q5_K || type == DS41_TENSOR_Q8_0; }
+bool gemv_type(uint32_t type) {
+  return type == DS41_TENSOR_Q5_K || type == DS41_TENSOR_Q6_K || type == DS41_TENSOR_Q8_0;
+}
 
-/* Batches of Q5_K rows run on the FP16 matrix cores (ds41_v41_dense_f16). */
+/* Batches of Q5_K, Q6_K and Q8_0 rows run on the FP16 matrix cores (ds41_v41_dense_f16). */
 bool dense_f16(uint32_t type, uint32_t rows, uint32_t k, uint32_t n) {
-  return n > 8 && type == DS41_TENSOR_Q5_K && rows % 256 == 0 && k % 256 == 0;
+  return n > 8 && (type == DS41_TENSOR_Q5_K || type == DS41_TENSOR_Q6_K || type == DS41_TENSOR_Q8_0) &&
+         rows % 256 == 0 && k % 256 == 0;
+}
+
+/* Whether out1 = W1 x and out2 = W2 x fit one ds41_v41_dense_f16_pair launch. */
+bool dense_f16_pair(const ds41_tensor* w1, const ds41_tensor* w2, uint32_t n) {
+  const uint32_t k = (uint32_t)w1->dim[0];
+  return w1->type == w2->type && w2->dim[0] == k && dense_f16(w1->type, (uint32_t)(w1->elements / k), k, n) &&
+         dense_f16(w2->type, (uint32_t)(w2->elements / k), k, n);
+}
+
+bool run_dense_f16_pair(const ds41_decoder* d, const ds41_tensor* w1, void* out1, const ds41_tensor* w2, void* out2,
+                        const void* x, uint32_t n, uint32_t io) {
+  const uint32_t k = (uint32_t)w1->dim[0];
+  const void* p1 = dev(d, w1);
+  const void* p2 = dev(d, w2);
+  return p1 && p2 &&
+         ds41_v41_dense_f16_pair((int)w1->type, p1, out1, (uint32_t)(w1->elements / k), p2, out2,
+                                 (uint32_t)(w2->elements / k), x, n, k, io) == 0;
 }
 
 /* out[t] = W x[t] for n tokens and a [rows, k] weight at `p` of `type`. */
@@ -431,6 +480,7 @@ bool linear(const ds41_decoder* d, const ds41_tensor* w, const float* x, float* 
 bool linear_pair(const ds41_decoder* d, const ds41_tensor* w1, float* out1, const ds41_tensor* w2, float* out2,
                  const float* x, uint32_t n) {
   const uint32_t k = (uint32_t)w1->dim[0];
+  if (n > d->decode_rows && dense_f16_pair(w1, w2, n)) return run_dense_f16_pair(d, w1, out1, w2, out2, x, n, 0);
   if (n > d->decode_rows && w1->type == w2->type && w2->dim[0] == k && mmq_batched(w1->type) &&
       !dense_f16(w1->type, (uint32_t)(w1->elements / k), k, n)) {
     const void* p1 = dev(d, w1);
@@ -526,10 +576,26 @@ bool engram(ds41_decoder* d, uint32_t il, const float* rows, uint32_t n) {
   return ds41_v41_engram_gate(d->h, d->engram_kv, f32(d, l->engram_gate), kHc, kDim, DS41_RMS_EPS, n) == 0;
 }
 
+/* Up to this many tokens hc_mix is one kernel, which can run on mix_stream. */
+constexpr uint32_t kMixStreamTokens = 16;
+
+/* With a side stream (mix_stream, up to kMixStreamTokens), the mix runs there
+ * once the null stream reaches it; the mixes feed only the expand closing
+ * their half, which waits for mix_done first (join_mix). */
 bool hc_mix(ds41_decoder* d, const ds41_tensor* fn, const ds41_tensor* scale, const ds41_tensor* base,
             const float* h, float* pre, float* post, float* comb, uint32_t n) {
+  const bool side = d->mix_stream && n <= kMixStreamTokens;
+  hipStream_t stream = side ? d->mix_stream : nullptr;
+  if (side && (hipEventRecord(d->mix_start, nullptr) != hipSuccess ||
+               hipStreamWaitEvent(stream, d->mix_start, 0) != hipSuccess))
+    return false;
   return ds41_v41_hc_mix(f32(d, fn), h, f32(d, scale), f32(d, base), d->mixes, pre, post, comb, kHc, kDim,
-                         DS41_RMS_EPS, DS41_N_HC_SINKHORN_ITER, DS41_HC_EPS, n) == 0;
+                         DS41_RMS_EPS, DS41_N_HC_SINKHORN_ITER, DS41_HC_EPS, n, stream) == 0 &&
+         (!side || hipEventRecord(d->mix_done, stream) == hipSuccess);
+}
+
+bool join_mix(ds41_decoder* d, uint32_t n) {
+  return !d->mix_stream || n > kMixStreamTokens || hipStreamWaitEvent(nullptr, d->mix_done, 0) == hipSuccess;
 }
 
 bool copy_dev(float* dst, const float* src, uint64_t count) {
@@ -661,6 +727,13 @@ bool attention(ds41_decoder* d, uint32_t il, uint32_t n, const Joint* joint) {
     const uint32_t m = (uint32_t)((wqa->elements + wkv->elements) / k);
     if (ds41_v41_gemv_pair((int)wqa->type, dev(d, wqa), d->qa, DS41_N_LORA_Q, dev(d, wkv), d->kv, kHeadDim, d->xn, k,
                            gemv_slices(m, k), n))
+      return false;
+  } else if (n > d->decode_rows && dense_f16_pair(wqa, wkv, n)) {
+    /* FP16 rows of xn (rounded as the kernel would stage them) in o, idle
+     * until the attention writes it: half the bytes per staged tile. */
+    auto* x16 = reinterpret_cast<uint16_t*>(d->o);
+    if (ds41_v41_to_half(d->xn, x16, (uint64_t)n * wqa->dim[0]) ||
+        !run_dense_f16_pair(d, wqa, d->qa, wkv, d->kv, x16, n, DS41_V41_DENSE_X_HALF))
       return false;
   } else if (!linear_pair(d, wqa, d->qa, wkv, d->kv, d->xn, n)) {
     return false;
@@ -844,7 +917,7 @@ bool attention(ds41_decoder* d, uint32_t il, uint32_t n, const Joint* joint) {
 /* Batched routed projections on the FP16 matrix cores (ds41_v41_routed_f16). */
 bool routed_f16_type(int type) {
   return type == (int)DS41_TENSOR_IQ1_S || type == (int)DS41_TENSOR_IQ1_M ||
-         type == (int)DS41_TENSOR_IQ2_XXS || type == (int)DS41_TENSOR_IQ2_XS;
+         type == (int)DS41_TENSOR_IQ2_XXS || type == (int)DS41_TENSOR_IQ2_XS || type == (int)DS41_TENSOR_IQ2_S;
 }
 
 /* ds41_v41_routed_plan's rows, bounds and tiles for batches up to cap tokens. */
@@ -895,13 +968,8 @@ static_assert(DS41_V41_GEMV_MAX_TOKENS <= DS41_V41_EXPERT_PLAN_COLS &&
 bool shared_moe(ds41_decoder* d, const ds41_layer_weights* l, uint32_t n, const uint16_t* x16) {
   const ds41_tensor* sg = l->ffn_gate_shexp;
   const ds41_tensor* su = l->ffn_up_shexp;
-  const uint32_t sk = (uint32_t)sg->dim[0], sm = (uint32_t)(sg->elements / sk);
-  if (x16 && su->dim[0] == sk && su->elements == sg->elements && dense_f16(sg->type, sm, sk, n) &&
-      dense_f16(su->type, sm, sk, n)) {
-    const void* pg = dev(d, sg);
-    const void* pu = dev(d, su);
-    if (!pg || !pu || ds41_v41_dense_f16((int)sg->type, pg, x16, d->sg, sm, n, sk, 1, DS41_V41_DENSE_X_HALF) ||
-        ds41_v41_dense_f16((int)su->type, pu, x16, d->su, sm, n, sk, 1, DS41_V41_DENSE_X_HALF) ||
+  if (x16 && dense_f16_pair(sg, su, n)) {
+    if (!run_dense_f16_pair(d, sg, d->sg, su, d->su, x16, n, DS41_V41_DENSE_X_HALF) ||
         ds41_v41_swiglu(d->sg, d->su, nullptr, d->sm, n, DS41_N_FF_EXP, kSwigluLimit))
       return false;
   } else if (n <= d->decode_rows && sg->type == su->type && sg->elements == su->elements && gemv_type(sg->type)) {
@@ -925,6 +993,14 @@ bool shared_moe(ds41_decoder* d, const ds41_layer_weights* l, uint32_t n, const 
  * joint batches predict only when this layer waited on reads: misses
  * cluster in neighbouring layers, and a prediction without a stall to hide
  * it costs more than the read it saves. */
+/* Router logits of layer il (the narrowed BF16 copy when there is one). */
+bool router_logits(ds41_decoder* d, uint32_t il, uint32_t n) {
+  const ds41_weights* w = d->engine->weights;
+  if (!w->router_bf16) return linear(d, w->layer[il].ffn_gate_inp, d->xn, d->router, n);
+  return linear_raw(DS41_TENSOR_BF16, w->router_bf16 + (uint64_t)il * DS41_N_EXPERT * DS41_N_EMBD, DS41_N_EXPERT,
+                    DS41_N_EMBD, d->xn, d->router, n, d->decode_rows);
+}
+
 void predict_next_layer(ds41_decoder* d, uint32_t il, uint32_t n, bool misses_now) {
   if (!d->engine->expert_store || !d->pred_ok || il + 1 >= DS41_N_LAYER)
     return;
@@ -936,7 +1012,7 @@ void predict_next_layer(ds41_decoder* d, uint32_t il, uint32_t n, bool misses_no
   const uint32_t used = DS41_N_EXPERT_USED;
   const uint64_t rows = (uint64_t)d->capacity * DS41_N_EXPERT_USED;
   int32_t* ids = d->pred_pinned + (size_t)(il + 1) * rows;
-  if (!linear(d, nl->ffn_gate_inp, d->xn, d->router, n) ||
+  if (!router_logits(d, il + 1, n) ||
       ds41_v41_route(d->router, f32(d, nl->ffn_exp_probs_b), d->pred_ids, d->pred_w,
                      DS41_N_EXPERT, used, DS41_EXPERT_WEIGHT_SCALE, n) ||
       hipMemcpyAsync(ids, d->pred_ids, (size_t)n * used * sizeof(int32_t),
@@ -952,7 +1028,7 @@ void predict_next_layer(ds41_decoder* d, uint32_t il, uint32_t n, bool misses_no
 bool moe(ds41_decoder* d, uint32_t il, uint32_t n) {
   const ds41_layer_weights* l = &d->engine->weights->layer[il];
   const int used = (int)DS41_N_EXPERT_USED;
-  if (!linear(d, l->ffn_gate_inp, d->xn, d->router, n) ||
+  if (!router_logits(d, il, n) ||
       ds41_v41_route(d->router, f32(d, l->ffn_exp_probs_b), d->route_ids, d->route_w, DS41_N_EXPERT, used,
                      DS41_EXPERT_WEIGHT_SCALE, n))
     return false;
@@ -1004,13 +1080,14 @@ bool moe(ds41_decoder* d, uint32_t il, uint32_t n) {
     bool fused;
     const uint16_t* x16;
     bool gate_up_done = false;
+    bool shared_done = false;
     ds41_expert_overlap info{};
   };
   StreamWork work{d,         l,          il,        n,         (uint32_t)rows, (uint32_t)used, gate_type,
                   d->expert_plan_split[0], fused_pair, shared_x16};
   const auto streamed_overlap = [](void* context, const ds41_expert_overlap* info) {
     StreamWork& w = *static_cast<StreamWork*>(context);
-    if (!shared_moe(w.d, w.layer, w.n, w.x16))
+    if (!w.shared_done && !shared_moe(w.d, w.layer, w.n, w.x16))
       return false;
     predict_next_layer(w.d, w.il, w.n, info && info->miss_rows > 0);
     if (!info || !info->hit_ids || info->miss_rows == 0 || info->miss_rows == info->rows || !w.fused)
@@ -1034,8 +1111,16 @@ bool moe(ds41_decoder* d, uint32_t il, uint32_t n) {
                                          static_cast<const void* const*>(info->table[1]), 1) == 0;
   };
   if (d->engine->expert_store) {
+    /* Decode batches queue the shared expert, which reads none of the
+     * store's buffers, so it runs while the host reads the routes and plans
+     * the layer. Prefill keeps it in the read overlap, where the gap is
+     * small next to its reads. */
+    if (small && d->routes_ready) {
+      if (hipEventRecord(d->routes_ready, nullptr) != hipSuccess || !shared_moe(d, l, n, shared_x16)) return false;
+      work.shared_done = true;
+    }
     if (!ds41_expert_store_prepare(d->engine->expert_store, il, d->route_ids, n, &gate, &up, &down,
-                                   streamed_overlap, &work))
+                                   streamed_overlap, &work, work.shared_done ? d->routes_ready : nullptr))
       return false;
   } else {
     gate = dev(d, l->ffn_gate_exps);
@@ -1208,8 +1293,8 @@ bool moe(ds41_decoder* d, uint32_t il, uint32_t n) {
                                              rows, DS41_N_EXPERT, 1, 0)) {
     return false;
   } else if (streamed) {
-    /* No FP16 tile kernel for this type (IQ2_S, two down projections of the
-     * IQ1_M build): each row through the table-indexed expert GEMV. */
+    /* No FP16 tile kernel for this type: each row through the
+     * table-indexed expert GEMV. */
     int status = 0;
     if (!expert_gemv(down_type, down, d->route_ids, rows, d->mid6, true, d->down6, kDim, DS41_N_FF_EXP, &status,
                      down_table) ||
@@ -1266,13 +1351,13 @@ bool block(ds41_decoder* d, uint32_t il, int prev, int next, uint32_t n, const J
   /* Attention uses the pre-mix of the previous FFN (shifted mHC). */
   if (!hc_mix(d, l->hc_attn_fn, l->hc_attn_scale, l->hc_attn_base, d->h, d->pre[next], d->post, d->comb, n) ||
       ds41_v41_hc_collapse_norm(d->h, d->pre[prev], f32(d, l->attn_norm), d->xn, kHc, kDim, eps, n) ||
-      !attention(d, il, n, joint) ||
+      !attention(d, il, n, joint) || !join_mix(d, n) ||
       ds41_v41_hc_expand(d->attn_out, d->h, d->post, d->comb, d->h2, kHc, kDim, n))
     return false;
   /* The FFN uses this layer's attention pre-mix; its own pre-mix feeds the next attention. */
   if (!hc_mix(d, l->hc_ffn_fn, l->hc_ffn_scale, l->hc_ffn_base, d->h2, d->pre[prev], d->ffn_post, d->ffn_comb, n) ||
       ds41_v41_hc_collapse_norm(d->h2, d->pre[next], f32(d, l->ffn_norm), d->xn, kHc, kDim, eps, n) ||
-      !moe(d, il, n) ||
+      !moe(d, il, n) || !join_mix(d, n) ||
       ds41_v41_hc_expand_sum(d->down6, d->sd, DS41_N_EXPERT_USED, d->h2, d->ffn_post, d->ffn_comb, d->h, kHc, kDim,
                              n))
     return false;
@@ -1497,7 +1582,13 @@ ds41_decoder* ds41_decoder_create(ds41_engine* engine, uint32_t context) {
     for (uint32_t l = 0; ok && l < DS41_N_LAYER; ++l)
       ok = hipEventCreateWithFlags(&d->pred_events[l],
                                    hipEventDisableTiming) == hipSuccess;
+    if (hipEventCreateWithFlags(&d->routes_ready, hipEventDisableTiming) != hipSuccess)
+      d->routes_ready = nullptr;
   }
+  if (hipEventCreateWithFlags(&d->mix_start, hipEventDisableTiming) != hipSuccess ||
+      hipEventCreateWithFlags(&d->mix_done, hipEventDisableTiming) != hipSuccess ||
+      hipStreamCreateWithFlags(&d->mix_stream, hipStreamNonBlocking) != hipSuccess)
+    d->mix_stream = nullptr;
   d->host_h.resize((uint64_t)kHc * kDim);
   d->host_ids.resize(DS41_N_EXPERT_USED);
   return d;
@@ -1508,6 +1599,15 @@ void ds41_decoder_destroy(ds41_decoder* d) {
   if (d->pred_pinned && d->engine && d->engine->expert_store)
     ds41_expert_store_predict_flush(d->engine->expert_store);
   for (hipEvent_t event : d->pred_events)
+    if (event)
+      (void)hipEventDestroy(event);
+  if (d->routes_ready)
+    (void)hipEventDestroy(d->routes_ready);
+  if (d->mix_stream) {
+    (void)hipStreamSynchronize(d->mix_stream);
+    (void)hipStreamDestroy(d->mix_stream);
+  }
+  for (hipEvent_t event : {d->mix_start, d->mix_done})
     if (event)
       (void)hipEventDestroy(event);
   if (d->pred_pinned)

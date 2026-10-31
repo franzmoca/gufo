@@ -3,8 +3,9 @@
 Gufo runs **DeepSeek-V4.1-Flash-1017**, a 763B-parameter mixture-of-experts
 model with a native 1M-token context, on a single AMD Strix Halo with 128 GB
 of unified memory. The `IQ1_M` backbone stays resident in GPU memory; the
-larger `IQ2_XXS` backbone can stream its routed experts from SSD. Engram
-lookup tables are read from the SSD in both configurations.
+larger `IQ2_XXS` backbone and Unsloth's `UD-IQ1_M` can stream their routed
+experts from SSD. Engram lookup tables are read from the SSD in every
+configuration.
 
 > [!WARNING]
 > **Headless, dedicated deployment only.** The resident model leaves about
@@ -18,7 +19,11 @@ lookup tables are read from the SSD in both configurations.
 
 - **Backbone:** ISTA-DASLab's GSQ-RCO `IQ1_M` build (1.75 bits per weight),
   resident in GTT, or the experimental `IQ2_XXS` build with streamed experts.
-- **Engram tables:** the shared `IQ4_NL` file, read from disk.
+  Unsloth's Dynamic `UD-IQ1_M` runs with streamed experts; `UD-IQ1_S` uses
+  only weight types Gufo supports but has not been tested
+  ([Unsloth Dynamic quants](#unsloth-dynamic-quants)).
+- **Engram tables:** the shared `IQ4_NL` file, read from disk. Unsloth's
+  Engram shard holds the same tables.
 - **DSpark speculative decoding** with a separate drafter, plus prompt lookup:
   copies of earlier context are verified up to 15 tokens at a time.
   Greedy output is identical to plain decoding.
@@ -85,8 +90,9 @@ wait in its logs.
 ## Download the models
 
 All files go into **one directory**: Gufo opens the other shards from the
-directory of the first one. The shared Engram file is shard 6 of every build,
-through a link named after the build.
+directory of the first one. The shared Engram file is shard 6 of every
+ISTA-DASLab build (shard 5 of the Unsloth builds), through a link named after
+the build.
 
 ```sh
 pip install -U "huggingface_hub[cli]"
@@ -107,6 +113,7 @@ hf download Lucebox/DeepSeek-V4.1-Flash-1017-ROCMFP-GGUF \
 | --- | --- | --- |
 | [ISTA-DASLab GSQ-RCO](https://huggingface.co/ISTA-DASLab/DeepSeek-V4.1-Flash-1017-GSQ-RCO-GGUF) | `*-IQ1_M-0000{1..5}-of-00006.gguf` or `*-IQ2_XXS-0000{1..5}-of-00006.gguf`, `DeepSeek-V4.1-Flash-Engram-IQ4_NL.gguf` (linked as shard 6) | `IQ1_M` fits resident; `IQ2_XXS` (138 GB) needs `--stream-experts`. |
 | [Lucebox](https://huggingface.co/Lucebox/DeepSeek-V4.1-Flash-1017-ROCMFP-GGUF) | `DeepSeek-V4.1-Flash-1017-DSpark-draft-Q2K-Q4K.gguf` | **Recommended drafter**: 4.59 GiB resident. |
+| [unsloth](https://huggingface.co/unsloth/DeepSeek-V4.1-Flash-1017-GGUF) | `UD-IQ1_M/*-0000{1..4}-of-00005.gguf`, Engram as shard 5 | `UD-IQ1_M` (140 GB) needs `--stream-experts`; `UD-IQ1_S` (122 GB) is untested. See [Unsloth Dynamic quants](#unsloth-dynamic-quants). |
 | [unsloth](https://huggingface.co/unsloth/DeepSeek-V4.1-Flash-1017-GGUF) | `dspark-DeepSeek-V4.1-Flash-1017-Q8_0.gguf` | Supported: 7.42 GiB resident, about 2.6 GiB less host memory left, similar speed and acceptance. |
 
 Use the smaller Q2_K/Q4_K drafter: in matched runs the Q8_0 drafter
@@ -190,6 +197,40 @@ ln -s DeepSeek-V4.1-Flash-Engram-IQ4_NL.gguf \
   -m ds41/DeepSeek-V4.1-Flash-1017-GSQ-RCO-IQ2_XXS-00001-of-00006.gguf \
   --stream-experts
 ```
+
+### Unsloth Dynamic quants
+
+Unsloth's
+[Dynamic GGUFs](https://huggingface.co/unsloth/DeepSeek-V4.1-Flash-1017-GGUF)
+quantize the dense projections to Q6_K/Q8_0/Q5_K and keep the router in F32.
+Each build has four backbone shards plus the Engram tables as shard 5
+(110.6 GB). That shard holds the same tables as ISTA-DASLab's `IQ4_NL`
+Engram file, so if you already have it, link it instead of downloading
+again. Gufo then logs a warning that the linked shard names another build's
+split position; it is expected and harmless.
+
+| Build | Backbone | Routed experts | Status |
+| --- | ---: | --- | --- |
+| `UD-IQ1_M` | 139.8 GB (130.2 GiB) | IQ1_S, IQ2_XXS, IQ2_XS, IQ2_S | Tested with `--stream-experts`; [benchmarked](docs/models/deepseek-v4.1-flash/BENCHMARKS.md) |
+| `UD-IQ1_S` | 122.4 GB (114.0 GiB) | IQ1_S, IQ2_XXS | Untested; every weight type is supported |
+
+```sh
+hf download unsloth/DeepSeek-V4.1-Flash-1017-GGUF \
+  --include "UD-IQ1_M/*-0000[1-4]-of-00005.gguf" --local-dir ds41
+ln -s ../DeepSeek-V4.1-Flash-Engram-IQ4_NL.gguf \
+  ds41/UD-IQ1_M/DeepSeek-V4.1-Flash-1017-UD-IQ1_M-00005-of-00005.gguf
+./result/bin/gufo serve llm \
+  -m ds41/UD-IQ1_M/DeepSeek-V4.1-Flash-1017-UD-IQ1_M-00001-of-00005.gguf \
+  --stream-experts \
+  --speculative dspark \
+  --dspark-model ds41/DeepSeek-V4.1-Flash-1017-DSpark-draft-Q2K-Q4K.gguf
+```
+
+Without the ISTA Engram file, download shard 5 with the others (drop the
+`[1-4]`). For `UD-IQ1_S`, replace `UD-IQ1_M` with `UD-IQ1_S` throughout.
+Its backbone is 1.6 GiB larger than `IQ1_M`, which leaves too little memory
+to run it resident with the native context and the DSpark drafter;
+start it with `--stream-experts`.
 
 Streaming is never chosen automatically: without `--stream-experts`, a model
 that does not fit the available memory fails to load and states what it
@@ -277,46 +318,10 @@ podman logs -f gufo-ds41
 
 ## Performance
 
-Measured over HTTP with `gufo serve` on October 29, 2026 (greedy, thinking
-off, real chat text); full tables and charts are on the
-[benchmark card](docs/models/deepseek-v4.1-flash/BENCHMARKS.md).
-
-| `IQ1_M` resident, single user | Depth 0 | 32K | 128K |
-| --- | ---: | ---: | ---: |
-| Prefill, pp2048 (tok/s) | 1,228 | 1,177 | 1,045 |
-| Decode, AR (tok/s) | 24.5 | 24.1 | 23.1 |
-| Decode, DSpark, mixed text (tok/s) | 30.7 | 29.8 | 29.9 |
-| Decode, DSpark, repetitive text (tok/s) | 73.6 | 66.6 | 64.4 |
-
-| `IQ1_M` resident, concurrent users | 1 | 2 | 4 | 8 |
-| --- | ---: | ---: | ---: | ---: |
-| AR, total decode (tok/s) | 24.2 | 41.3 | 64.5 | 86.1 |
-| DSpark mixed, total decode (tok/s) | 31.0 | 45.0 | 58.3 | 73.8 |
-
-Streamed `IQ2_XXS` (`--stream-experts`, default expert cache), with the routed
-experts read from a Samsung 990 PRO. A slower SSD gives lower numbers,
-mostly while the expert cache warms up; each row starts from a new server.
-
-| `IQ2_XXS` streamed, single user | Depth 0 | 32K | 128K |
-| --- | ---: | ---: | ---: |
-| Prefill, pp2048 (tok/s) | 1,064 | 899 | 992 |
-| Decode, AR (tok/s) | 20.8 | 22.6 | 21.7 |
-| Decode, DSpark, mixed text (tok/s) | 23.3 | 27.7 | 24.9 |
-| Decode, DSpark, repetitive text (tok/s) | 54.9 | 63.7 | 59.6 |
-
-| `IQ2_XXS` streamed, concurrent users | 1 | 2 | 4 | 8 |
-| --- | ---: | ---: | ---: | ---: |
-| AR, total decode (tok/s) | 20.2 | 35.6 | 59.4 | 81.5 |
-| DSpark mixed, total decode (tok/s) | 22.7 | 36.1 | 51.6 | 69.1 |
-
-- `gufo bench` prefills 1,394 tok/s at depth 0 (synthetic token IDs).
-- Repeating a source file with one edit decodes at 67.6 tok/s through
-  prompt lookup.
-- From a cold page cache the server is ready in 19.7 s (`IQ1_M`) or 22.5 s
-  (`IQ2_XXS` streamed).
-- From four users, plain AR is faster than DSpark on mixed text.
-- Greedy DSpark and concurrent outputs are identical to single-session plain
-  decoding.
+Measured over HTTP with `gufo serve` (greedy, thinking off, real chat text);
+the [benchmark card](docs/models/deepseek-v4.1-flash/BENCHMARKS.md) has the
+single-user, concurrent, loading and memory tables for `IQ1_M` resident and
+for `IQ2_XXS` and `UD-IQ1_M` streamed.
 
 ## Model notes
 
@@ -338,8 +343,10 @@ State is small: about 890 B per token of compressed KV and index K plus a
 fixed 128-row SWA ring per layer; stored as FP4 codes and scales it is about
 0.9 GiB at 1M tokens. GGUF types: experts are IQ1_S/IQ1_M/IQ2_XXS/IQ2_XS/IQ2_S
 per layer (gate and up share a type; down may differ); dense projections
-Q8_0/Q5_K; router, compressor and indexer BF16; Engram gate (q·k), hc and
-norms F32; `token_embd` and `output` Q5_K; Engram hash constants in metadata. An independent
+Q8_0/Q5_K (Q6_K/Q8_0/Q5_K in the Unsloth builds); router BF16 (F32 in the
+Unsloth builds), compressor and indexer BF16; Engram gate (q·k), hc and
+norms F32; `token_embd` and `output` Q5_K (Q6_K or Q8_0 in the Unsloth
+builds); Engram hash constants in metadata. An independent
 CPU/torch oracle that ports the official `inference/model.py` and
 `inference/engram.py` is in `tools/ds41/`.
 

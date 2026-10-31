@@ -1,0 +1,256 @@
+{
+  "artifactType": "model-bench-table",
+  "fingerprint": {
+    "canonical": {
+      "cppStandard": "C++20",
+      "cpuArchitecture": "x86_64",
+      "cpuLogicalCores": 32,
+      "cpuModel": "AMD RYZEN AI MAX+ 395 w/ Radeon 8060S",
+      "cpuPhysicalCores": 16,
+      "cxxCompiler": "GCC 15.3.0",
+      "gpuArchitecture": "gfx1151",
+      "gpuComputeUnits": 20,
+      "gpuDriver": "amdgpu",
+      "gpuName": "AMD Radeon 8060S Graphics",
+      "gpuPciId": "1002:1586",
+      "kernelRelease": "7.2.11-200.fc44.x86_64",
+      "memoryTotalBytes": 133616861184,
+      "memoryType": "LPDDR5X (Unified)",
+      "rocmVersion": "7.2.3",
+      "schemaVersion": "1.0.0"
+    },
+    "fingerprintId": "d19fe457f2791c2dec2f2de6cd1c21607a1d51ce20c58e0d686637de1fa0d0a1",
+    "schemaVersion": "1.0.0"
+  },
+  "measuredOn": "2026-10-31",
+  "mode": "dspark",
+  "model": {
+    "id": "DeepSeek-V4.1-Flash-1017",
+    "variant": "udiq1m"
+  },
+  "notes": [
+    "pp2048/tg128; depth is a cached conversation prefix of synthetic text (8-token reply); measured turn task is recorded per row; tolerance max(32, 0.500%) on cache_n and prompt_n; actual counts per sample in rows",
+    "synthetic text: 1.138 tokens/word, template overhead 4 tokens"
+  ],
+  "referenceName": "reference",
+  "rows": {
+    "0": {
+      "acceptance": 63.33,
+      "acceptance_sd": null,
+      "accepted_per_step": 0.8,
+      "accepted_per_step_sd": null,
+      "command": "gufo serve --port 51181 --sessions 1 llm --model DeepSeek-V4.1-Flash-1017-UD-IQ1_M-00001-of-00005.gguf --context 133760 --served-model-name bench --think off --max-pending-per-client 8 --stream-experts --speculative dspark --dspark-model DeepSeek-V4.1-Flash-1017-DSpark-draft-Q2K-Q4K.gguf",
+      "counts": [
+        {
+          "cache_n": 0,
+          "completion_sha256": "9d10de9150df98fdc5652f8a7d3f9f5e7f27e2d1ab55ec914612e8715557177a",
+          "draft_n": 90,
+          "draft_n_accepted": 57,
+          "predicted_n": 128,
+          "prompt_n": 2035
+        }
+      ],
+      "pp": 897.2,
+      "pp_sd": null,
+      "samples": 1,
+      "tg": 22.29,
+      "tg_sd": null,
+      "workload": "prose"
+    },
+    "12288": {
+      "acceptance": 63.11,
+      "acceptance_sd": null,
+      "accepted_per_step": 1.03,
+      "accepted_per_step_sd": null,
+      "command": "gufo serve --port 51181 --sessions 1 llm --model DeepSeek-V4.1-Flash-1017-UD-IQ1_M-00001-of-00005.gguf --context 133760 --served-model-name bench --think off --max-pending-per-client 8 --stream-experts --speculative dspark --dspark-model DeepSeek-V4.1-Flash-1017-DSpark-draft-Q2K-Q4K.gguf",
+      "counts": [
+        {
+          "cache_n": 12241,
+          "completion_sha256": "98797cca97c08fc53473c9453bbf58b513cc092077a0451203dc58812cf0e997",
+          "draft_n": 103,
+          "draft_n_accepted": 65,
+          "predicted_n": 128,
+          "prompt_n": 2042
+        }
+      ],
+      "pp": 818.05,
+      "pp_sd": null,
+      "samples": 1,
+      "tg": 22.79,
+      "tg_sd": null,
+      "workload": "prose"
+    },
+    "131072": {
+      "acceptance": 75.9,
+      "acceptance_sd": null,
+      "accepted_per_step": 0.97,
+      "accepted_per_step_sd": null,
+      "command": "gufo serve --port 51181 --sessions 1 llm --model DeepSeek-V4.1-Flash-1017-UD-IQ1_M-00001-of-00005.gguf --context 133760 --served-model-name bench --think off --max-pending-per-client 8 --stream-experts --speculative dspark --dspark-model DeepSeek-V4.1-Flash-1017-DSpark-draft-Q2K-Q4K.gguf",
+      "counts": [
+        {
+          "cache_n": 131248,
+          "completion_sha256": "4aa7fff68f515fdf6e932dcd296360b88912fd3b7759d81bf2a80aac2ef97765",
+          "draft_n": 83,
+          "draft_n_accepted": 63,
+          "predicted_n": 128,
+          "prompt_n": 2052
+        }
+      ],
+      "pp": 693.47,
+      "pp_sd": null,
+      "samples": 1,
+      "tg": 22.79,
+      "tg_sd": null,
+      "workload": "prose"
+    },
+    "16384": {
+      "acceptance": 67.35,
+      "acceptance_sd": null,
+      "accepted_per_step": 1.06,
+      "accepted_per_step_sd": null,
+      "command": "gufo serve --port 51181 --sessions 1 llm --model DeepSeek-V4.1-Flash-1017-UD-IQ1_M-00001-of-00005.gguf --context 133760 --served-model-name bench --think off --max-pending-per-client 8 --stream-experts --speculative dspark --dspark-model DeepSeek-V4.1-Flash-1017-DSpark-draft-Q2K-Q4K.gguf",
+      "counts": [
+        {
+          "cache_n": 16364,
+          "completion_sha256": "a457174f28cf0d41fad0cdbf8061530c3a7030a723122e3e240bf115d455591f",
+          "draft_n": 98,
+          "draft_n_accepted": 66,
+          "predicted_n": 128,
+          "prompt_n": 2054
+        }
+      ],
+      "pp": 768.98,
+      "pp_sd": null,
+      "samples": 1,
+      "tg": 24.8,
+      "tg_sd": null,
+      "workload": "prose"
+    },
+    "32768": {
+      "acceptance": 56.12,
+      "acceptance_sd": null,
+      "accepted_per_step": 0.75,
+      "accepted_per_step_sd": null,
+      "command": "gufo serve --port 51181 --sessions 1 llm --model DeepSeek-V4.1-Flash-1017-UD-IQ1_M-00001-of-00005.gguf --context 133760 --served-model-name bench --think off --max-pending-per-client 8 --stream-experts --speculative dspark --dspark-model DeepSeek-V4.1-Flash-1017-DSpark-draft-Q2K-Q4K.gguf",
+      "counts": [
+        {
+          "cache_n": 32798,
+          "completion_sha256": "403f39d24c7ce74c93599dc2824c918881b328cf4e1812243929aafdc7b9108e",
+          "draft_n": 98,
+          "draft_n_accepted": 55,
+          "predicted_n": 128,
+          "prompt_n": 2035
+        }
+      ],
+      "pp": 769.33,
+      "pp_sd": null,
+      "samples": 1,
+      "tg": 21.5,
+      "tg_sd": null,
+      "workload": "prose"
+    },
+    "4096": {
+      "acceptance": 56.25,
+      "acceptance_sd": null,
+      "accepted_per_step": 0.73,
+      "accepted_per_step_sd": null,
+      "command": "gufo serve --port 51181 --sessions 1 llm --model DeepSeek-V4.1-Flash-1017-UD-IQ1_M-00001-of-00005.gguf --context 133760 --served-model-name bench --think off --max-pending-per-client 8 --stream-experts --speculative dspark --dspark-model DeepSeek-V4.1-Flash-1017-DSpark-draft-Q2K-Q4K.gguf",
+      "counts": [
+        {
+          "cache_n": 4116,
+          "completion_sha256": "633cc7ab834ac1c5963c409dcc854ce7ba5b0a6dd69e1b5dec13c2e880796b4e",
+          "draft_n": 96,
+          "draft_n_accepted": 54,
+          "predicted_n": 128,
+          "prompt_n": 2040
+        }
+      ],
+      "pp": 948.66,
+      "pp_sd": null,
+      "samples": 1,
+      "tg": 23.42,
+      "tg_sd": null,
+      "workload": "prose"
+    },
+    "65536": {
+      "acceptance": 76.09,
+      "acceptance_sd": null,
+      "accepted_per_step": 0.38,
+      "accepted_per_step_sd": null,
+      "command": "gufo serve --port 51181 --sessions 1 llm --model DeepSeek-V4.1-Flash-1017-UD-IQ1_M-00001-of-00005.gguf --context 133760 --served-model-name bench --think off --max-pending-per-client 8 --stream-experts --speculative dspark --dspark-model DeepSeek-V4.1-Flash-1017-DSpark-draft-Q2K-Q4K.gguf",
+      "counts": [
+        {
+          "cache_n": 65569,
+          "completion_sha256": "e84a6a849ef4c178a1b78feca53e21031a656b59b38d37033b83545076370f4c",
+          "draft_n": 46,
+          "draft_n_accepted": 35,
+          "predicted_n": 128,
+          "prompt_n": 2056
+        }
+      ],
+      "pp": 685.25,
+      "pp_sd": null,
+      "samples": 1,
+      "tg": 18.79,
+      "tg_sd": null,
+      "workload": "story"
+    },
+    "8192": {
+      "acceptance": 60.48,
+      "acceptance_sd": null,
+      "accepted_per_step": 1.42,
+      "accepted_per_step_sd": null,
+      "command": "gufo serve --port 51181 --sessions 1 llm --model DeepSeek-V4.1-Flash-1017-UD-IQ1_M-00001-of-00005.gguf --context 133760 --served-model-name bench --think off --max-pending-per-client 8 --stream-experts --speculative dspark --dspark-model DeepSeek-V4.1-Flash-1017-DSpark-draft-Q2K-Q4K.gguf",
+      "counts": [
+        {
+          "cache_n": 8177,
+          "completion_sha256": "2495a5e04d0b1a3862f4335b90b89fa2c5a6f802b87fa89e735bb879df9dfb1f",
+          "draft_n": 124,
+          "draft_n_accepted": 75,
+          "predicted_n": 128,
+          "prompt_n": 2028
+        }
+      ],
+      "pp": 919.38,
+      "pp_sd": null,
+      "samples": 1,
+      "tg": 26.34,
+      "tg_sd": null,
+      "workload": "prose"
+    }
+  },
+  "schemaVersion": 1,
+  "server": {
+    "command": [
+      "gufo",
+      "serve",
+      "--port",
+      "51181",
+      "--sessions",
+      "1",
+      "llm",
+      "--model",
+      "DeepSeek-V4.1-Flash-1017-UD-IQ1_M-00001-of-00005.gguf",
+      "--context",
+      "133760",
+      "--served-model-name",
+      "bench",
+      "--think",
+      "off",
+      "--max-pending-per-client",
+      "8",
+      "--stream-experts",
+      "--speculative",
+      "dspark",
+      "--dspark-model",
+      "DeepSeek-V4.1-Flash-1017-DSpark-draft-Q2K-Q4K.gguf"
+    ]
+  },
+  "source": {
+    "buildMode": "nix-release",
+    "dirty": false,
+    "revision": "0eb9e89ca9c2a679d6ebd9819cc497e5bf498feb"
+  },
+  "table": "single-dspark-udiq1m",
+  "target": "gufo"
+}

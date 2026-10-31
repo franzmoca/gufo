@@ -1,4 +1,5 @@
-// Decode matvec bandwidth on the V4.1 Flash dense Q5_K shapes and routed
+// Decode matvec bandwidth on the V4.1 Flash dense shapes (Q5_K, or the
+// type named by the argument: Q6_K, Q8_0) and routed
 // expert shapes: the vendored mmvq path (Q8_1 activations) against
 // ds41_v41_gemv at every slice count and ds41_v41_gemv_experts.
 // Weights rotate through copies larger than the caches, so every launch reads
@@ -23,24 +24,37 @@ struct Shape {
   int rows_per_x = 0;  // grouped output LoRA: rows per activation group
 };
 
-std::vector<uint8_t> RandomQ5K(std::size_t blocks, std::mt19937& rng) {
-  std::vector<uint8_t> data(blocks * 176);
+struct Dense {
+  int type, block_bytes, block_values, d_offset;
+};
+
+std::vector<uint8_t> RandomDense(const Dense& t, std::size_t blocks,
+                                 std::mt19937& rng) {
+  std::vector<uint8_t> data(blocks * t.block_bytes);
   for (auto& b : data)
     b = static_cast<uint8_t>(rng());
   for (std::size_t i = 0; i < blocks; ++i) {
     const uint16_t d = 0x1c00 | (rng() & 0x3ff),
                    dmin = 0x1800 | (rng() & 0x3ff);
-    std::memcpy(&data[i * 176], &d, 2);
-    std::memcpy(&data[i * 176 + 2], &dmin, 2);
+    std::memcpy(&data[i * t.block_bytes + t.d_offset], &d, 2);
+    if (t.type == 13)
+      std::memcpy(&data[i * t.block_bytes + 2], &dmin, 2);
   }
   return data;
 }
 
 }  // namespace
 
-int main() {
+int main(int argc, char** argv) {
   if (ds41_mmq_init(0) != 0)
     return 1;
+  Dense dense = {13, 176, 256, 0};
+  if (argc > 1 && std::strcmp(argv[1], "Q6_K") == 0)
+    dense = {14, 210, 256, 208};
+  else if (argc > 1 && std::strcmp(argv[1], "Q8_0") == 0)
+    dense = {8, 34, 32, 0};
+  else if (argc > 1 && std::strcmp(argv[1], "Q5_K") != 0)
+    return 2;
   const Shape shapes[] = {
       {"q_b", 32768, 1280},     {"wq_a", 1280, 5120},
       {"wkv", 512, 5120},       {"wo_b", 5120, 8192},
@@ -49,10 +63,12 @@ int main() {
   };
   std::mt19937 rng(41);
   for (const Shape& s : shapes) {
-    const std::size_t bytes = static_cast<std::size_t>(s.m) * s.k / 256 * 176;
+    const std::size_t bytes = static_cast<std::size_t>(s.m) * s.k /
+                              dense.block_values * dense.block_bytes;
     const int copies =
         static_cast<int>(std::max<std::size_t>(2, (512u << 20) / bytes));
-    const auto host = RandomQ5K(static_cast<std::size_t>(s.m) * s.k / 256, rng);
+    const auto host = RandomDense(
+        dense, static_cast<std::size_t>(s.m) * s.k / dense.block_values, rng);
     std::vector<void*> w(copies);
     for (auto& p : w) {
       (void)hipMalloc(&p, bytes);
@@ -85,19 +101,20 @@ int main() {
       return ms * 1000.0 / iters;
     };
     const double us_mmvq =
-        s.rows_per_x ? time([&](void* p) {
-          ds41_mmq_grouped_vec_typed(13, p, x, y0, s.rows_per_x, 1, s.k,
-                                     x_groups, 0);
-        })
-                     : time([&](void* p) {
-                         ds41_mmq_dense_vec_typed(13, p, x, y0, s.m, 1, s.k, 0);
-                       });
+        s.rows_per_x
+            ? time([&](void* p) {
+                ds41_mmq_grouped_vec_typed(dense.type, p, x, y0, s.rows_per_x,
+                                           1, s.k, x_groups, 0);
+              })
+            : time([&](void* p) {
+                ds41_mmq_dense_vec_typed(dense.type, p, x, y0, s.m, 1, s.k, 0);
+              });
     std::printf("%-8s %6dx%-5d %6.1f MB  mmvq %6.1f GB/s  ds41", s.name, s.m,
                 s.k, bytes / 1e6, bytes / us_mmvq / 1e3);
     for (const int slices : {1, 2, 4, 8}) {
       const double us = time([&](void* p) {
-        ds41_v41_gemv(13, p, x, y1, s.m, s.k, s.rows_per_x, slices, 1, s.k,
-                      s.m);
+        ds41_v41_gemv(dense.type, p, x, y1, s.m, s.k, s.rows_per_x, slices, 1,
+                      s.k, s.m);
       });
       std::vector<float> r0(s.m), r1(s.m);
       (void)hipMemcpy(r0.data(), y0, s.m * 4, hipMemcpyDeviceToHost);
