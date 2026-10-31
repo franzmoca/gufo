@@ -5,6 +5,34 @@ first. Each entry is a brief summary; its pull request has the details,
 measurements and validation. Upstream Gufo's changes are in
 [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-10-31: DeepSeek V4.1 Flash: Unsloth UD quants and faster prefill and decode ([#14](https://github.com/franzmoca/gufo/pull/14))
+
+- Unsloth's Dynamic `UD-IQ1_M` (130.2 GiB) runs with `--stream-experts`: F32
+  routers, Q6_K dense weights and IQ2_S routed experts load, and a build can
+  link ISTA-DASLab's Engram file as its shard 5 instead of downloading the
+  same tables again. `UD-IQ1_S` uses only supported weight types but is
+  untested.
+- Faster dense prefill on the FP16 matrix cores, now including Q8_0:
+  streamed pp2048 1,135 → 1,278 tok/s on `UD-IQ1_M` and 1,189 → 1,223 on
+  `IQ2_XXS`. Q8_0 activations are rounded to FP16 instead of Q8_1 blocks;
+  3K-token perplexity shifts stay within noise.
+- Faster decode with outputs unchanged: lighter streamed expert loads, the
+  shared expert and hyper-connection mixes overlapped with other work, and
+  multi-token Q6_K/Q8_0 GEMVs on the task-major kernel (+4.6% at 8 users on
+  `UD-IQ1_M`).
+- The benchmark card is refreshed for all tables and adds `UD-IQ1_M`; its
+  repetitive workload introduces the copied passage as filler text.
+  README_DEEPSEEK.md lists the Unsloth builds and links the card instead of
+  repeating its tables.
+
+## 2026-10-31: DeepSeek V4.1 Flash: MXFP8 and Q5_K Engram tables ([#13](https://github.com/franzmoca/gufo/pull/13))
+
+- The loader reads the MXFP8 (202.8 GB, the checkpoint's own format) and
+  Q5_K Engram tables that Unsloth publishes beside IQ4_NL.
+- [EVAL.md](docs/models/deepseek-v4.1-flash/EVAL.md) compares IQ4_NL with
+  MXFP8 on `IQ1_M` and streamed `IQ2_XXS`: perplexity and MMLU-Pro,
+  HumanEval+ and MBPP+ scores do not change significantly.
+
 ## 2026-10-29: DeepSeek V4.1 Flash: streamed IQ2_XXS, llama.cpp GGUF layout and faster decode ([#12](https://github.com/franzmoca/gufo/pull/12))
 
 - `--stream-experts` keeps the dense weights of the 128.75 GiB `IQ2_XXS` build
