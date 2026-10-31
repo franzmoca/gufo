@@ -10,7 +10,8 @@ This fork of [gufo-org/gufo](https://github.com/gufo-org/gufo) adds two
 native engines to Gufo, each with its own HIP kernels for prefill, decode and
 speculative verification on Strix Halo. Neither model is on upstream's
 roadmap, so both are maintained here. The default branch, `main`, runs both;
-each model also has its own branch (`ds41`, `gemma`) on top of upstream.
+each model also has its own branch (`feat/ds41`, `feat/gemma`) on top of
+upstream.
 
 > [!NOTE]
 > **What's new:** the [fork changelog](CHANGELOG_FORK.md) lists the fork's
@@ -84,7 +85,6 @@ Thanks to the Gufo maintainers for the engine this builds on.
 
 ## Upstream Gufo README
 
-Gufo is a vertical local inference engine specifically built and optimized for the AMD Strix Halo hardware:
 Gufo is a vertical local inference engine for Linux and Windows, specifically built and optimized for AMD Strix Halo hardware:
 Ryzen AI MAX+ 395 systems with Radeon 8060S (`gfx1151`), up to 128 GiB of unified memory.
 
