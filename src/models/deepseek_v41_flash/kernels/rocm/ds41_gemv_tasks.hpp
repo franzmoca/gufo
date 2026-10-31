@@ -1,7 +1,6 @@
-// Device helpers for the V4.1 decode GEMVs (ds41_gemv.hip.cpp), forked from
-// src/models/gemma4/kernels/rocm/gemv_tasks.hpp: one lane's unit of quantized
-// weights dequantized once and contracted with FP32 activations in a fixed
-// FMA order.
+// Device helpers for the V4.1 decode GEMVs (ds41_gemv.hip.cpp): one lane's
+// unit of quantized weights dequantized once and contracted with FP32
+// activations in a fixed FMA order.
 #ifndef DS41_GEMV_TASKS_HPP_
 #define DS41_GEMV_TASKS_HPP_
 

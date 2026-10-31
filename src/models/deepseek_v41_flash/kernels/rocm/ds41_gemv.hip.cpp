@@ -1,6 +1,6 @@
 /* Single-token decode projections for the V4.1 Flash dense Q5_K, Q6_K and
- * Q8_0 weights (and the DSpark drafter's Q4_K), after the Gemma 4 K-quant GEMV (src/models/gemma4/kernels/rocm/
- * gemv.hip.cpp): weights stay in their GGUF blocks, activations stay FP32. A
+ * Q8_0 weights (and the DSpark drafter's Q4_K): weights stay in their GGUF
+ * blocks, activations stay FP32. A
  * lane's unit of work is one 16-byte vector of quantized values; lanes
  * holding the same task of different rows read the same activations, which
  * the hardware broadcasts. A workgroup's eight waves form 8 / S row groups
