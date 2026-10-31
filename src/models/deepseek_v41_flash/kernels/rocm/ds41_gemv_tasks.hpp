@@ -237,27 +237,47 @@ __device__ __forceinline__ float TaskQ6K(const std::uint8_t* block, int t,
 /// groups 2 r and 2 r + 1: the low (r = 0) or high (r = 1) nibbles of the
 /// two ql vectors with qh bits 4 r and 4 r + 2. w[16 g + i] belongs to
 /// activation 128 n + 16 h + 64 r + 32 g + i.
-__device__ __forceinline__ void DecodeQ6K32(const std::uint8_t* block, int t,
-                                            float (&w)[32]) {
+/// The loads of a DecodeQ6K32 task, so callers can issue them ahead of the
+/// decode: its two ql and one qh vectors, d and its two scales.
+struct RawQ6K32 {
+  uint4 a, b, h;
+  float d;
+  std::int8_t s0, s1;
+};
+
+__device__ __forceinline__ RawQ6K32 LoadQ6K32(const std::uint8_t* block,
+                                              int t) {
   const int p = t >> 1;
   const int r = t & 1;
   const int n = p >> 1;
   const int h = p & 1;
-  const float d = Half(block + 208);
   const auto* sc =
       reinterpret_cast<const std::int8_t*>(block + 192) + 8 * n + h + 4 * r;
-  const uint4 raw_a = *reinterpret_cast<const uint4*>(block + 64 * n + 16 * h);
-  const uint4 raw_b =
-      *reinterpret_cast<const uint4*>(block + 64 * n + 32 + 16 * h);
-  const uint4 raw_h =
-      *reinterpret_cast<const uint4*>(block + 128 + 32 * n + 16 * h);
-  const auto* ql_a = reinterpret_cast<const std::uint8_t*>(&raw_a);
-  const auto* ql_b = reinterpret_cast<const std::uint8_t*>(&raw_b);
-  const auto* qh = reinterpret_cast<const std::uint8_t*>(&raw_h);
-  const float s0 = d * static_cast<float>(sc[0]);
-  const float s1 = d * static_cast<float>(sc[2]);
+  RawQ6K32 raw;
+  raw.d = Half(block + 208);
+  raw.s0 = sc[0];
+  raw.s1 = sc[2];
+  raw.a = *reinterpret_cast<const uint4*>(block + 64 * n + 16 * h);
+  raw.b = *reinterpret_cast<const uint4*>(block + 64 * n + 32 + 16 * h);
+  raw.h = *reinterpret_cast<const uint4*>(block + 128 + 32 * n + 16 * h);
+  return raw;
+}
+
+__device__ __forceinline__ void DecodeQ6K32(const RawQ6K32& raw, int t,
+                                            float (&w)[32]) {
+  const int r = t & 1;
+  const auto* ql_a = reinterpret_cast<const std::uint8_t*>(&raw.a);
+  const auto* ql_b = reinterpret_cast<const std::uint8_t*>(&raw.b);
+  const auto* qh = reinterpret_cast<const std::uint8_t*>(&raw.h);
+  const float s0 = raw.d * static_cast<float>(raw.s0);
+  const float s1 = raw.d * static_cast<float>(raw.s1);
   Dequant16(ql_a, 4 * r, qh, 4 * r, 3, s0, -32.0F * s0, w);
   Dequant16(ql_b, 4 * r, qh, 4 * r + 2, 3, s1, -32.0F * s1, w + 16);
+}
+
+__device__ __forceinline__ void DecodeQ6K32(const std::uint8_t* block, int t,
+                                            float (&w)[32]) {
+  DecodeQ6K32(LoadQ6K32(block, t), t, w);
 }
 
 __device__ __forceinline__ int OffsetQ6K32(int t) {
