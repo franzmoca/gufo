@@ -521,12 +521,44 @@ void DeviceTargetDraw() {
   std::printf("device target draws: %u accepted, %u rejected, %u plain\n",
               accepted, rejected, plain);
 }
+// Logprobs observe the raw target distribution without changing draws, and
+// keep every selection on host logits.
+void Logprobs() {
+  using gufo::models::deepseek_v41_flash::DsparkSamplerBridge;
+  using gufo::sampling::SamplerState;
+  using gufo::sampling::SamplingConfig;
+  constexpr std::array<float, 3> logits{2, 1, -1};
+  for (const float temperature : {0.F, 0.8F}) {
+    SamplingConfig config;
+    config.temperature = temperature;
+    config.seed = 73;
+    DsparkSamplerBridge plain{SamplerState(config)};
+    config.logprobs = 2;
+    DsparkSamplerBridge observed{SamplerState(config)};
+    const auto* a = plain.hook();
+    const auto* b = observed.hook();
+    const int token = b->sample(b->ctx, logits.data(), logits.size());
+    Check(token == a->sample(a->ctx, logits.data(), logits.size()) &&
+              observed.rng_state() == plain.rng_state(),
+          "logprobs preserve DSpark draws");
+    const double z = std::log(std::exp(2.) + std::exp(1.) + std::exp(-1.));
+    Check(observed.logprobs().size() == 1 &&
+              std::abs(observed.logprobs()[0].selected.logprob -
+                       (logits[token] - z)) < 1e-12,
+          "DSpark reports the raw target distribution");
+    Check(b->try_accept_argmax == nullptr && b->device_temperature == nullptr,
+          "logprobs keep every selection on host logits");
+    Check(b->unmodified_argmax == (temperature == 0.F),
+          "a greedy request that observes logprobs keeps the greedy step");
+  }
+}
 }  // namespace
 
 int main() {
   int devices = 0;
   if (hipGetDeviceCount(&devices) != hipSuccess || !devices)
     return 77;
+  Logprobs();
   Top8();
   Sampler();
   DeviceProposal();
@@ -534,7 +566,8 @@ int main() {
   Confidence();
   DeviceTargetDraw();
   std::puts(
-      "PASS: post-Markov top8, fused Markov selection, learned confidence, "
+      "PASS: logprobs, post-Markov top8, fused Markov selection, learned "
+      "confidence, "
       "device target draws, device q, exact sampled "
       "correction and seeded replay");
 }

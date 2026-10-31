@@ -8,6 +8,7 @@
 #include <cstdlib>
 #include <span>
 #include <stdexcept>
+#include <vector>
 
 #include "src/core/sampling.hpp"
 #include "src/models/deepseek_v41_flash/runtime/model.h"
@@ -26,21 +27,27 @@ class DsparkSamplerBridge {
 public:
   explicit DsparkSamplerBridge(const sampling::SamplerState& sampler)
       : working_(sampler),
-        hook_{.ctx = this,
-              .sample = &Sample,
-              .accept = &Accept,
-              .propose = UseStochastic(sampler.config()) ? &Propose : nullptr,
-              .verify = UseStochastic(sampler.config()) ? &Verify : nullptr,
-              .draws = UseStochastic(sampler.config()) ? &Draws : nullptr,
-              .retain = UseStochastic(sampler.config()) ? &Retain : nullptr,
-              .try_accept_argmax = sampler.config().temperature == 0.F &&
-                                           !sampler.config().penalties_enabled()
-                                       ? &TryAcceptArgmax
-                                       : nullptr,
-              .device_temperature = &DeviceTemperature,
-              .uniform = &DrawUniform,
-              .rng = &Rng,
-              .set_rng = &SetRng} {}
+        hook_{
+            .ctx = this,
+            .sample = &Sample,
+            .accept = &Accept,
+            .propose = UseStochastic(sampler.config()) ? &Propose : nullptr,
+            .verify = UseStochastic(sampler.config()) ? &Verify : nullptr,
+            .draws = UseStochastic(sampler.config()) ? &Draws : nullptr,
+            .retain = UseStochastic(sampler.config()) ? &Retain : nullptr,
+            // Logprobs need every selection's host logits.
+            .try_accept_argmax = !sampler.config().logprobs &&
+                                         sampler.config().temperature == 0.F &&
+                                         !sampler.config().penalties_enabled()
+                                     ? &TryAcceptArgmax
+                                     : nullptr,
+            .device_temperature =
+                sampler.config().logprobs ? nullptr : &DeviceTemperature,
+            .uniform = &DrawUniform,
+            .rng = &Rng,
+            .set_rng = &SetRng,
+            .unmodified_argmax = sampler.config().can_use_unmodified_argmax()} {
+  }
 
   DsparkSamplerBridge(const DsparkSamplerBridge&) = delete;
   DsparkSamplerBridge& operator=(const DsparkSamplerBridge&) = delete;
@@ -48,7 +55,18 @@ public:
   [[nodiscard]] const ds41_dspark_sampler* hook() const { return &hook_; }
   [[nodiscard]] std::uint64_t rng_state() const { return working_.rng_state(); }
 
+  /// One entry per selected token, in order, when the request asks for them.
+  [[nodiscard]] const std::vector<sampling::TokenLogprobs>& logprobs() const {
+    return logprobs_;
+  }
+
 private:
+  void Observe(const float* logits, std::uint32_t size, int token) {
+    if (auto value = sampling::CollectLogprobs({logits, size}, token,
+                                               working_.config().logprobs))
+      logprobs_.push_back(std::move(*value));
+  }
+
   static bool UseStochastic(const sampling::SamplingConfig& config) {
     return config.uses_random_sampling();
   }
@@ -180,15 +198,18 @@ private:
                    "p=%.6f q=%.6f\n",
                    row, proposal.confidence, token == proposal.token,
                    target.probability(proposal.token), proposal.probability);
+    self.Observe(logits, vocabulary_size, static_cast<int>(token));
     self.working_.Accept(token);
     return static_cast<int>(token);
   }
 
   static int Sample(void* ctx, const float* logits,
                     std::uint32_t vocabulary_size) {
-    auto& working = static_cast<DsparkSamplerBridge*>(ctx)->working_;
+    auto& self = *static_cast<DsparkSamplerBridge*>(ctx);
+    auto& working = self.working_;
     const auto token =
         working.Sample(std::span<const float>(logits, vocabulary_size));
+    self.Observe(logits, vocabulary_size, static_cast<int>(token));
     working.Accept(token);
     return static_cast<int>(token);
   }
@@ -232,6 +253,7 @@ private:
   }
 
   sampling::SamplerState working_;
+  std::vector<sampling::TokenLogprobs> logprobs_;
   std::array<Proposal, 16> proposals_{};
   ds41_dspark_sampler hook_;
 };

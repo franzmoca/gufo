@@ -448,10 +448,11 @@ int prepare(Cycle& c, char* error, size_t capacity) {
    * only from their prompt and need the longer match (PromptLookup). */
   if (s->lookup.Step(c.first)) {
     using Lookup = gufo::speculative::PromptLookup<int>;
-    s->lookup.Extend(s->tokens, sampler != nullptr);
+    const bool sampled = sampler && !sampler->unmodified_argmax;
+    s->lookup.Extend(s->tokens, sampled);
     size_t agreed = 0;
     const auto match = s->lookup.Find(s->tokens, std::span<const int>(&anchor, 1),
-                                      sampler ? Lookup::kSampledMinMatch : Lookup::kMinMatch, false, &agreed);
+                                      sampled ? Lookup::kSampledMinMatch : Lookup::kMinMatch, false, &agreed);
     const uint32_t cap = std::min(c.cap, room);
     if (match.length != 0) {
       c.copy_start = match.start;

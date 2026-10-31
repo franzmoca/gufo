@@ -103,6 +103,9 @@ struct ds41_dspark_sampler {
   double (*uniform)(void* ctx) = nullptr;
   uint64_t (*rng)(void* ctx) = nullptr;
   void (*set_rng)(void* ctx, uint64_t state) = nullptr;
+  // A greedy request that only observes logprobs keeps the greedy step:
+  // prompt lookup indexes generated tokens as without a sampler.
+  bool unmodified_argmax = false;
 };
 
 struct ds41_session_dspark_batch_item {
