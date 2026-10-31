@@ -277,7 +277,7 @@ the host setup above).
 ```sh
 # Once: a volume for the Nix store, and the source
 podman volume create gufo-nix
-git clone -b feat/ds41 https://github.com/franzmoca/gufo.git
+git clone https://github.com/franzmoca/gufo.git
 
 # Build (the first run downloads the toolchain into the volume)
 podman run --rm -v gufo-nix:/nix -v "$PWD/gufo:/src:Z" \
