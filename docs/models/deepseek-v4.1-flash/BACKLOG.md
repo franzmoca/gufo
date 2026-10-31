@@ -230,6 +230,12 @@ read and wait times, since rows grow up to 3.6× (E28 measured the current reads
 - **Decode expert GEMV spills.** Several `expert_group_kernel` variants
   use 256 VGPRs and still spill 80–540 bytes per lane to scratch; check
   whether fewer columns per lane or `ext_vector_type` arrays remove them.
+- **Streamed sessions at the native context.** `--stream-experts -j 8` at
+  the default 1M context sometimes fails at startup ("decoder allocation
+  failed", also on `feat/ds41`): the expert seed's 4 GiB reserve plus a
+  sixteenth covers one session, and eight 1M sessions need about 8.6 GiB
+  after it. The seed could reserve per session; `-c 4096` (the card's
+  multi-user context) starts reliably.
 
 ### 16. Multi-user AR decode below the card
 
