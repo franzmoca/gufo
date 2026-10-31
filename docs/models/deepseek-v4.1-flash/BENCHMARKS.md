@@ -7,7 +7,9 @@ with streamed routed experts (third table), sharing the ISTA Engram file;
 `IQ4_NL` Engram tables read from disk, Lucebox Q2_K/Q4_K DSpark drafter. Gufo only: no other
 engine runs DeepSeek V4.1 Flash on this machine, so the tables carry no
 reference columns. HTTP through `gufo serve`, greedy, thinking off; measured
-October 31, 2026 on the production `nix build` of `0eb9e89c`. Prefill rates
+October 31, 2026 on the production `nix build` of `0eb9e89c`, tuned profile
+`accelerator-performance`, GPU DPM level `auto`, Tctl 45–58 °C at the start of
+each run. Prefill rates
 are the server's own prompt timings for real chat text; see
 [native prefill](#native-prefill) for `gufo bench`.
 [Method and quality](QUALITY.md) · [Experiments](EXPERIMENTS.md) ·
@@ -79,20 +81,21 @@ pp2048 / tg128; depth is the cached prefix in tokens.
 
 pp is the highest measured rate per depth across mixed/repetitive text. The
 mixed workload asks for a summary and a story (a story at 64K); the
-repetitive one copies a passage, which prompt lookup verifies up to 15 tokens
-at a time. Greedy output is identical to plain decoding.
+repetitive one copies a passage, introduced as random filler for a
+transcription test (otherwise `UD-IQ1_M` comments on the passage and stops),
+which prompt lookup verifies up to 15 tokens at a time. Greedy output is identical to plain decoding.
 
 <!-- bench:single-dspark -->
 | DS4.1 Flash IQ1_M DSpark<br>Depth (tokens) | Gufo pp (tok/s) | Gufo tg mixed (tok/s) | Gufo tg repetitive (tok/s) |
 | ---: | ---: | ---: | ---: |
-| 0 | 1256.21 | 31.06 | 74.27 |
-| 4,096 | 1102.66 | 30.92 | 72.50 |
-| 8,192 | 1199.46 | 31.30 | 73.40 |
-| 12,288 | 1123.05 | 30.97 | 74.32 |
-| 16,384 | 1167.47 | 32.74 | 73.10 |
-| 32,768 | 979.26 | 29.09 | 66.16 |
-| 65,536 | 881.96 | 26.88 | 62.50 |
-| 131,072 | 891.80 | 27.86 | 62.69 |
+| 0 | 1219.56 | 31.06 | 73.35 |
+| 4,096 | 1173.64 | 30.92 | 72.37 |
+| 8,192 | 1199.46 | 31.30 | 73.64 |
+| 12,288 | 1170.10 | 30.97 | 74.03 |
+| 16,384 | 1167.47 | 32.74 | 70.33 |
+| 32,768 | 979.26 | 29.09 | 59.14 |
+| 65,536 | 951.98 | 26.88 | 67.40 |
+| 131,072 | 949.43 | 27.86 | 63.95 |
 <!-- /bench -->
 
 ![Single user, DSpark](artifacts/charts/single-dspark.svg)
@@ -102,14 +105,14 @@ at a time. Greedy output is identical to plain decoding.
 <!-- bench:single-dspark-iq2xxs -->
 | DS4.1 Flash IQ2_XXS streamed DSpark<br>Depth (tokens) | Gufo pp (tok/s) | Gufo tg mixed (tok/s) | Gufo tg repetitive (tok/s) |
 | ---: | ---: | ---: | ---: |
-| 0 | 959.40 | 23.91 | 54.78 |
-| 4,096 | 1066.77 | 28.86 | 61.56 |
-| 8,192 | 1024.08 | 26.29 | 56.45 |
-| 12,288 | 879.91 | 23.75 | 54.05 |
-| 16,384 | 795.49 | 26.87 | 50.39 |
-| 32,768 | 830.62 | 29.32 | 55.09 |
-| 65,536 | 739.29 | 21.20 | 49.01 |
-| 131,072 | 721.78 | 22.75 | 47.16 |
+| 0 | 1063.61 | 23.91 | 57.38 |
+| 4,096 | 1066.77 | 28.86 | 62.57 |
+| 8,192 | 1026.58 | 26.29 | 66.78 |
+| 12,288 | 890.68 | 23.75 | 58.40 |
+| 16,384 | 806.24 | 26.87 | 55.44 |
+| 32,768 | 921.94 | 29.32 | 64.48 |
+| 65,536 | 874.47 | 21.20 | 62.24 |
+| 131,072 | 862.76 | 22.75 | 59.74 |
 <!-- /bench -->
 
 ![Single user, DSpark](artifacts/charts/single-dspark-iq2xxs.svg)
@@ -119,21 +122,17 @@ at a time. Greedy output is identical to plain decoding.
 <!-- bench:single-dspark-udiq1m -->
 | DS4.1 Flash UD-IQ1_M streamed DSpark<br>Depth (tokens) | Gufo pp (tok/s) | Gufo tg mixed (tok/s) | Gufo tg repetitive (tok/s) |
 | ---: | ---: | ---: | ---: |
-| 0 | 961.12 | 22.29 | 43.24 |
-| 4,096 | 948.66 | 23.42 | stops¹ |
-| 8,192 | 951.43 | 26.34 | 61.87 |
-| 12,288 | 839.54 | 22.79 | 51.82 |
-| 16,384 | 768.98 | 24.80 | 51.31 |
-| 32,768 | 769.33 | 21.50 | stops¹ |
-| 65,536 | 685.25 | 18.79 | stops¹ |
-| 131,072 | 693.47 | 22.79 | 44.41 |
+| 0 | 1018.34 | 22.29 | 52.42 |
+| 4,096 | 948.66 | 23.42 | 60.37 |
+| 8,192 | 965.43 | 26.34 | 63.56 |
+| 12,288 | 846.81 | 22.79 | 55.87 |
+| 16,384 | 779.05 | 24.80 | 54.17 |
+| 32,768 | 872.23 | 21.50 | 61.74 |
+| 65,536 | 816.24 | 18.79 | 59.06 |
+| 131,072 | 826.08 | 22.79 | 57.27 |
 <!-- /bench -->
 
 ![Single user, DSpark](artifacts/charts/single-dspark-udiq1m.svg)
-
-¹ At these depths greedy `UD-IQ1_M` answers the copy request with a one-line
-comment on the passage and ends after 8–9 tokens, so there is no tg128 to
-time. The reply is the same without DSpark and without the prompt cache.
 
 ## Multiple users, autoregressive
 
