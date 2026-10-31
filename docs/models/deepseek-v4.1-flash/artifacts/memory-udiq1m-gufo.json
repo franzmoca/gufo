@@ -1,0 +1,78 @@
+{
+  "artifactType": "model-bench-table",
+  "fingerprint": {
+    "canonical": {
+      "cppStandard": "C++20",
+      "cpuArchitecture": "x86_64",
+      "cpuLogicalCores": 32,
+      "cpuModel": "AMD RYZEN AI MAX+ 395 w/ Radeon 8060S",
+      "cpuPhysicalCores": 16,
+      "cxxCompiler": "GCC 15.3.0",
+      "gpuArchitecture": "gfx1151",
+      "gpuComputeUnits": 20,
+      "gpuDriver": "amdgpu",
+      "gpuName": "AMD Radeon 8060S Graphics",
+      "gpuPciId": "1002:1586",
+      "kernelRelease": "7.2.11-200.fc44.x86_64",
+      "memoryTotalBytes": 133616861184,
+      "memoryType": "LPDDR5X (Unified)",
+      "rocmVersion": "7.2.3",
+      "schemaVersion": "1.0.0"
+    },
+    "fingerprintId": "d19fe457f2791c2dec2f2de6cd1c21607a1d51ce20c58e0d686637de1fa0d0a1",
+    "schemaVersion": "1.0.0"
+  },
+  "measuredOn": "2026-10-31",
+  "mode": null,
+  "model": {
+    "id": "DeepSeek-V4.1-Flash-1017",
+    "variant": "udiq1m"
+  },
+  "notes": [
+    "peak device-global hipMemGetInfo used bytes (total - free), sampled every 250 ms during the request; idle_gib is the same counter before the server started",
+    "server mode: ar"
+  ],
+  "referenceName": "reference",
+  "rows": {
+    "16K prefix, pp4096 + tg128": {
+      "command": "gufo serve --port 52169 --sessions 1 llm --model DeepSeek-V4.1-Flash-1017-UD-IQ1_M-00001-of-00005.gguf --context 262144 --served-model-name bench --think off --max-pending-per-client 8 --stream-experts",
+      "gib": 121.03,
+      "idle_gib": 3.01
+    },
+    "pp2048 + tg128": {
+      "command": "gufo serve --port 52169 --sessions 1 llm --model DeepSeek-V4.1-Flash-1017-UD-IQ1_M-00001-of-00005.gguf --context 262144 --served-model-name bench --think off --max-pending-per-client 8 --stream-experts",
+      "gib": 120.91,
+      "idle_gib": 3.01
+    }
+  },
+  "schemaVersion": 1,
+  "server": {
+    "command": [
+      "gufo",
+      "serve",
+      "--port",
+      "52169",
+      "--sessions",
+      "1",
+      "llm",
+      "--model",
+      "DeepSeek-V4.1-Flash-1017-UD-IQ1_M-00001-of-00005.gguf",
+      "--context",
+      "262144",
+      "--served-model-name",
+      "bench",
+      "--think",
+      "off",
+      "--max-pending-per-client",
+      "8",
+      "--stream-experts"
+    ]
+  },
+  "source": {
+    "buildMode": "nix-release",
+    "dirty": true,
+    "revision": "0eb9e89ca9c2a679d6ebd9819cc497e5bf498feb"
+  },
+  "table": "memory-udiq1m",
+  "target": "gufo"
+}

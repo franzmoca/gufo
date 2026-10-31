@@ -22,7 +22,7 @@
     "fingerprintId": "d19fe457f2791c2dec2f2de6cd1c21607a1d51ce20c58e0d686637de1fa0d0a1",
     "schemaVersion": "1.0.0"
   },
-  "measuredOn": "2026-10-29",
+  "measuredOn": "2026-10-31",
   "mode": null,
   "model": {
     "id": "DeepSeek-V4.1-Flash-1017",
@@ -35,13 +35,13 @@
   "referenceName": "reference",
   "rows": {
     "16K prefix, pp4096 + tg128": {
-      "command": "gufo serve --port 46649 --sessions 1 llm --model DeepSeek-V4.1-Flash-1017-GSQ-RCO-IQ2_XXS-00001-of-00006.gguf --context 262144 --served-model-name bench --think off --max-pending-per-client 8 --stream-experts",
-      "gib": 121.0,
+      "command": "gufo serve --port 37849 --sessions 1 llm --model DeepSeek-V4.1-Flash-1017-GSQ-RCO-IQ2_XXS-00001-of-00006.gguf --context 262144 --served-model-name bench --think off --max-pending-per-client 8 --stream-experts",
+      "gib": 120.98,
       "idle_gib": 3.01
     },
     "pp2048 + tg128": {
-      "command": "gufo serve --port 46649 --sessions 1 llm --model DeepSeek-V4.1-Flash-1017-GSQ-RCO-IQ2_XXS-00001-of-00006.gguf --context 262144 --served-model-name bench --think off --max-pending-per-client 8 --stream-experts",
-      "gib": 120.87,
+      "command": "gufo serve --port 37849 --sessions 1 llm --model DeepSeek-V4.1-Flash-1017-GSQ-RCO-IQ2_XXS-00001-of-00006.gguf --context 262144 --served-model-name bench --think off --max-pending-per-client 8 --stream-experts",
+      "gib": 120.86,
       "idle_gib": 3.01
     }
   },
@@ -51,7 +51,7 @@
       "gufo",
       "serve",
       "--port",
-      "46649",
+      "37849",
       "--sessions",
       "1",
       "llm",
@@ -71,7 +71,7 @@
   "source": {
     "buildMode": "nix-release",
     "dirty": true,
-    "revision": "cd8b92c18ac999f9b87d85f83be431aed0d572f1"
+    "revision": "0eb9e89ca9c2a679d6ebd9819cc497e5bf498feb"
   },
   "table": "memory-iq2xxs",
   "target": "gufo"
