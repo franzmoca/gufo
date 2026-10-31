@@ -1,0 +1,21 @@
+2026-10-27 12:49:39 [INFO] [ds41] DeepSeek V4.1 Flash: 4 backbone shard(s), 128.32 GiB device-eligible weights; Engram /mnt/data/models/ds41/ista-gsq-rco-gguf/DeepSeek-V4.1-Flash-Engram-IQ4_NL.gguf (103.00 GiB, 144 B rows, read from disk)
+2026-10-27 12:49:39 [INFO] [ds4] backend initialized on AMD Radeon 8060S Graphics (sm_115)
+2026-10-27 12:49:39 [INFO] [ds4] native MMQ enabled
+2026-10-27 12:49:39 [INFO] [ds41] streaming routed experts: 5.31 GiB dense weights, 120.83 GiB available unified memory
+ds41: ROCm weights (128.76 GiB) do not fit the device heap above its 4.00 GiB dispatch reserve; placing them in managed memory
+2026-10-27 12:49:39 [INFO] [ds4] loading model tensors into device cache
+2026-10-27 12:49:40 [INFO] [ds4] ROCm startup model cache prepared 5.31 GiB of tensor spans in 0.874s
+2026-10-27 12:49:59 [INFO] [ds41] expert seed (built-in V4.1 ranking): cached 10240 of 10240 ranked experts from 81.96 GiB in 18.79 s
+2026-10-27 12:50:01 [INFO] [ds41] expert cache interval: 81.2% route hits, 4.10 MiB read/token (49.3% prefetched), 1.26 ms host wait/token, 103.70 GiB allocated
+[Model Load]: 19.7774 s
+| model                            |       size | backend    |               test |                   t/s |
+| -------------------------------- | ---------- | ---------- | ------------------ | --------------------- |
+DeepSeek pp depth=0 payload_bytes=12878912
+| DeepSeek V4.1 Flash              | 128.75 GiB | ROCm (HIP) |             pp2048 |        742.48 ± 0.00 |
+2026-10-27 12:50:05 [INFO] [ds41] expert cache interval: 94.1% route hits, 124.42 MiB read/token (34.0% prefetched), 51.13 ms host wait/token, 103.72 GiB allocated
+2026-10-27 12:50:08 [INFO] [ds41] expert cache interval: 97.0% route hits, 67.20 MiB read/token (27.6% prefetched), 50.40 ms host wait/token, 103.77 GiB allocated
+DeepSeek tg C=1 depth=0 request=0 accepted=0 drafted=0 steps=0 skipped=0 output_sha256=04842be74b153c8e90e0b6082faae0eec55b930762e9e0ca8132d1c502540254
+| DeepSeek V4.1 Flash              | 128.75 GiB | ROCm (HIP) |              tg128 |         17.35 ± 0.00 |
+2026-10-27 12:50:09 [INFO] [ds41] expert cache total: 82.9% route hits, 10.02 MiB read/token, 4.52 ms host wait/token, 103.78 GiB allocated, 8.27 GiB prefetched (0.28 GiB dropped)
+2026-10-27 12:50:09 [INFO] [ds41] expert reads: 18520 direct, 0 buffered
+
