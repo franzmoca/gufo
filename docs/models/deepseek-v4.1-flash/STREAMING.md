@@ -187,3 +187,10 @@ quantization, hardware, context and speculative decoding differ.
   VRAM, pinned RAM and NVMe tiers with ranking and layer read-ahead (62–70%
   one-layer router recall); the source of the built-in expert ranking. Its
   optional route bias toward resident experts is in the backlog.
+- [mako](https://github.com/jhanssen/mako/tree/8567de3) (inspected at
+  `8567de3`): C++/Metal on a 128 GB M5 Max with ~55–66% of experts resident;
+  an mlock'ed arena with decayed-count eviction and a calibrated start set,
+  CPU `pread` misses overlapped with the resident experts, two-layer-ahead
+  gated read-ahead, and large prefill groups staged through a 3 GB ring
+  without admission. Its `--miss-penalty` (cache-aware routing) gives ~25 →
+  ~29 tok/s on Maya-S and 34 tok/s on ISTA `IQ2_XS`; backlog items 21–24.
