@@ -1995,3 +1995,33 @@ Rejected: launching each collapse before forking its mix. The collapse
 kept its 4.2 us, but the fork's host calls then delayed the first
 projection; tg128 20.49 / 20.49 -> 20.50 / 20.56, and 20.12 / 19.86 in the
 three-way pp512 runs, no gain.
+
+## E58 — multi-token Q6_K and Q8_0 dense GEMVs on the task-major kernel
+
+Joint decode and verification batches run the dense projections through
+`ds41_v41_gemv` with one column per token. Q5_K switched to the
+task-major `split_gemv_kernel` from 2 tokens (scalar activation loads, one
+wave per task); Unsloth's Q6_K projections and output head never did, and
+Q8_0 only for gate/up pairs, so at 8 tokens their per-wave activation loads
+bounded them: Q6_K q_b 223 -> 153 GB/s from 1 to 8 tokens, against 218 ->
+205 for Q5_K (standalone, weights rotated beyond the caches).
+
+Q6_K gained the split kernel's load and decode (`LoadQ6K32` and the
+unchanged `DecodeQ6K32` arithmetic), and plain or paired Q6_K/Q8_0 rows now
+take the task-major kernel from 4 tokens, their fused SwiGLU from 6. The
+slice scratch grew from 32 to 64 MiB so the 129,280-row head fits at 16
+tokens. Every output matches the previous kernels bit for bit (`ds41.mmq_typed`
+batched against single-token launches; a dump of every type, shape,
+SwiGLU and grouped case at 1-16 tokens compared with `cmp`).
+
+| Kernel time | 4 tokens | 8 tokens | 16 tokens |
+| --- | ---: | ---: | ---: |
+| Q6_K q_b, wo_b, shared expert | -3 to -10% | -17 to -25% | -23 to -41% |
+| Q8_0 shared expert gate+up / down | -0 / -14% | -15 / -17% | -34 / -29% |
+| Q6_K output head (ms) | 2.72 -> 2.54 | 3.12 -> 2.64 | 5.43 -> 2.90 |
+| Q5_K output head (ms, ISTA builds) | unchanged | unchanged | 4.57 -> 2.61 |
+
+At 2 tokens the lane layout stays as fast or faster (+0-8% for the split
+kernel), as does the SwiGLU at 4. Streamed UD-IQ1_M over HTTP (distinct
+prompts, 4,096 context, alternating): C8 63.81 / 63.63 -> 66.83 / 66.52
+tok/s (+4.6%), C4 48.23 / 47.93 -> 47.80 / 48.69 (no change).
