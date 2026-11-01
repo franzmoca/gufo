@@ -1,0 +1,101 @@
+{
+ "model": "DeepSeek-V4.1-Flash-1017-UD-IQ2_XXS (streamed, expert tails on for *-tails and 18.5K)",
+ "commit": "4974ef9a",
+ "note": "GPU columns from ds41_load_probe --score [--batch]; mean_dnll = GPU - oracle NLL; block100_se = standard error over 100-token block means",
+ "udiq2xxs_3k": {
+  "oracle": {
+   "positions": 2999,
+   "ppl": 5.8177,
+   "top1": 0.5969,
+   "sha256": "47fa325a67a0ba57ccb89d5a397a7c63fe8007b3dc29668be9fc1e53470cfc30"
+  },
+  "dec3k": {
+   "positions": 2999,
+   "ppl": 5.7782,
+   "top1": 0.5979,
+   "agreement": 0.9486,
+   "mean_abs_dnll": 0.108,
+   "mean_dnll": -0.00681,
+   "block100_se": 0.0039
+  },
+  "b3k": {
+   "positions": 2999,
+   "ppl": 5.8169,
+   "top1": 0.5932,
+   "agreement": 0.954,
+   "mean_abs_dnll": 0.1018,
+   "mean_dnll": -0.00014,
+   "block100_se": 0.00346
+  },
+  "dec3k-tails": {
+   "positions": 2999,
+   "ppl": 5.7782,
+   "top1": 0.5979,
+   "agreement": 0.9486,
+   "mean_abs_dnll": 0.108,
+   "mean_dnll": -0.00681,
+   "block100_se": 0.0039
+  },
+  "b3k-tails": {
+   "positions": 2999,
+   "ppl": 5.8169,
+   "top1": 0.5932,
+   "agreement": 0.954,
+   "mean_abs_dnll": 0.1018,
+   "mean_dnll": -0.00014,
+   "block100_se": 0.00346
+  }
+ },
+ "udiq2xxs_18k": {
+  "oracle": {
+   "positions": 18499,
+   "ppl": 5.7151,
+   "top1": 0.6104,
+   "sha256": "7996590112e81bcb4155745f86edf48179a14eb115c8ed7f3900f9b27432a78f"
+  },
+  "dec18k": {
+   "positions": 18499,
+   "ppl": 5.7116,
+   "top1": 0.6099,
+   "agreement": 0.9476,
+   "mean_abs_dnll": 0.1019,
+   "mean_dnll": -0.00061,
+   "block100_se": 0.00176
+  },
+  "b18k": {
+   "positions": 18499,
+   "ppl": 5.7211,
+   "top1": 0.6093,
+   "agreement": 0.9518,
+   "mean_abs_dnll": 0.1009,
+   "mean_dnll": 0.00105,
+   "block100_se": 0.00167
+  }
+ },
+ "udiq1m_3k": {
+  "oracle": {
+   "positions": 2999,
+   "ppl": 5.8176,
+   "top1": 0.5989,
+   "sha256": "4e6375131a58775d5f1fdb11f3aa20bc6cd2f9a4a5cb1aff851906ee36c8cb8d"
+  },
+  "dec3k": {
+   "positions": 2999,
+   "ppl": 5.795,
+   "top1": 0.5995,
+   "agreement": 0.9517,
+   "mean_abs_dnll": 0.1076,
+   "mean_dnll": -0.00388,
+   "block100_se": 0.00362
+  },
+  "b3k": {
+   "positions": 2999,
+   "ppl": 5.8172,
+   "top1": 0.5942,
+   "agreement": 0.9496,
+   "mean_abs_dnll": 0.1077,
+   "mean_dnll": -7e-05,
+   "block100_se": 0.00397
+  }
+ }
+}

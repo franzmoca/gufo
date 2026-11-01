@@ -13,6 +13,7 @@ open work is in [BACKLOG.md](BACKLOG.md).
 | --- | ---: | --- |
 | `IQ1_M` backbone, 4 shards | 112.4 GiB | yes, 112.27 GiB GTT |
 | `IQ2_XXS` backbone, 4 shards | 128.7 GiB | no: 5.31 GiB dense weights resident, experts streamed |
+| Unsloth `UD-IQ2_XXS` backbone, 5 shards | 153.9 GiB | no: 7.04 GiB dense weights resident, 146.1 GiB of experts streamed |
 | `Engram-IQ4_NL.gguf` | 103.0 GiB, 144 B rows | always read from disk |
 
 MemTotal is 124.4 GiB (128 GiB minus the 1 GiB UMA carve-out and about
@@ -20,7 +21,8 @@ MemTotal is 124.4 GiB (128 GiB minus the 1 GiB UMA carve-out and about
 already covers it. The model has 40 layers × 384 routed experts (top 6 plus
 one shared expert). Expert sizes differ by layer, because the builds mix
 block types: `IQ1_M` has six sizes (6.59–8.26 MiB, mean 7.11) and `IQ2_XXS`
-eight (7.38–9.76 MiB, mean 8.20). A decode token reads six experts in each of
+eight (7.38–9.76 MiB, mean 8.20); Unsloth's `UD-IQ2_XXS` seven
+(7.29–11.51 MiB, mean 9.74), with IQ3_XXS and Q2_K downs. A decode token reads six experts in each of
 40 layers, so streamed decode depends almost entirely on the route-hit rate:
 keeping about 90% of resident speed needs about 99% of routes to hit.
 
@@ -126,7 +128,7 @@ symlink to it), every projection read becomes a head read from the GGUF and
 a tail read from the file, queued together, so both drives work on each
 miss; prefetch jobs split the same way. The symlink is resolved once when
 the file is opened. The file is about half the expert bytes (61.6 GiB for
-`IQ2_XXS`, 61.7 GiB for UD-`IQ1_M`). An expert's three tails are adjacent
+`IQ2_XXS`, 61.7 GiB for UD-`IQ1_M`, 73.0 GiB for UD-`IQ2_XXS`). An expert's three tails are adjacent
 and 4 KiB-aligned for direct I/O; on btrfs the packer creates the file
 without copy-on-write, which also turns off compression, as direct reads
 need. At load the engine checks the header against the model's expert

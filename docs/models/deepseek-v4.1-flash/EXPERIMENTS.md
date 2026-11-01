@@ -2308,3 +2308,34 @@ and looping tokens outside it is bit-identical, with the row re-read from
 cache, but only gains 7-10% on the indexer and is slower on the compressor
 and router. Not retained: the faster kernel needs a rounding change in
 the verification path.
+
+## E67 — IQ3_XXS and Q2_K routed downs, IQ2_S fused gate/up (retained)
+
+Unsloth `UD-IQ2_XXS` stores routed downs as IQ3_XXS (layers 20-34) and
+Q2_K (layer 0), and gate/up as IQ2_S in layers 25-39. The streamed path had
+no kernel for the two down types and ran IQ2_S gate/up unfused. Added: an
+IQ3_XXS format in the per-expert GEMV and the grouped 2-16-token GEMV
+(grid staged as 32-bit words through a shared `StageIq2` helper), IQ3_XXS
+and Q2_K formats in the FP16 routed tiles (down only), IQ2_S in the fused
+SwiGLU gate/up pair, and the 98 / 84-byte block sizes in the expert store.
+`ds41.mmq_typed` checks each against the ggml matvec.
+
+`ds41_gemv_bench`, six expert slots, 5,120 × 2,304 down:
+
+| Kernel | Time | Read rate |
+|---|---:|---:|
+| IQ3_XXS down, 2 blocks loaded before decoding (retained) | 126.8 µs | 214 GB/s |
+| IQ3_XXS down, 1 / 3 / 4 blocks | 142 / 128.5 / 130.7 µs | — |
+| IQ3_XXS down, two rows per lane group (`kPair`) | 130.1 µs | — |
+| Q2_K down (existing format) | 112.6 µs | 207 GB/s |
+| IQ2_S gate/up fused pair | 236 µs | against 295 µs for two mmvq launches |
+
+FP16 routed down tiles at a 2,048-token batch (`ds41_mmq_bench
+--down-type`): IQ2_XXS 11.95 ms, IQ2_S 12.93 ms, IQ3_XXS 13.24 ms, Q2_K
+11.3 ms. The first Q2_K tile took 18.2 ms: selecting its 32-bit code word
+with a lane-dependent index (`s.q[2*l]`) put the array in 96 B of scratch;
+explicit select chains keep it in registers. Every new kernel is at most
+23.8 KB of code (under the 32 KB instruction cache) with no scratch. The
+ISTA `IQ1_M` 3K scores are identical before and after, decode and batched.
+Quality and speed of the build are in
+[QUALITY.md](QUALITY.md#streamed-ud-iq2_xxs).

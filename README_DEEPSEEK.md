@@ -3,8 +3,8 @@
 Gufo runs **DeepSeek-V4.1-Flash-1017**, a 763B-parameter mixture-of-experts
 model with a native 1M-token context, on a single AMD Strix Halo with 128 GB
 of unified memory. The `IQ1_M` backbone stays resident in GPU memory; the
-larger `IQ2_XXS` backbone and Unsloth's `UD-IQ1_M` can stream their routed
-experts from SSD. Engram lookup tables are read from the SSD in every
+larger `IQ2_XXS` backbone and Unsloth's `UD-IQ1_M` and `UD-IQ2_XXS` can
+stream their routed experts from SSD. Engram lookup tables are read from the SSD in every
 configuration.
 
 > [!WARNING]
@@ -19,7 +19,7 @@ configuration.
 
 - **Backbone:** ISTA-DASLab's GSQ-RCO `IQ1_M` build (1.75 bits per weight),
   resident in GTT, or the experimental `IQ2_XXS` build with streamed experts.
-  Unsloth's Dynamic `UD-IQ1_M` runs with streamed experts; `UD-IQ1_S` uses
+  Unsloth's Dynamic `UD-IQ1_M` and `UD-IQ2_XXS` run with streamed experts; `UD-IQ1_S` uses
   only weight types Gufo supports but has not been tested
   ([Unsloth Dynamic quants](#unsloth-dynamic-quants)).
 - **Engram tables:** the shared `IQ4_NL` file, read from disk. Unsloth's
@@ -113,7 +113,7 @@ hf download Lucebox/DeepSeek-V4.1-Flash-1017-ROCMFP-GGUF \
 | --- | --- | --- |
 | [ISTA-DASLab GSQ-RCO](https://huggingface.co/ISTA-DASLab/DeepSeek-V4.1-Flash-1017-GSQ-RCO-GGUF) | `*-IQ1_M-0000{1..5}-of-00006.gguf` or `*-IQ2_XXS-0000{1..5}-of-00006.gguf`, `DeepSeek-V4.1-Flash-Engram-IQ4_NL.gguf` (linked as shard 6) | `IQ1_M` fits resident; `IQ2_XXS` (138 GB) needs `--stream-experts`. |
 | [Lucebox](https://huggingface.co/Lucebox/DeepSeek-V4.1-Flash-1017-ROCMFP-GGUF) | `DeepSeek-V4.1-Flash-1017-DSpark-draft-Q2K-Q4K.gguf` | **Recommended drafter**: 4.59 GiB resident. |
-| [unsloth](https://huggingface.co/unsloth/DeepSeek-V4.1-Flash-1017-GGUF) | `UD-IQ1_M/*-0000{1..4}-of-00005.gguf`, Engram as shard 5 | `UD-IQ1_M` (140 GB) needs `--stream-experts`; `UD-IQ1_S` (122 GB) is untested. See [Unsloth Dynamic quants](#unsloth-dynamic-quants). |
+| [unsloth](https://huggingface.co/unsloth/DeepSeek-V4.1-Flash-1017-GGUF) | `UD-IQ1_M/*-0000{1..4}-of-00005.gguf`, Engram as shard 5 | `UD-IQ1_M` (140 GB) and `UD-IQ2_XXS` (165 GB) need `--stream-experts`; `UD-IQ1_S` (122 GB) is untested. See [Unsloth Dynamic quants](#unsloth-dynamic-quants). |
 | [unsloth](https://huggingface.co/unsloth/DeepSeek-V4.1-Flash-1017-GGUF) | `dspark-DeepSeek-V4.1-Flash-1017-Q8_0.gguf` | Supported: 7.42 GiB resident, about 2.6 GiB less host memory left, similar speed and acceptance. |
 
 Use the smaller Q2_K/Q4_K drafter: in matched runs the Q8_0 drafter
@@ -203,8 +203,8 @@ ln -s DeepSeek-V4.1-Flash-Engram-IQ4_NL.gguf \
 Unsloth's
 [Dynamic GGUFs](https://huggingface.co/unsloth/DeepSeek-V4.1-Flash-1017-GGUF)
 quantize the dense projections to Q6_K/Q8_0/Q5_K and keep the router in F32.
-Each build has four backbone shards plus the Engram tables as shard 5
-(110.6 GB). That shard holds the same tables as ISTA-DASLab's `IQ4_NL`
+Each build has its backbone shards (four for `UD-IQ1_M` and `UD-IQ1_S`,
+five for `UD-IQ2_XXS`) plus the Engram tables as the last shard (110.6 GB). That shard holds the same tables as ISTA-DASLab's `IQ4_NL`
 Engram file, so if you already have it, link it instead of downloading
 again. Gufo then logs a warning that the linked shard names another build's
 split position; it is expected and harmless.
@@ -212,6 +212,7 @@ split position; it is expected and harmless.
 | Build | Backbone | Routed experts | Status |
 | --- | ---: | --- | --- |
 | `UD-IQ1_M` | 139.8 GB (130.2 GiB) | IQ1_S, IQ2_XXS, IQ2_XS, IQ2_S | Tested with `--stream-experts`; [benchmarked](docs/models/deepseek-v4.1-flash/BENCHMARKS.md) |
+| `UD-IQ2_XXS` | 165.3 GB (153.9 GiB) | IQ1_S, IQ2_XXS, IQ2_S gate/up; IQ2_XXS, IQ2_XS, IQ2_S, IQ3_XXS, Q2_K down | Tested with `--stream-experts`; perplexity 5.715 against 6.267 for `IQ1_M` on the same 18.5K tokens ([quality](docs/models/deepseek-v4.1-flash/QUALITY.md#streamed-ud-iq2_xxs)) |
 | `UD-IQ1_S` | 122.4 GB (114.0 GiB) | IQ1_S, IQ2_XXS | Untested; every weight type is supported |
 
 ```sh
@@ -227,7 +228,12 @@ ln -s ../DeepSeek-V4.1-Flash-Engram-IQ4_NL.gguf \
 ```
 
 Without the ISTA Engram file, download shard 5 with the others (drop the
-`[1-4]`). For `UD-IQ1_S`, replace `UD-IQ1_M` with `UD-IQ1_S` throughout.
+`[1-4]`). For `UD-IQ1_S`, replace `UD-IQ1_M` with `UD-IQ1_S` throughout. For
+`UD-IQ2_XXS`, replace it with `UD-IQ2_XXS`, download shards `[1-5]` of
+`00006` and link the Engram file as shard 6. Its experts are about 1.2×
+larger than `UD-IQ1_M`'s, so it decodes 10-25% more slowly; a
+[second drive for expert tails](docs/models/deepseek-v4.1-flash/STREAMING.md#split-reads-across-two-drives)
+helps most with this build.
 Its backbone is 1.6 GiB larger than `IQ1_M`, which leaves too little memory
 to run it resident with the native context and the DSpark drafter;
 start it with `--stream-experts`.
@@ -321,7 +327,8 @@ podman logs -f gufo-ds41
 Measured over HTTP with `gufo serve` (greedy, thinking off, real chat text);
 the [benchmark card](docs/models/deepseek-v4.1-flash/BENCHMARKS.md) has the
 single-user, concurrent, loading and memory tables for `IQ1_M` resident and
-for `IQ2_XXS` and `UD-IQ1_M` streamed.
+for `IQ2_XXS` and `UD-IQ1_M` streamed. `UD-IQ2_XXS` against `UD-IQ1_M` on
+the same build is in [QUALITY.md](docs/models/deepseek-v4.1-flash/QUALITY.md#streamed-ud-iq2_xxs).
 
 ## Model notes
 
@@ -342,7 +349,7 @@ V4.1 Flash against the V4 Flash engine it was forked from:
 State is small: about 890 B per token of compressed KV and index K plus a
 fixed 128-row SWA ring per layer; stored as FP4 codes and scales it is about
 0.9 GiB at 1M tokens. GGUF types: experts are IQ1_S/IQ1_M/IQ2_XXS/IQ2_XS/IQ2_S
-per layer (gate and up share a type; down may differ); dense projections
+per layer, plus IQ3_XXS and Q2_K downs in `UD-IQ2_XXS` (gate and up share a type; down may differ); dense projections
 Q8_0/Q5_K (Q6_K/Q8_0/Q5_K in the Unsloth builds); router BF16 (F32 in the
 Unsloth builds), compressor and indexer BF16; Engram gate (q·k), hc and
 norms F32; `token_embd` and `output` Q5_K (Q6_K or Q8_0 in the Unsloth

@@ -548,3 +548,67 @@ Exactness checks of the card's own outputs:
 These hashes show that speculative and concurrent execution reproduce plain
 decoding; they do not measure accuracy against the original model (see the
 teacher-forced sections above).
+
+## Streamed UD-IQ2_XXS
+
+Unsloth's `UD-IQ2_XXS` (165.3 GB backbone in five shards, the shared
+`IQ4_NL` Engram linked as shard 6) quantizes routed gate/up to IQ1_S
+(layers 0-9), IQ2_XXS (10-24) and IQ2_S (25-39), and routed down to Q2_K
+(layer 0), IQ2_XS, IQ2_XXS, IQ2_S and IQ3_XXS (layers 20-34). Streaming it
+needed IQ3_XXS and Q2_K in the per-expert GEMVs and the FP16 routed-down
+tiles, and IQ2_S in the fused gate/up SwiGLU; `tools/ds41/quants.py` gained
+IQ3_XXS and Q2_K dequantizers that match gguf-py bit for bit on 4,096
+random blocks, with the torch versions equal to NumPy on the model's own
+experts. `ds41.mmq_typed` checks the new kernels against the ggml matvec, the
+grouped 2-16-token path and the routed FP16 down tile.
+
+Teacher-forced scores against an oracle run on the same file, streamed
+experts with the [tail file](STREAMING.md#split-reads-across-two-drives) on
+a second drive (results are identical without it), commit `4974ef9a`:
+
+| Positions | Path | Perplexity | Target top-1 | Argmax agreement | Mean \|ΔNLL\| | Mean ΔNLL ± s.e. |
+|---|---|---:|---:|---:|---:|---:|
+| 2,999 | oracle | 5.818 | 59.7% | — | — | — |
+| 2,999 | decode | 5.778 | 59.8% | 94.9% | 0.108 | −0.0068 ± 0.0039 |
+| 2,999 | batched | 5.817 | 59.3% | 95.4% | 0.102 | −0.0001 ± 0.0035 |
+| 18,499 | oracle | 5.715 | 61.0% | — | — | — |
+| 18,499 | decode | 5.712 | 61.0% | 94.8% | 0.102 | −0.0006 ± 0.0018 |
+| 18,499 | batched | 5.721 | 60.9% | 95.2% | 0.101 | +0.0011 ± 0.0017 |
+
+The standard error is taken over 100-token block means. The 3K decode
+offset (t = −1.75) does not persist at 18.5K (t = −0.35); decode and
+batched differ by −0.0017 ± 0.0017 there. Over the six position bands of
+the IQ1_M 18.5K table the mean offsets range from −0.014 to +0.007 nats on
+both paths, with no trend past 16K. On the same 18.5K
+tokens the `IQ1_M` oracle scores 6.267, so `UD-IQ2_XXS` has about 9% lower
+perplexity. On the 3K text `UD-IQ1_M` gives the same shape (oracle 5.818,
+decode −0.0039 ± 0.0036, batched −0.0001 ± 0.0040), and its argmax agrees
+with the `UD-IQ2_XXS` oracle at 86.7% of positions. The argmax agreement
+with the own oracle is lower than `IQ1_M`'s (96.2%) for both Unsloth builds,
+with the same mean |ΔNLL| on the decode and batched paths.
+
+Exactness: speculative verification at widths 8, 12 and 16
+(`--spec-check 8`) keeps all 36 retained rows of each width bit-identical
+to serial decode, and
+two joint sessions keep 168 of 168 rows bit-identical to their isolated
+evaluations. Over HTTP the greedy DSpark completion equals the AR
+completion at depths 0 and 16K, for `UD-IQ2_XXS` and for the `UD-IQ1_M`
+control. The `conversation`, `tools`, `long-context` and `cache` suites
+pass with DSpark on (32K context, two sessions). The ISTA `IQ1_M` 3K scores
+are identical before and after the change, decode and batched.
+
+Speed on the same production build, one sample per cell, tails on, single
+user, pp2048 / tg128, tok/s:
+
+| Mode, depth | `UD-IQ2_XXS` pp / tg | `UD-IQ1_M` pp / tg |
+|---|---:|---:|
+| AR, 0 | 857 / 17.2 | 1024 / 20.6 |
+| AR, 16K | 883 / 18.6 | 940 / 21.4 |
+| DSpark mixed, 0 | 783 / 23.8 | 960 / 26.9 |
+| DSpark mixed, 16K | 900 / 25.2 | 897 / 30.3 |
+| DSpark repetitive, 0 | 825 / 44.8 | 1000 / 60.1 |
+| DSpark repetitive, 16K | 813 / 56.4 | 908 / 62.9 |
+
+[Scores](artifacts/2026-11-01-ud-iq2xxs/scores.json),
+[speed](artifacts/2026-11-01-ud-iq2xxs/speed/),
+[functional reports](artifacts/2026-11-01-ud-iq2xxs/functional/).
