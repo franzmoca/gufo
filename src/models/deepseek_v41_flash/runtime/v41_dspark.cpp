@@ -28,6 +28,15 @@ constexpr uint32_t kMixes = 2 * kHc + kHc * kHc;
 constexpr uint32_t kFeatureDim = DS41_DSPARK_TARGET_LAYERS * kDim;
 constexpr uint32_t kRows = DS41_DSPARK_BLOCK;
 constexpr uint32_t kMaxRows = kRows * DS41_DSPARK_MAX_BATCH;
+/* Pinned staging sections for a draft's inputs, 256-byte aligned. */
+constexpr uint64_t kStageAlign = 256;
+constexpr uint64_t stage_round(uint64_t b) { return (b + kStageAlign - 1) / kStageAlign * kStageAlign; }
+constexpr uint64_t kStageDraws = 0;
+constexpr uint64_t kStageRows = kStageDraws + stage_round((uint64_t)kMaxRows * sizeof(uint32_t));
+constexpr uint64_t kStageOneHot = kStageRows + stage_round((uint64_t)kMaxRows * DS41_N_EMBD * sizeof(float));
+constexpr uint64_t kStageTokens = kStageOneHot + stage_round((uint64_t)kMaxRows * DS41_N_HC * sizeof(float));
+constexpr uint64_t kStagingBytes =
+    kStageTokens + stage_round((uint64_t)DS41_DSPARK_MAX_BATCH * (kRows + 1) * sizeof(int32_t));
 constexpr uint32_t kRouted = DS41_DSPARK_EXPERTS_USED;
 constexpr uint64_t kRingFloats = (uint64_t)DS41_N_SWA * kHeadDim;
 constexpr float kSwigluLimit = DS41_SWIGLU_CLAMP_EXP;
@@ -80,9 +89,12 @@ struct ds41_dspark_scratch {
   ds41_v41_proposal* proposals = nullptr;
   float *main_raw = nullptr, *main_x = nullptr, *main_kv = nullptr, *main_kvn = nullptr;
   float* head_x = nullptr;     // the drafted rows' final norms, compacted for the target head
-  std::vector<float> host_rows;  // embedded block rows
+  /* Pinned staging for a draft's inputs (draws, rows, one-hot pre-mix,
+   * tokens), uploaded asynchronously behind the queued work. */
+  unsigned char* staging = nullptr;
   ~ds41_dspark_scratch() {
     for (void* p : owned) (void)hipFree(p);
+    if (staging) (void)hipHostFree(staging);
   }
   template <typename T>
   bool alloc(T** p, uint64_t count) {
@@ -145,9 +157,12 @@ bool gemv_type(uint32_t type) {
 
 bool alloc_scratch(ds41_dspark_scratch& s) {
   const uint64_t r = kMaxRows;
-  s.host_rows.resize(r * kDim);
   const uint64_t hd = (uint64_t)kHc * kDim;
   const uint64_t f = DS41_DSPARK_FEATURE_ROWS;
+  if (hipHostMalloc((void**)&s.staging, kStagingBytes) != hipSuccess) {
+    s.staging = nullptr;
+    return false;
+  }
   return s.alloc(&s.h, r * hd) && s.alloc(&s.h2, r * hd) && s.alloc(&s.xn, r * kDim) &&
          s.alloc(&s.mixes, r * kMixes) && s.alloc(&s.pre[0], r * kHc) && s.alloc(&s.pre[1], r * kHc) &&
          s.alloc(&s.post, r * kHc) && s.alloc(&s.comb, r * kHc * kHc) && s.alloc(&s.ffn_post, r * kHc) &&
@@ -235,10 +250,22 @@ bool attention(const ds41_dspark_stage& st, ds41_dspark_scratch& s, uint32_t sta
 }
 
 /* The routed experts' FP32-activation GEMV (ds41_expert_gemv.hip.cpp) covers
- * the drafter's Q2_K and Q4_K layers: one fused gate/up/SwiGLU launch and
+ * the drafter's K-quant and IQ1/IQ2 layers: one fused gate/up/SwiGLU launch and
  * one down launch replace the three mmvq passes and their Q8_1 rounding,
  * streaming the weights at the dense GEMV's bandwidth. */
-static int expert_block_bytes(uint32_t type) { return type == 10 ? 84 : type == 12 ? 144 : 0; }
+static int expert_block_bytes(uint32_t type) {
+  switch (type) {
+  case 10: return 84;   // Q2_K
+  case 12: return 144;  // Q4_K
+  case 16: return 66;   // IQ2_XXS
+  case 17: return 74;   // IQ2_XS
+  case 19: return 50;   // IQ1_S
+  case 22: return 82;   // IQ2_S
+  case 29: return 56;   // IQ1_M
+  default: return 0;
+  }
+}
+
 
 bool moe(const ds41_dspark_stage& st, ds41_dspark_scratch& s, uint32_t n) {
   const int experts = (int)DS41_DSPARK_EXPERTS;
@@ -467,7 +494,8 @@ bool ds41_dspark_inject(ds41_dspark_state* s, uint32_t pos0, uint32_t rows) {
   }
   if (pos0 != s->ring_end) s->ring_start = pos0;
   s->ring_end = pos0 + rows;
-  return hipDeviceSynchronize() == hipSuccess;
+  /* The drafter and the decoder follow on the same stream: no host sync. */
+  return hipGetLastError() == hipSuccess;
 }
 
 bool ds41_dspark_draft(ds41_dspark_state* s, int anchor, int32_t* drafts, uint32_t count,
@@ -531,14 +559,22 @@ bool ds41_dspark_draft_batch(ds41_dspark_draft_request* requests, uint32_t count
       j.temperature = r.sampler->draws(r.sampler->ctx, r.count, draws.data() + j.row0);
       any_stochastic = true;
     }
-    ok = ok && ds41_decoder_embed(r.state->decoder, block, kRows, sc.host_rows.data() + (uint64_t)j.row0 * kDim);
+    ok = ok && ds41_decoder_embed(r.state->decoder, block, kRows,
+                                  reinterpret_cast<float*>(sc.staging + kStageRows) + (uint64_t)j.row0 * kDim);
   }
-  ok = ok && (!any_stochastic ||
-              hipMemcpy(sc.draws, draws.data(), n * sizeof(uint32_t), hipMemcpyHostToDevice) == hipSuccess) &&
-       hipMemcpy(sc.xn, sc.host_rows.data(), (uint64_t)n * kDim * sizeof(float), hipMemcpyHostToDevice) ==
-           hipSuccess &&
-       hipMemcpy(sc.pre[0], one_hot.data(), one_hot.size() * sizeof(float), hipMemcpyHostToDevice) == hipSuccess &&
-       hipMemcpy(sc.tokens, tokens.data(), tokens.size() * sizeof(int32_t), hipMemcpyHostToDevice) == hipSuccess;
+  /* Pinned, asynchronous uploads queue behind the work in flight (the
+   * previous cycle's injection) instead of waiting for it. */
+  memcpy(sc.staging + kStageDraws, draws.data(), n * sizeof(uint32_t));
+  memcpy(sc.staging + kStageOneHot, one_hot.data(), one_hot.size() * sizeof(float));
+  memcpy(sc.staging + kStageTokens, tokens.data(), tokens.size() * sizeof(int32_t));
+  ok = ok && (!any_stochastic || hipMemcpyAsync(sc.draws, sc.staging + kStageDraws, n * sizeof(uint32_t),
+                                                hipMemcpyHostToDevice, 0) == hipSuccess) &&
+       hipMemcpyAsync(sc.xn, sc.staging + kStageRows, (uint64_t)n * kDim * sizeof(float), hipMemcpyHostToDevice,
+                      0) == hipSuccess &&
+       hipMemcpyAsync(sc.pre[0], sc.staging + kStageOneHot, one_hot.size() * sizeof(float), hipMemcpyHostToDevice,
+                      0) == hipSuccess &&
+       hipMemcpyAsync(sc.tokens, sc.staging + kStageTokens, tokens.size() * sizeof(int32_t), hipMemcpyHostToDevice,
+                      0) == hipSuccess;
   for (uint32_t c = 0; c < kHc && ok; c++)
     ok = hipMemcpy2DAsync(sc.h + c * kDim, hd * sizeof(float), sc.xn, kDim * sizeof(float), kDim * sizeof(float), n,
                           hipMemcpyDeviceToDevice, 0) == hipSuccess;
