@@ -1,8 +1,8 @@
 /* Single-token routed-expert projections for the V4.1 Flash IQ1_S, IQ1_M,
- * IQ2_XXS, IQ2_XS and IQ2_S weights with FP32 activations. Each slot multiplies its
- * own expert, ids[slot]; a wave covers 4 rows and a lane takes one 32-value
- * sub-block (task t) of each 256-value block, summed over the 8 tasks at the
- * end.
+ * IQ2_XXS, IQ2_XS, IQ2_S, IQ3_XXS, Q2_K and Q4_K weights with FP32
+ * activations. Each slot multiplies its own expert, ids[slot]; a wave
+ * covers 4 rows and a lane takes one 32-value sub-block (task t) of each
+ * 256-value block, summed over the 8 tasks at the end.
  *
  * IQ1 weights are (n - 1 + delta) * d * s with a grid nibble n in {0, 1, 2},
  * so a group of eight is d s (sum n_i x_i + (delta - 1) sum x_i): one convert
@@ -361,6 +361,57 @@ struct Format<22> {
   }
 };
 
+/* IQ3_XXS (98 bytes): d, 64 grid bytes (eight per sub-block, four
+ * magnitudes each), then per sub-block a u32 with four 7-bit sign indices
+ * and a 4-bit scale. The task's eight grid bytes arrive as one word pair;
+ * the 256 u32 grid entries are staged as words, entry i at words[i]. */
+template <>
+struct Format<18> {
+  static constexpr int kBlockBytes = 98;
+  static constexpr bool kIq1Grid = false;
+  static constexpr int kIq2Words = 256;
+  static constexpr bool kXReg = true;
+  struct Raw {
+    uint32_t d, q0, q1, aux;
+  };
+  static __device__ __forceinline__ Raw Load(const uint8_t* b, int t) {
+    Raw r{};
+    __builtin_memcpy(&r.d, b, 2);
+    uint64_t v;
+    __builtin_memcpy(&v, b + 2 + 8 * t, 8);
+    r.q0 = static_cast<uint32_t>(v);
+    r.q1 = static_cast<uint32_t>(v >> 32);
+    __builtin_memcpy(&r.aux, b + 66 + 4 * t, 4);
+    return r;
+  }
+  template <bool kReg>
+  static __device__ __forceinline__ float AccT(float acc, const Raw& a, int, const float* x, const float (&xr)[32],
+                                               const uint32_t*, const Iq2Tab& tab) {
+    const float d = HalfBits(a.d);
+    const uint32_t aux = a.aux;
+    const float scale = d * (0.5f + static_cast<float>(aux >> 28)) * 0.5f;
+    float w[32];
+#pragma unroll
+    for (int l = 0; l < 4; ++l) {
+      const uint32_t q = l < 2 ? a.q0 : a.q1;
+      const uint32_t lo = (q >> (16 * (l & 1))) & 0xFF, hi = (q >> (16 * (l & 1) + 8)) & 0xFF;
+      Iq2Group(tab.words[lo], tab.words[hi], tab.signs[(aux >> (7 * l)) & 127], scale, w + 8 * l);
+    }
+    if constexpr (kReg)
+      return acc + AccumulateR(0.0f, w, xr);
+    return acc + Accumulate<32>(0.0f, w, x);
+  }
+  static __device__ __forceinline__ float Acc(float acc, const Raw& a, int t, const float* x, const uint32_t* g,
+                                              const Iq2Tab& tab) {
+    float xr[32] = {};
+    return AccT<false>(acc, a, t, x, xr, g, tab);
+  }
+  static __device__ __forceinline__ float AccR(float acc, const Raw& a, int t, const float (&xr)[32],
+                                               const uint32_t* g, const Iq2Tab& tab) {
+    return AccT<true>(acc, a, t, nullptr, xr, g, tab);
+  }
+};
+
 /* Q4_K (144 bytes, 16-byte aligned blocks): the dense GEMV's task split
  * (DecodeQ45K/DotQ45K), one header and one 16-byte payload load per task.
  * The task's 32 values live in two 16-value slices 32 apart, so the fused
@@ -446,6 +497,23 @@ __device__ __forceinline__ const uint64_t* Iq2GridTable() {
     return iq2s_grid;
 }
 
+/* Stages one format's grid words and the sign table in LDS (the caller
+ * synchronizes): the IQ2 u64 entries as lo/hi word pairs, the IQ3_XXS u32
+ * entries as they are. */
+template <int kType>
+__device__ __forceinline__ void StageIq2(uint32_t* words, uint8_t* signs) {
+  if constexpr (kType == 18) {
+    for (uint32_t i = threadIdx.x; i < 256; i += blockDim.x) words[i] = iq3xxs_grid[i];
+  } else {
+    for (uint32_t i = threadIdx.x; i < Format<kType>::kIq2Words / 2; i += blockDim.x) {
+      const uint64_t g = Iq2GridTable<kType>()[i];
+      words[2 * i] = static_cast<uint32_t>(g);
+      words[2 * i + 1] = static_cast<uint32_t>(g >> 32);
+    }
+  }
+  for (uint32_t i = threadIdx.x; i < 128; i += blockDim.x) signs[i] = ksigns_iq2xs[i];
+}
+
 /* Grid (row tiles of 32, slots). The raw words of U blocks are loaded before
  * any of them is decoded. */
 /* Row sums of one expert matrix; with kSwiGLU, a wave takes the same rows
@@ -480,12 +548,7 @@ __global__ void __launch_bounds__(kWave* kWaves)
     __syncthreads();
   }
   if constexpr (F::kIq2Words) {
-    for (uint32_t i = threadIdx.x; i < F::kIq2Words / 2; i += blockDim.x) {
-      const uint64_t g = Iq2GridTable<kType>()[i];
-      iq2_words[2 * i] = static_cast<uint32_t>(g);
-      iq2_words[2 * i + 1] = static_cast<uint32_t>(g >> 32);
-    }
-    for (uint32_t i = threadIdx.x; i < 128; i += blockDim.x) iq2_signs[i] = ksigns_iq2xs[i];
+    StageIq2<kType>(iq2_words, iq2_signs);
     __syncthreads();
   }
   const Iq2Tab tab{iq2_words, iq2_signs};
@@ -673,12 +736,7 @@ __global__ void __launch_bounds__(kWave* kWaves)
     __syncthreads();
   }
   if constexpr (F::kIq2Words) {
-    for (uint32_t i = threadIdx.x; i < F::kIq2Words / 2; i += blockDim.x) {
-      const uint64_t g2 = Iq2GridTable<kType>()[i];
-      iq2_words[2 * i] = static_cast<uint32_t>(g2);
-      iq2_words[2 * i + 1] = static_cast<uint32_t>(g2 >> 32);
-    }
-    for (uint32_t i = threadIdx.x; i < 128; i += blockDim.x) iq2_signs[i] = ksigns_iq2xs[i];
+    StageIq2<kType>(iq2_words, iq2_signs);
     __syncthreads();
   }
   const Iq2Tab tab{iq2_words, iq2_signs};
@@ -958,6 +1016,9 @@ int dispatch(int type, const void* w, const void* w_up, const void* const* w_tab
   case 22:
     return launch<22, 2>(w, w_up, w_table, w_up_table, route_w, limit, expert_bytes, ids, slots, x, x_slot,
                          slots_per_x, y, m, k, zero_dropped);
+  case 18:
+    return launch<18, 2>(w, w_up, w_table, w_up_table, route_w, limit, expert_bytes, ids, slots, x, x_slot,
+                         slots_per_x, y, m, k, zero_dropped);
   default:
     return 1;
   }
@@ -1029,6 +1090,9 @@ extern "C" int ds41_v41_gemv_experts_grouped(int type, const void* w, const void
                                  x_slot, slots_per_x, y, m, k, zero_dropped);
   case 22:
     return dispatch_group<22, 2>(w, w_up, w_table, w_up_table, route_w, limit, expert_bytes, plan, slots, cols, x,
+                                 x_slot, slots_per_x, y, m, k, zero_dropped);
+  case 18:
+    return dispatch_group<18, 2>(w, w_up, w_table, w_up_table, route_w, limit, expert_bytes, plan, slots, cols, x,
                                  x_slot, slots_per_x, y, m, k, zero_dropped);
   default:
     return 1;

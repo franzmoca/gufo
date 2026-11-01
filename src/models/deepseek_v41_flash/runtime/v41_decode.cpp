@@ -930,6 +930,11 @@ bool routed_f16_type(int type) {
          type == (int)DS41_TENSOR_IQ2_XXS || type == (int)DS41_TENSOR_IQ2_XS || type == (int)DS41_TENSOR_IQ2_S;
 }
 
+/* Down projections also take IQ3_XXS and Q2_K (the Unsloth Dynamic builds). */
+bool routed_f16_down_type(int type) {
+  return routed_f16_type(type) || type == (int)DS41_TENSOR_IQ3_XXS || type == (int)DS41_TENSOR_Q2_K;
+}
+
 /* ds41_v41_routed_plan's rows, bounds and tiles for batches up to cap tokens. */
 uint64_t routed_plan_ints(uint64_t cap) {
   const uint64_t slots = cap * DS41_N_EXPERT_USED;
@@ -948,6 +953,10 @@ uint64_t expert_block_bytes(int type) {
     return 74;
   case DS41_TENSOR_IQ2_S:
     return 82;
+  case DS41_TENSOR_Q2_K:
+    return 84;
+  case DS41_TENSOR_IQ3_XXS:
+    return 98;
   default:
     return 0;
   }
@@ -1085,12 +1094,13 @@ bool moe(ds41_decoder* d, uint32_t il, uint32_t n) {
   const bool fused_pair = gate_type == up_type && (gate_type == (int)DS41_TENSOR_IQ1_S ||
                                                    gate_type == (int)DS41_TENSOR_IQ1_M ||
                                                    gate_type == (int)DS41_TENSOR_IQ2_XXS ||
-                                                   gate_type == (int)DS41_TENSOR_IQ2_XS);
+                                                   gate_type == (int)DS41_TENSOR_IQ2_XS ||
+                                                   gate_type == (int)DS41_TENSOR_IQ2_S);
   const bool grouped = n > 1 && n <= d->decode_rows && expert_block_bytes(gate_type) &&
                        expert_block_bytes(up_type) && expert_block_bytes(down_type);
   const bool small = n == 1 || grouped;
   const bool f16_gate = !small && gate_type == up_type && routed_f16_type(gate_type);
-  const bool f16_down = !small && routed_f16_type(down_type);
+  const bool f16_down = !small && routed_f16_down_type(down_type);
   /* FP16 copies of the input and of the SwiGLU rows, in the buffers the
    * MMQ path would use for the gate and up rows. The routed FP16 gate/up
    * and the shared expert's dense projections share the input copy. */
