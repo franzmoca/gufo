@@ -241,6 +241,12 @@ public:
   std::shared_ptr<PrefetchJob> Resolve(uint32_t layer, bool adopt_wide,
                                        uint64_t* dropped_bytes) {
     std::unique_lock lock(mutex_);
+    // One thread stops the background job at a time: a submission that is
+    // replacing it finishes first. Two waiters would race on pf_idle_: if the
+    // submission woke first it restarted the workers with pf_stop_ cleared,
+    // so they never signalled this wait again (a hang); if this wait woke
+    // first it reset pf_, which the submission then dereferenced.
+    pf_idle_.wait(lock, [this] { return !resolving_; });
     if (!pf_run_)
       return nullptr;
     std::shared_ptr<PrefetchJob> job;
@@ -326,6 +332,7 @@ public:
     pf_run_ = true;
     ++wake_;
     start_.notify_all();
+    pf_idle_.notify_all();  // a Resolve may wait for this replacement
     return true;
   }
 
