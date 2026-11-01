@@ -83,6 +83,7 @@ pp2048 runs 1,182 tok/s at 32K, 1,155 at 64K and 1,098 at 128K.
 | 22 | Decode misses after a long prompt under scan-resistant admission | Streamed decode | Unmeasured | — |
 | 23 | Streamed `IQ2_XS` with cache-aware routing | Quality option | Unmeasured; lower KL than `IQ2_XXS` at a residency cost | Low |
 | 27 | Streamed kernels for the `IQ2_XS` build (IQ3_XXS down, IQ2_S gate/up) | Model support | Prerequisite for item 23 | High |
+| 28 | Split-read head share from measured drive speeds | Streamed reads, two drives | Small on matched drives; up to the slower drive's excess on mismatched ones | Medium |
 | 24 | Selection-only miss penalty, mako's form of item 13 (changes outputs) | Streamed decode, short prefills | Up to the ~5 ms/token of miss-read idle; more cold, after long prompts and in verification | Medium |
 | 25 | Direction projection and steering vectors | Feature | Per-request behavior edits; ~0.1–0.5 ms/token if unfused | Medium |
 | 26 | LoRA adapters (GGUF `adapter.type = lora`) | Feature | Adapter compatibility; rank-1 abliteration adapters reduce to item 25 | Medium |
@@ -457,6 +458,18 @@ run):
   table-indexed kernel for this shape" because `routed_f16_type` excludes
   IQ2_S: add an IQ2_S FP16 tile or the per-row expert GEMV fallback the
   IQ2_S down projections use.
+
+### 28. Split-read head share from measured drive speeds
+
+With an expert tails file ([split reads](STREAMING.md#split-reads-across-two-drives)),
+every projection read is split at the share chosen when the file is packed
+(`--head`, default 0.5). On the 990 PRO and KIOXIA pair, which read 5.3-5.9
+and 5.15 GB/s, shares of 0.50-0.60 measured the same, so the default
+stands. A pair with unequal drives finishes each miss at the slower one's
+pace. Pack a wider tail (for example 0.3, so the head can range from 0.3 to
+1.0), time a few cold reads per drive at load, and split each read at the
+measured ratio; only the share up to the packed cut can move to the second
+drive. Measure on a mismatched pair or with the second drive under load.
 
 Check each against the resident MMQ/MMVQ outputs (`ds41.mmq_typed`,
 `ds41_gemv_bench`) and keep the existing builds' outputs bit-identical.

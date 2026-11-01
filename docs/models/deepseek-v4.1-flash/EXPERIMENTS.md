@@ -2091,3 +2091,81 @@ no decode gain in alternating runs (19.33 / 19.56 / 17.27 against 18.71 /
 17.20 / 17.47 tok/s). Precomputed IQ1 group sums of x staged in LDS were
 slower (IQ1_M up 100 -> 102 us, IQ1_S up 76 -> 89 us in `ds41_gemv_bench`).
 
+
+## E61 — expert reads split across two drives (retained)
+
+Each miss reads an expert's three projections (~7.7 MB for `IQ2_XXS`)
+from one drive, and a single direct read stream on the Samsung 990 PRO does
+not get past ~5.5 GB/s (1.32-1.47 ms per cold miss; ~6.5 GB/s for six
+misses at once). More readers (3-32) or smaller chunks did not raise it.
+The second NVMe, a KIOXIA EXCERIA BASIC on the root btrfs, reads
+5.15 GB/s with direct I/O once compression is off for the file (NOCOW);
+the 2.3 GB/s in the earlier [storage reads](#storage-reads) note was
+measured through btrfs compression.
+
+`tools/ds41/pack_expert_tails.py` copies the second half of every routed
+expert projection into one file on the second drive (61.6 GiB for
+`IQ2_XXS`, 61.7 GiB for UD-`IQ1_M`, instead of a full copy). With
+`MODEL.gguf.expert-tails` present, each projection read becomes a head
+read from the GGUF and a tail read from that file, issued together, so
+both drives read every miss. Read workers went from 4 to 8 so each drive
+keeps its queue depth. The bytes are unchanged: greedy outputs of `IQ2_XXS`
+and UD-`IQ1_M` were identical with and without the file in AR, DSpark and
+DSpark-sampled modes.
+
+Cold reads of real expert spans (2026-11-01):
+
+| Case | One drive | Split, 50-55% from the GGUF |
+| --- | ---: | ---: |
+| 1 miss | 1.32-1.47 ms (5.3-5.9 GB/s) | 0.87 ms (8.9 GB/s) |
+| 2 misses | — | 1.61 ms |
+| 6 misses | ~7.1 ms (~6.5 GB/s) | 4.35 ms (10.7 GB/s) |
+
+Head shares of 0.50-0.60 and one merged tail read per expert, instead of
+three, measured the same.
+
+`gufo bench` on streamed `IQ2_XXS` (pp512 + tg128, random prompt, no
+drafter, alternating runs): tg 17.06-17.68 → 17.87-19.16 tok/s (median
++7.6%), pp512 510-538 → 613-621 tok/s (+16%), cache seed 19.7 → 14.9 s.
+
+**Served workloads.** A fresh `gufo serve` per run (DSpark, temperature 0,
+alternating without and with the file, two rounds each) played an 8-turn
+chat that switches topic and language, an 18.4K-token document with two
+follow-up questions, and a Pi 0.87.0 coding-agent session (creation,
+bugfix and edit tasks, all passing). Chat and document outputs were
+identical across runs; the agent's turn count varies by one. Prefill and
+decode are the server's per-request rates, summed over each workload.
+Rounds 1 / 2:
+
+| Model, expert cache | Workload | Prefill tok/s, without → with | Decode tok/s, without → with |
+| --- | --- | --- | --- |
+| `IQ2_XXS`, ~100 GiB (81% of experts) | chat | 112.8 / 111.3 → 121.1 / 113.2 | 30.46 / 30.63 → 31.20 / 30.84 |
+| | document | 879.1 / 878.2 → 925.8 / 912.7 | 32.48 / 32.19 → 32.68 / 32.36 |
+| | agent | 322.5 / 311.8 → 355.0 / 352.4 | 41.94 / 40.72 → 42.83 / 43.30 |
+| UD-`IQ1_M`, ~100 GiB | chat | 192.3 / 182.4 → 211.9 / 212.6 | 28.34 / 28.64 → 29.24 / 29.22 |
+| | document | 827.0 / 827.7 → 878.7 / 905.8 | 30.84 / 30.92 → 31.44 / 31.18 |
+| | agent | 312.8 / 296.9 → 339.8 / 338.6 | 40.40 / 42.43 → 44.00 / 43.42 |
+| `IQ2_XXS`, 64 GiB cap (52%) | chat | 44.4 / 44.5 → 65.6 / 65.6 | 20.74 / 20.70 → 25.41 / 25.08 |
+| | document | 402.5 / 413.4 → 663.5 / 664.2 | 23.30 / 23.27 → 26.61 / 26.55 |
+| | agent | 125.3 / 125.4 → 189.5 / 190.2 | 27.78 / 28.35 → 31.21 / 33.75 |
+
+With the full cache, `IQ2_XXS` hit 98.0% of routes and read 6.4 MiB per
+evaluated token over the session (chat 13.8, agent 10, document 4.2 MiB),
+under one expert per token, so decode gains 1-3% while prefill of short
+requests gains 5-17% and the agent's summed time to first token falls from
+7.25 / 8.52 s to 6.39 / 7.33 s. The 64 GiB cap stands in for a larger
+quantization at the full cache: 91.5% route hits and 35 MiB per token
+(chat 90, agent 67 MiB), where the split gains 47-65% in prefill and
+12-23% in decode. The Pi tasks took 59-67 s instead of 76-87 s.
+
+The per-token host wait now separates the wait for the layer's routes from
+the wait on demand reads after the overlapped work. At 64 GiB the split
+cut the session's read wait from 3.88 to 2.45 ms per token and the route
+wait from 5.73 to 5.26 ms; in chat, read wait fell 9.8 → 6.8 ms and route
+wait 19.8 → 17.4 ms. The route wait follows the reads too (it includes the
+previous layers' queued miss work), so read wait alone understates what
+reads cost a token.
+
+A served session on 2026-10-31 (UD-`IQ1_M`, 275 coding-agent requests,
+prompts up to 73K tokens, no tails) ran at a median 99.7% route hits and
+7.2 MiB per token (p90 13.1).
