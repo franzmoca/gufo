@@ -2025,3 +2025,41 @@ At 2 tokens the lane layout stays as fast or faster (+0-8% for the split
 kernel), as does the SwiGLU at 4. Streamed UD-IQ1_M over HTTP (distinct
 prompts, 4,096 context, alternating): C8 63.81 / 63.63 -> 66.83 / 66.52
 tok/s (+4.6%), C4 48.23 / 47.93 -> 47.80 / 48.69 (no change).
+
+## E59 — decode: router loads in flight, routing without argmax rounds; GEMV probes
+
+Resident `IQ1_M`, ROCm 10.1, single-token decode (rocprofv3 kernel times,
+medians over 33 tokens).
+
+**Retained.** The BF16 matvec gave each wave one 10 KiB router row with one
+load in flight per iteration; four loads in flight (`#pragma unroll 4`,
+same sums in the same order) take the 384-row router 21.9 -> 19.2 us, the
+4-block matvec 8.3 -> 3.6 and the 64-block one 28.2 -> 24.2. `route_kernel`
+ran k block-wide argmax rounds with two barriers each; each wave now takes
+its own k best with shuffles and wave 0 merges the candidates by the same
+order (larger choice, then lower index): 7.2 -> 5.6 us, ids and weights
+identical on 2,000 tokens with ties, unchanged at 2,048 rows (419 against
+427 us). About 0.24 ms per token; greedy, DSpark and seeded DSpark text
+identical on `IQ1_M`, streamed `IQ2_XXS` and streamed UD-IQ1_M. Ranks
+computed per expert (one pass, 384 compares per thread) were no faster
+(6.2 us).
+
+**Measured, not pursued.**
+
+- Expert GEMVs (`ds41_gemv_bench`, fused SwiGLU added): U = 3 or 4 blocks
+  ahead are slower for IQ1_S and IQ1_M (IQ1_S gate+up 202 -> 172 / 167
+  GB/s); U = 2 instead of 1 gives IQ1_M gate+up +2%. Two to six row tiles
+  per block (amortizing the LDS codebook) were never faster.
+- Dense Q5_K at one token: the multi-token path's one-block-ahead register
+  prefetch moved shapes by -3 to +3% with no consistent gain; nontemporal
+  weight loads (`slc dlc`) were 3-20% slower.
+- `wo_b` (Q5_K 5,120 x 8,192, 28.8 MB) takes 140 us in the model against
+  125 us standalone (230 GB/s), every layer. A cold `wo_b` launched after
+  another `wo_b` takes 128 us; after `wo_a` 140, whatever it reads. Not the
+  activations' cache state (a disjoint copy keeps 128), placement (a fresh
+  `hipMalloc` copy keeps 140), slices (S4 141), or a memset in between.
+  Dispatches use agent-scope fences (CLR 10.1 default). ~0.5 ms per token,
+  cause open. A second read of the same weights right after takes 45 us
+  (MALL).
+- The standalone benches run the shader clock at ~0.95 GHz and ~38 W; the
+  model's decode at 2.3-2.9 GHz and ~68 W.
