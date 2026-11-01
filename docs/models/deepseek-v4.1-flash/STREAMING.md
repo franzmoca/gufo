@@ -138,8 +138,9 @@ On the 990 PRO plus a KIOXIA EXCERIA BASIC (both PCIe 4.0 x4), one cold
 miss takes 0.87 ms instead of 1.32-1.47 ms, and six misses 4.35 ms
 (10.7 GB/s). Served workloads gain most where misses are frequent: with
 the full ~100 GiB cache, short-request prefill gains 5-17% and decode
-1-3%; with the cache capped at 64 GiB, standing in for a larger
-quantization, prefill gains 47-65% and decode 12-23%
+1-3%. Capped caches stand in for larger quantizations: at 88 GiB (the
+expert share a ~150 GB backbone would keep cached) prefill gains 18-27% and
+decode 2-5%, at 64 GiB prefill 47-65% and decode 12-23%
 ([E61](EXPERIMENTS.md#e61--expert-reads-split-across-two-drives-retained)).
 
 ## Prefetch from router predictions

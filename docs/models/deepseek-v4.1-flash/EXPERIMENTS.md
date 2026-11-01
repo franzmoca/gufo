@@ -2145,6 +2145,9 @@ Rounds 1 / 2:
 | UD-`IQ1_M`, ~100 GiB | chat | 192.3 / 182.4 → 211.9 / 212.6 | 28.34 / 28.64 → 29.24 / 29.22 |
 | | document | 827.0 / 827.7 → 878.7 / 905.8 | 30.84 / 30.92 → 31.44 / 31.18 |
 | | agent | 312.8 / 296.9 → 339.8 / 338.6 | 40.40 / 42.43 → 44.00 / 43.42 |
+| `IQ2_XXS`, 88 GiB cap (71%) | chat | 88.6 / 88.0 → 109.2 / 109.1 | 28.62 / 28.57 → 29.96 / 29.69 |
+| | document | 706.8 / 710.3 → 841.1 / 838.6 | 30.49 / 30.62 → 31.39 / 31.30 |
+| | agent | 233.6 / 240.7 → 296.0 / 296.4 | 38.91 / 37.14 → 40.19 / 40.16 |
 | `IQ2_XXS`, 64 GiB cap (52%) | chat | 44.4 / 44.5 → 65.6 / 65.6 | 20.74 / 20.70 → 25.41 / 25.08 |
 | | document | 402.5 / 413.4 → 663.5 / 664.2 | 23.30 / 23.27 → 26.61 / 26.55 |
 | | agent | 125.3 / 125.4 → 189.5 / 190.2 | 27.78 / 28.35 → 31.21 / 33.75 |
@@ -2153,13 +2156,19 @@ With the full cache, `IQ2_XXS` hit 98.0% of routes and read 6.4 MiB per
 evaluated token over the session (chat 13.8, agent 10, document 4.2 MiB),
 under one expert per token, so decode gains 1-3% while prefill of short
 requests gains 5-17% and the agent's summed time to first token falls from
-7.25 / 8.52 s to 6.39 / 7.33 s. The 64 GiB cap stands in for a larger
-quantization at the full cache: 91.5% route hits and 35 MiB per token
-(chat 90, agent 67 MiB), where the split gains 47-65% in prefill and
-12-23% in decode. The Pi tasks took 59-67 s instead of 76-87 s.
+7.25 / 8.52 s to 6.39 / 7.33 s. The caps stand in for larger
+quantizations at the full cache. At 88 GiB, about the share of experts a
+~150 GB backbone such as `IQ2_XS` would keep cached, routes hit 96.3% and
+the session read 12.5-12.7 MiB per token (chat 28, agent 21 MiB): the
+split gains 18-27% in prefill and 2-5% in chat and document decode. At
+64 GiB, 91.5% route hits and 35 MiB per token (chat 90, agent 67 MiB), it
+gains 47-65% in prefill and 12-23% in decode; the Pi tasks took 59-67 s
+instead of 76-87 s.
 
 The per-token host wait now separates the wait for the layer's routes from
-the wait on demand reads after the overlapped work. At 64 GiB the split
+the wait on demand reads after the overlapped work. At 88 GiB the split
+cut the session's read wait from 1.40 / 1.42 to 0.95 / 0.95 ms per token,
+with the route wait unchanged at ~5.1 ms. At 64 GiB it
 cut the session's read wait from 3.88 to 2.45 ms per token and the route
 wait from 5.73 to 5.26 ms; in chat, read wait fell 9.8 → 6.8 ms and route
 wait 19.8 → 17.4 ms. The route wait follows the reads too (it includes the
