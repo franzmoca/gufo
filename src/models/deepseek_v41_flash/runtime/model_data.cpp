@@ -1625,10 +1625,14 @@ static void dspark_open(ds41_dspark_model* d, const char* path) {
        DS41_DSPARK_MARKOV_RANK, DS41_N_VOCAB);
   bind(&d->markov_w2, lucebox ? "dflash.dspark.markov.w2" : "markov_w2.weight",
        DS41_DSPARK_MARKOV_RANK, DS41_N_VOCAB);
-  // The acceptance head is optional: hidden then Markov-rank inputs.
-  if (const ds41_tensor* w = model_find_tensor(
-          m, lucebox ? "dflash.dspark.confidence.weight"
-                     : "confidence_head.proj.weight")) {
+  // The acceptance head is optional: hidden then Markov-rank inputs. Unsloth
+  // names it conf_proj.
+  const ds41_tensor* conf =
+      lucebox ? model_find_tensor(m, "dflash.dspark.confidence.weight")
+              : model_find_tensor(m, "conf_proj.weight");
+  if (!lucebox && !conf)
+    conf = model_find_tensor(m, "confidence_head.proj.weight");
+  if (const ds41_tensor* w = conf) {
     dspark_bind(d, &d->confidence, w, dim + DS41_DSPARK_MARKOV_RANK, 1);
     if (const ds41_tensor* b =
             model_find_tensor(m, "dflash.dspark.confidence.bias"))
@@ -1971,6 +1975,9 @@ int ds41_engine_open(ds41_engine** out, const ds41_engine_options* opt) {
         *out = nullptr;
         return 1;
       }
+      const std::string tails = std::string(opt->model_path) + ".expert-tails";
+      if (access(tails.c_str(), F_OK) == 0)
+        (void)ds41_expert_store_attach_tails(e->expert_store, tails.c_str());
       const std::string histogram = std::string(opt->model_path) + ".expert-histogram";
       const bool custom = access(histogram.c_str(), F_OK) == 0;
       if (custom && !ds41_expert_store_seed(e->expert_store, histogram.c_str())) {

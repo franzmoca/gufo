@@ -15,6 +15,8 @@ struct ds41_expert_store_stats {
   uint64_t bytes_read = 0;
   uint64_t tokens = 0;
   uint64_t stall_ns = 0;
+  uint64_t route_wait_ns = 0;  // part of stall_ns: waiting for the routes
+  uint64_t read_wait_ns = 0;   // part of stall_ns: waiting for demand reads
   uint64_t cache_bytes = 0;
   uint64_t prefetch_bytes = 0;         // staged by background prefetch jobs
   uint64_t prefetch_dropped_bytes = 0; // prefetched bytes no prepare consumed
@@ -46,6 +48,12 @@ ds41_expert_store* ds41_expert_store_create(const ds41_model* model,
                                             const ds41_weights* weights,
                                             uint64_t cache_limit_bytes = 0);
 void ds41_expert_store_destroy(ds41_expert_store* store);
+
+/* Splits every expert read between the model's GGUF and a tails file built by
+ * tools/ds41/pack_expert_tails.py, normally on a second drive, so both read
+ * at once. Call before seeding. The file must match this model's expert
+ * tensors byte for byte; false (with a message) leaves reads unchanged. */
+bool ds41_expert_store_attach_tails(ds41_expert_store* store, const char* path);
 
 /* Prime the cache from the built-in V4.1 ranking or an optional
  * DS41_EXPERT_HISTOGRAM_V1 text file. Priming is startup work and does not
@@ -89,6 +97,17 @@ bool ds41_expert_store_predict(ds41_expert_store* store, uint32_t layer,
 /* Waits until every recorded prediction has been submitted, so the ids and
  * event may be released. */
 void ds41_expert_store_predict_flush(ds41_expert_store* store);
+
+/* DS41_EXPERT_TRACE=path writes a binary routing trace (the seeded cache,
+ * then each prepare's routes, hits and timing) for
+ * tools/ds41/prefetch_sim.py. Decoders add router predictions for later
+ * layers with ds41_expert_store_trace_prediction once the target layer's
+ * prepare returned. Tracing is a measurement mode: it disables the
+ * production prediction and adds router work. */
+bool ds41_expert_store_tracing(const ds41_expert_store* store);
+void ds41_expert_store_trace_prediction(ds41_expert_store* store, uint32_t layer,
+                                        uint32_t lead, const int32_t* ids,
+                                        uint32_t n_tokens, uint32_t k);
 
 /* True when no background prefetch work is queued or running. */
 bool ds41_expert_store_prefetch_idle(const ds41_expert_store* store);

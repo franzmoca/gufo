@@ -189,6 +189,23 @@ __global__ void matmul_kernel(const W* w, const float* x, float* out, uint32_t r
   }
 }
 
+/* FP32 rows for a few tokens: a wave per row of one token (blockIdx.y). Each
+ * lane sums the same elements in the same order as matmul_kernel and the
+ * wave reduces alike, so results are bit-identical; a 128-row router gets
+ * 16 x n blocks instead of 16 (the drafter's took 133-162 us for 6 rows). */
+__global__ void matmul_f32_row_token_kernel(const float* w, const float* x, float* out, uint32_t rows, uint32_t k) {
+  const uint32_t row = blockIdx.x * (blockDim.x / warpSize) + threadIdx.x / warpSize;
+  if (row >= rows) return;
+  const uint32_t t = blockIdx.y;
+  const float* r = w + (uint64_t)row * k;
+  const float* xt = x + (uint64_t)t * k;
+  float acc = 0.0f;
+#pragma unroll 4
+  for (uint32_t i = threadIdx.x % warpSize; i < k; i += warpSize) acc += r[i] * xt[i];
+  for (int o = warpSize / 2; o > 0; o >>= 1) acc += __shfl_xor(acc, o);
+  if (threadIdx.x % warpSize == 0) out[(uint64_t)t * rows + row] = acc;
+}
+
 /* BF16 rows with k % 256 == 0: each lane loads eight weights (16 bytes) and
  * the matching eight inputs per step. A wave takes one row of one token
  * (blockIdx.y): with a wave per token, more waves keep loads in flight (the
@@ -2694,7 +2711,10 @@ extern "C" int ds41_v41_matmul_f32(const float* w, const float* x, float* out, u
                                    uint32_t n) {
   const uint32_t rows_per_block = kThreads / 32;
   const dim3 grid((rows + rows_per_block - 1) / rows_per_block, (n + kTokenTile - 1) / kTokenTile);
-  matmul_kernel<float><<<grid, kThreads>>>(w, x, out, rows, k, n);
+  if (n <= 16)
+    matmul_f32_row_token_kernel<<<dim3(grid.x, n), kThreads>>>(w, x, out, rows, k);
+  else
+    matmul_kernel<float><<<grid, kThreads>>>(w, x, out, rows, k, n);
   return launch_ok("f32 matmul");
 }
 

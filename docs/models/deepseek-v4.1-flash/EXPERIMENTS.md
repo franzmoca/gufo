@@ -2091,3 +2091,220 @@ no decode gain in alternating runs (19.33 / 19.56 / 17.27 against 18.71 /
 17.20 / 17.47 tok/s). Precomputed IQ1 group sums of x staged in LDS were
 slower (IQ1_M up 100 -> 102 us, IQ1_S up 76 -> 89 us in `ds41_gemv_bench`).
 
+
+## E61 — expert reads split across two drives (retained)
+
+Each miss reads an expert's three projections (~7.7 MB for `IQ2_XXS`)
+from one drive, and a single direct read stream on the Samsung 990 PRO does
+not get past ~5.5 GB/s (1.32-1.47 ms per cold miss; ~6.5 GB/s for six
+misses at once). More readers (3-32) or smaller chunks did not raise it.
+The second NVMe, a KIOXIA EXCERIA BASIC on the root btrfs, reads
+5.15 GB/s with direct I/O once compression is off for the file (NOCOW);
+the 2.3 GB/s in the earlier [storage reads](#storage-reads) note was
+measured through btrfs compression.
+
+`tools/ds41/pack_expert_tails.py` copies the second half of every routed
+expert projection into one file on the second drive (61.6 GiB for
+`IQ2_XXS`, 61.7 GiB for UD-`IQ1_M`, instead of a full copy). With
+`MODEL.gguf.expert-tails` present, each projection read becomes a head
+read from the GGUF and a tail read from that file, issued together, so
+both drives read every miss. Read workers went from 4 to 8 so each drive
+keeps its queue depth. The bytes are unchanged: greedy outputs of `IQ2_XXS`
+and UD-`IQ1_M` were identical with and without the file in AR, DSpark and
+DSpark-sampled modes.
+
+Cold reads of real expert spans (2026-11-01):
+
+| Case | One drive | Split, 50-55% from the GGUF |
+| --- | ---: | ---: |
+| 1 miss | 1.32-1.47 ms (5.3-5.9 GB/s) | 0.87 ms (8.9 GB/s) |
+| 2 misses | — | 1.61 ms |
+| 6 misses | ~7.1 ms (~6.5 GB/s) | 4.35 ms (10.7 GB/s) |
+
+Head shares of 0.50-0.60 and one merged tail read per expert, instead of
+three, measured the same.
+
+`gufo bench` on streamed `IQ2_XXS` (pp512 + tg128, random prompt, no
+drafter, alternating runs): tg 17.06-17.68 → 17.87-19.16 tok/s (median
++7.6%), pp512 510-538 → 613-621 tok/s (+16%), cache seed 19.7 → 14.9 s.
+
+**Served workloads.** A fresh `gufo serve` per run (DSpark, temperature 0,
+alternating without and with the file, two rounds each) played an 8-turn
+chat that switches topic and language, an 18.4K-token document with two
+follow-up questions, and a Pi 0.87.0 coding-agent session (creation,
+bugfix and edit tasks, all passing). Chat and document outputs were
+identical across runs; the agent's turn count varies by one. Prefill and
+decode are the server's per-request rates, summed over each workload.
+Rounds 1 / 2:
+
+| Model, expert cache | Workload | Prefill tok/s, without → with | Decode tok/s, without → with |
+| --- | --- | --- | --- |
+| `IQ2_XXS`, ~100 GiB (81% of experts) | chat | 112.8 / 111.3 → 121.1 / 113.2 | 30.46 / 30.63 → 31.20 / 30.84 |
+| | document | 879.1 / 878.2 → 925.8 / 912.7 | 32.48 / 32.19 → 32.68 / 32.36 |
+| | agent | 322.5 / 311.8 → 355.0 / 352.4 | 41.94 / 40.72 → 42.83 / 43.30 |
+| UD-`IQ1_M`, ~100 GiB | chat | 192.3 / 182.4 → 211.9 / 212.6 | 28.34 / 28.64 → 29.24 / 29.22 |
+| | document | 827.0 / 827.7 → 878.7 / 905.8 | 30.84 / 30.92 → 31.44 / 31.18 |
+| | agent | 312.8 / 296.9 → 339.8 / 338.6 | 40.40 / 42.43 → 44.00 / 43.42 |
+| `IQ2_XXS`, 88 GiB cap (71%) | chat | 88.6 / 88.0 → 109.2 / 109.1 | 28.62 / 28.57 → 29.96 / 29.69 |
+| | document | 706.8 / 710.3 → 841.1 / 838.6 | 30.49 / 30.62 → 31.39 / 31.30 |
+| | agent | 233.6 / 240.7 → 296.0 / 296.4 | 38.91 / 37.14 → 40.19 / 40.16 |
+| `IQ2_XXS`, 64 GiB cap (52%) | chat | 44.4 / 44.5 → 65.6 / 65.6 | 20.74 / 20.70 → 25.41 / 25.08 |
+| | document | 402.5 / 413.4 → 663.5 / 664.2 | 23.30 / 23.27 → 26.61 / 26.55 |
+| | agent | 125.3 / 125.4 → 189.5 / 190.2 | 27.78 / 28.35 → 31.21 / 33.75 |
+
+With the full cache, `IQ2_XXS` hit 98.0% of routes and read 6.4 MiB per
+evaluated token over the session (chat 13.8, agent 10, document 4.2 MiB),
+under one expert per token, so decode gains 1-3% while prefill of short
+requests gains 5-17% and the agent's summed time to first token falls from
+7.25 / 8.52 s to 6.39 / 7.33 s. The caps stand in for larger
+quantizations at the full cache. At 88 GiB, about the share of experts a
+~150 GB backbone such as `IQ2_XS` would keep cached, routes hit 96.3% and
+the session read 12.5-12.7 MiB per token (chat 28, agent 21 MiB): the
+split gains 18-27% in prefill and 2-5% in chat and document decode. At
+64 GiB, 91.5% route hits and 35 MiB per token (chat 90, agent 67 MiB), it
+gains 47-65% in prefill and 12-23% in decode; the Pi tasks took 59-67 s
+instead of 76-87 s.
+
+The per-token host wait now separates the wait for the layer's routes from
+the wait on demand reads after the overlapped work. At 88 GiB the split
+cut the session's read wait from 1.40 / 1.42 to 0.95 / 0.95 ms per token,
+with the route wait unchanged at ~5.1 ms. At 64 GiB it
+cut the session's read wait from 3.88 to 2.45 ms per token and the route
+wait from 5.73 to 5.26 ms; in chat, read wait fell 9.8 → 6.8 ms and route
+wait 19.8 → 17.4 ms. The route wait follows the reads too (it includes the
+previous layers' queued miss work), so read wait alone understates what
+reads cost a token.
+
+A served session on 2026-10-31 (UD-`IQ1_M`, 275 coding-agent requests,
+prompts up to 73K tokens, no tails) ran at a median 99.7% route hits and
+7.2 MiB per token (p90 13.1).
+
+## E62 — DSpark drafter size and quantization (measured, current drafter kept)
+
+Streamed `IQ2_XXS` frees memory for the drafter, so bigger and smaller
+drafters were compared against the Q2_K/Q4_K drafter (4.59 GiB resident).
+Ten prompts, greedy, 512 tokens; every cycle drafted five tokens and was
+scored against the plain greedy sequence, so acceptance is not censored by
+the width rule. Replayed rate: the learned-head width rule over those
+cycles with fixed measured costs.
+
+| Drafter | Resident | Accepted of 5 | Drafting | Replayed tok/s |
+| --- | ---: | ---: | ---: | ---: |
+| Q2_K experts, Q4_K dense (current) | 4.59 GiB | 2.26 | 8.5 ms | 37.18 |
+| Same, fine-tuned dense/head tensors | 4.59 GiB | 2.22 | 8.5 ms | 37.00 |
+| `IQ2_XXS` experts (imatrix), Q4_K dense | 3.70 GiB | 2.22 | 8.5 ms | 36.89 |
+| `IQ1_S` experts (imatrix), Q4_K dense | 2.91 GiB | 2.11 | 8.4 ms | 36.21 |
+| Q8_0 dense, MXFP4 experts | 7.42 GiB | 2.30 | 10.3 ms | 36.88 |
+| Same, fine-tuned dense/head tensors | 7.42 GiB | 2.29 | 10.3 ms | 36.64 |
+
+Drafting time is bound by fixed costs (output head, Markov selection,
+dense layers), not by expert bytes, so smaller experts do not draft
+faster. Replaying the expert-cache traces with the memory each drafter
+frees or takes: `IQ2_XXS` experts gain 0.89 GiB of cache (decode stall
+-0.2% at the full cache, -0.9% at 64 GiB), `IQ1_S` 1.70 GiB (-0.4% to
+-1.7%), Q8_0 loses 2.83 GiB (+1.1% to +3.2%). Net: `IQ2_XXS` experts are
+even, `IQ1_S` 1-2% slower, Q8_0 2-4% slower. The drafter's expert use is
+skewed (layer 2 uses 62 of 128 experts; the top 32 take 98% of routes), but
+experts unseen in calibration quantize to 52-60% error at `IQ2_XXS`.
+
+The Unsloth drafter names its confidence head `confidence_head.proj.weight`;
+it is now loaded (it was ignored, so the drafter ran without learned
+widths).
+
+## E63 — DSpark drafter: no host sync after injection, F32 router per token (retained)
+
+The feature injection ended with `hipDeviceSynchronize` (312 µs of host
+block per cycle), and the drafter's block rows, draws and tokens went up
+with blocking pageable copies. The drafter and decoder share a stream, so
+the injection now only checks the launch, and the drafter's inputs are
+staged in pinned memory and uploaded with `hipMemcpyAsync` behind the
+queued work. The drafter's 128-expert F32 router ran on `matmul_kernel`
+(16 blocks for 6 rows, 131 µs per layer); up to 16 tokens now take a wave
+per row of one token (`matmul_f32_row_token_kernel`, the same per-lane
+order, bit-identical), 36 µs.
+
+Drafting 8.5 → 8.3 ms per cycle in per-cycle traces. Drafts matched the
+previous build at 1,518 of 1,518 positions; greedy, seeded sampled and AR
+outputs are identical to the previous build.
+
+**HC mixes of several tokens in one launch (rejected).** A mix kernel that
+reads each weight once for all verification rows took 14.1 instead of
+17.1 µs at 6 tokens and 25.3 instead of 36.5 at 16, but per-cycle
+verification at 2-6 rows did not move beyond noise (±1 ms). Matching
+single-token decode bit for bit needed explicit FMA chains, which changed
+single-token rounding against earlier builds (~1e-7, a near-tie flips
+greedy text after ~30 tokens), so it was dropped.
+
+## E64 — DSpark cycles cut to zero drafts (measured, not pursued)
+
+When the width rule keeps no drafts, the cycle has paid for drafting and
+verifies only its anchor. Five prompts, 256 tokens: 67 of 493 greedy
+cycles and 185 of 563 sampled cycles (`top < kConfidentDraft`), 9% and 23%
+of the time. The one-row verification costs the same as a plain step
+(42.1-42.3 ms decoder, 0.28 ms feature injection), so only the 8.3 ms of
+drafting is lost: skipping every cut with perfect foresight would gain
+1.5% greedy and 3.9% sampled. Gates known before drafting do not find
+them: the previous cycle's cut (P(cut) 0.42-0.50 after a cut, 0.24-0.41
+otherwise) or the target's probability at the anchor (median 0.48-0.51 for
+cut cycles, 0.66 for drafted ones). Skipping when the target's top
+probability is below 0.3/0.5/0.7 gives -0.4/-2.9/-7.9% greedy and
++0.1/+0.1/-3.0% sampled. Stopping the drafter after the first position
+decides a cut would save only the remaining Markov selections (~1.2 ms).
+
+**Draft vocabulary estimate.** DS4.1 numbers frequent tokens first less
+strongly than Qwen: of 10,220 generated tokens, ids below 32,768 / 65,536 /
+98,304 cover 90.4 / 95.8 / 98.9% (95.7 / 98.6 / 99.5% with the specials
+and the request's earlier tokens). Scaling the head and Markov selection
+(3.66 ms of drafting) to the subset and truncating acceptance at each
+uncovered token, the greedy replay gains -0.7 / +1.1 / +0.7%.
+
+## E65 — attention partials written back during the dense GEMVs (measured)
+
+Per-width verification profiles put the dense GEMVs ~3.8 ms per 4-row
+cycle above their read time; most of it is one GEMV. Timed with events
+inside the model, `attn_output_b` (Q5_K, 5,120 x 8,192, 28.8 MB) took
+149 / 176 / 214 µs at 1 / 3 / 6 rows (193 / 164 / 135 GB/s), while
+`gemv_bench` ran the same call at 134-146 µs (198-216 GB/s), also with the
+real weights, misaligned bases, and the `attn_output_a` launch before it.
+Fresh allocations for the weights, the input or the output, and the
+resident model without SSD reads, measured the same in the model. A second
+`attn_output_b` launch after the first ran at full speed, and an extra
+launch placed before `attn_output_a` moved the delay to it and to
+`attn_output_a`: a fixed cost of ~16 µs at 1 row and ~76 µs at 6 rows lands
+on whatever follows attention.
+
+Split decode attention writes 20 splits x 64 heads x 516 floats, 2.64 MB
+per row and layer, which the combine kernel reads once. Writing that many
+bytes with a memset before the pair in `gemv_bench` reproduces the delay
+(1 row, 2.64 MB: `attn_output_b` 134 → 145 µs; 6 rows, 15.8 MB: 128 / 146 →
+158 / 182 µs). With 10 splits (half the bytes), `attn_output_b` in the
+model took 143 / 160 / 174 µs at 1 / 3 / 5 rows; AR on resident `IQ1_M` went
+24.95 / 24.99 / 25.05 → 25.08 / 25.12 / 25.16 tok/s (alternating, different
+text from the changed rounding), and per-width verification 0.4-1.7 ms
+faster. Non-temporal Q5_K weight loads removed the delay in the bench at
+one row but not in the model (AR 24.94 → 25.03 tok/s, `attn_output_b`
+unchanged), and made the multi-row split kernel twice as slow, since its
+eight waves re-read each block's header. Not retained; backlog item 33.
+
+## E66 — multi-token BF16 matmuls for verification (measured, not retained)
+
+Verification runs the BF16 indexer `q_b` (4,096 x 1,280), compressor
+(512 x 5,120) and router (384 x 5,120) with one wave per row and token, so
+each weight row is read from DRAM once per token: the indexer took 46.7 /
+57 / 82 / 102 / 122 µs at 1 / 2 / 4 / 6 / 8 tokens
+(`tools/bench/ds41_bf16_rows.hip`, production flags `-O3 -ffast-math
+-fno-finite-math-only`). A wave taking two rows and up to eight tokens
+read each weight once: indexer 50-53 µs at 2-6 tokens, compressor 33.5 /
+34.9 µs at 4 / 6 (from 33.3 / 40.0); the router stays faster with a wave
+per token. About 0.2-0.35 ms per verification cycle.
+
+Under `-ffast-math` the compiler reassociates the two kernels' sums
+differently (the per-token kernel adds four unrolled iterations' tree sums
+into the accumulator), so results differ at rounding level (up to ~2e-3
+relative) from the one-token launch used by AR. Explicit FMA chains in
+either order, and an isolated 8-term sum behind a register barrier, did
+not reproduce the reference bits. Keeping the reference loop unchanged
+and looping tokens outside it is bit-identical, with the row re-read from
+cache, but only gains 7-10% on the indexer and is slower on the compressor
+and router. Not retained: the faster kernel needs a rounding change in
+the verification path.

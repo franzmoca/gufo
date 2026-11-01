@@ -1,13 +1,15 @@
 // The batched mHC state pass against the separate kernels it fuses: the
 // expand (or the expand of a sum of rows, or the plain state), the mixes over
 // it and the collapse with its RMS norm, on random data with an odd token
-// count.
+// count. The small-batch mix with Sinkhorn (several tokens in one launch)
+// must match the one-token launch bit for bit.
 #include <hip/hip_runtime.h>
 
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
+#include <cstring>
 #include <random>
 #include <vector>
 
@@ -105,6 +107,52 @@ bool Case(uint32_t n, int rows, std::mt19937& rng) {
   return pass;
 }
 
+/* Tokens in one launch against one launch per token: identical mixes, pre,
+ * post and comb. */
+bool MixCase(uint32_t n, std::mt19937& rng) {
+  const float eps = 1e-6f, hc_eps = 1e-6f;
+  const uint32_t iters = 20;
+  auto* h = Device(Random((std::size_t)n * kHc * kDim, -2.0f, 2.0f, rng));
+  auto* fn = Device(Random((std::size_t)kMix * kHc * kDim, -0.05f, 0.05f, rng));
+  auto* scale = Device(Random(3, 0.5f, 1.5f, rng));
+  auto* base = Device(Random(kMix, -0.5f, 0.5f, rng));
+  const std::size_t sizes[4] = {(std::size_t)n * kMix, (std::size_t)n * kHc,
+                                (std::size_t)n * kHc,
+                                (std::size_t)n * kHc * kHc};
+  float *want[4], *got[4];
+  for (int i = 0; i < 4; i++) {
+    want[i] = Device(std::vector<float>(sizes[i]));
+    got[i] = Device(std::vector<float>(sizes[i]));
+  }
+  bool ok = true;
+  for (uint32_t t = 0; t < n && ok; t++)
+    ok = ds41_v41_hc_mix(fn, h + (std::size_t)t * kHc * kDim, scale, base,
+                         want[0] + t * kMix, want[1] + t * kHc,
+                         want[2] + t * kHc, want[3] + t * kHc * kHc, kHc, kDim,
+                         eps, iters, hc_eps, 1, nullptr) == 0;
+  ok = ok &&
+       ds41_v41_hc_mix(fn, h, scale, base, got[0], got[1], got[2], got[3], kHc,
+                       kDim, eps, iters, hc_eps, n, nullptr) == 0 &&
+       hipDeviceSynchronize() == hipSuccess;
+  bool same = ok;
+  for (int i = 0; i < 4 && ok; i++) {
+    const auto a = Host(want[i], sizes[i]), b = Host(got[i], sizes[i]);
+    same =
+        same && std::memcmp(a.data(), b.data(), sizes[i] * sizeof(float)) == 0;
+  }
+  std::printf("hc mix n=%u against one token per launch: %s\n", n,
+              !ok    ? "launch failed"
+              : same ? "identical"
+                     : "FAIL");
+  for (float* p : {h, fn, scale, base})
+    (void)hipFree(p);
+  for (int i = 0; i < 4; i++) {
+    (void)hipFree(want[i]);
+    (void)hipFree(got[i]);
+  }
+  return ok && same;
+}
+
 }  // namespace
 
 int main() {
@@ -118,5 +166,7 @@ int main() {
   for (uint32_t n : {16u, 37u})
     for (int rows : {-1, 0, 6})
       ok = Case(n, rows, rng) && ok;
+  for (uint32_t n : {2u, 5u, 6u, 9u, 16u})
+    ok = MixCase(n, rng) && ok;
   return ok ? 0 : 1;
 }
