@@ -83,8 +83,6 @@ public:
       std::string* error_msg = nullptr, bool* interrupted = nullptr) const;
   [[nodiscard]] std::vector<int> Tokenize(
       std::string_view text, bool parse_special_tokens = false) const;
-  [[nodiscard]] std::vector<int> EncodeChat(std::string_view system_prompt,
-                                            std::string_view user_prompt) const;
   [[nodiscard]] std::vector<int> EncodeChat(
       std::span<const ChatMessage> messages,
       const ChatTemplateOptions& options = {}) const;
@@ -93,7 +91,6 @@ public:
       const ChatTemplateOptions& options = {}) const;
   [[nodiscard]] std::string DecodeToken(int token) const;
   [[nodiscard]] bool IsStopToken(int token) const;
-  [[nodiscard]] int EosToken() const;
   [[nodiscard]] int VocabSize() const;
   [[nodiscard]] std::string ModelName() const;
   [[nodiscard]] std::uint32_t MaxContext() const noexcept;
@@ -141,15 +138,6 @@ public:
   [[nodiscard]] bool DsparkEnabled() const;
   /// Reset request statistics and draft policy, retaining a restored prefix.
   void BeginRequest();
-  /// Discards DSpark-only request state before exact multi-session execution.
-  void PrepareBatchExecution();
-  /// Runs one greedy speculative cycle and appends the emitted tokens.
-  [[nodiscard]] bool DsparkStep(std::vector<int>* emitted,
-                                std::string* error_msg = nullptr);
-  /// Runs one greedy speculative cycle without committing more than max_tokens.
-  [[nodiscard]] bool DsparkStep(std::size_t max_tokens,
-                                std::vector<int>* emitted,
-                                std::string* error_msg = nullptr);
   /// Runs one speculative cycle; a sampler makes it a sampled cycle. A cycle
   /// verifies prompt-lookup copies where the context repeats earlier tokens,
   /// otherwise the drafter's block; without either it is a plain step. Also

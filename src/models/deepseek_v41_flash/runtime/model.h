@@ -142,13 +142,6 @@ void ds41_tokenize_text(ds41_engine* engine, const char* text,
                         ds41_tokens* out);
 void ds41_tokenize_rendered_chat(ds41_engine* engine, const char* text,
                                  ds41_tokens* out);
-void ds41_encode_chat_prompt(ds41_engine* engine, const char* system,
-                             const char* prompt, ds41_tokens* out);
-void ds41_chat_begin(ds41_engine* engine, ds41_tokens* tokens);
-void ds41_chat_append_message(ds41_engine* engine, ds41_tokens* tokens,
-                              const char* role, const char* content);
-void ds41_chat_append_assistant_prefix(ds41_engine* engine,
-                                       ds41_tokens* tokens);
 char* ds41_token_text(ds41_engine* engine, int token, size_t* length);
 int ds41_token_eos(const ds41_engine* engine);
 bool ds41_token_is_stop(const ds41_engine* engine, int token);
@@ -177,7 +170,6 @@ int ds41_sessions_eval_batch(const ds41_session_batch_item* items,
                              size_t item_count, char* error,
                              size_t error_capacity);
 void ds41_session_begin_request(ds41_session* session);
-void ds41_session_prepare_batch_execution(ds41_session* session);
 bool ds41_engine_has_dspark(const ds41_engine* engine);
 bool ds41_engine_exact_prefill(const ds41_engine* engine);
 /* Uploads the MoE gates' image routing bias (blk.N.exp_probs_b_vl). Then
@@ -293,7 +285,6 @@ int ds41_decoder_commit(ds41_decoder* decoder, uint32_t keep);
 int ds41_decoder_step(ds41_decoder* decoder, int token, float* logits,
                       ds41_decoder_layer_fn layer_fn, void* ctx);
 uint32_t ds41_decoder_pos(const ds41_decoder* decoder);
-uint32_t ds41_decoder_context(const ds41_decoder* decoder);
 /* Returns to position 0; rows past the position are never read again. */
 int ds41_decoder_reset(ds41_decoder* decoder);
 /* Appends the decoder state to `out`; load consumes it from `data`. */

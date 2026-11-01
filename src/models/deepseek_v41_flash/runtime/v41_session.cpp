@@ -287,7 +287,6 @@ void ds41_session_begin_request(ds41_session* s) {
   s->lookup.BeginRequest();
   s->next = -1;
 }
-void ds41_session_prepare_batch_execution(ds41_session*) {}
 
 namespace {
 

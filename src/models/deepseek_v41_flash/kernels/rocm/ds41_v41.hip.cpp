@@ -139,14 +139,6 @@ __device__ __forceinline__ float4 ik_load4(ds41_fp4_rows r, uint64_t row, uint32
   const uint32_t codes = *reinterpret_cast<const uint16_t*>(r.codes + row * (dim / 2) + d / 2);
   return fp4x4(codes, __uint_as_float((uint32_t)r.scales[row * (dim / 32) + d / 32] << 23));
 }
-/* Eight values d .. d + 7 (d a multiple of 8), as two float4, from one code word. */
-__device__ __forceinline__ void kv_load8(ds41_fp4_rows r, uint64_t row, uint32_t d, uint32_t dim, float4* lo,
-                                         float4* hi) {
-  const uint32_t codes = *reinterpret_cast<const uint32_t*>(r.codes + row * (dim / 2) + d / 2);
-  const float scale = e4m3_value(r.scales[row * (dim / 16) + d / 16]);
-  *lo = fp4x4(codes, scale);
-  *hi = fp4x4(codes >> 16, scale);
-}
 __device__ __forceinline__ void ik_load8(ds41_fp4_rows r, uint64_t row, uint32_t d, uint32_t dim, float4* lo,
                                          float4* hi) {
   const uint32_t codes = *reinterpret_cast<const uint32_t*>(r.codes + row * (dim / 2) + d / 2);
@@ -1821,7 +1813,6 @@ __global__ __launch_bounds__(256) void attention_f16_kernel(const float* q, cons
   const uint32_t lo = max(p + 1 > window ? p + 1 - window : 0u, min(floor, p));
   const uint32_t n_window = p - lo + 1;
   const uint32_t n_comp = min(k, comp_len(p, ratio));
-  const uint32_t n_score = n_window + n_comp;
 
   __shared__ uint32_t fp4_pairs[256];  // code byte -> its two E2M1 values as FP16
   __shared__ uint16_t e4m3_half[256];  // scale byte -> FP16

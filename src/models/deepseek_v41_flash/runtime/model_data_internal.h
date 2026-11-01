@@ -194,7 +194,6 @@ bool ds41_layer_is_index_source(uint32_t layer);
 int ds41_layer_engram_slot(uint32_t layer);
 void* ds41_xcalloc(size_t count, size_t size);
 void* ds41_xmalloc(size_t size);
-void* ds41_xrealloc(void* pointer, size_t size);
 double ds41_now_seconds(void);
 uint64_t ds41_align_up(uint64_t value, uint64_t alignment);
 const char* ds41_tensor_type_name(uint32_t type);

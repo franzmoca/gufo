@@ -1620,8 +1620,6 @@ uint32_t ds41_decoder_batch_capacity(const ds41_decoder* d) { return d ? d->capa
 
 uint32_t ds41_decoder_pos(const ds41_decoder* d) { return d ? d->pos : 0; }
 
-uint32_t ds41_decoder_context(const ds41_decoder* d) { return d ? d->context : 0; }
-
 namespace {
 
 /* Every device range that carries state across steps, with its live bytes. */

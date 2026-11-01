@@ -14,10 +14,10 @@ matrix backend. There is no CUDA build or CUDA-to-HIP API alias layer.
 small ggml type and allocation interface needed by the templates. Quantization
 layouts, tables and active AMD arithmetic remain from the imported kernels.
 Unused NVIDIA/MUSA preprocessing paths, ggml graph support and full ggml
-tensor entry points are removed; DS4 owns its HIP graph execution separately.
+tensor entry points are removed; the V4.1 decoder owns its HIP graph
+execution.
 
-When importing upstream changes, retain the HIP implementation and rerun the
-focused DS4 projection/attention checks through Nix. The backend and all six
-matrix translation units were also compared before and after preprocessing
-for `gfx1151`; only private symbol names and unsupported-kernel diagnostics
-changed. Current measurements belong in the model benchmark README.
+When importing upstream changes, retain the HIP implementation and rerun
+`ds41.mmq_typed`, which checks every quantized type the V4.1 builds use
+against a matvec reference. Current measurements belong in the model's
+[BENCHMARKS.md](../../../../../../docs/models/deepseek-v4.1-flash/BENCHMARKS.md).

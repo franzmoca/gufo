@@ -606,22 +606,6 @@ void ds41_vocab_destroy(ds41_vocab *vocab) {
     free(vocab);
 }
 
-/* Build the production chat prompt used by Gufo. */
-static void encode_chat_prompt(
-        const ds41_vocab *vocab,
-        const char      *system,
-        const char      *prompt,
-        token_vec       *out) {
-    token_vec_push(out, vocab->bos_id);
-    if (system && system[0]) {
-        bpe_tokenize_text(vocab, system, out);
-    }
-    token_vec_push(out, vocab->user_id);
-    bpe_tokenize_text(vocab, prompt, out);
-    token_vec_push(out, vocab->assistant_id);
-    token_vec_push(out, vocab->think_end_id);
-}
-
 void ds41_vocab_tokenize(const ds41_vocab *vocab,
                         const char *text,
                         ds41_tokens *tokens) {
@@ -698,47 +682,6 @@ void ds41_vocab_tokenize_rendered_chat(const ds41_vocab *vocab,
                                       const char *text,
                                       ds41_tokens *tokens) {
     tokenize_rendered_chat_vocab(vocab, text, tokens);
-}
-
-void ds41_vocab_chat_begin(const ds41_vocab *vocab, ds41_tokens *tokens) {
-    token_vec_push(tokens, vocab->bos_id);
-}
-
-void ds41_vocab_encode_chat(const ds41_vocab *vocab,
-                           const char *system,
-                           const char *prompt,
-                           ds41_tokens *tokens) {
-    encode_chat_prompt(vocab, system, prompt ? prompt : "", tokens);
-}
-
-void ds41_vocab_chat_append_message(const ds41_vocab *vocab,
-                                   ds41_tokens *tokens,
-                                   const char *role,
-                                   const char *content) {
-    if (!role) role = "user";
-    if (!content) content = "";
-
-    if (!strcmp(role, "system") || !strcmp(role, "developer")) {
-        bpe_tokenize_text(vocab, content, tokens);
-    } else if (!strcmp(role, "assistant")) {
-        token_vec_push(tokens, vocab->assistant_id);
-        if (strncmp(content, "<think>", 7) != 0 && strncmp(content, "</think>", 8) != 0) {
-            token_vec_push(tokens, vocab->think_end_id);
-        }
-        bpe_tokenize_text(vocab, content, tokens);
-    } else {
-        token_vec_push(tokens, vocab->user_id);
-        if (!strcmp(role, "tool") || !strcmp(role, "function")) {
-            bpe_tokenize_text(vocab, "Tool: ", tokens);
-        }
-        bpe_tokenize_text(vocab, content, tokens);
-    }
-}
-
-void ds41_vocab_chat_append_assistant_prefix(const ds41_vocab *vocab,
-                                            ds41_tokens *tokens) {
-    token_vec_push(tokens, vocab->assistant_id);
-    token_vec_push(tokens, vocab->think_end_id);
 }
 
 static uint32_t utf8_decode_one(const char *s, uint64_t len, uint64_t *pos) {
@@ -844,30 +787,6 @@ void ds41_tokenize_rendered_chat(ds41_engine *engine,
                                 const char *text,
                                 ds41_tokens *tokens) {
     ds41_vocab_tokenize_rendered_chat(engine->vocab, text, tokens);
-}
-
-void ds41_chat_begin(ds41_engine *engine, ds41_tokens *tokens) {
-    ds41_vocab_chat_begin(engine->vocab, tokens);
-}
-
-void ds41_encode_chat_prompt(ds41_engine *engine,
-                            const char *system,
-                            const char *prompt,
-                            ds41_tokens *tokens) {
-    ds41_vocab_encode_chat(engine->vocab, system, prompt, tokens);
-}
-
-void ds41_chat_append_message(ds41_engine *engine,
-                             ds41_tokens *tokens,
-                             const char *role,
-                             const char *content) {
-    ds41_vocab_chat_append_message(
-        engine->vocab, tokens, role, content);
-}
-
-void ds41_chat_append_assistant_prefix(ds41_engine *engine,
-                                      ds41_tokens *tokens) {
-    ds41_vocab_chat_append_assistant_prefix(engine->vocab, tokens);
 }
 
 char *ds41_token_text(ds41_engine *engine, int token, size_t *length) {
