@@ -2257,3 +2257,31 @@ strongly than Qwen: of 10,220 generated tokens, ids below 32,768 / 65,536 /
 and the request's earlier tokens). Scaling the head and Markov selection
 (3.66 ms of drafting) to the subset and truncating acceptance at each
 uncovered token, the greedy replay gains -0.7 / +1.1 / +0.7%.
+
+## E65 — attention partials written back during the dense GEMVs (measured)
+
+Per-width verification profiles put the dense GEMVs ~3.8 ms per 4-row
+cycle above their read time; most of it is one GEMV. Timed with events
+inside the model, `attn_output_b` (Q5_K, 5,120 x 8,192, 28.8 MB) took
+149 / 176 / 214 µs at 1 / 3 / 6 rows (193 / 164 / 135 GB/s), while
+`gemv_bench` ran the same call at 134-146 µs (198-216 GB/s), also with the
+real weights, misaligned bases, and the `attn_output_a` launch before it.
+Fresh allocations for the weights, the input or the output, and the
+resident model without SSD reads, measured the same in the model. A second
+`attn_output_b` launch after the first ran at full speed, and an extra
+launch placed before `attn_output_a` moved the delay to it and to
+`attn_output_a`: a fixed cost of ~16 µs at 1 row and ~76 µs at 6 rows lands
+on whatever follows attention.
+
+Split decode attention writes 20 splits x 64 heads x 516 floats, 2.64 MB
+per row and layer, which the combine kernel reads once. Writing that many
+bytes with a memset before the pair in `gemv_bench` reproduces the delay
+(1 row, 2.64 MB: `attn_output_b` 134 → 145 µs; 6 rows, 15.8 MB: 128 / 146 →
+158 / 182 µs). With 10 splits (half the bytes), `attn_output_b` in the
+model took 143 / 160 / 174 µs at 1 / 3 / 5 rows; AR on resident `IQ1_M` went
+24.95 / 24.99 / 25.05 → 25.08 / 25.12 / 25.16 tok/s (alternating, different
+text from the changed rounding), and per-width verification 0.4-1.7 ms
+faster. Non-temporal Q5_K weight loads removed the delay in the bench at
+one row but not in the model (AR 24.94 → 25.03 tok/s, `attn_output_b`
+unchanged), and made the multi-row split kernel twice as slow, since its
+eight waves re-read each block's header. Not retained; backlog item 33.

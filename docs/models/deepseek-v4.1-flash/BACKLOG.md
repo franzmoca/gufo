@@ -218,10 +218,16 @@ read and wait times, since rows grow up to 3.6× (E28 measured the current reads
   162–205 GB/s; IQ1 down projections stay at ~165 GB/s with a fixed
   per-launch floor (85–96 µs across 13.8–22.7 MB). A plain read of the same
   six experts streams at 230–238 GB/s.
-- **Draft vocabulary.** A request-vocabulary draft head, as Qwen and Gemma
-  use, with request tokens and a multilingual fallback; the verifier keeps
-  the full vocabulary. The greedy replay estimate is about +1% at a
-  65,536-id prefix plus a request table ([E64](EXPERIMENTS.md#e64--dspark-cycles-cut-to-zero-drafts-measured-not-pursued)).
+- **Draft vocabulary.** A request-vocabulary draft head, as Qwen uses
+  (`draft_vocab.hpp`), with request tokens and a fallback to the full
+  vocabulary after recent misses; the verifier keeps the full vocabulary.
+  Greedy replay ([E64](EXPERIMENTS.md#e64--dspark-cycles-cut-to-zero-drafts-measured-not-pursued)):
+  a 65,536-id prefix plus the specials and a request table +1.1%
+  (49,152: +0.6%, 98,304: +0.7%); the prefix alone loses (-2.6% at
+  65,536), since the specials sit above id 128,000 and high-id tokens
+  repeat within a request. The table needs gathered (or per-session
+  compacted) head and Markov W2 rows, index mapping for argmax, Markov and
+  sampled candidates, and per-session tables in batched drafting.
 - **Tokenizer merges.** E3 memoizes pieces per span; the merge loop still
   rescans adjacent pairs (`bpe_rank`/`bpe_emit_piece`). Qwen's heap merge
   with token-ID pairs is the local precedent.
@@ -605,6 +611,20 @@ slower; a tiny kernel on a second queue during the wait gained 3-4%
 decode. Read the gfx1151 clock and power sensors (without changing clock
 settings) across a streamed decode to see whether waits of 2-4 ms per
 token drop clocks here before trying the same.
+
+### 33. Attention partials written back during the dense GEMVs
+
+Split decode attention leaves (max, sum, out[512]) per head and split:
+20 x 64 x 516 floats, 2.64 MB per row and layer, read once by the combine
+kernel. The dirty lines are written back to DRAM while the next GEMVs
+stream their weights, so the `attn_output_b` GEMV runs at 135-193 GB/s in
+the model against 198-216 GB/s alone
+([E65](EXPERIMENTS.md#e65--attention-partials-written-back-during-the-dense-gemvs-measured)).
+The cost is ~0.6 ms per AR token and ~3 ms per 6-row verification. 10
+splits measured +0.5% AR and ~1% per verification cycle with changed
+rounding; FP16 partials or a merge without the partial buffer could reach
+~1.5% AR and ~3% at 6 rows, also with changed rounding. Non-temporal
+weight loads in the dense GEMV alone did not help in the model.
 
 ## Memory
 
