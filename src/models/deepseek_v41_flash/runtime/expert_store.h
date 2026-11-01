@@ -98,6 +98,17 @@ bool ds41_expert_store_predict(ds41_expert_store* store, uint32_t layer,
  * event may be released. */
 void ds41_expert_store_predict_flush(ds41_expert_store* store);
 
+/* DS41_EXPERT_TRACE=path writes a binary routing trace (the seeded cache,
+ * then each prepare's routes, hits and timing) for
+ * tools/ds41/prefetch_sim.py. Decoders add router predictions for later
+ * layers with ds41_expert_store_trace_prediction once the target layer's
+ * prepare returned. Tracing is a measurement mode: it disables the
+ * production prediction and adds router work. */
+bool ds41_expert_store_tracing(const ds41_expert_store* store);
+void ds41_expert_store_trace_prediction(ds41_expert_store* store, uint32_t layer,
+                                        uint32_t lead, const int32_t* ids,
+                                        uint32_t n_tokens, uint32_t k);
+
 /* True when no background prefetch work is queued or running. */
 bool ds41_expert_store_prefetch_idle(const ds41_expert_store* store);
 ds41_expert_store_stats ds41_expert_store_get_stats(

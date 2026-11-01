@@ -58,6 +58,7 @@ constexpr uint32_t kPromptDecodeRows = 6;
  * experts and prefetch them during this layer's compute (the store's
  * adoption gate mirrors this threshold); single tokens predict for decode. */
 constexpr uint32_t kPrefillPredictTokens = 1024;
+constexpr uint32_t kTraceK = 12;
 
 float half_to_float(uint16_t h) {
   const uint32_t sign = (uint32_t)(h & 0x8000u) << 16;
@@ -345,6 +346,15 @@ struct ds41_decoder : Activations {
   int32_t* pred_pinned = nullptr;  // pinned [DS41_N_LAYER][capacity][DS41_N_EXPERT_USED]
   hipEvent_t pred_events[DS41_N_LAYER] = {};
   bool pred_ok = true;
+  /* Expert trace (ds41_expert_store_tracing): top-kTraceK router predictions
+   * for the next two layers of every batch of up to DS41_DECODER_MAX_JOINT
+   * rows, copied asynchronously and written once the target layer's prepare
+   * returns (its routes copy orders them). */
+  bool tracing = false;
+  int32_t* trace_ids = nullptr;     // device [2][MAX_JOINT][kTraceK]
+  float* trace_w = nullptr;         // device, as trace_ids
+  int32_t* trace_pinned = nullptr;  // pinned [DS41_N_LAYER][2][MAX_JOINT][kTraceK]
+  uint32_t trace_rows[DS41_N_LAYER][2] = {};
   /* Recorded after the router so the store reads the routes while the
    * shared expert runs; without it the store's copy waits for the stream. */
   hipEvent_t routes_ready = nullptr;
@@ -1001,7 +1011,29 @@ bool router_logits(ds41_decoder* d, uint32_t il, uint32_t n) {
                     DS41_N_EMBD, d->xn, d->router, n, d->decode_rows);
 }
 
+/* Trace mode: route the next two layers on this layer's FFN input. */
+bool trace_predict(ds41_decoder* d, uint32_t il, uint32_t n) {
+  const uint64_t span = (uint64_t)DS41_DECODER_MAX_JOINT * kTraceK;
+  for (uint32_t lead = 1; lead <= 2; ++lead) {
+    const uint32_t tl = il + lead;
+    if (tl >= DS41_N_LAYER) break;
+    const ds41_layer_weights* nl = &d->engine->weights->layer[tl];
+    if (!nl->ffn_exp_probs_b) continue;
+    int32_t* dev_ids = d->trace_ids + (lead - 1) * span;
+    int32_t* host = d->trace_pinned + ((uint64_t)tl * 2 + (lead - 1)) * span;
+    if (!router_logits(d, tl, n) ||
+        ds41_v41_route(d->router, f32(d, nl->ffn_exp_probs_b), dev_ids, d->trace_w + (lead - 1) * span,
+                       DS41_N_EXPERT, kTraceK, DS41_EXPERT_WEIGHT_SCALE, n) ||
+        hipMemcpyAsync(host, dev_ids, (size_t)n * kTraceK * sizeof(int32_t), hipMemcpyDeviceToHost, nullptr) !=
+            hipSuccess)
+      return false;
+    d->trace_rows[tl][lead - 1] = n;
+  }
+  return true;
+}
+
 void predict_next_layer(ds41_decoder* d, uint32_t il, uint32_t n, bool misses_now) {
+  if (d->tracing) return;
   if (!d->engine->expert_store || !d->pred_ok || il + 1 >= DS41_N_LAYER)
     return;
   if (n > DS41_DECODER_MAX_JOINT && n < kPrefillPredictTokens)
@@ -1043,6 +1075,7 @@ bool moe(ds41_decoder* d, uint32_t il, uint32_t n) {
                        hi - lo))
       return false;
   }
+  if (d->tracing && n <= DS41_DECODER_MAX_JOINT && !trace_predict(d, il, n)) return false;
   const int gate_type = (int)l->ffn_gate_exps->type;
   const int up_type = (int)l->ffn_up_exps->type;
   const int down_type = (int)l->ffn_down_exps->type;
@@ -1122,6 +1155,14 @@ bool moe(ds41_decoder* d, uint32_t il, uint32_t n) {
     if (!ds41_expert_store_prepare(d->engine->expert_store, il, d->route_ids, n, &gate, &up, &down,
                                    streamed_overlap, &work, work.shared_done ? d->routes_ready : nullptr))
       return false;
+    for (uint32_t lead = 1; d->tracing && lead <= 2; ++lead) {
+      uint32_t& rows_pred = d->trace_rows[il][lead - 1];
+      if (rows_pred == n)
+        ds41_expert_store_trace_prediction(
+            d->engine->expert_store, il, lead,
+            d->trace_pinned + ((uint64_t)il * 2 + (lead - 1)) * DS41_DECODER_MAX_JOINT * kTraceK, n, kTraceK);
+      rows_pred = 0;
+    }
   } else {
     gate = dev(d, l->ffn_gate_exps);
     up = dev(d, l->ffn_up_exps);
@@ -1584,6 +1625,13 @@ ds41_decoder* ds41_decoder_create(ds41_engine* engine, uint32_t context) {
                                    hipEventDisableTiming) == hipSuccess;
     if (hipEventCreateWithFlags(&d->routes_ready, hipEventDisableTiming) != hipSuccess)
       d->routes_ready = nullptr;
+    if (ok && ds41_expert_store_tracing(engine->expert_store)) {
+      const uint64_t span = 2ull * DS41_DECODER_MAX_JOINT * kTraceK;
+      d->trace_ids = alloc<int32_t>(d->allocations, span);
+      d->trace_w = alloc<float>(d->allocations, span);
+      d->tracing = d->trace_ids && d->trace_w &&
+                   hipHostMalloc(&d->trace_pinned, (size_t)DS41_N_LAYER * span * sizeof(int32_t)) == hipSuccess;
+    }
   }
   if (hipEventCreateWithFlags(&d->mix_start, hipEventDisableTiming) != hipSuccess ||
       hipEventCreateWithFlags(&d->mix_done, hipEventDisableTiming) != hipSuccess ||
@@ -1612,6 +1660,8 @@ void ds41_decoder_destroy(ds41_decoder* d) {
       (void)hipEventDestroy(event);
   if (d->pred_pinned)
     (void)hipHostFree(d->pred_pinned);
+  if (d->trace_pinned)
+    (void)hipHostFree(d->trace_pinned);
   for (void* p : d->allocations) (void)hipFree(p);
   delete d;
 }

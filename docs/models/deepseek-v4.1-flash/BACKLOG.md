@@ -459,6 +459,9 @@ run):
   IQ2_S: add an IQ2_S FP16 tile or the per-row expert GEMV fallback the
   IQ2_S down projections use.
 
+Check each against the resident MMQ/MMVQ outputs (`ds41.mmq_typed`,
+`ds41_gemv_bench`) and keep the existing builds' outputs bit-identical.
+
 ### 28. Split-read head share from measured drive speeds
 
 With an expert tails file ([split reads](STREAMING.md#split-reads-across-two-drives)),
@@ -471,8 +474,50 @@ pace. Pack a wider tail (for example 0.3, so the head can range from 0.3 to
 measured ratio; only the share up to the packed cut can move to the second
 drive. Measure on a mismatched pair or with the second drive under load.
 
-Check each against the resident MMQ/MMVQ outputs (`ds41.mmq_typed`,
-`ds41_gemv_bench`) and keep the existing builds' outputs bit-identical.
+### 29. Zero-copy expert reads
+
+A miss is read into a pinned buffer, uploaded to the demand stage and,
+when admitted, copied into its cache slot. On gfx1151 the SSD can write
+straight into managed memory, which kernels read at the full 240 GB/s
+(`tools/bench/ds41_zero_copy.hip`: O_DIRECT into managed memory 6.46 GB/s,
+GPU checksums correct). Kernel bandwidth lost per GB/s of expert reads fell
+from 3.0% with the copy chain to 1.2% with the DMA alone.
+
+A first version read every projection in place: slots and stage rows got
+a page of slack before and after each projection, a miss took its slot
+before its reads (never evicting an expert the batch routes), and the
+tails packer now cuts at 4 KiB multiples, since btrfs needs page-aligned
+buffers and silently turns a misaligned direct read into a buffered one
+through the page cache. Outputs matched on IQ2_XXS (also capped at
+24 GiB), UD-IQ1_M and IQ1_M, and every read landed in place, but the
+served workloads at an 88 GiB cap (two alternating rounds) got slower:
+
+| 88 GiB cap | Misses/row | Read wait | Decode |
+|---|---|---|---|
+| With tails | +2-4% | -2 to -13% | chat/agent -2 to -4%, document noise |
+| Without tails | +1 to +14% | about equal | -3 to -7% |
+
+The slack takes ~30 KiB per expert, 0.4% of the cache, which replays of
+the 88 GiB trace turn into 1.45% more misses; taking slots before the
+reads changes misses by -0.16%. Without tails, per-expert reads also lose
+the old merging of consecutive experts into 32 MiB reads. The copy savings
+are small next to either: at 88 GiB decode moves ~0.8 GB/s of experts, so
+less contention is worth at most ~1.5% of kernel time.
+
+To make it pay:
+
+- Size slack from each file's direct-I/O alignment (statx
+  `STATX_DIOALIGN`; 512 bytes on XFS with 512-byte sectors) instead of a
+  page everywhere, and keep the page only where a file needs it (btrfs,
+  4 KiB-sector drives).
+- Keep demand stage rows contiguous in file order, so non-admitted misses
+  still merge into large reads; only slots need slack.
+- Or read in place only into the stage and keep the slot copy, which costs
+  no cache capacity.
+- Measure where reads dominate: smaller caches (64 GiB: ~27 MiB/token) and
+  the larger ~150 GB builds, where per-byte cost decides whether decode
+  prefetch can pay (the replayed prefetch policies all land within ±1%
+  with today's per-byte cost).
 
 ## Memory
 
