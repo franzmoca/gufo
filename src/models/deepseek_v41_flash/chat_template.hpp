@@ -93,10 +93,6 @@ struct ChatTemplateOptions {
   return "13231c592e958fb39e2af6001dae69d90e7a36b265702b9b390236fb387599e2";
 }
 
-/// Native DeepSeek effort name after mapping provider-neutral effort levels.
-[[nodiscard]] std::string_view DeepSeekReasoningEffortName(
-    ReasoningEffort effort) noexcept;
-
 }  // namespace gufo::models::deepseek_v41_flash
 
 #endif  // GUFO_MODELS_DEEPSEEK_V41_FLASH_CHAT_TEMPLATE_HPP_

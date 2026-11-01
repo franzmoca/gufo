@@ -176,13 +176,6 @@ void* ds41_xmalloc(size_t size) {
   return p;
 }
 
-void* ds41_xrealloc(void* ptr, size_t size) {
-  void* p = realloc(ptr, size);
-  if (!p)
-    ds41_die("out of memory");
-  return p;
-}
-
 double ds41_now_seconds(void) {
   struct timespec ts;
   clock_gettime(CLOCK_MONOTONIC, &ts);

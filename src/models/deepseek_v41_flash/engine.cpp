@@ -217,15 +217,6 @@ std::vector<int> Model::Tokenize(std::string_view text,
   return TakeTokens(&tokens);
 }
 
-std::vector<int> Model::EncodeChat(std::string_view system_prompt,
-                                   std::string_view user_prompt) const {
-  const std::string system(system_prompt);
-  const std::string prompt(user_prompt);
-  ds41_tokens tokens{};
-  ds41_encode_chat_prompt(engine_, system.c_str(), prompt.c_str(), &tokens);
-  return TakeTokens(&tokens);
-}
-
 std::vector<int> Model::EncodeChat(std::span<const ChatMessage> messages,
                                    const ChatTemplateOptions& options) const {
   return EncodeChat(messages, {}, options);
@@ -251,10 +242,6 @@ std::string Model::DecodeToken(int token) const {
 
 bool Model::IsStopToken(int token) const {
   return ds41_token_is_stop(engine_, token);
-}
-
-int Model::EosToken() const {
-  return ds41_token_eos(engine_);
 }
 
 int Model::VocabSize() const {
@@ -372,20 +359,6 @@ bool Session::DsparkEnabled() const {
 
 void Session::BeginRequest() {
   ds41_session_begin_request(session_);
-}
-
-void Session::PrepareBatchExecution() {
-  ds41_session_prepare_batch_execution(session_);
-}
-
-bool Session::DsparkStep(std::vector<int>* emitted, std::string* error_msg) {
-  return DsparkStep(32, emitted, error_msg);
-}
-
-bool Session::DsparkStep(std::size_t max_tokens, std::vector<int>* emitted,
-                         std::string* error_msg) {
-  return DsparkStep(max_tokens, SessionDsparkBatchItem{}.max_draft_tokens,
-                    emitted, error_msg);
 }
 
 bool Session::DsparkStep(std::size_t max_tokens, std::uint32_t max_draft_tokens,

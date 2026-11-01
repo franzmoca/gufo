@@ -65,12 +65,6 @@ void ds41_ggml_hip_set_device(int device) {
     }
 }
 
-int64_t ds41_ggml_time_us() {
-    using clock = std::chrono::steady_clock;
-    static const auto t0 = clock::now();
-    return std::chrono::duration_cast<std::chrono::microseconds>(clock::now() - t0).count();
-}
-
 // ----------------------------------------------------------------------------
 // ds41_ggml_hip_error: invoked by the DS41_HIP_CHECK / DS41_HIPBLAS_CHECK macros defined
 // in common.hip.hpp on the error path. Marked [[noreturn]] in the declaration
@@ -102,10 +96,6 @@ static thread_local hipStream_t t_ds41_pool_stream = hipStreamPerThread;
 
 extern "C" void ds41_pool_set_stream(hipStream_t stream) {
     t_ds41_pool_stream = stream;
-}
-
-extern "C" hipStream_t ds41_pool_get_stream(void) {
-    return t_ds41_pool_stream;
 }
 
 namespace {

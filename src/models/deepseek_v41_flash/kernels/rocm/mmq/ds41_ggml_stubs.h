@@ -25,7 +25,6 @@
 //   * struct ggml_tensor (complete enough for common.hip.hpp's
 //     ds41_ggml_hip_concurrent_event::is_valid() to compile - we never call it)
 //   * int64_t ggml_nbytes(const ggml_tensor *) (stub - never called)
-//   * int64_t ds41_ggml_time_us() (used by USE_CUDA_GRAPH paths we disable)
 //   * inline ggml_type_size() / ggml_blck_size() lookups
 //
 // Things ggml-common.h (vendored) owns:
@@ -210,9 +209,6 @@ struct ggml_tensor {
 // stub so common.hip.hpp's is_valid() compiles. If anything does call it the
 // returned 0 will surface as an immediate logic error.
 static inline int64_t ggml_nbytes(const struct ggml_tensor * /*t*/) { return 0; }
-
-// Microsecond timer (used only inside USE_CUDA_GRAPH paths we disable).
-int64_t ds41_ggml_time_us();
 
 // ----------------------------------------------------------------------------
 // Inline size traits.

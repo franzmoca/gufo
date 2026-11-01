@@ -105,9 +105,6 @@ target_include_directories(gufo_deepseek_v41_flash PUBLIC ${PROJECT_SOURCE_DIR})
 target_include_directories(gufo_deepseek_v41_flash SYSTEM PUBLIC
     ${DEEPSEEK_V41_FLASH_RUNTIME_DIR}
     ${DEEPSEEK_V41_FLASH_ROCM_DIR}
-    ${DEEPSEEK_V41_FLASH_ROCM_DIR}/detail
-    ${HIPCUB_INCLUDE_DIR}
-    ${ROCPRIM_INCLUDE_DIR}
     ${ROCWMMA_INCLUDE_DIR})
 
 find_package(OpenSSL REQUIRED COMPONENTS Crypto)

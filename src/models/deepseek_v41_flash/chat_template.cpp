@@ -283,17 +283,6 @@ ChatTemplateOptions ResolveDeepSeekChatOptions(
   };
 }
 
-std::string_view DeepSeekReasoningEffortName(ReasoningEffort effort) noexcept {
-  switch (EffortBudget(effort)) {
-    case 50:
-      return "low";
-    case 100:
-      return "max";
-    default:
-      return "high";
-  }
-}
-
 std::string RenderChat(std::span<const ChatMessage> messages,
                        const ChatTemplateOptions& options) {
   return RenderChat(messages, {}, options);
