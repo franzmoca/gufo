@@ -2178,3 +2178,82 @@ reads cost a token.
 A served session on 2026-10-31 (UD-`IQ1_M`, 275 coding-agent requests,
 prompts up to 73K tokens, no tails) ran at a median 99.7% route hits and
 7.2 MiB per token (p90 13.1).
+
+## E62 — DSpark drafter size and quantization (measured, current drafter kept)
+
+Streamed `IQ2_XXS` frees memory for the drafter, so bigger and smaller
+drafters were compared against the Q2_K/Q4_K drafter (4.59 GiB resident).
+Ten prompts, greedy, 512 tokens; every cycle drafted five tokens and was
+scored against the plain greedy sequence, so acceptance is not censored by
+the width rule. Replayed rate: the learned-head width rule over those
+cycles with fixed measured costs.
+
+| Drafter | Resident | Accepted of 5 | Drafting | Replayed tok/s |
+| --- | ---: | ---: | ---: | ---: |
+| Q2_K experts, Q4_K dense (current) | 4.59 GiB | 2.26 | 8.5 ms | 37.18 |
+| Same, fine-tuned dense/head tensors | 4.59 GiB | 2.22 | 8.5 ms | 37.00 |
+| `IQ2_XXS` experts (imatrix), Q4_K dense | 3.70 GiB | 2.22 | 8.5 ms | 36.89 |
+| `IQ1_S` experts (imatrix), Q4_K dense | 2.91 GiB | 2.11 | 8.4 ms | 36.21 |
+| Q8_0 dense, MXFP4 experts | 7.42 GiB | 2.30 | 10.3 ms | 36.88 |
+| Same, fine-tuned dense/head tensors | 7.42 GiB | 2.29 | 10.3 ms | 36.64 |
+
+Drafting time is bound by fixed costs (output head, Markov selection,
+dense layers), not by expert bytes, so smaller experts do not draft
+faster. Replaying the expert-cache traces with the memory each drafter
+frees or takes: `IQ2_XXS` experts gain 0.89 GiB of cache (decode stall
+-0.2% at the full cache, -0.9% at 64 GiB), `IQ1_S` 1.70 GiB (-0.4% to
+-1.7%), Q8_0 loses 2.83 GiB (+1.1% to +3.2%). Net: `IQ2_XXS` experts are
+even, `IQ1_S` 1-2% slower, Q8_0 2-4% slower. The drafter's expert use is
+skewed (layer 2 uses 62 of 128 experts; the top 32 take 98% of routes), but
+experts unseen in calibration quantize to 52-60% error at `IQ2_XXS`.
+
+The Unsloth drafter names its confidence head `confidence_head.proj.weight`;
+it is now loaded (it was ignored, so the drafter ran without learned
+widths).
+
+## E63 — DSpark drafter: no host sync after injection, F32 router per token (retained)
+
+The feature injection ended with `hipDeviceSynchronize` (312 µs of host
+block per cycle), and the drafter's block rows, draws and tokens went up
+with blocking pageable copies. The drafter and decoder share a stream, so
+the injection now only checks the launch, and the drafter's inputs are
+staged in pinned memory and uploaded with `hipMemcpyAsync` behind the
+queued work. The drafter's 128-expert F32 router ran on `matmul_kernel`
+(16 blocks for 6 rows, 131 µs per layer); up to 16 tokens now take a wave
+per row of one token (`matmul_f32_row_token_kernel`, the same per-lane
+order, bit-identical), 36 µs.
+
+Drafting 8.5 → 8.3 ms per cycle in per-cycle traces. Drafts matched the
+previous build at 1,518 of 1,518 positions; greedy, seeded sampled and AR
+outputs are identical to the previous build.
+
+**HC mixes of several tokens in one launch (rejected).** A mix kernel that
+reads each weight once for all verification rows took 14.1 instead of
+17.1 µs at 6 tokens and 25.3 instead of 36.5 at 16, but per-cycle
+verification at 2-6 rows did not move beyond noise (±1 ms). Matching
+single-token decode bit for bit needed explicit FMA chains, which changed
+single-token rounding against earlier builds (~1e-7, a near-tie flips
+greedy text after ~30 tokens), so it was dropped.
+
+## E64 — DSpark cycles cut to zero drafts (measured, not pursued)
+
+When the width rule keeps no drafts, the cycle has paid for drafting and
+verifies only its anchor. Five prompts, 256 tokens: 67 of 493 greedy
+cycles and 185 of 563 sampled cycles (`top < kConfidentDraft`), 9% and 23%
+of the time. The one-row verification costs the same as a plain step
+(42.1-42.3 ms decoder, 0.28 ms feature injection), so only the 8.3 ms of
+drafting is lost: skipping every cut with perfect foresight would gain
+1.5% greedy and 3.9% sampled. Gates known before drafting do not find
+them: the previous cycle's cut (P(cut) 0.42-0.50 after a cut, 0.24-0.41
+otherwise) or the target's probability at the anchor (median 0.48-0.51 for
+cut cycles, 0.66 for drafted ones). Skipping when the target's top
+probability is below 0.3/0.5/0.7 gives -0.4/-2.9/-7.9% greedy and
++0.1/+0.1/-3.0% sampled. Stopping the drafter after the first position
+decides a cut would save only the remaining Markov selections (~1.2 ms).
+
+**Draft vocabulary estimate.** DS4.1 numbers frequent tokens first less
+strongly than Qwen: of 10,220 generated tokens, ids below 32,768 / 65,536 /
+98,304 cover 90.4 / 95.8 / 98.9% (95.7 / 98.6 / 99.5% with the specials
+and the request's earlier tokens). Scaling the head and Markov selection
+(3.66 ms of drafting) to the subset and truncating acceptance at each
+uncovered token, the greedy replay gains -0.7 / +1.1 / +0.7%.

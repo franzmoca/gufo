@@ -220,7 +220,8 @@ read and wait times, since rows grow up to 3.6× (E28 measured the current reads
   six experts streams at 230–238 GB/s.
 - **Draft vocabulary.** A request-vocabulary draft head, as Qwen and Gemma
   use, with request tokens and a multilingual fallback; the verifier keeps
-  the full vocabulary.
+  the full vocabulary. The greedy replay estimate is about +1% at a
+  65,536-id prefix plus a request table ([E64](EXPERIMENTS.md#e64--dspark-cycles-cut-to-zero-drafts-measured-not-pursued)).
 - **Tokenizer merges.** E3 memoizes pieces per span; the merge loop still
   rescans adjacent pairs (`bpe_rank`/`bpe_emit_piece`). Qwen's heap merge
   with token-ID pairs is the local precedent.
