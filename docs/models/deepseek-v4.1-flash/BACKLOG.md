@@ -610,7 +610,10 @@ the CPU waited for expert reads, so the kernels after each wait ran
 slower; a tiny kernel on a second queue during the wait gained 3-4%
 decode. Read the gfx1151 clock and power sensors (without changing clock
 settings) across a streamed decode to see whether waits of 2-4 ms per
-token drop clocks here before trying the same.
+token drop clocks here before trying the same. Measured on streamed
+`IQ2_XXS` DSpark decode: the shader clock stayed at 2.24-2.85 GHz (mostly
+~2.82) and the memory clock at 1,000 MHz throughout, with no drops during
+read waits, so nothing to recover here.
 
 ### 33. Attention partials written back during the dense GEMVs
 
@@ -625,6 +628,17 @@ splits measured +0.5% AR and ~1% per verification cycle with changed
 rounding; FP16 partials or a merge without the partial buffer could reach
 ~1.5% AR and ~3% at 6 rows, also with changed rounding. Non-temporal
 weight loads in the dense GEMV alone did not help in the model.
+
+### 34. Multi-token BF16 matmuls in verification
+
+The BF16 indexer `q_b` and compressor read their weights once per token
+during verification. A wave over two rows and up to eight tokens reads
+them once: ~0.2-0.35 ms per cycle (~0.3-0.4%), but with `-ffast-math` its
+sums round differently from the one-token kernel used by AR
+([E66](EXPERIMENTS.md#e66--multi-token-bf16-matmuls-for-verification-measured-not-retained)).
+Retain only together with an accepted rounding change in this path, e.g.
+both kernels with reassociation disabled so verification and AR keep the
+same bits.
 
 ## Memory
 

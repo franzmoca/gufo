@@ -2285,3 +2285,26 @@ faster. Non-temporal Q5_K weight loads removed the delay in the bench at
 one row but not in the model (AR 24.94 → 25.03 tok/s, `attn_output_b`
 unchanged), and made the multi-row split kernel twice as slow, since its
 eight waves re-read each block's header. Not retained; backlog item 33.
+
+## E66 — multi-token BF16 matmuls for verification (measured, not retained)
+
+Verification runs the BF16 indexer `q_b` (4,096 x 1,280), compressor
+(512 x 5,120) and router (384 x 5,120) with one wave per row and token, so
+each weight row is read from DRAM once per token: the indexer took 46.7 /
+57 / 82 / 102 / 122 µs at 1 / 2 / 4 / 6 / 8 tokens
+(`tools/bench/ds41_bf16_rows.hip`, production flags `-O3 -ffast-math
+-fno-finite-math-only`). A wave taking two rows and up to eight tokens
+read each weight once: indexer 50-53 µs at 2-6 tokens, compressor 33.5 /
+34.9 µs at 4 / 6 (from 33.3 / 40.0); the router stays faster with a wave
+per token. About 0.2-0.35 ms per verification cycle.
+
+Under `-ffast-math` the compiler reassociates the two kernels' sums
+differently (the per-token kernel adds four unrolled iterations' tree sums
+into the accumulator), so results differ at rounding level (up to ~2e-3
+relative) from the one-token launch used by AR. Explicit FMA chains in
+either order, and an isolated 8-term sum behind a register barrier, did
+not reproduce the reference bits. Keeping the reference loop unchanged
+and looping tokens outside it is bit-identical, with the row re-read from
+cache, but only gains 7-10% on the indexer and is slower on the compressor
+and router. Not retained: the faster kernel needs a rounding change in
+the verification path.
