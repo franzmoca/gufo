@@ -647,3 +647,18 @@ adds 0.9 GiB of FP4 state; the batch scratch (1.4 GiB at 1M, 256 MiB of it
 indexer scores) is shared by all sessions, and a 2048-token prefill peaks
 0.3 GiB higher. Further reductions need smaller prefill batches, which cost
 speed (EXPERIMENTS.md).
+
+### 35. Rank-ordered expert layout, measured on replayed workloads
+
+E30 rejected repacking from a synthetic read benchmark (real `IQ2_XXS`
+expert spans, fixed batches of 6 or 64 experts per layer): contiguity per
+expert was worth ~1%, while one long run per layer read 36% faster. It
+never replayed the misses of real prompts, chats or agent sessions. Larger
+builds change that: streamed `UD-IQ2_XXS` keeps 102 of 146 GiB cached and a
+warm pp2048 still reads 5.4 GiB (~570 experts, mostly the rarely routed
+ones a usage-ordered file would place together). Replay recorded route
+traces against a layout ordered by usage rank per layer (on one drive, on
+the tails drive, or a full copy on both) and measure the runs of missed
+neighbours, over-read included, before converting any file. Trading disk
+space for speed is acceptable here: a second full copy or a rank-ordered
+tails file is an option users may take.
