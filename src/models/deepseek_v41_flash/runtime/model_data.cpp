@@ -1971,6 +1971,9 @@ int ds41_engine_open(ds41_engine** out, const ds41_engine_options* opt) {
         *out = nullptr;
         return 1;
       }
+      const std::string tails = std::string(opt->model_path) + ".expert-tails";
+      if (access(tails.c_str(), F_OK) == 0)
+        (void)ds41_expert_store_attach_tails(e->expert_store, tails.c_str());
       const std::string histogram = std::string(opt->model_path) + ".expert-histogram";
       const bool custom = access(histogram.c_str(), F_OK) == 0;
       if (custom && !ds41_expert_store_seed(e->expert_store, histogram.c_str())) {
