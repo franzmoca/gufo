@@ -9,7 +9,8 @@ time, so the two drives' bandwidths add. The bytes are copied unchanged, so
 results do not change.
 
 The file keeps, for each projection, the bytes from a cut point (--head, the
-smallest share of each projection read from the GGUF) to its end. An expert's
+smallest share of each projection read from the GGUF, rounded up to a 4 KiB
+multiple) to its end. An expert's
 three tails are stored next to each other, each padded to 4 KiB, so direct
 I/O reads one contiguous record. On btrfs the file is created without
 copy-on-write (which also disables compression), as direct I/O needs.
@@ -127,7 +128,11 @@ def main() -> int:
     for layer in layers:
         record = 0
         for p, (shard, base, size) in enumerate(spans[layer]):
-            cut = int(size * args.head)
+            # A page-aligned cut lets the tail's direct read land in place
+            # in the expert's (page-aligned) cache slot.
+            cut = -(-int(size * args.head) // ALIGN) * ALIGN
+            if not 0 < cut < size:
+                raise SystemExit(f"layer {layer} projection {p}: {size} bytes cannot be cut at {args.head}")
             table[layer, p] = (size, cut, pad(size - cut), base, shard)
             record += pad(size - cut)
         first_record[layer], record_bytes[layer] = offset, record

@@ -20,6 +20,7 @@
 #include <cmath>
 #include <condition_variable>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
@@ -65,6 +66,7 @@ constexpr uint32_t kSplitRows = DS41_DECODER_MAX_SPECULATIVE * DS41_N_EXPERT_USE
  * prediction job for their layer; smaller batches drop it instead of reading
  * a whole prompt's experts. */
 constexpr uint32_t kSweepTokens = 1024;
+
 constexpr uint32_t kSeedPerLayer = DS41_N_EXPERT;
 constexpr uint32_t kNoSlot = std::numeric_limits<uint32_t>::max();
 constexpr uint64_t kTableEntries = uint64_t{DS41_N_LAYER} * DS41_N_EXPERT;
@@ -626,6 +628,11 @@ struct ds41_expert_store {
   uint64_t cache_limit = 0;
   uint64_t tick = 0;
   uint64_t logged_tokens = 0;
+  /* DS41_EXPERT_TRACE=path: binary routing trace for
+   * tools/ds41/prefetch_sim.py, opened at the first prepare (after seeding). */
+  std::FILE* trace = nullptr;
+  bool trace_started = false;
+  bool seeding = false;  // seed prepares stay out of the trace
   ds41_expert_store_stats stats;
   ds41_expert_store_stats logged_stats;
 
@@ -638,6 +645,8 @@ struct ds41_expert_store {
     if (predictor.joinable())
       predictor.join();
     readers.reset();
+    if (trace)
+      (void)std::fclose(trace);
     for (int fd : direct_fds)
       if (fd >= 0)
         (void)close(fd);
@@ -845,6 +854,11 @@ ds41_expert_store* ds41_expert_store_create(const ds41_model* model,
   store->cache_limit = available > kReserve ? available - kReserve : 0;
   if (cache_limit_bytes)
     store->cache_limit = std::min(store->cache_limit, cache_limit_bytes);
+  if (const char* path = std::getenv("DS41_EXPERT_TRACE"); path && *path) {
+    store->trace = std::fopen(path, "wb");
+    if (!store->trace)
+      fprintf(stderr, "ds41: cannot open expert trace %s\n", path);
+  }
   return owner.release();
 }
 
@@ -1018,6 +1032,7 @@ bool seed_ranked(ds41_expert_store* store, std::vector<SeedItem> ranked,
   for (size_t i = 0; i < target; ++i)
     by_layer[ranked[i].layer].push_back(ranked[i]);
   bool ok = true;
+  store->seeding = true;
   for (uint32_t l = 0; l < DS41_N_LAYER && ok; ++l) {
     std::vector<uint32_t> ids;
     for (const SeedItem& item : by_layer[l]) {
@@ -1041,6 +1056,7 @@ bool seed_ranked(ds41_expert_store* store, std::vector<SeedItem> ranked,
              static_cast<uint32_t>(routes.size() / DS41_N_EXPERT_USED), &gate,
              &up, &down);
   }
+  store->seeding = false;
   (void)hipFree(device_ids);
   const uint64_t bytes = store->stats.bytes_read - previous.bytes_read;
   const uint64_t allocated = store->stats.cache_bytes;
@@ -1276,6 +1292,72 @@ void PredictWork(ds41_expert_store* store) {
 
 }  // namespace
 
+namespace {
+
+uint64_t trace_now() {
+  return static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                   std::chrono::steady_clock::now().time_since_epoch())
+                                   .count());
+}
+
+template <typename T>
+void trace_put(std::FILE* f, const T& value) {
+  (void)std::fwrite(&value, sizeof(T), 1, f);
+}
+
+/* 'S': the cache as seeded, so a replay starts from the same state. */
+void trace_snapshot(ds41_expert_store* store) {
+  std::FILE* f = store->trace;
+  trace_put(f, 'S');
+  trace_put(f, uint32_t{1});  // version
+  trace_put(f, uint32_t{DS41_N_LAYER});
+  trace_put(f, uint32_t{DS41_N_EXPERT});
+  trace_put(f, uint32_t{DS41_N_EXPERT_USED});
+  trace_put(f, store->tick);
+  trace_put(f, store->cache_limit);
+  trace_put(f, store->stats.cache_bytes);
+  trace_put(f, ds41_expert_available_memory());
+  trace_put(f, static_cast<uint32_t>(store->class_bytes.size()));
+  for (uint64_t bytes : store->class_bytes)
+    trace_put(f, bytes);
+  for (uint32_t l = 0; l < DS41_N_LAYER; ++l) {
+    trace_put(f, store->layer_class[l]);
+    trace_put(f, store->source[l][0].bytes + store->source[l][1].bytes +
+                     store->source[l][2].bytes);
+  }
+  trace_put(f, static_cast<uint32_t>(store->slots.size()));
+  for (const Slot& slot : store->slots) {
+    trace_put(f, slot.size_class);
+    trace_put(f, slot.layer);
+    trace_put(f, slot.expert);
+  }
+  for (uint32_t l = 0; l < DS41_N_LAYER; ++l)
+    for (uint32_t e = 0; e < DS41_N_EXPERT; ++e) {
+      trace_put(f, store->entries[l][e].score);
+      trace_put(f, store->entries[l][e].last);
+    }
+}
+
+}  // namespace
+
+bool ds41_expert_store_tracing(const ds41_expert_store* store) {
+  return store && store->trace;
+}
+
+void ds41_expert_store_trace_prediction(ds41_expert_store* store, uint32_t layer,
+                                        uint32_t lead, const int32_t* ids,
+                                        uint32_t n_tokens, uint32_t k) {
+  if (!store || !store->trace || !store->trace_started)
+    return;
+  std::FILE* f = store->trace;
+  trace_put(f, 'Q');
+  trace_put(f, layer);
+  trace_put(f, lead);
+  trace_put(f, n_tokens);
+  trace_put(f, k);
+  (void)std::fwrite(ids, sizeof(int32_t), static_cast<size_t>(n_tokens) * k, f);
+}
+
 bool ds41_expert_store_prepare(ds41_expert_store* store, uint32_t layer,
                                const int32_t* routes, uint32_t n_tokens,
                                const void** gate, const void** up,
@@ -1286,6 +1368,12 @@ bool ds41_expert_store_prepare(ds41_expert_store* store, uint32_t layer,
       !down)
     return false;
   const auto start = std::chrono::steady_clock::now();
+  std::FILE* const trace = store->seeding ? nullptr : store->trace;
+  const uint64_t trace_start = trace ? trace_now() : 0;
+  if (trace && !store->trace_started) {
+    trace_snapshot(store);
+    store->trace_started = true;
+  }
   const size_t n_routes = static_cast<size_t>(n_tokens) * DS41_N_EXPERT_USED;
   std::vector<int32_t> ids(n_routes);
   if (routes_ready) {
@@ -1315,6 +1403,7 @@ bool ds41_expert_store_prepare(ds41_expert_store* store, uint32_t layer,
   store->stats.route_wait_ns += std::chrono::duration_cast<std::chrono::nanoseconds>(
                                      std::chrono::steady_clock::now() - start)
                                      .count();
+  const uint64_t trace_routes = trace ? trace_now() : 0;
   std::array<uint32_t, DS41_N_EXPERT> counts{}, recent{};
   for (size_t i = 0; i < ids.size(); ++i) {
     const int32_t id = ids[i];
@@ -1364,6 +1453,7 @@ bool ds41_expert_store_prepare(ds41_expert_store* store, uint32_t layer,
   store->stats.prefetch_dropped_bytes += orphaned;
   std::shared_ptr<PrefetchJob> adopted;
   uint64_t dropped = 0;
+  uint64_t trace_demand = 0, trace_adopted = 0, trace_read_wait = 0;
   const bool phase = misses || !store->readers->Idle();
   if (phase)
     adopted = store->readers->Resolve(layer, n_tokens >= kSweepTokens, &dropped);
@@ -1465,8 +1555,11 @@ bool ds41_expert_store_prepare(ds41_expert_store* store, uint32_t layer,
     }
     store->stats.read_wait_ns += store->readers->last_wait_ns();
     store->stats.bytes_read += demand_bytes;
+    trace_read_wait = store->readers->last_wait_ns();
+    trace_demand = demand_bytes;
     if (adopted) {
       const uint64_t bytes = adopted->bytes.load();
+      trace_adopted = bytes;
       store->stats.bytes_read += bytes;
       store->stats.prefetch_bytes += bytes;
     }
@@ -1498,6 +1591,22 @@ bool ds41_expert_store_prepare(ds41_expert_store* store, uint32_t layer,
   *gate = device_table[0];
   *up = device_table[1];
   *down = device_table[2];
+  if (trace) {
+    // 'P': one prepare, its timing and each route's hit before admission.
+    std::FILE* f = trace;
+    trace_put(f, 'P');
+    trace_put(f, trace_start);
+    trace_put(f, trace_routes);
+    trace_put(f, trace_now());
+    trace_put(f, layer);
+    trace_put(f, n_tokens);
+    trace_put(f, trace_read_wait);
+    trace_put(f, trace_demand);
+    trace_put(f, trace_adopted);
+    (void)std::fwrite(ids.data(), sizeof(int32_t), n_routes, f);
+    for (size_t i = 0; i < n_routes; ++i)
+      trace_put(f, static_cast<uint8_t>(ids[i] >= 0 && !missing[ids[i]]));
+  }
   store->stats.stall_ns += std::chrono::duration_cast<std::chrono::nanoseconds>(
                                std::chrono::steady_clock::now() - start)
                                .count();
