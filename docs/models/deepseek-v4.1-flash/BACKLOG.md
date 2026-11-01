@@ -121,10 +121,11 @@ Streamed UD-IQ1_M (2026-10-31, tg128 after pp2048, after E56/E57): a
 layer takes ~1,046 µs over 22 launches, two open parts:
 
 - **~7 µs gaps after the 2,048-block GEMVs** (before `rope_tail`, the
-  wo_b GEMV and `hc_expand`): ~20 µs per layer, ~0.9 ms per token. A
-  synthetic dependent chain gives 1.9 µs after a 2,048-block kernel (E54),
-  so grid size alone does not explain them; check what the GEMV's tail
-  waves and the following launch wait on.
+  wo_b GEMV and `hc_expand`) are mostly added by rocprofv3 tracing (E60):
+  traced, a launch after any kernel longer than ~60 µs starts 6.4 µs later
+  (10.7 µs after ~0.75 ms), while event timing without the profiler gives
+  the same ~2 µs launch cost after 8 to 28 MB streaming reads. Subtract
+  ~4.5 µs per such launch from traced idle.
 - **~2.5 µs before every launch**: ~55 µs per layer, ~2.4 ms per token.
   Graph replay does not remove it (E44); only fewer launches (fusions, or
   a persistent per-layer kernel) do.

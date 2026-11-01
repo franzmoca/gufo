@@ -2063,3 +2063,31 @@ computed per expert (one pass, 384 compares per thread) were no faster
   (MALL).
 - The standalone benches run the shader clock at ~0.95 GHz and ~38 W; the
   model's decode at 2.3-2.9 GHz and ~68 W.
+
+## E60 — launch gaps after long kernels are a tracing artifact
+
+Streamed decode traces (UD-IQ1_M, `IQ2_XXS`) show ~6-8 us before the
+launch after each 2,048-block dense GEMV, against ~2.5 us elsewhere
+(backlog item 4). A standalone chain of a streaming read (2,048 blocks,
+cold 1 GiB pool) and a one-block kernel reproduces it under rocprofv3:
+the gap is 1.9 us after reads of up to 14 MB (60 us) and 6.4 us from
+16 MB (69 us) on; warm reads of the same sizes, which finish in under
+26 us, keep 1.9 us. Fixed-length spin kernels give the same steps by
+duration alone: 1.9 us after 54 us, 6.4 us after 100-500 us, 10.7 us
+after 750 us or more.
+
+Without the profiler (hipEvent over 100 iterations, medians of 21
+trials) the one-block kernel adds 2.0-2.1 us after cold reads of 8, 12,
+14, 16, 20 and 28 MB alike, so the step is added by kernel tracing. Spin
+kernels timed with events vary by 5-39 us per iteration and are not
+usable for this.
+
+Streamed decode work: the miss-read idle (~5.8 ms per `IQ2_XXS` token at
+98.5% route hits, 32.7 MiB per token) is the remaining streamed-specific
+cost; the cache holds 12,696 of 15,360 experts within unified memory.
+Predicting the next layer on every layer instead of only after a stall
+read 30% more bytes (14.7 -> 19.2 MiB per token over pp512 + tg128) with
+no decode gain in alternating runs (19.33 / 19.56 / 17.27 against 18.71 /
+17.20 / 17.47 tok/s). Precomputed IQ1 group sums of x staged in LDS were
+slower (IQ1_M up 100 -> 102 us, IQ1_S up 76 -> 89 us in `ds41_gemv_bench`).
+
