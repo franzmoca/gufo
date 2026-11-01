@@ -5,6 +5,35 @@ first. Each entry is a brief summary; its pull request has the details,
 measurements and validation. Upstream Gufo's changes are in
 [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-11-01: DeepSeek V4.1 Flash: split expert reads across two drives and DSpark drafter fixes ([#15](https://github.com/franzmoca/gufo/pull/15))
+
+- Streamed builds (`--stream-experts`) can read every expert miss from two
+  NVMe drives at once. `tools/ds41/pack_expert_tails.py` copies the second
+  half of each routed expert projection into a tails file (61.6 GiB for
+  `IQ2_XXS`) for the second drive. With `MODEL.gguf.expert-tails` beside the
+  first shard, each read is split between the GGUF and the tails file. A
+  mismatched file is detected at load and ignored. Outputs are unchanged.
+- On a Samsung 990 PRO plus a KIOXIA EXCERIA BASIC, a single expert miss
+  takes 0.87 ms instead of 1.32–1.47 ms. `gufo bench` on streamed `IQ2_XXS`
+  gains about 7.6% decode and 16% prefill. In served chat, document and
+  coding-agent workloads, prefill is 2–13% and decode 0.5–6% faster at the
+  full expert cache, rising to 47–65% and 12–23% with a 64 GiB cache.
+  Usage is in `STREAMING.md`.
+- The expert read pool has 8 workers instead of 4, and the expert-cache log
+  lines report the interval's tokens and split host wait into route and read
+  waits.
+- `DS41_EXPERT_TRACE=path` records expert routes, cache hits and read
+  timings. `tools/ds41/prefetch_sim.py`, `rank_eval.py` and
+  `prefetch_fit.py` replay those traces to compare cache and prefetch
+  policies.
+- Unsloth's DSpark drafters now load their confidence head
+  (`confidence_head.proj.weight`), which was ignored, so they draft with
+  learned widths.
+- The DSpark drafter no longer blocks the host after each feature injection,
+  stages its inputs in pinned memory and runs its F32 router with a wave per
+  row and token (131 → 36 µs per layer). Drafting takes 8.5 → 8.3 ms per
+  cycle; outputs are identical.
+
 ## 2026-11-01: Upstream v0.28.1, ROCm 10.1 and streamed DSpark fix
 
 - The fork is now based on upstream Gufo v0.28.1, up from v0.23.0, and builds
