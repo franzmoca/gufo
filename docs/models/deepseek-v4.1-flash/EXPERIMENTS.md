@@ -2359,11 +2359,28 @@ wide one; batches up to 16 rows keep predicting only after a missed layer.
 
 About +3.5% on warm pp2048 and +11-15% on a first pp512, at more reads:
 pp512 reads 10-12 MiB per token instead of 4-6, pp2048 3.3-4.2 instead of
-2.5-3.5. Predicting mid-size batches only after a missed layer kept the
-reads near the old level (4.4-6.2 MiB per token at pp512) and lost the
-gain (pp2048 973-1111, pp512 532-607 against 996-1143 and 581-678 for
-always predicting), so the extra reads are what pay. Reads only: the 3K
-batched score is identical on all 2,999 positions.
+2.5-3.5. Reads only: the 3K batched score is identical on all 2,999
+positions.
+
+Always predicting cost GSQ `IQ2_XXS`, whose warm passes hit every route:
+pp512 865-884 → 803-834 tok/s (the extra router pass per layer and
+mispredicted reads, 0 → 2 MiB per token), pp2048 about −1%. A mid-size
+batch now predicts only once a layer of the same evaluation waited on
+reads. The store counted miss rows only for batches of up to 96 route
+rows, so prompt batches always reported none (a first gated attempt
+therefore stopped predicting entirely and lost the `UD-IQ2_XXS` gain); it
+now counts them for every batch. Alternating, tok/s:
+
+| Build | Arm | pp2048 passes 2-4 | pp512 passes 1-4 | Warm reads, MiB per token |
+|---|---|---|---|---|
+| `UD-IQ2_XXS` | always | 1070 1140 1149 / 1024 1110 1098 | 631 652 678 675 / 611 618 650 616 | pp512 9.9-12.1 |
+| | gated | 1062 1137 1146 / 1033 1110 1126 | 638 654 668 675 / 625 643 669 669 | pp512 8.3-10.4 |
+| GSQ `IQ2_XXS` | before | 1307 1317 1257 / 1273 1284 1289 | 757 755 648 795 / 626 764 909 793 | pp512 0, pp2048 0.43 |
+| | gated | 1275 1297 1285 / 1281 1297 1290 | 735 791 813 822 / 568 832 865 869 | pp512 0, pp2048 0.43 |
+
+Warm GSQ passes never miss, so they never predict and run the previous
+code; its first pass predicts (pp512 reads 1.2 instead of 0.6 MiB per
+token).
 
 The same trace showed one 41-42 ms `q_b` call (layer 7, Q8_0, otherwise
 5.6-5.8 ms, the `ds41_mmq_bench` time) in two of four passes, with no
