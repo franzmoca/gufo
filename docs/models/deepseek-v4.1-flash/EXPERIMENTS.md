@@ -2339,3 +2339,58 @@ explicit select chains keep it in registers. Every new kernel is at most
 ISTA `IQ1_M` 3K scores are identical before and after, decode and batched.
 Quality and speed of the build are in
 [QUALITY.md](QUALITY.md#streamed-ud-iq2_xxs).
+
+## E68 — streamed prefill: next-layer prediction for mid-size batches (retained)
+
+A warm streamed `UD-IQ2_XXS` pp2048 (146 GiB of experts, 102 GiB cache)
+still read 5.4 GiB per pass at 99% route hits, and its GPU idled 235 ms of
+a 1.91 s pass. 148 ms of the 189 ms of stalls before `routed_counts` fell
+in layers 20-39, the 140-row decoder replay: batches of 17-1,023 rows sent
+no next-layer prediction, so every miss there was read on demand. They now
+always send an ordinary (not wide) prediction, as 1,024-row batches send a
+wide one; batches up to 16 rows keep predicting only after a missed layer.
+
+`gufo bench -p 2048,512 -n 0 -r 4 -v`, alternating, tok/s per repetition:
+
+| Arm | pp2048 passes 2-4 | pp512 pass 1 | pp512 passes 2-4 |
+|---|---|---:|---|
+| before (2 rounds) | 988 1046 1079 / 979 1089 1093 | 520 / 548 | 565 629 636 / 594 617 620 |
+| after (2 rounds) | 1026 1099 1122 / 1019 1102 1124 | 597 / 611 | 586 642 642 / 585 625 645 |
+
+About +3.5% on warm pp2048 and +11-15% on a first pp512, at more reads:
+pp512 reads 10-12 MiB per token instead of 4-6, pp2048 3.3-4.2 instead of
+2.5-3.5. Predicting mid-size batches only after a missed layer kept the
+reads near the old level (4.4-6.2 MiB per token at pp512) and lost the
+gain (pp2048 973-1111, pp512 532-607 against 996-1143 and 581-678 for
+always predicting), so the extra reads are what pay. Reads only: the 3K
+batched score is identical on all 2,999 positions.
+
+The same trace showed one 41-42 ms `q_b` call (layer 7, Q8_0, otherwise
+5.6-5.8 ms, the `ds41_mmq_bench` time) in two of four passes, with no
+other kernel or copy running; not explained, not reproduced in decode.
+
+## E69 — decode: Q8_0 `q_b` GEMV in four slices (retained)
+
+`gemv_slices` came from a Q5_K sweep. `UD-IQ2_XXS` keeps 27 `q_b`
+projections in Q8_0 (32,768 × 1,280), which ran at ~211 GB/s with two
+slices. Q8_0 `q_b` by slices and rows (`ds41_v41_gemv`, DRAM-cold, all
+widths bit-identical to single-token launches):
+
+| Slices | 1 row | 2 | 4 | 8 | 16 |
+|---|---:|---:|---:|---:|---:|
+| 2 (before) | 214.7 µs | 221.3 | 228.1 | 238.5 | 275.1 |
+| 4 (retained) | 208.3 | 216.0 | 215.0 | 223.9 | 266.6 |
+| 8 | 202.1 | 200.7 | 217.0 | 245.6 | 311.4 |
+
+Four slices win at every verification width; eight lose from 8 rows. The
+shared down projection (k 2,304) measured within ±2 µs at one or two
+slices and stays at two. About 0.17 ms per decode token. The split changes
+the sum order: 3K decode score 5.788 (oracle 5.818, ΔNLL against the
+previous build +0.0018 ± 0.0040), and verification at widths 8 and 16
+stays bit-identical to serial decode on 36 of 36 rows.
+
+Decode budget after both (`UD-IQ2_XXS` tg128, 55 ms per token): dense
+GEMVs 32.7 ms (6.9 GB, floor 28.9 ms at the measured 238.6 GB/s), routed
+experts 11.5 ms (floor 10.2 ms), hc mixes and norms 3.6 ms, BF16 router,
+compressor and indexer 1.6 ms, attention 0.7 ms; the GPU is busy between
+~2 µs launch gaps.
