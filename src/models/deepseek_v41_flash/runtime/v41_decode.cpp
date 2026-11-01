@@ -54,9 +54,9 @@ constexpr uint32_t kDecodeRows = 8;  // see ds41_decoder::decode_rows
 /* Prompt batches need no single-token arithmetic: from 7 rows the batched
  * paths are faster (7 rows 108 -> 99 ms, 8 rows 122 -> 99 ms). */
 constexpr uint32_t kPromptDecodeRows = 6;
-/* Batches of at least this many tokens predict the next layer's routed
- * experts and prefetch them during this layer's compute (the store's
- * adoption gate mirrors this threshold); single tokens predict for decode. */
+/* Batches of at least this many tokens send a wide (prompt-scale) prediction
+ * of the next layer's routed experts, which the store's adoption gate
+ * mirrors; smaller batches send ordinary ones (see predict_next_layer). */
 constexpr uint32_t kPrefillPredictTokens = 1024;
 constexpr uint32_t kTraceK = 12;
 
@@ -1011,7 +1011,9 @@ bool shared_moe(ds41_decoder* d, const ds41_layer_weights* l, uint32_t n, const 
  * extra matvec hides in the read stall. Single tokens and verification or
  * joint batches predict only when this layer waited on reads: misses
  * cluster in neighbouring layers, and a prediction without a stall to hide
- * it costs more than the read it saves. */
+ * it costs more than the read it saves. Larger batches always predict,
+ * including the prompt's decoder replay: their layers miss many experts, and
+ * a stale prediction's extra reads still arrive before they are needed. */
 /* Router logits of layer il (the narrowed BF16 copy when there is one). */
 bool router_logits(ds41_decoder* d, uint32_t il, uint32_t n) {
   const ds41_weights* w = d->engine->weights;
@@ -1044,8 +1046,6 @@ bool trace_predict(ds41_decoder* d, uint32_t il, uint32_t n) {
 void predict_next_layer(ds41_decoder* d, uint32_t il, uint32_t n, bool misses_now) {
   if (d->tracing) return;
   if (!d->engine->expert_store || !d->pred_ok || il + 1 >= DS41_N_LAYER)
-    return;
-  if (n > DS41_DECODER_MAX_JOINT && n < kPrefillPredictTokens)
     return;
   if (n <= DS41_DECODER_MAX_JOINT && !misses_now)
     return;
