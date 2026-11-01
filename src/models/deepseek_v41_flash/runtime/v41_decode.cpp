@@ -411,8 +411,11 @@ bool mmq_batched(uint32_t type) {
 }
 
 /* Waves per row group of the single-token GEMV, from a slice sweep over the
- * V4.1 shapes: short rows split fewer ways, so more rows run per block. */
-int gemv_slices(uint32_t rows, uint32_t k) {
+ * V4.1 shapes: short rows split fewer ways, so more rows run per block.
+ * Q8_0 q_b (k 1280) is faster with 4 at every verification width (1-16 rows:
+ * 208-267 us against 215-275 us with 2); 8 wins one row but loses from 8. */
+int gemv_slices(uint32_t type, uint32_t rows, uint32_t k) {
+  if (type == DS41_TENSOR_Q8_0 && k <= 1280) return 4;
   if (k <= 2304) return 2;
   if (k <= 5120 && rows <= 4096) return 4;
   return 8;
@@ -467,7 +470,7 @@ bool linear_raw(uint32_t type, const void* p, uint32_t rows, uint32_t k, const f
   default:
     /* Decode batches: FP32 activations, no Q8_1 pass, each weight read once. */
     if (n <= decode_rows && gemv_type(type))
-      return ds41_v41_gemv((int)type, p, x, out, rows, k, 0, gemv_slices(rows, k), n, k, rows) == 0;
+      return ds41_v41_gemv((int)type, p, x, out, rows, k, 0, gemv_slices(type, rows, k), n, k, rows) == 0;
     if (dense_f16(type, rows, k, n)) return ds41_v41_dense_f16((int)type, p, x, out, rows, n, k, 1, 0) == 0;
     if (n > decode_rows && mmq_batched(type))
       return ds41_mmq_dense_typed((int)type, p, x, out, (int)rows, (int)n, (int)k, 0) == 0;
@@ -736,7 +739,7 @@ bool attention(ds41_decoder* d, uint32_t il, uint32_t n, const Joint* joint) {
     const uint32_t k = (uint32_t)wqa->dim[0];
     const uint32_t m = (uint32_t)((wqa->elements + wkv->elements) / k);
     if (ds41_v41_gemv_pair((int)wqa->type, dev(d, wqa), d->qa, DS41_N_LORA_Q, dev(d, wkv), d->kv, kHeadDim, d->xn, k,
-                           gemv_slices(m, k), n))
+                           gemv_slices(wqa->type, m, k), n))
       return false;
   } else if (n > d->decode_rows && dense_f16_pair(wqa, wkv, n)) {
     /* FP16 rows of xn (rounded as the kernel would stage them) in o, idle
@@ -879,7 +882,7 @@ bool attention(ds41_decoder* d, uint32_t il, uint32_t n, const Joint* joint) {
   /* Small batches take all groups in one matvec launch. */
   if (n <= d->decode_rows && gemv_type(wo_a->type)) {
     if (ds41_v41_gemv((int)wo_a->type, wo_a_dev, d->o, d->oa, DS41_N_OUT_GROUP * DS41_N_LORA_O, kGroupDim,
-                      DS41_N_LORA_O, gemv_slices(DS41_N_OUT_GROUP * DS41_N_LORA_O, kGroupDim), n, kQDim,
+                      DS41_N_LORA_O, gemv_slices(wo_a->type, DS41_N_OUT_GROUP * DS41_N_LORA_O, kGroupDim), n, kQDim,
                       DS41_N_OUT_GROUP * DS41_N_LORA_O))
       return false;
     return linear(d, l->attn_output_b, d->oa, d->attn_out, n);
@@ -995,7 +998,7 @@ bool shared_moe(ds41_decoder* d, const ds41_layer_weights* l, uint32_t n, const 
     const uint32_t k = (uint32_t)sg->dim[0];
     const uint32_t m = (uint32_t)(sg->elements / k);
     if (ds41_v41_gemv_swiglu((int)sg->type, dev(d, sg), dev(d, su), d->xn, d->sm, m, k, kSwigluLimit,
-                             gemv_slices(m, k), n))
+                             gemv_slices(sg->type, m, k), n))
       return false;
   } else if (!linear_pair(d, sg, d->sg, su, d->su, d->xn, n) ||
              ds41_v41_swiglu(d->sg, d->su, nullptr, d->sm, n, DS41_N_FF_EXP, kSwigluLimit)) {
