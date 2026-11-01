@@ -2411,3 +2411,36 @@ GEMVs 32.7 ms (6.9 GB, floor 28.9 ms at the measured 238.6 GB/s), routed
 experts 11.5 ms (floor 10.2 ms), hc mixes and norms 3.6 ms, BF16 router,
 compressor and indexer 1.6 ms, attention 0.7 ms; the GPU is busy between
 ~2 µs launch gaps.
+
+## E70 — served coding agent on streamed `UD-IQ2_XXS`; expert layout from its trace (measured)
+
+Pi 0.87.0 through `tests/functional/pi_agent.py` (creation, bugfix and edit,
+five rounds in one retained session, thinking off) against a fresh
+`gufo serve` (`--stream-experts`, Lucebox DSpark drafter, 64K context,
+expert tails on a second drive). All 15 tasks pass in both runs.
+
+| Run | Requests | Decode | Prefill (summed) | Route hits | Read per evaluated token | Read wait per evaluated token |
+|---|---:|---|---|---:|---:|---:|
+| production | 52 | 5,756 tokens, 38.5 tok/s | 7,476 tokens, 223 tok/s | 97.6% | 36.2 MiB | 2.05 ms |
+| traced (no prediction) | 51 | 6,349 tokens, 36.2 tok/s | 7,706 tokens, 199 tok/s | 97.9% | 21.6 MiB | 2.59 ms |
+
+Prompts are ~8.2K tokens (median) of which ~37 are new per request. The
+bench's repeated pp2048 read 2.5-3.5 MiB per token; the agent reads ten
+times that, as E61's 64 GiB stand-in did. Prediction reads 68% more to cut
+the read wait by a fifth.
+
+The trace (55,760 layer prepares, 315 GiB of missed experts, 38.6 s of
+read wait in a 214 s session) was replayed against expert orders per
+layer, keeping its recorded misses; a run joins misses at most one
+unneeded expert apart:
+
+| Batches | Missed | Read wait | In runs of ≥ 4 experts: index order | usage order, this trace | usage order, built-in rank |
+|---|---:|---:|---:|---:|---:|
+| 1-16 rows (decode, verification) | 204 GiB | 26.2 s | 0.0% | 0.0% | 0.0% |
+| 17+ rows (prompts) | 112 GiB | 12.4 s | 4.4% | 11.3% | 14.5% |
+
+Decode and verification miss about one rarely routed expert per layer
+step, which no file order makes adjacent; prompt misses form long runs for
+at most 15% of their bytes, worth ~0.5 s of the session at E30's +36% for
+long runs. A rank-ordered or replicated expert file does not pay for this
+workload; single-expert decode misses (~12% of the session) are the cost.

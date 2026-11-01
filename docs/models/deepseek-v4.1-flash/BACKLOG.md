@@ -662,3 +662,9 @@ the tails drive, or a full copy on both) and measure the runs of missed
 neighbours, over-read included, before converting any file. Trading disk
 space for speed is acceptable here: a second full copy or a rank-ordered
 tails file is an option users may take.
+
+First replay (E70, served coding agent on `UD-IQ2_XXS`): decode and
+verification misses are single experts (0% of their bytes in runs of four
+or more under any order), prompt misses at most 15%, ~0.5 s of a 214 s
+session. Still to replay: prompt-heavy sessions (long documents, many
+fresh prompts), where prompt batches carry most of the misses.
