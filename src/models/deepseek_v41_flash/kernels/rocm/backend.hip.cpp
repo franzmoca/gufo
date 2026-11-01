@@ -22,18 +22,6 @@
 
 #define DS41_GPU_LOG_PREFIX "ds41: ROCm "
 
-/* MMQ can reuse a producer-emitted Q8_1 activation instead of quantizing its
- * own. This backend keeps no such registry, so MMQ always takes its regular
- * activation-quantize prelude. */
-extern "C" int ds41_hip_q8_fold_take_q81(const void* src, uint64_t in_dim,
-                                         const void** q81) {
-  (void)src;
-  (void)in_dim;
-  if (q81)
-    *q81 = NULL;
-  return 0;
-}
-
 namespace {
 
 struct ModelShard {
