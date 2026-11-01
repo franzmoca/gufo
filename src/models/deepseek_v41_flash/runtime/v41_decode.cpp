@@ -346,6 +346,7 @@ struct ds41_decoder : Activations {
   int32_t* pred_pinned = nullptr;  // pinned [DS41_N_LAYER][capacity][DS41_N_EXPERT_USED]
   hipEvent_t pred_events[DS41_N_LAYER] = {};
   bool pred_ok = true;
+  bool pass_missed = false;  // a layer of this eval waited on expert reads
   /* Expert trace (ds41_expert_store_tracing): top-kTraceK router predictions
    * for the next two layers of every batch of up to DS41_DECODER_MAX_JOINT
    * rows, copied asynchronously and written once the target layer's prepare
@@ -1014,9 +1015,11 @@ bool shared_moe(ds41_decoder* d, const ds41_layer_weights* l, uint32_t n, const 
  * extra matvec hides in the read stall. Single tokens and verification or
  * joint batches predict only when this layer waited on reads: misses
  * cluster in neighbouring layers, and a prediction without a stall to hide
- * it costs more than the read it saves. Larger batches always predict,
- * including the prompt's decoder replay: their layers miss many experts, and
- * a stale prediction's extra reads still arrive before they are needed. */
+ * it costs more than the read it saves. Larger batches predict once any
+ * layer of the same evaluation has waited on reads, including the prompt's
+ * decoder replay: their layers then keep missing, and a stale prediction's
+ * extra reads still arrive before they are needed. A model whose experts
+ * stay cached never pays for the extra router pass. */
 /* Router logits of layer il (the narrowed BF16 copy when there is one). */
 bool router_logits(ds41_decoder* d, uint32_t il, uint32_t n) {
   const ds41_weights* w = d->engine->weights;
@@ -1049,6 +1052,9 @@ bool trace_predict(ds41_decoder* d, uint32_t il, uint32_t n) {
 void predict_next_layer(ds41_decoder* d, uint32_t il, uint32_t n, bool misses_now) {
   if (d->tracing) return;
   if (!d->engine->expert_store || !d->pred_ok || il + 1 >= DS41_N_LAYER)
+    return;
+  d->pass_missed = d->pass_missed || misses_now;
+  if (n < kPrefillPredictTokens && !d->pass_missed)
     return;
   if (n <= DS41_DECODER_MAX_JOINT && !misses_now)
     return;
@@ -1875,6 +1881,7 @@ int eval_rows(ds41_decoder* d, const int* tokens, uint32_t n, uint32_t keep_from
       d->pos + n > d->context || d->spec_n)
     return 1;
   d->resident_logits = 0;
+  d->pass_missed = false;
   const uint32_t pos0 = d->pos;
   const uint32_t skip = std::clamp(keep_from, pos0, pos0 + n) - pos0;
   const uint32_t kept = n - skip;

@@ -1502,11 +1502,11 @@ bool ds41_expert_store_prepare(ds41_expert_store* store, uint32_t layer,
   info.rows = static_cast<uint32_t>(n_routes);
   for (uint32_t p = 0; p < 3; ++p)
     info.table[p] = device_table[p];
+  uint32_t miss_rows = 0;
+  for (size_t i = 0; i < ids.size(); ++i)
+    miss_rows += ids[i] >= 0 && missing[ids[i]];
+  info.miss_rows = miss_rows;
   if (n_routes <= kSplitRows) {
-    uint32_t miss_rows = 0;
-    for (size_t i = 0; i < ids.size(); ++i)
-      miss_rows += ids[i] >= 0 && missing[ids[i]];
-    info.miss_rows = miss_rows;
     /* Only a batch with both hits and misses splits its launches; any other
      * batch keeps one pass over the routes, so its rows are not uploaded. */
     if (miss_rows && miss_rows < n_routes) {
