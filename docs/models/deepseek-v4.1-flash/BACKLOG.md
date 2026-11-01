@@ -483,7 +483,8 @@ straight into managed memory, which kernels read at the full 240 GB/s
 GPU checksums correct). Kernel bandwidth lost per GB/s of expert reads fell
 from 3.0% with the copy chain to 1.2% with the DMA alone.
 
-A first version read every projection in place: slots and stage rows got
+A first version (commit 575b1999 on `feat/ds41-expert-prefetch`, reverted
+after it) read every projection in place: slots and stage rows got
 a page of slack before and after each projection, a miss took its slot
 before its reads (never evicting an expert the batch routes), and the
 tails packer now cuts at 4 KiB multiples, since btrfs needs page-aligned

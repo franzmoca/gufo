@@ -57,15 +57,6 @@ constexpr uint32_t kPrefetchStageRows = 192;
 constexpr uint64_t kChunkBytes = 128ull << 20;
 constexpr uint64_t kReadBytes = 32ull << 20;
 constexpr uint64_t kDirectAlign = 4096;
-/* Every slot and stage row keeps each projection in a region with
- * kDirectAlign bytes of slack before and after its data, which starts
- * kDirectAlign-aligned. Direct reads then land in place: one starts at the
- * aligned file offset below its span, so its leading bytes fall in the slack
- * before, and its rounded-up end in the slack after. Bytes a read spills into
- * a neighbouring read's span are the same file bytes. */
-constexpr uint64_t region_bytes(uint64_t bytes) {
-  return (bytes + kDirectAlign - 1) / kDirectAlign * kDirectAlign + 2 * kDirectAlign;
-}
 constexpr uint32_t kReadWorkers = 8;
 constexpr uint32_t kRecentRows = 16;
 /* Route rows of the largest split evaluation (decode, DSpark verification
@@ -112,7 +103,6 @@ struct Slot {
 struct Source {
   int fd = -1;
   int direct_fd = -1;
-  uint32_t mem_align = 0;  // direct reads' buffer alignment; 0: none
   uint64_t offset = 0;
   uint64_t bytes = 0;  // one expert
 };
@@ -129,9 +119,6 @@ struct TailSource {
 struct ReadTask {
   int fd;
   int direct_fd;
-  /* Buffer alignment direct reads of direct_fd need; 0 disables reading in
-   * place. The destination has the region slack of region_bytes. */
-  uint32_t mem_align;
   uint64_t offset;
   uint64_t bytes;
   uint8_t* destination;
@@ -215,30 +202,14 @@ bool read_direct(int fd, uint8_t* dst, uint64_t bytes, uint64_t offset,
   return true;
 }
 
-/* The buffer alignment direct reads of fd need, or 0 when its offsets need
- * more than kDirectAlign. Without STATX_DIOALIGN (btrfs reports none, and
- * quietly turns a misaligned direct read into a buffered one) a page is
- * assumed. */
-uint32_t direct_mem_align(int fd) {
-  if (fd < 0)
-    return 0;
-  struct statx st{};
-  if (statx(fd, "", AT_EMPTY_PATH, STATX_DIOALIGN, &st) != 0 || !(st.stx_mask & STATX_DIOALIGN) ||
-      !st.stx_dio_offset_align || !st.stx_dio_mem_align)
-    return kDirectAlign;
-  if (kDirectAlign % st.stx_dio_offset_align || kDirectAlign % st.stx_dio_mem_align)
-    return 0;
-  return st.stx_dio_mem_align;
-}
-
 double decayed(const Entry& entry, uint64_t now) {
   return entry.score / (1.0 + static_cast<double>(now - entry.last) / 1600.0);
 }
 
-/* The queue is sorted before dispatch. Workers read independent ranges
- * straight into their slot or stage row; a read the file system cannot do in
- * place goes through the worker's pinned buffer and an upload on its own
- * stream, awaited before the buffer is reused. Demand phases always
+/* The queue is sorted before dispatch. Workers read independent ranges into
+ * their own pinned buffers and upload on their own streams, so the copies
+ * overlap the legacy stream's kernels instead of queueing behind them; each
+ * upload is awaited before its buffer is reused. Demand phases always
  * preempt the background prefetch sweep, which resumes between phases. No
  * work outlives Execute, so stage buffers and shard descriptors stay
  * valid. */
@@ -402,7 +373,6 @@ public:
            (!pf_run_ || pf_next_ >= pf_->tasks.size());
   }
 
-  uint64_t in_place_reads() const { return in_place_reads_.load(); }
   uint64_t direct_reads() const { return direct_reads_.load(); }
   uint64_t buffered_reads() const { return buffered_reads_.load(); }
 
@@ -429,20 +399,6 @@ private:
   }
 
   bool RunTask(const ReadTask& task, uint32_t index) {
-    /* In place: the SSD writes straight into the slot or stage row, which
-     * kernels read as they are; no pinned bounce, upload or slot copy. */
-    if (task.direct_fd >= 0 && task.mem_align) {
-      const uint64_t lead = task.offset % kDirectAlign;
-      uint8_t* start = task.destination - lead;
-      uint64_t skip = 0;
-      if (reinterpret_cast<uintptr_t>(start) % task.mem_align == 0 &&
-          read_direct(task.direct_fd, start, task.bytes, task.offset, &skip)) {
-        ++in_place_reads_;
-        if (task.job_bytes)
-          task.job_bytes->fetch_add(task.bytes);
-        return true;
-      }
-    }
     const uintptr_t raw = reinterpret_cast<uintptr_t>(buffers_[index]);
     auto* buffer = reinterpret_cast<uint8_t*>((raw + kDirectAlign - 1) /
                                               kDirectAlign * kDirectAlign);
@@ -541,7 +497,7 @@ private:
   uint64_t last_wait_ns_ = 0;
   uint64_t wake_ = 0;
   bool stopping_ = false;
-  std::atomic<uint64_t> in_place_reads_{0}, direct_reads_{0}, buffered_reads_{0};
+  std::atomic<uint64_t> direct_reads_{0}, buffered_reads_{0};
   std::atomic<uint64_t> orphaned_{0};
 };
 
@@ -612,13 +568,11 @@ struct ds41_expert_store {
    * parity halves keep a job from clobbering the rows the layer before
    * adopted. */
   std::array<std::array<uint8_t*, 3>, 2> stage{};
-  /* Row stride per projection of both stages: the region of the largest
-   * expert of any layer. Rows must not use the layer's own size, or a layer
-   * with large experts overruns into the other parity half when the layer
-   * after has smaller ones (the builds mix 50- to 82-byte block types). */
+  /* Compact prefetch row stride per projection: the largest expert of any
+   * layer. Rows must not use the layer's own size, or a layer with large
+   * experts overruns into the other parity half when the layer after has
+   * smaller ones (the builds mix 50- to 82-byte block types). */
   std::array<uint64_t, 3> stage_stride{};
-  /* Offset of each projection's data in a slot of the layer. */
-  std::array<std::array<uint64_t, 3>, DS41_N_LAYER> slot_offset{};
   bool stage_pairs = false;
   /* The only layer a concurrent prefetch submission may target: the next
    * prepare call's. Set by that call before its reads begin. */
@@ -661,7 +615,6 @@ struct ds41_expert_store {
   std::array<std::array<TailSource, 3>, DS41_N_LAYER> tail{};
   int tail_fd = -1;
   int tail_direct_fd = -1;
-  uint32_t tail_mem_align = 0;
   std::vector<Slot> slots;
   /* Slot sizes: the distinct per-layer expert sizes, ascending. The builds
    * mix block types, so one largest-expert slot size wasted 14-16% of the
@@ -752,13 +705,7 @@ struct ds41_expert_store {
     return true;
   }
 
-  /* A slot for expert of layer: a free one, else (allow_evict) the lowest
-   * scored resident one below the expert's score, never one of `routed`,
-   * this batch's experts of `layer`: their kernels are queued, or the slot
-   * is being read into. Earlier layers' kernels are done, as the blocking
-   * routes copy waited for them. */
-  uint32_t acquire(uint32_t layer, uint32_t expert, bool allow_evict,
-                   const std::array<uint32_t, DS41_N_EXPERT>& routed) {
+  uint32_t acquire(uint32_t layer, uint32_t expert, bool allow_evict) {
     const uint32_t own = layer_class[layer];
     if (free_slots[own].empty() && grow_failure[own] != tick && !grow(own))
       grow_failure[own] = tick;
@@ -775,7 +722,7 @@ struct ds41_expert_store {
     double lowest = std::numeric_limits<double>::infinity();
     for (uint32_t i = 0; i < slots.size(); ++i) {
       const Slot& s = slots[i];
-      if (s.layer == kNoSlot || s.size_class < own || (s.layer == layer && routed[s.expert]))
+      if (s.layer == kNoSlot || s.size_class < own)
         continue;
       const double score = decayed(entries[s.layer][s.expert], tick);
       if (score < lowest) {
@@ -812,9 +759,6 @@ ds41_expert_store* ds41_expert_store_create(const ds41_model* model,
     std::snprintf(path, sizeof(path), "/proc/self/fd/%d", model->shard_fd[s]);
     store->direct_fds[s] = open(path, O_RDONLY | O_DIRECT | O_CLOEXEC);
   }
-  std::array<uint32_t, DS41_MAX_SHARDS> mem_align{};
-  for (uint32_t s = 0; s < model->n_shards; ++s)
-    mem_align[s] = direct_mem_align(store->direct_fds[s]);
   std::array<uint64_t, 3> max_bytes{};
   for (uint32_t layer = 0; layer < DS41_N_LAYER; ++layer) {
     const auto& w = weights->layer[layer];
@@ -823,14 +767,13 @@ ds41_expert_store* ds41_expert_store_create(const ds41_model* model,
     uint64_t combined = 0;
     for (uint32_t p = 0; p < 3; ++p) {
       const ds41_tensor* t = tensors[p];
-      store->slot_offset[layer][p] = combined + kDirectAlign;
       if (!t || !t->bytes || t->bytes % DS41_N_EXPERT) {
         return nullptr;
       }
       Source& src = store->source[layer][p];
       src.bytes = t->bytes / DS41_N_EXPERT;
       max_bytes[p] = std::max(max_bytes[p], src.bytes);
-      combined += region_bytes(src.bytes);
+      combined += src.bytes;
       for (uint32_t s = 0; s < model->n_shards; ++s) {
         const uint64_t start = model->shard_offset[s];
         if (t->abs_offset >= start &&
@@ -838,7 +781,6 @@ ds41_expert_store* ds41_expert_store_create(const ds41_model* model,
             t->bytes <= model->shard_size[s] - (t->abs_offset - start)) {
           src.fd = model->shard_fd[s];
           src.direct_fd = store->direct_fds[s];
-          src.mem_align = mem_align[s];
           src.offset = t->abs_offset - start;
           break;
         }
@@ -847,7 +789,8 @@ ds41_expert_store* ds41_expert_store_create(const ds41_model* model,
         return nullptr;
       }
     }
-    // Slot sizes are whole regions, so slot bases stay page aligned.
+    // Slot bases stay 256-byte aligned, as the chunk allocations are.
+    combined = (combined + 255) / 256 * 256;
     if (std::find(store->class_bytes.begin(), store->class_bytes.end(),
                   combined) == store->class_bytes.end())
       store->class_bytes.push_back(combined);
@@ -856,7 +799,8 @@ ds41_expert_store* ds41_expert_store_create(const ds41_model* model,
   for (uint32_t layer = 0; layer < DS41_N_LAYER; ++layer) {
     uint64_t combined = 0;
     for (const Source& src : store->source[layer])
-      combined += region_bytes(src.bytes);
+      combined += src.bytes;
+    combined = (combined + 255) / 256 * 256;
     store->layer_class[layer] = static_cast<uint32_t>(
         std::lower_bound(store->class_bytes.begin(), store->class_bytes.end(),
                          combined) -
@@ -868,14 +812,9 @@ ds41_expert_store* ds41_expert_store_create(const ds41_model* model,
   for (uint32_t i = 0; i < kReadWorkers && ok; ++i)
     ok = hipHostMalloc(&store->read_buffers[i],
                        kReadBytes + 2 * kDirectAlign) == hipSuccess;
-  /* Managed, so the SSD can write the rows in place; touched now, so the
-   * cache budget below sees the pages as used. */
-  for (uint32_t p = 0; p < 3 && ok; ++p) {
-    store->stage_stride[p] = region_bytes(max_bytes[p]);
-    const uint64_t bytes = store->stage_stride[p] * DS41_N_EXPERT;
-    ok = gufo::hip::AllocateManaged(reinterpret_cast<void**>(&store->stage[0][p]), bytes) == hipSuccess &&
-         hipMemset(store->stage[0][p], 0, bytes) == hipSuccess;
-  }
+  for (uint32_t p = 0; p < 3 && ok; ++p)
+    ok =
+        hipMalloc(&store->stage[0][p], max_bytes[p] * DS41_N_EXPERT) == hipSuccess;
   /* The second stage set (prefetch) is allocated lazily, after the startup
    * seed has taken its memory, so it never shrinks the resident set. */
   for (uint32_t p = 0; p < 3 && ok; ++p)
@@ -1039,19 +978,6 @@ bool ds41_expert_store_attach_tails(ds41_expert_store* store, const char* path) 
   char proc[64];
   std::snprintf(proc, sizeof(proc), "/proc/self/fd/%d", fd);
   store->tail_direct_fd = open(proc, O_RDONLY | O_DIRECT | O_CLOEXEC);
-  store->tail_mem_align = direct_mem_align(store->tail_direct_fd);
-  /* Slots are page aligned, so a tail lands in place when its cut is a
-   * multiple of the file's buffer alignment; files packed before cuts were
-   * page-aligned stage their tails instead. */
-  bool staged_tails = false;
-  for (const auto& layer_tail : tail)
-    for (const TailSource& t : layer_tail)
-      staged_tails = staged_tails || !store->tail_mem_align || t.cut % store->tail_mem_align;
-  if (staged_tails)
-    fprintf(stderr,
-            "ds41: expert tails %s cannot be read in place on its file system; tails take an extra copy "
-            "(rebuild it with tools/ds41/pack_expert_tails.py)\n",
-            path);
   store->tail_fd = fd;
   store->tail = tail;
   gufo::server::Logger::LogFormatted(gufo::server::LogLevel::kInfo, "ds41",
@@ -1216,27 +1142,21 @@ void append_projection(const ds41_expert_store* store, uint32_t layer, uint32_t 
   if (store->tail_fd < 0 || !t.stride) {
     for (uint64_t done = 0; done < src.bytes;) {
       const uint64_t bytes = std::min(src.bytes - done, kReadBytes);
-      tasks.push_back({src.fd, src.direct_fd, src.mem_align, offset + done, bytes, dst + done});
+      tasks.push_back({src.fd, src.direct_fd, offset + done, bytes, dst + done});
       done += bytes;
     }
     return;
   }
-  tasks.push_back({src.fd, src.direct_fd, src.mem_align, offset, t.cut, dst});
-  tasks.push_back({store->tail_fd, store->tail_direct_fd, store->tail_mem_align, t.first + (uint64_t)e * t.stride,
-                   src.bytes - t.cut, dst + t.cut});
+  tasks.push_back({src.fd, src.direct_fd, offset, t.cut, dst});
+  tasks.push_back({store->tail_fd, store->tail_direct_fd, t.first + (uint64_t)e * t.stride, src.bytes - t.cut,
+                   dst + t.cut});
 }
 
-/* Where projection p of a stage row starts. */
-uint8_t* stage_row(const ds41_expert_store* store, uint32_t set, uint32_t p, uint32_t row) {
-  return store->stage[set][p] + (uint64_t)row * store->stage_stride[p] + kDirectAlign;
-}
-
-/* Demand read tasks of the wanted experts, each into its slot when slot[e]
- * names one, else into its row of the whole-layer stage, ordered by shard
- * and offset for sequential access. */
+/* Demand read tasks into the whole-layer stage, merging consecutive experts
+ * of one projection into chunks of at most kReadBytes and ordering chunks by
+ * shard and offset for sequential access. */
 std::vector<ReadTask> build_read_tasks(const ds41_expert_store* store, uint32_t layer,
-                                       const std::array<bool, DS41_N_EXPERT>& wanted,
-                                       const std::array<uint32_t, DS41_N_EXPERT>& slot) {
+                                       const std::array<bool, DS41_N_EXPERT>& wanted) {
   const auto& src = store->source[layer];
   std::array<uint32_t, 3> order{0, 1, 2};
   std::sort(order.begin(), order.end(), [&](uint32_t a, uint32_t b) {
@@ -1244,13 +1164,33 @@ std::vector<ReadTask> build_read_tasks(const ds41_expert_store* store, uint32_t 
                                   : src[a].fd < src[b].fd;
   });
   std::vector<ReadTask> tasks;
-  for (uint32_t p : order)
-    for (uint32_t e = 0; e < DS41_N_EXPERT; ++e)
-      if (wanted[e])
-        append_projection(store, layer, p, e,
-                          slot[e] != kNoSlot ? store->slots[slot[e]].data + store->slot_offset[layer][p]
-                                             : stage_row(store, 0, p, e),
-                          tasks);
+  if (store->tail_fd >= 0) {
+    for (uint32_t p : order)
+      for (uint32_t e = 0; e < DS41_N_EXPERT; ++e)
+        if (wanted[e]) append_projection(store, layer, p, e, store->stage[0][p] + (uint64_t)e * src[p].bytes, tasks);
+    return tasks;
+  }
+  for (uint32_t p : order) {
+    for (uint32_t e = 0; e < DS41_N_EXPERT;) {
+      if (!wanted[e]) {
+        ++e;
+        continue;
+      }
+      const uint32_t first = e++;
+      while (e < DS41_N_EXPERT && wanted[e])
+        ++e;
+      uint64_t offset = src[p].offset + (uint64_t)first * src[p].bytes;
+      uint64_t left = (e - first) * src[p].bytes;
+      uint8_t* dst = store->stage[0][p] + (uint64_t)first * src[p].bytes;
+      while (left) {
+        const uint64_t bytes = std::min(left, kReadBytes);
+        tasks.push_back({src[p].fd, src[p].direct_fd, offset, bytes, dst});
+        offset += bytes;
+        dst += bytes;
+        left -= bytes;
+      }
+    }
+  }
   return tasks;
 }
 
@@ -1259,10 +1199,14 @@ std::vector<ReadTask> build_read_tasks(const ds41_expert_store* store, uint32_t 
 bool ensure_stage_pairs(ds41_expert_store* store) {
   if (store->stage_pairs)
     return true;
+  std::array<uint64_t, 3> bytes{};
   for (uint32_t p = 0; p < 3; ++p)
-    if (gufo::hip::AllocateManaged(reinterpret_cast<void**>(&store->stage[1][p]),
-                                   store->stage_stride[p] * kPrefetchStageRows) != hipSuccess ||
-        hipMemset(store->stage[1][p], 0, store->stage_stride[p] * kPrefetchStageRows) != hipSuccess) {
+    for (uint32_t layer = 0; layer < DS41_N_LAYER; ++layer)
+      bytes[p] = std::max(bytes[p], store->source[layer][p].bytes);
+  store->stage_stride = bytes;
+  for (uint32_t p = 0; p < 3; ++p)
+    if (hipMalloc(&store->stage[1][p],
+                  bytes[p] * kPrefetchStageRows) != hipSuccess) {
       for (uint32_t q = 0; q <= p; ++q) {
         if (store->stage[1][q])
           (void)hipFree(store->stage[1][q]);
@@ -1285,7 +1229,7 @@ void append_expert_tasks(const ds41_expert_store* store, uint32_t layer, uint32_
                                   : src[a].fd < src[b].fd;
   });
   for (uint32_t p : order)
-    append_projection(store, layer, p, e, stage_row(store, 1, p, row), tasks);
+    append_projection(store, layer, p, e, store->stage[1][p] + (uint64_t)row * store->stage_stride[p], tasks);
 }
 
 std::shared_ptr<PrefetchJob> build_prefetch_job(
@@ -1515,25 +1459,6 @@ bool ds41_expert_store_prepare(ds41_expert_store* store, uint32_t layer,
     adopted = store->readers->Resolve(layer, n_tokens >= kSweepTokens, &dropped);
   store->stats.bytes_read += dropped;
   store->stats.prefetch_dropped_bytes += dropped;
-  /* Misses the cache admits take their slots now, so their reads land in the
-   * slot; the rest read into the demand stage. A miss an adopted job stages
-   * is copied into its slot after the phase. */
-  std::array<uint32_t, DS41_N_EXPERT> read_slot;
-  read_slot.fill(kNoSlot);
-  for (uint32_t e = 0; e < DS41_N_EXPERT; ++e) {
-    if (!missing[e] || (adopted && adopted->task_count[e]))
-      continue;
-    // Fill unused capacity during a scan. Once full, only promoted prefill
-    // experts may displace the existing working set.
-    const uint32_t slot_id = store->acquire(layer, e, admit[e], counts);
-    if (slot_id == kNoSlot)
-      continue;
-    Slot& slot = store->slots[slot_id];
-    slot.layer = layer;
-    slot.expert = e;
-    store->entries[layer][e].slot = slot_id;
-    read_slot[e] = slot_id;
-  }
   /* Map every expert of the layer to its weights: the cache slot when
    * resident, the adopted job's compact stage row when it stages one, else
    * the demand stage row the phase's reads fill. The kernels index the
@@ -1551,12 +1476,16 @@ bool ds41_expert_store_prepare(ds41_expert_store* store, uint32_t layer,
     const uint8_t* base =
         slot_id != kNoSlot ? store->slots[slot_id].data : nullptr;
     const bool covered = adopted && adopted->task_count[e] != 0;
+    const uint32_t job_row = covered ? adopted->row_of[e] : 0;
+    uint64_t staged = 0;
     for (uint32_t p = 0; p < 3; ++p) {
-      const uint8_t* entry = base      ? base + store->slot_offset[layer][p]
-                             : covered ? stage_row(store, 1, p, adopted->row_of[e])
-                                       : stage_row(store, 0, p, e);
+      const uint8_t* row =
+          covered ? store->stage[1][p] + (uint64_t)job_row * store->stage_stride[p]
+                  : store->stage[0][p] + (uint64_t)e * src[p].bytes;
+      const uint8_t* entry = base ? base + staged : row;
       changed[p] = changed[p] || mirror[p][e] != entry;
       mirror[p][e] = entry;
+      staged += src[p].bytes;
     }
   }
   for (uint32_t p = 0; p < 3; ++p)
@@ -1603,7 +1532,7 @@ bool ds41_expert_store_prepare(ds41_expert_store* store, uint32_t layer,
     std::array<bool, DS41_N_EXPERT> want{};
     for (uint32_t e = 0; e < DS41_N_EXPERT; ++e)
       want[e] = missing[e] && !(adopted && adopted->task_count[e]);
-    std::vector<ReadTask> tasks = build_read_tasks(store, layer, want, read_slot);
+    std::vector<ReadTask> tasks = build_read_tasks(store, layer, want);
     uint64_t demand_bytes = 0;
     for (const ReadTask& task : tasks)
       demand_bytes += task.bytes;
@@ -1621,11 +1550,6 @@ bool ds41_expert_store_prepare(ds41_expert_store* store, uint32_t layer,
       }
     }
     if (!store->readers->RunPhase(layer, tasks, overlap, overlap_context, info)) {
-      for (uint32_t e = 0; e < DS41_N_EXPERT; ++e)
-        if (read_slot[e] != kNoSlot) {
-          store->entries[layer][e].slot = kNoSlot;
-          store->release(read_slot[e]);
-        }
       fprintf(stderr, "ds41: failed to stage experts or run overlapped work\n");
       return false;
     }
@@ -1642,19 +1566,24 @@ bool ds41_expert_store_prepare(ds41_expert_store* store, uint32_t layer,
   } else if (overlap && !overlap(overlap_context, &info)) {
     return false;
   }
-  for (uint32_t e = 0; adopted && e < DS41_N_EXPERT; ++e) {
-    if (!missing[e] || !adopted->task_count[e])
+  for (uint32_t e = 0; e < DS41_N_EXPERT; ++e) {
+    if (!missing[e])
       continue;
-    const uint32_t slot_id = store->acquire(layer, e, admit[e], counts);
+    // Fill unused capacity during a scan. Once full, only promoted prefill
+    // experts may displace the existing working set.
+    const uint32_t slot_id = store->acquire(layer, e, admit[e]);
     if (slot_id == kNoSlot)
       continue;
     Slot& slot = store->slots[slot_id];
-    for (uint32_t p = 0; p < 3; ++p)
-      if (hipMemcpyAsync(slot.data + store->slot_offset[layer][p], mirror[p][e], src[p].bytes,
+    uint8_t* dst = slot.data;
+    for (uint32_t p = 0; p < 3; ++p) {
+      if (hipMemcpyAsync(dst, mirror[p][e], src[p].bytes,
                          hipMemcpyDeviceToDevice, nullptr) != hipSuccess) {
         store->release(slot_id);
         return false;
       }
+      dst += src[p].bytes;
+    }
     slot.layer = layer;
     slot.expert = e;
     store->entries[layer][e].slot = slot_id;
@@ -1793,8 +1722,7 @@ void ds41_expert_store_log(const ds41_expert_store* store) {
       static_cast<double>(s.prefetch_dropped_bytes) / kGiB);
   gufo::server::Logger::LogFormatted(
       gufo::server::LogLevel::kInfo, "ds41",
-      "expert reads: %llu in place, %llu direct through a staging buffer, %llu buffered",
-      static_cast<unsigned long long>(store->readers->in_place_reads()),
+      "expert reads: %llu direct, %llu buffered",
       static_cast<unsigned long long>(store->readers->direct_reads()),
       static_cast<unsigned long long>(store->readers->buffered_reads()));
 }
