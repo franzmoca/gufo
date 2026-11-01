@@ -6,6 +6,11 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <hip/hip_runtime_api.h>
+#include <linux/fs.h>
+#include <linux/magic.h>
+#include <sys/ioctl.h>
+#include <sys/stat.h>
+#include <sys/vfs.h>
 #include <unistd.h>
 
 #include <algorithm>
@@ -15,6 +20,8 @@
 #include <cmath>
 #include <condition_variable>
 #include <cstdio>
+#include <cstdlib>
+#include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <limits>
@@ -50,7 +57,7 @@ constexpr uint32_t kPrefetchStageRows = 192;
 constexpr uint64_t kChunkBytes = 128ull << 20;
 constexpr uint64_t kReadBytes = 32ull << 20;
 constexpr uint64_t kDirectAlign = 4096;
-constexpr uint32_t kReadWorkers = 4;
+constexpr uint32_t kReadWorkers = 8;
 constexpr uint32_t kRecentRows = 16;
 /* Route rows of the largest split evaluation (decode, DSpark verification
  * and joint rows); larger batches read their experts in one pass. */
@@ -59,6 +66,7 @@ constexpr uint32_t kSplitRows = DS41_DECODER_MAX_SPECULATIVE * DS41_N_EXPERT_USE
  * prediction job for their layer; smaller batches drop it instead of reading
  * a whole prompt's experts. */
 constexpr uint32_t kSweepTokens = 1024;
+
 constexpr uint32_t kSeedPerLayer = DS41_N_EXPERT;
 constexpr uint32_t kNoSlot = std::numeric_limits<uint32_t>::max();
 constexpr uint64_t kTableEntries = uint64_t{DS41_N_LAYER} * DS41_N_EXPERT;
@@ -97,6 +105,15 @@ struct Source {
   int direct_fd = -1;
   uint64_t offset = 0;
   uint64_t bytes = 0;  // one expert
+};
+
+/* An expert projection's tail in the optional MODEL.gguf.expert-tails file
+ * (tools/ds41/pack_expert_tails.py): bytes from `cut` to the end of each
+ * expert's projection, at first + expert * stride. */
+struct TailSource {
+  uint64_t cut = 0;
+  uint64_t first = 0;
+  uint64_t stride = 0;
 };
 
 struct ReadTask {
@@ -282,8 +299,12 @@ public:
     }
     const bool overlap_ok = !overlap || overlap(overlap_context, &info);
     {
+      const auto wait_start = std::chrono::steady_clock::now();
       std::unique_lock lock(mutex_);
       done_.wait(lock, [this] { return parked_workers_ == threads_.size(); });
+      last_wait_ns_ = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                          std::chrono::steady_clock::now() - wait_start)
+                          .count();
       demand_ = nullptr;
       parked_workers_ = 0;
       /* After the phase: a job submitted mid-phase runs next; otherwise the
@@ -306,6 +327,9 @@ public:
     start_.notify_all();
     return overlap_ok && !phase_failed_.load();
   }
+
+  /* Time the last phase blocked on its reads after the overlapped work. */
+  uint64_t last_wait_ns() const { return last_wait_ns_; }
 
   bool SubmitPrefetch(std::shared_ptr<PrefetchJob> job) {
     std::unique_lock lock(mutex_);
@@ -470,6 +494,7 @@ private:
   size_t pf_next_ = 0;
   uint32_t pf_inflight_ = 0;
   uint32_t parked_workers_ = 0;
+  uint64_t last_wait_ns_ = 0;
   uint64_t wake_ = 0;
   bool stopping_ = false;
   std::atomic<uint64_t> direct_reads_{0}, buffered_reads_{0};
@@ -584,6 +609,12 @@ struct ds41_expert_store {
     fds.fill(-1);
     return fds;
   }();
+  /* With an expert-tails file on a second drive, every projection read is
+   * split: the head from the GGUF, the tail from the file, so both drives
+   * read at once. */
+  std::array<std::array<TailSource, 3>, DS41_N_LAYER> tail{};
+  int tail_fd = -1;
+  int tail_direct_fd = -1;
   std::vector<Slot> slots;
   /* Slot sizes: the distinct per-layer expert sizes, ascending. The builds
    * mix block types, so one largest-expert slot size wasted 14-16% of the
@@ -597,6 +628,11 @@ struct ds41_expert_store {
   uint64_t cache_limit = 0;
   uint64_t tick = 0;
   uint64_t logged_tokens = 0;
+  /* DS41_EXPERT_TRACE=path: binary routing trace for
+   * tools/ds41/prefetch_sim.py, opened at the first prepare (after seeding). */
+  std::FILE* trace = nullptr;
+  bool trace_started = false;
+  bool seeding = false;  // seed prepares stay out of the trace
   ds41_expert_store_stats stats;
   ds41_expert_store_stats logged_stats;
 
@@ -609,7 +645,12 @@ struct ds41_expert_store {
     if (predictor.joinable())
       predictor.join();
     readers.reset();
+    if (trace)
+      (void)std::fclose(trace);
     for (int fd : direct_fds)
+      if (fd >= 0)
+        (void)close(fd);
+    for (int fd : {tail_fd, tail_direct_fd})
       if (fd >= 0)
         (void)close(fd);
     (void)hipDeviceSynchronize();
@@ -813,11 +854,136 @@ ds41_expert_store* ds41_expert_store_create(const ds41_model* model,
   store->cache_limit = available > kReserve ? available - kReserve : 0;
   if (cache_limit_bytes)
     store->cache_limit = std::min(store->cache_limit, cache_limit_bytes);
+  if (const char* path = std::getenv("DS41_EXPERT_TRACE"); path && *path) {
+    store->trace = std::fopen(path, "wb");
+    if (!store->trace)
+      fprintf(stderr, "ds41: cannot open expert trace %s\n", path);
+  }
   return owner.release();
 }
 
 void ds41_expert_store_destroy(ds41_expert_store* store) {
   delete store;
+}
+
+namespace {
+
+/* Layout of tools/ds41/pack_expert_tails.py's header (little endian). */
+constexpr char kTailMagic[8] = {'G', 'U', 'F', 'O', 'E', 'T', 'L', '1'};
+constexpr uint32_t kTailVersion = 1;
+constexpr size_t kTailHeader = 8192;
+
+template <typename T>
+T read_le(const uint8_t* p) {
+  T v;
+  std::memcpy(&v, p, sizeof(T));
+  return v;
+}
+
+}  // namespace
+
+bool ds41_expert_store_attach_tails(ds41_expert_store* store, const char* path) {
+  if (!store || !path)
+    return false;
+  const auto fail = [&](const char* why) {
+    fprintf(stderr, "ds41: ignoring expert tails %s: %s\n", path, why);
+    return false;
+  };
+  const int fd = open(path, O_RDONLY | O_CLOEXEC);
+  if (fd < 0)
+    return fail(strerror(errno));
+  std::vector<uint8_t> header(kTailHeader);
+  std::array<std::array<TailSource, 3>, DS41_N_LAYER> tail{};
+  bool ok = read_all(fd, header.data(), header.size(), 0);
+  const uint8_t* h = header.data();
+  if (!ok || std::memcmp(h, kTailMagic, sizeof(kTailMagic)) != 0 || read_le<uint32_t>(h + 8) != kTailVersion ||
+      read_le<uint32_t>(h + 12) != DS41_N_LAYER || read_le<uint32_t>(h + 16) != DS41_N_EXPERT) {
+    (void)close(fd);
+    return fail("not a tails file for this model layout");
+  }
+  const uint32_t head_ppm = read_le<uint32_t>(h + 20);
+  const uint32_t n_files = read_le<uint32_t>(h + 24);
+  size_t pos = 28;
+  std::vector<uint64_t> file_size(n_files);
+  for (uint32_t i = 0; i < n_files && pos + 8 <= kTailHeader; ++i, pos += 8)
+    file_size[i] = read_le<uint64_t>(h + pos);
+  /* Every projection must match this model's tensor: size, offset in its
+   * shard, and the shard's file size. */
+  for (uint32_t l = 0; l < DS41_N_LAYER && ok; ++l)
+    for (uint32_t p = 0; p < 3 && ok; ++p, pos += 36) {
+      if (pos + 36 > kTailHeader) {
+        ok = false;
+        break;
+      }
+      const uint64_t bytes = read_le<uint64_t>(h + pos), cut = read_le<uint64_t>(h + pos + 8);
+      const uint64_t padded = read_le<uint64_t>(h + pos + 16), base = read_le<uint64_t>(h + pos + 24);
+      const uint32_t file = read_le<uint32_t>(h + pos + 32);
+      const Source& src = store->source[l][p];
+      struct stat st{};
+      ok = bytes == src.bytes && base == src.offset && cut > 0 && cut < bytes && padded >= bytes - cut &&
+           file < n_files && fstat(src.fd, &st) == 0 && (uint64_t)st.st_size == file_size[file];
+      tail[l][p].cut = cut;
+      tail[l][p].stride = padded;  // the piece size; the record stride follows
+    }
+  for (uint32_t l = 0; l < DS41_N_LAYER && ok; ++l, pos += 16) {
+    if (pos + 16 > kTailHeader) {
+      ok = false;
+      break;
+    }
+    const uint64_t first = read_le<uint64_t>(h + pos), record = read_le<uint64_t>(h + pos + 8);
+    uint64_t piece = 0;
+    for (uint32_t p = 0; p < 3; ++p) {
+      const uint64_t padded = tail[l][p].stride;
+      tail[l][p].first = first + piece;
+      tail[l][p].stride = record;
+      piece += padded;
+    }
+    ok = piece == record && first % kDirectAlign == 0 && record % kDirectAlign == 0;
+  }
+  struct stat st{};
+  const uint64_t end = tail[DS41_N_LAYER - 1][0].first + (uint64_t)DS41_N_EXPERT * tail[DS41_N_LAYER - 1][0].stride;
+  if (ok && (fstat(fd, &st) != 0 || (uint64_t)st.st_size < end))
+    ok = false;
+  if (!ok) {
+    (void)close(fd);
+    return fail("it does not match this model's expert tensors; rebuild it with tools/ds41/pack_expert_tails.py");
+  }
+  /* Spot check: the tails of a few experts equal the GGUF bytes. */
+  std::vector<uint8_t> a, b;
+  for (const auto [l, e] : {std::pair<uint32_t, uint32_t>{0, 0}, {DS41_N_LAYER / 2, DS41_N_EXPERT / 2},
+                            {DS41_N_LAYER - 1, DS41_N_EXPERT - 1}})
+    for (uint32_t p = 0; p < 3 && ok; ++p) {
+      const Source& src = store->source[l][p];
+      const TailSource& t = tail[l][p];
+      const uint64_t n = src.bytes - t.cut;
+      a.resize(n);
+      b.resize(n);
+      ok = read_all(src.fd, a.data(), n, src.offset + (uint64_t)e * src.bytes + t.cut) &&
+           read_all(fd, b.data(), n, t.first + (uint64_t)e * t.stride) && a == b;
+    }
+  if (!ok) {
+    (void)close(fd);
+    return fail("its bytes differ from the model's; rebuild it with tools/ds41/pack_expert_tails.py");
+  }
+  /* Direct reads need an uncompressed, NOCOW file on btrfs; elsewhere the
+   * flag does not exist and direct I/O works as is. */
+  struct statfs fs{};
+  long flags = 0;
+  if (fstatfs(fd, &fs) == 0 && fs.f_type == BTRFS_SUPER_MAGIC &&
+      (ioctl(fd, FS_IOC_GETFLAGS, &flags) != 0 || !(flags & FS_NOCOW_FL)))
+    fprintf(stderr,
+            "ds41: expert tails %s is on btrfs without NOCOW; its reads may be compressed and buffered "
+            "(create it in a `chattr +C` directory)\n",
+            path);
+  char proc[64];
+  std::snprintf(proc, sizeof(proc), "/proc/self/fd/%d", fd);
+  store->tail_direct_fd = open(proc, O_RDONLY | O_DIRECT | O_CLOEXEC);
+  store->tail_fd = fd;
+  store->tail = tail;
+  gufo::server::Logger::LogFormatted(gufo::server::LogLevel::kInfo, "ds41",
+                                     "expert tails %s: %.2f GiB, %.0f%% of each expert read from the GGUF", path,
+                                     static_cast<double>(end) / kGiB, head_ppm / 1e4);
+  return true;
 }
 
 namespace {
@@ -866,6 +1032,7 @@ bool seed_ranked(ds41_expert_store* store, std::vector<SeedItem> ranked,
   for (size_t i = 0; i < target; ++i)
     by_layer[ranked[i].layer].push_back(ranked[i]);
   bool ok = true;
+  store->seeding = true;
   for (uint32_t l = 0; l < DS41_N_LAYER && ok; ++l) {
     std::vector<uint32_t> ids;
     for (const SeedItem& item : by_layer[l]) {
@@ -889,6 +1056,7 @@ bool seed_ranked(ds41_expert_store* store, std::vector<SeedItem> ranked,
              static_cast<uint32_t>(routes.size() / DS41_N_EXPERT_USED), &gate,
              &up, &down);
   }
+  store->seeding = false;
   (void)hipFree(device_ids);
   const uint64_t bytes = store->stats.bytes_read - previous.bytes_read;
   const uint64_t allocated = store->stats.cache_bytes;
@@ -963,6 +1131,27 @@ bool ds41_expert_store_seed(ds41_expert_store* store, const char* path) {
 
 namespace {
 
+/* Reads of one expert's projection p into dst: the whole span from the GGUF,
+ * or with an expert-tails file its head from the GGUF and its tail from the
+ * file, queued next to each other so the two drives read together. */
+void append_projection(const ds41_expert_store* store, uint32_t layer, uint32_t p, uint32_t e,
+                       uint8_t* dst, std::vector<ReadTask>& tasks) {
+  const Source& src = store->source[layer][p];
+  const uint64_t offset = src.offset + (uint64_t)e * src.bytes;
+  const TailSource& t = store->tail[layer][p];
+  if (store->tail_fd < 0 || !t.stride) {
+    for (uint64_t done = 0; done < src.bytes;) {
+      const uint64_t bytes = std::min(src.bytes - done, kReadBytes);
+      tasks.push_back({src.fd, src.direct_fd, offset + done, bytes, dst + done});
+      done += bytes;
+    }
+    return;
+  }
+  tasks.push_back({src.fd, src.direct_fd, offset, t.cut, dst});
+  tasks.push_back({store->tail_fd, store->tail_direct_fd, t.first + (uint64_t)e * t.stride, src.bytes - t.cut,
+                   dst + t.cut});
+}
+
 /* Demand read tasks into the whole-layer stage, merging consecutive experts
  * of one projection into chunks of at most kReadBytes and ordering chunks by
  * shard and offset for sequential access. */
@@ -975,6 +1164,12 @@ std::vector<ReadTask> build_read_tasks(const ds41_expert_store* store, uint32_t 
                                   : src[a].fd < src[b].fd;
   });
   std::vector<ReadTask> tasks;
+  if (store->tail_fd >= 0) {
+    for (uint32_t p : order)
+      for (uint32_t e = 0; e < DS41_N_EXPERT; ++e)
+        if (wanted[e]) append_projection(store, layer, p, e, store->stage[0][p] + (uint64_t)e * src[p].bytes, tasks);
+    return tasks;
+  }
   for (uint32_t p : order) {
     for (uint32_t e = 0; e < DS41_N_EXPERT;) {
       if (!wanted[e]) {
@@ -1033,17 +1228,8 @@ void append_expert_tasks(const ds41_expert_store* store, uint32_t layer, uint32_
     return src[a].fd == src[b].fd ? src[a].offset < src[b].offset
                                   : src[a].fd < src[b].fd;
   });
-  for (uint32_t p : order) {
-    uint64_t offset = src[p].offset + (uint64_t)e * src[p].bytes;
-    uint8_t* dst = store->stage[1][p] + (uint64_t)row * store->stage_stride[p];
-    for (uint64_t left = src[p].bytes; left;) {
-      const uint64_t bytes = std::min(left, kReadBytes);
-      tasks.push_back({src[p].fd, src[p].direct_fd, offset, bytes, dst});
-      offset += bytes;
-      dst += bytes;
-      left -= bytes;
-    }
-  }
+  for (uint32_t p : order)
+    append_projection(store, layer, p, e, store->stage[1][p] + (uint64_t)row * store->stage_stride[p], tasks);
 }
 
 std::shared_ptr<PrefetchJob> build_prefetch_job(
@@ -1106,6 +1292,72 @@ void PredictWork(ds41_expert_store* store) {
 
 }  // namespace
 
+namespace {
+
+uint64_t trace_now() {
+  return static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                   std::chrono::steady_clock::now().time_since_epoch())
+                                   .count());
+}
+
+template <typename T>
+void trace_put(std::FILE* f, const T& value) {
+  (void)std::fwrite(&value, sizeof(T), 1, f);
+}
+
+/* 'S': the cache as seeded, so a replay starts from the same state. */
+void trace_snapshot(ds41_expert_store* store) {
+  std::FILE* f = store->trace;
+  trace_put(f, 'S');
+  trace_put(f, uint32_t{1});  // version
+  trace_put(f, uint32_t{DS41_N_LAYER});
+  trace_put(f, uint32_t{DS41_N_EXPERT});
+  trace_put(f, uint32_t{DS41_N_EXPERT_USED});
+  trace_put(f, store->tick);
+  trace_put(f, store->cache_limit);
+  trace_put(f, store->stats.cache_bytes);
+  trace_put(f, ds41_expert_available_memory());
+  trace_put(f, static_cast<uint32_t>(store->class_bytes.size()));
+  for (uint64_t bytes : store->class_bytes)
+    trace_put(f, bytes);
+  for (uint32_t l = 0; l < DS41_N_LAYER; ++l) {
+    trace_put(f, store->layer_class[l]);
+    trace_put(f, store->source[l][0].bytes + store->source[l][1].bytes +
+                     store->source[l][2].bytes);
+  }
+  trace_put(f, static_cast<uint32_t>(store->slots.size()));
+  for (const Slot& slot : store->slots) {
+    trace_put(f, slot.size_class);
+    trace_put(f, slot.layer);
+    trace_put(f, slot.expert);
+  }
+  for (uint32_t l = 0; l < DS41_N_LAYER; ++l)
+    for (uint32_t e = 0; e < DS41_N_EXPERT; ++e) {
+      trace_put(f, store->entries[l][e].score);
+      trace_put(f, store->entries[l][e].last);
+    }
+}
+
+}  // namespace
+
+bool ds41_expert_store_tracing(const ds41_expert_store* store) {
+  return store && store->trace;
+}
+
+void ds41_expert_store_trace_prediction(ds41_expert_store* store, uint32_t layer,
+                                        uint32_t lead, const int32_t* ids,
+                                        uint32_t n_tokens, uint32_t k) {
+  if (!store || !store->trace || !store->trace_started)
+    return;
+  std::FILE* f = store->trace;
+  trace_put(f, 'Q');
+  trace_put(f, layer);
+  trace_put(f, lead);
+  trace_put(f, n_tokens);
+  trace_put(f, k);
+  (void)std::fwrite(ids, sizeof(int32_t), static_cast<size_t>(n_tokens) * k, f);
+}
+
 bool ds41_expert_store_prepare(ds41_expert_store* store, uint32_t layer,
                                const int32_t* routes, uint32_t n_tokens,
                                const void** gate, const void** up,
@@ -1116,6 +1368,12 @@ bool ds41_expert_store_prepare(ds41_expert_store* store, uint32_t layer,
       !down)
     return false;
   const auto start = std::chrono::steady_clock::now();
+  std::FILE* const trace = store->seeding ? nullptr : store->trace;
+  const uint64_t trace_start = trace ? trace_now() : 0;
+  if (trace && !store->trace_started) {
+    trace_snapshot(store);
+    store->trace_started = true;
+  }
   const size_t n_routes = static_cast<size_t>(n_tokens) * DS41_N_EXPERT_USED;
   std::vector<int32_t> ids(n_routes);
   if (routes_ready) {
@@ -1142,6 +1400,10 @@ bool ds41_expert_store_prepare(ds41_expert_store* store, uint32_t layer,
                        hipMemcpyDeviceToHost) != hipSuccess) {
     return false;
   }
+  store->stats.route_wait_ns += std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                     std::chrono::steady_clock::now() - start)
+                                     .count();
+  const uint64_t trace_routes = trace ? trace_now() : 0;
   std::array<uint32_t, DS41_N_EXPERT> counts{}, recent{};
   for (size_t i = 0; i < ids.size(); ++i) {
     const int32_t id = ids[i];
@@ -1191,6 +1453,7 @@ bool ds41_expert_store_prepare(ds41_expert_store* store, uint32_t layer,
   store->stats.prefetch_dropped_bytes += orphaned;
   std::shared_ptr<PrefetchJob> adopted;
   uint64_t dropped = 0;
+  uint64_t trace_demand = 0, trace_adopted = 0, trace_read_wait = 0;
   const bool phase = misses || !store->readers->Idle();
   if (phase)
     adopted = store->readers->Resolve(layer, n_tokens >= kSweepTokens, &dropped);
@@ -1290,9 +1553,13 @@ bool ds41_expert_store_prepare(ds41_expert_store* store, uint32_t layer,
       fprintf(stderr, "ds41: failed to stage experts or run overlapped work\n");
       return false;
     }
+    store->stats.read_wait_ns += store->readers->last_wait_ns();
     store->stats.bytes_read += demand_bytes;
+    trace_read_wait = store->readers->last_wait_ns();
+    trace_demand = demand_bytes;
     if (adopted) {
       const uint64_t bytes = adopted->bytes.load();
+      trace_adopted = bytes;
       store->stats.bytes_read += bytes;
       store->stats.prefetch_bytes += bytes;
     }
@@ -1324,6 +1591,22 @@ bool ds41_expert_store_prepare(ds41_expert_store* store, uint32_t layer,
   *gate = device_table[0];
   *up = device_table[1];
   *down = device_table[2];
+  if (trace) {
+    // 'P': one prepare, its timing and each route's hit before admission.
+    std::FILE* f = trace;
+    trace_put(f, 'P');
+    trace_put(f, trace_start);
+    trace_put(f, trace_routes);
+    trace_put(f, trace_now());
+    trace_put(f, layer);
+    trace_put(f, n_tokens);
+    trace_put(f, trace_read_wait);
+    trace_put(f, trace_demand);
+    trace_put(f, trace_adopted);
+    (void)std::fwrite(ids.data(), sizeof(int32_t), n_routes, f);
+    for (size_t i = 0; i < n_routes; ++i)
+      trace_put(f, static_cast<uint8_t>(ids[i] >= 0 && !missing[ids[i]]));
+  }
   store->stats.stall_ns += std::chrono::duration_cast<std::chrono::nanoseconds>(
                                std::chrono::steady_clock::now() - start)
                                .count();
@@ -1337,7 +1620,8 @@ bool ds41_expert_store_prepare(ds41_expert_store* store, uint32_t layer,
     gufo::server::Logger::LogFormatted(
         gufo::server::LogLevel::kInfo, "ds41",
         "expert cache interval: %.1f%% route hits, %.2f MiB read/token "
-        "(%.1f%% prefetched), %.2f ms host wait/token, %.2f GiB allocated",
+        "(%.1f%% prefetched), %.2f ms host wait/token (%.2f routes, %.2f "
+        "reads), %.2f GiB allocated, %llu tokens",
         uses ? 100.0 * static_cast<double>(hits) / uses : 0.0,
         tokens ? static_cast<double>(read) / tokens / (1u << 20) : 0.0,
         read ? 100.0 * static_cast<double>(s.prefetch_bytes - old.prefetch_bytes) /
@@ -1345,7 +1629,14 @@ bool ds41_expert_store_prepare(ds41_expert_store* store, uint32_t layer,
              : 0.0,
         tokens ? static_cast<double>(s.stall_ns - old.stall_ns) / tokens / 1e6
                : 0.0,
-        static_cast<double>(s.cache_bytes) / kGiB);
+        tokens ? static_cast<double>(s.route_wait_ns - old.route_wait_ns) /
+                     tokens / 1e6
+               : 0.0,
+        tokens ? static_cast<double>(s.read_wait_ns - old.read_wait_ns) /
+                     tokens / 1e6
+               : 0.0,
+        static_cast<double>(s.cache_bytes) / kGiB,
+        static_cast<unsigned long long>(tokens));
     store->logged_stats = s;
     store->logged_tokens = store->stats.tokens;
   }
@@ -1418,12 +1709,14 @@ void ds41_expert_store_log(const ds41_expert_store* store) {
   gufo::server::Logger::LogFormatted(
       gufo::server::LogLevel::kInfo, "ds41",
       "expert cache total: %.1f%% route hits, %.2f MiB read/token, %.2f ms "
-      "host wait/token, %.2f GiB allocated, %.2f GiB prefetched (%.2f GiB "
+      "host wait/token (%.2f routes, %.2f reads), %.2f GiB allocated, %.2f GiB prefetched (%.2f GiB "
       "dropped)",
       100.0 * static_cast<double>(s.hits) / s.uses,
       s.tokens ? static_cast<double>(s.bytes_read) / s.tokens / (1u << 20)
                : 0.0,
       s.tokens ? static_cast<double>(s.stall_ns) / s.tokens / 1e6 : 0.0,
+      s.tokens ? static_cast<double>(s.route_wait_ns) / s.tokens / 1e6 : 0.0,
+      s.tokens ? static_cast<double>(s.read_wait_ns) / s.tokens / 1e6 : 0.0,
       static_cast<double>(s.cache_bytes) / kGiB,
       static_cast<double>(s.prefetch_bytes) / kGiB,
       static_cast<double>(s.prefetch_dropped_bytes) / kGiB);

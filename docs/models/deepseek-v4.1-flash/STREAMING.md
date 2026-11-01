@@ -89,7 +89,7 @@ its pinned mirror is rewritten.
 
 ## Reads
 
-- **ReadPool.** Four worker threads read with `O_DIRECT` into their own
+- **ReadPool.** Eight worker threads read with `O_DIRECT` into their own
   pinned buffers (falling back to buffered reads when direct I/O is not
   available; the last read may end at an unaligned EOF) and upload through
   their own non-blocking streams, so staging does not queue behind the
@@ -106,6 +106,42 @@ its pinned mirror is rewritten.
   experts take rows in its layer's half, addressed with the allocation
   stride (the stride of the largest expert). A job beyond 96 experts
   truncates; the excess stays a demand read.
+
+## Split reads across two drives
+
+A second NVMe can serve part of every miss. `tools/ds41/pack_expert_tails.py`
+copies the tail of each routed expert projection (by default the second
+half: `--head 0.5` is the share still read from the GGUF) into one file:
+
+```sh
+python3 tools/ds41/pack_expert_tails.py \
+  --model /models/IQ2_XXS-00001-of-00006.gguf \
+  --out /second-drive/IQ2_XXS.expert-tails
+ln -s /second-drive/IQ2_XXS.expert-tails \
+  /models/IQ2_XXS-00001-of-00006.gguf.expert-tails
+```
+
+When `MODEL.gguf.expert-tails` exists beside the first shard (the file or a
+symlink to it), every projection read becomes a head read from the GGUF and
+a tail read from the file, queued together, so both drives work on each
+miss; prefetch jobs split the same way. The symlink is resolved once when
+the file is opened. The file is about half the expert bytes (61.6 GiB for
+`IQ2_XXS`, 61.7 GiB for UD-`IQ1_M`). An expert's three tails are adjacent
+and 4 KiB-aligned for direct I/O; on btrfs the packer creates the file
+without copy-on-write, which also turns off compression, as direct reads
+need. At load the engine checks the header against the model's expert
+tensors (sizes, offsets, shard sizes) and compares sampled tails with the
+GGUF; on any mismatch it logs why and reads only the GGUF. Results do not
+change.
+
+On the 990 PRO plus a KIOXIA EXCERIA BASIC (both PCIe 4.0 x4), one cold
+miss takes 0.87 ms instead of 1.32-1.47 ms, and six misses 4.35 ms
+(10.7 GB/s). Served workloads gain most where misses are frequent: with
+the full ~100 GiB cache, short-request prefill gains 5-17% and decode
+1-3%. Capped caches stand in for larger quantizations: at 88 GiB (the
+expert share a ~150 GB backbone would keep cached) prefill gains 18-27% and
+decode 2-5%, at 64 GiB prefill 47-65% and decode 12-23%
+([E61](EXPERIMENTS.md#e61--expert-reads-split-across-two-drives-retained)).
 
 ## Prefetch from router predictions
 
@@ -149,9 +185,12 @@ Measured on the Samsung 990 PRO (XFS, `noatime`, scheduler `none`):
   readers, and eight or twelve readers did not help.
 - `io_uring` and polling `io_uring` matched `pread` threads (about 4.9 GB/s
   sustained at queue depth four).
-- A second, slower NVMe (KIOXIA EXCERIA, 2.3 GB/s sequential) did not help:
-  moving whole shards made their layers read at its pace, and moving the
-  Engram alone cost more in latency than the contention it removed.
+- Moving whole shards or the Engram to a second NVMe did not help: the
+  moved layers read at that drive's pace, and the Engram move cost more in
+  latency than the contention it removed. That drive (KIOXIA EXCERIA BASIC
+  on btrfs) was measured at 2.3 GB/s through btrfs compression; with
+  compression off for the file it reads 5.15 GB/s direct, and splitting
+  every expert read across both drives does help (above).
 
 The runs are in [EXPERIMENTS.md](EXPERIMENTS.md#storage-reads).
 
@@ -159,7 +198,10 @@ The runs are in [EXPERIMENTS.md](EXPERIMENTS.md#storage-reads).
 
 The engine logs route hits, MiB read per evaluated token (and the share
 prefetched), host wait per token and the allocated cache, per interval of at
-least 64 tokens and cumulatively. `gufo diagnose` does not report them yet.
+least 64 tokens (with its token count) and cumulatively. Host wait is split
+into the wait for the layer's routes, which includes GPU work queued before
+them, and the wait on demand reads after the overlapped work; the rest is
+host bookkeeping. `gufo diagnose` does not report them yet.
 
 ## Other implementations
 

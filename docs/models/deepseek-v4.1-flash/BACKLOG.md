@@ -83,6 +83,7 @@ pp2048 runs 1,182 tok/s at 32K, 1,155 at 64K and 1,098 at 128K.
 | 22 | Decode misses after a long prompt under scan-resistant admission | Streamed decode | Unmeasured | — |
 | 23 | Streamed `IQ2_XS` with cache-aware routing | Quality option | Unmeasured; lower KL than `IQ2_XXS` at a residency cost | Low |
 | 27 | Streamed kernels for the `IQ2_XS` build (IQ3_XXS down, IQ2_S gate/up) | Model support | Prerequisite for item 23 | High |
+| 28 | Split-read head share from measured drive speeds | Streamed reads, two drives | Small on matched drives; up to the slower drive's excess on mismatched ones | Medium |
 | 24 | Selection-only miss penalty, mako's form of item 13 (changes outputs) | Streamed decode, short prefills | Up to the ~5 ms/token of miss-read idle; more cold, after long prompts and in verification | Medium |
 | 25 | Direction projection and steering vectors | Feature | Per-request behavior edits; ~0.1–0.5 ms/token if unfused | Medium |
 | 26 | LoRA adapters (GGUF `adapter.type = lora`) | Feature | Adapter compatibility; rank-1 abliteration adapters reduce to item 25 | Medium |
@@ -460,6 +461,149 @@ run):
 
 Check each against the resident MMQ/MMVQ outputs (`ds41.mmq_typed`,
 `ds41_gemv_bench`) and keep the existing builds' outputs bit-identical.
+
+### 28. Split-read head share from measured drive speeds
+
+With an expert tails file ([split reads](STREAMING.md#split-reads-across-two-drives)),
+every projection read is split at the share chosen when the file is packed
+(`--head`, default 0.5). On the 990 PRO and KIOXIA pair, which read 5.3-5.9
+and 5.15 GB/s, shares of 0.50-0.60 measured the same, so the default
+stands. A pair with unequal drives finishes each miss at the slower one's
+pace. Pack a wider tail (for example 0.3, so the head can range from 0.3 to
+1.0), time a few cold reads per drive at load, and split each read at the
+measured ratio; only the share up to the packed cut can move to the second
+drive. Measure on a mismatched pair or with the second drive under load.
+
+[ds4-argodrive](https://github.com/argonautlabsai/ds4-argodrive) (Metal)
+splits reads across up to three drives holding complete model replicas,
+in 256 KiB blocks by per-drive weight, and found two useful refinements:
+decode and prefill want different splits (10:6:6 against 10:5:5 there: the
+lower-latency internal drive landed last on two thirds of decode reads at
+the prefill split), and a per-drive count of how often it landed last and
+by how much tells which way to move a split. Add that attribution first;
+it shows whether a different share would pay before any repacking. Tails
+generalise to more drives as one tails file per extra drive, each holding
+its slice of every expert, at a fraction of a full replica's size.
+
+### 29. Zero-copy expert reads
+
+A miss is read into a pinned buffer, uploaded to the demand stage and,
+when admitted, copied into its cache slot. On gfx1151 the SSD can write
+straight into managed memory, which kernels read at the full 240 GB/s
+(`tools/bench/ds41_zero_copy.hip`: O_DIRECT into managed memory 6.46 GB/s,
+GPU checksums correct). Kernel bandwidth lost per GB/s of expert reads fell
+from 3.0% with the copy chain to 1.2% with the DMA alone.
+
+A first version (tag `ds41-zero-copy-wip`, reverted after it) read every projection in place: slots and stage rows got
+a page of slack before and after each projection, a miss took its slot
+before its reads (never evicting an expert the batch routes), and the
+tails packer now cuts at 4 KiB multiples, since btrfs needs page-aligned
+buffers and silently turns a misaligned direct read into a buffered one
+through the page cache. Outputs matched on IQ2_XXS (also capped at
+24 GiB), UD-IQ1_M and IQ1_M, and every read landed in place, but the
+served workloads at an 88 GiB cap (two alternating rounds) got slower:
+
+| 88 GiB cap | Misses/row | Read wait | Decode |
+|---|---|---|---|
+| With tails | +2-4% | -2 to -13% | chat/agent -2 to -4%, document noise |
+| Without tails | +1 to +14% | about equal | -3 to -7% |
+
+The slack takes ~30 KiB per expert, 0.4% of the cache, which replays of
+the 88 GiB trace turn into 1.45% more misses; taking slots before the
+reads changes misses by -0.16%. Without tails, per-expert reads also lose
+the old merging of consecutive experts into 32 MiB reads. The copy savings
+are small next to either: at 88 GiB decode moves ~0.8 GB/s of experts, so
+less contention is worth at most ~1.5% of kernel time.
+
+To make it pay:
+
+- Size slack from each file's direct-I/O alignment (statx
+  `STATX_DIOALIGN`; 512 bytes on XFS with 512-byte sectors) instead of a
+  page everywhere, and keep the page only where a file needs it (btrfs,
+  4 KiB-sector drives).
+- Keep demand stage rows contiguous in file order, so non-admitted misses
+  still merge into large reads; only slots need slack.
+- Or read in place only into the stage and keep the slot copy, which costs
+  no cache capacity.
+- Measure where reads dominate: smaller caches (64 GiB: ~27 MiB/token) and
+  the larger ~150 GB builds, where per-byte cost decides whether decode
+  prefetch can pay (the replayed prefetch policies all land within ±1%
+  with today's per-byte cost).
+
+### 30. More memory for the expert cache
+
+The cache gets what is left of unified memory after the dense weights
+(5.3 GiB for `IQ2_XXS`), the DSpark drafter (4.6 GiB), a fixed 4 GiB
+reserve and the store's own buffers. Replays of the served traces put
++1.8 GiB at -14% decode and -10% prefill misses, and +3.7 GiB at -28% and
+-20% (uncapped, ~99.5 GiB cache; -20% and -17% at an 88 GiB cap). None of
+these changes outputs; the gain applies when memory, not
+`--expert-cache-bytes`, sizes the cache.
+
+- **Prefetch stage (~1.8 GiB).** 192 rows, allocated once decode
+  prediction starts. Decode jobs use 6-12 rows; the rows exist for
+  prompt-scale (wide) predictions of ~70 experts. Measure what wide jobs
+  are worth; without them 32 rows would do.
+- **Admitted misses straight into their slot.** Today a miss the cache
+  admits goes pinned buffer -> demand stage -> slot. Uploading it into its
+  slot directly needs the slot taken before the read, never evicting an
+  expert the batch routes (built for #29; replay: -0.16% misses). Decode
+  then rarely touches the demand stage, and one GPU copy goes away.
+- **Reserve the cache can give back.** The fixed 4 GiB reserve covers
+  scratch and session state at 1M context; serving at 131k with one
+  session, free memory never fell below 3.36 GiB, so ~3 GiB sat idle. Let
+  the cache grow into it and free its lowest-scored chunks when free
+  memory runs low (cached experts are disk copies, always safe to drop),
+  rather than sizing the reserve from the configuration and risking
+  running out of memory under loads that were not measured.
+- **Compact demand stage (~3.7 GiB today).** One row per expert id per
+  projection, sized for a prefill that misses a whole layer. With the item
+  above it only holds experts the cache does not keep; a stage of ~64 rows
+  (~0.6 GiB) serves any decode batch, and a prefill layer with more
+  non-cached misses runs in passes. That needs the prefill kernels to run
+  over a subset of routes, as the decode hit/miss split already does, and
+  double buffering so a pass's reads overlap the previous pass's kernels.
+  The same capability gives a two-wave prefill (compute the cached
+  experts while the misses are read), which ds4-argodrive measured at
+  +1.1% prefill on top of its read-ahead.
+- **DSpark drafter size (separate spike).** A smaller drafter frees cache
+  memory but lowers acceptance; a larger, more accurate one might pay for
+  its memory through acceptance. Measure both directions.
+
+Check each with outputs at a 24 GiB cap (constant evictions) and the
+served workloads; the cold first prompt of a long document is where
+passes could cost prefill.
+
+### 31. Per-layer eviction ranking and prompt admission
+
+`acquire` scans every slot (~12,000) for each eviction, ~48 µs on the
+host, and the miss kernels launch only after the admission loop. By miss
+counts that is an estimated 0.2-0.7 ms per decode token at an 88 GiB cap
+and more in prefill (not yet timed in the server). Rank
+eviction candidates once per prepare (or keep them ordered) and take
+victims from that list; ds4-argodrive ranks them while the CPU waits for
+the router (+0.5% decode there).
+
+Prompt admission waits on it. Letting a prefill batch admit every expert
+it routes at least twice (instead of its final rows and experts routed at
+least max(4, n/32) times) cut misses on the 18k-token document's
+follow-ups by 32% in two served rounds at 88 GiB, but prefill got slower:
+797 -> 774 tok/s with tails, 700 -> 673 without; agent prefill -7%
+without tails, agent misses +16-25%. Fewer bytes were read while read
+wait rose, so the cost is in admitting: the per-eviction scan above and
+one stage-to-slot copy per admitted expert. Re-measure after the
+ranking change and #30's direct-to-slot uploads; the trace replay
+(`tools/ds41/prefetch_sim.py`) predicted -16-19% prefill stall at full,
+88 GiB and no-tails caches and about even at 64 GiB.
+
+### 32. GPU idle during read waits
+
+ds4-argodrive found the Apple GPU dropping into low-power states while
+the CPU waited for expert reads, so the kernels after each wait ran
+slower; a tiny kernel on a second queue during the wait gained 3-4%
+decode. Read the gfx1151 clock and power sensors (without changing clock
+settings) across a streamed decode to see whether waits of 2-4 ms per
+token drop clocks here before trying the same.
 
 ## Memory
 
