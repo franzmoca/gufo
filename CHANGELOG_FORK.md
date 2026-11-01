@@ -5,6 +5,28 @@ first. Each entry is a brief summary; its pull request has the details,
 measurements and validation. Upstream Gufo's changes are in
 [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-11-01: Upstream v0.28.1, ROCm 10.1 and streamed DSpark fix
+
+- The fork is now based on upstream Gufo v0.28.1, up from v0.23.0, and builds
+  with ROCm 10.1, which upstream uses from v0.26. Upstream's changes in
+  between are in [CHANGELOG.md](CHANGELOG.md). Greedy outputs of DeepSeek V4.1
+  Flash `IQ1_M` and Gemma 4 31B are unchanged, and `bench` speeds match the
+  previous build.
+- The fork's code is now split by model: `feat/ds41` (DeepSeek V4.1 Flash) and
+  `feat/gemma` (Gemma 4) are model branches on upstream, and `main` merges
+  both.
+- ROCm 10.1's compiler (LLVM 24) made DeepSeek V4.1 prefill about 7% slower
+  by generating 16-bit register code in the routed and dense FP16 GEMMs.
+  Those two kernels now build without it: prefill GPU time drops 6.3%, back
+  to the ROCm 7 level, with identical outputs.
+- Requests with `logprobs` (new upstream) return them for every generated
+  token, including tokens accepted from DSpark drafts on DeepSeek V4.1 and
+  from MTP drafts on Gemma 4.
+- Fixed a hang or crash at the first DSpark request on streamed builds
+  (`--stream-experts`), caused by two threads stopping the expert prefetch at
+  once. On `UD-IQ1_M` it hit 3 of 9 server starts before the fix and none of
+  10 after; DSpark runs at 34.5–36.2 tok/s.
+
 ## 2026-10-31: DeepSeek V4.1 Flash: Unsloth UD quants and faster prefill and decode ([#14](https://github.com/franzmoca/gufo/pull/14))
 
 - Unsloth's Dynamic `UD-IQ1_M` (130.2 GiB) runs with `--stream-experts`: F32
