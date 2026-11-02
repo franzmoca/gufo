@@ -1,93 +1,73 @@
 tables below cover pass 1
-dispatches      : 13194
-kernel time sum :   18427.45 ms
-gpu busy (union):   18410.20 ms
-wall span       :   24056.55 ms
-idle in span    :    5646.34 ms  (23.5% of span -- launch or host bound if large)
+dispatches      : 9470
+kernel time sum :   17006.73 ms
+gpu busy (union):   16997.49 ms
+wall span       :   20585.69 ms
+idle in span    :    3588.21 ms  (17.4% of span -- launch or host bound if large)
 
 -- pipeline stages --
 stage                          calls   total ms       %
-moe: routed wmma (prefill)       600    8616.76   46.8%
-other                           3709    4841.50   26.3%
-attention                        720    1990.86   10.8%
-hyperconnections                1509    1377.26    7.5%
-dense: bf16 (router/indexer)     906     931.44    5.1%
-attention: indexer               445     202.96    1.1%
-convert                          600     103.41    0.6%
-engram                            22      54.47    0.3%
-moe: routing                    1549      51.32    0.3%
-attention: compressor             33      50.42    0.3%
-draft: dense                     324      49.53    0.3%
-dense: gemv                      248      47.93    0.3%
-ffn: swiglu                      300      45.17    0.2%
-moe: routed gemv (decode)        119      31.35    0.2%
-runtime: copy                   1373      23.47    0.1%
-attention: rope                  519       8.22    0.0%
-norm                             122       1.06    0.0%
-runtime: fill                     96       0.32    0.0%
+moe: routed wmma (prefill)       440    7827.23   46.0%
+other                           2413    4565.86   26.8%
+attention                        560    1811.18   10.6%
+hyperconnections                1169    1346.05    7.9%
+dense: bf16 (router/indexer)     702     860.08    5.1%
+attention: indexer               345     187.23    1.1%
+convert                          440     102.29    0.6%
+engram                            22      54.66    0.3%
+attention: compressor             33      49.07    0.3%
+moe: routing                    1153      48.13    0.3%
+ffn: swiglu                      220      44.56    0.3%
+dense: gemv                      244      38.50    0.2%
+moe: routed gemv (decode)        119      31.20    0.2%
+runtime: copy                    949      21.82    0.1%
+draft: dense                      68       9.81    0.1%
+attention: rope                  399       7.83    0.0%
+norm                              98       0.90    0.0%
+runtime: fill                     96       0.33    0.0%
 
--- kernels (top 45) --
+-- kernels (top 25) --
 kernel                                                calls   total ms   mean us       %  shape
-dense_f16_kernel<Q8, true, _Float16, float>             940    2936.50   3123.94   15.9%  blocks=128x16x1 wg=512  (+11 other shapes)
-routed_f16_kernel<16, true, true>                       125    2555.06  20440.46   13.9%  blocks=18x576x1 wg=256  (+2 other shapes)
-routed_f16_kernel<19, true, true>                       100    2330.39  23303.89   12.6%  blocks=18x576x1 wg=256  (+1 other shapes)
-attention_f16_kernel                                    300    1958.02   6526.75   10.6%  blocks=2048x2x1 wg=256  (+2 other shapes)
-routed_f16_kernel<22, false, false>                     125    1532.90  12263.23    8.3%  blocks=20x576x1 wg=256  (+2 other shapes)
-hc_state_pass_kernel<true>                              565    1219.24   2157.95    6.6%  blocks=1024x1x1 wg=640  (+2 other shapes)
-dense_f16_kernel<Q8, true, _Float16, _Float16>          235     966.84   4114.20    5.2%  blocks=4x16x8 wg=512  (+2 other shapes)
-matmul_bf16_wmma_kernel<128u>                           770     917.09   1191.03    5.0%  blocks=32x32x1 wg=256  (+16 other shapes)
-routed_f16_kernel<17, false, false>                      60     810.10  13501.69    4.4%  blocks=20x576x1 wg=256  (+1 other shapes)
-routed_f16_kernel<22, true, true>                        75     581.48   7753.03    3.2%  blocks=18x397x1 wg=256
-dense_f16_kernel<Q6K, true, float, float>                20     402.01  20100.69    2.2%  blocks=100x16x1 wg=512  (+1 other shapes)
-routed_f16_kernel<16, false, false>                      30     386.13  12871.01    2.1%  blocks=20x576x1 wg=256  (+1 other shapes)
-routed_f16_kernel<18, false, false>                      75     293.55   3914.00    1.6%  blocks=20x397x1 wg=256
-dense_f16_kernel<Q8, true, float, float>                235     272.80   1160.86    1.5%  blocks=20x16x1 wg=512  (+2 other shapes)
-routed_f16_kernel<10, false, false>                      10     127.15  12714.53    0.7%  blocks=20x576x1 wg=256  (+1 other shapes)
-indexer_score_wmma_kernel                               112     107.21    957.20    0.6%  blocks=38x63x1 wg=512  (+33 other shapes)
-to_half_kernel                                          600     103.41    172.35    0.6%  blocks=10240x1x1 wg=256  (+2 other shapes)
-hc_expand_sum_kernel                                     75      91.47   1219.56    0.5%  blocks=20x2048x1 wg=256  (+3 other shapes)
-dense_f16_kernel<Q6K, true, _Float16, float>            195      73.87    378.80    0.4%  blocks=128x1x1 wg=512  (+2 other shapes)
-fp4_fake_quant_kernel                                   161      70.31    436.71    0.4%  blocks=1024x1x1 wg=256  (+16 other shapes)
-hc_state_pass_kernel<false>                              45      58.47   1299.28    0.3%  blocks=1024x1x1 wg=640  (+4 other shapes)
-engram_gate_kernel                                       22      54.47   2475.91    0.3%  blocks=4x2048x1 wg=1024  (+2 other shapes)
-dense_f16_kernel<Q8, false, _Float16, float>            220      51.36    233.46    0.3%  blocks=128x1x1 wg=512  (+3 other shapes)
-compress_pool_kernel                                     33      50.42   1527.83    0.3%  blocks=2x1x1 wg=256
-mul_mat_vec_q<(ggml_type)12, 8, false, false>           320      49.27    153.98    0.3%  blocks=5120x1x1 wg=32  (+1 other shapes)
-swiglu_kernel                                           300      45.17    150.56    0.2%  blocks=18432x1x1 wg=256  (+2 other shapes)
-route_kernel                                            649      38.72     59.66    0.2%  blocks=2048x1x1 wg=384  (+3 other shapes)
-dense_f16_kernel<Q6K, false, _Float16, float>           195      36.28    186.04    0.2%  blocks=128x1x1 wg=512  (+2 other shapes)
-dense_f16_kernel<Q6K, true, _Float16, _Float16>          65      29.90    460.06    0.2%  blocks=4x1x8 wg=512
-q_kv_norm_kernel                                        340      29.19     85.86    0.2%  blocks=2x2048x1 wg=256  (+3 other shapes)
-topk_kernel                                             126      23.27    184.68    0.1%  blocks=1008x1x1 wg=1024  (+4 other shapes)
-__amd_rocclr_copyBufferRectAligned                       44      18.10    411.46    0.1%  blocks=80x128x1 wg=256  (+2 other shapes)
-dense_f16_kernel<Q8, false, _Float16, _Float16>          55      15.36    279.34    0.1%  blocks=4x1x8 wg=512
-matmul_bf16_vec8_kernel                                 136      14.35    105.53    0.1%  blocks=4x2048x1 wg=256  (+8 other shapes)
-gemv_kernel<14, 8, false, 1>                              6      14.31   2384.97    0.1%  blocks=32320x1x1 wg=256
-dense_f16_kernel<Q5K, true, _Float16, float>             65      13.00    199.95    0.1%  blocks=18x1x1 wg=512
-CopyAlignedSnapshot                                     404      11.56     28.61    0.1%  blocks=64x1x1 wg=256  (+12 other shapes)
-split_gemv_kernel<8, 8, false, 4>                        54      11.15    206.55    0.1%  blocks=1280x1x1 wg=256  (+1 other shapes)
-dense_f16_kernel<Q6K, false, _Float16, _Float16>         65      10.88    167.36    0.1%  blocks=4x1x8 wg=512
-expert_group_kernel<22, 2, true, 4, true>                23       8.94    388.70    0.0%  blocks=72x18x1 wg=256
-dense_f16_kernel<Q5K, true, float, float>                65       8.34    128.38    0.0%  blocks=20x1x1 wg=512
-rope_tail_kernel                                        201       7.52     37.39    0.0%  blocks=8192x1x1 wg=256  (+11 other shapes)
-split_gemv_kernel<8, 4, false, 4>                        54       7.11    131.74    0.0%  blocks=4096x1x1 wg=256  (+1 other shapes)
-expert_group_kernel<16, 2, true, 4, true>                20       6.54    327.09    0.0%  blocks=72x18x1 wg=256
-routed_rows_kernel                                      300       5.95     19.82    0.0%  blocks=384x1x1 wg=256
+dense_f16_kernel<Q8, true, _Float16, float>             828    2885.13   3484.46   17.0%  blocks=128x16x1 wg=512  (+11 other shapes)
+routed_f16_kernel<19, true, true>                       100    2505.14  25051.39   14.7%  blocks=18x576x1 wg=256  (+1 other shapes)
+routed_f16_kernel<16, true, true>                       105    2407.36  22927.24   14.2%  blocks=18x576x1 wg=256  (+2 other shapes)
+attention_f16_kernel                                    220    1779.30   8087.75   10.5%  blocks=2048x2x1 wg=256  (+2 other shapes)
+routed_f16_kernel<22, false, false>                     105    1422.28  13545.52    8.4%  blocks=20x576x1 wg=256  (+2 other shapes)
+hc_state_pass_kernel<true>                              409    1190.40   2910.52    7.0%  blocks=1024x1x1 wg=640  (+2 other shapes)
+dense_f16_kernel<Q8, true, _Float16, _Float16>          207     935.47   4519.17    5.5%  blocks=4x16x8 wg=512  (+2 other shapes)
+matmul_bf16_wmma_kernel<128u>                           586     846.26   1444.14    5.0%  blocks=32x32x1 wg=256  (+14 other shapes)
+routed_f16_kernel<17, false, false>                      60     797.50  13291.63    4.7%  blocks=20x576x1 wg=256  (+1 other shapes)
+dense_f16_kernel<Q6K, true, float, float>                20     397.13  19856.60    2.3%  blocks=100x16x1 wg=512  (+1 other shapes)
+routed_f16_kernel<16, false, false>                      30     380.35  12678.25    2.2%  blocks=20x576x1 wg=256  (+1 other shapes)
+dense_f16_kernel<Q8, true, float, float>                207     265.79   1284.01    1.6%  blocks=20x16x1 wg=512  (+2 other shapes)
+routed_f16_kernel<22, true, true>                        15     125.55   8370.31    0.7%  blocks=18x396x1 wg=256
+routed_f16_kernel<10, false, false>                      10     124.96  12495.54    0.7%  blocks=20x576x1 wg=256  (+1 other shapes)
+to_half_kernel                                          440     102.29    232.47    0.6%  blocks=10240x1x1 wg=256  (+2 other shapes)
+indexer_score_wmma_kernel                                92      96.32   1046.94    0.6%  blocks=38x63x1 wg=512  (+29 other shapes)
+hc_expand_sum_kernel                                     71      90.21   1270.56    0.5%  blocks=20x2048x1 wg=256  (+3 other shapes)
+fp4_fake_quant_kernel                                   133      67.82    509.93    0.4%  blocks=1024x1x1 wg=256  (+14 other shapes)
+routed_f16_kernel<18, false, false>                      15      64.10   4273.40    0.4%  blocks=20x396x1 wg=256
+hc_state_pass_kernel<false>                              41      58.57   1428.62    0.3%  blocks=1024x1x1 wg=640  (+3 other shapes)
+engram_gate_kernel                                       22      54.66   2484.77    0.3%  blocks=4x2048x1 wg=1024  (+2 other shapes)
+compress_pool_kernel                                     33      49.07   1486.83    0.3%  blocks=2x1x1 wg=256
+swiglu_kernel                                           220      44.56    202.53    0.3%  blocks=18432x1x1 wg=256  (+2 other shapes)
+route_kernel                                            493      36.67     74.39    0.2%  blocks=2048x1x1 wg=384  (+3 other shapes)
+q_kv_norm_kernel                                        260      28.25    108.66    0.2%  blocks=2x2048x1 wg=256  (+3 other shapes)
 
 -- largest idle gaps (top 15) --
     gap us  after -> before
-   62104.8  dense_f16_kernel<Q5K, false, float -> routed_counts_kernel
-   61108.1  hc_expand_sum_kernel -> dense_f16_kernel<Q6K, true, float,
-   57099.7  __amd_rocclr_copyBuffer -> routed_counts_kernel
-   56802.7  __amd_rocclr_copyBuffer -> routed_counts_kernel
-   48962.7  route_kernel -> routed_counts_kernel
-   48694.6  __amd_rocclr_copyBuffer -> routed_counts_kernel
-   48605.0  __amd_rocclr_copyBuffer -> routed_counts_kernel
-   48437.6  __amd_rocclr_copyBuffer -> routed_counts_kernel
-   48326.8  __amd_rocclr_copyBuffer -> routed_counts_kernel
-   47786.8  hc_expand_sum_kernel -> dense_f16_kernel<Q6K, true, float,
-   46312.7  hc_expand_sum_kernel -> dense_f16_kernel<Q6K, true, float,
-   45500.9  __amd_rocclr_copyBuffer -> routed_counts_kernel
-   44872.0  __amd_rocclr_copyBuffer -> routed_counts_kernel
-   43354.6  __amd_rocclr_copyBuffer -> routed_counts_kernel
-   43240.5  route_kernel -> routed_counts_kernel
+   71052.1  __amd_rocclr_copyBuffer -> routed_counts_kernel
+   68191.5  __amd_rocclr_copyBuffer -> routed_counts_kernel
+   64966.2  dense_f16_kernel<Q5K, false, float -> routed_counts_kernel
+   63029.6  hc_expand_sum_kernel -> dense_f16_kernel<Q6K, true, float,
+   58943.8  hc_expand_sum_kernel -> dense_f16_kernel<Q6K, true, float,
+   58252.0  __amd_rocclr_copyBuffer -> routed_counts_kernel
+   56960.3  __amd_rocclr_copyBuffer -> routed_counts_kernel
+   56638.6  __amd_rocclr_copyBuffer -> routed_counts_kernel
+   53812.7  __amd_rocclr_copyBuffer -> routed_counts_kernel
+   53462.1  __amd_rocclr_copyBuffer -> routed_counts_kernel
+   52448.8  __amd_rocclr_copyBuffer -> routed_counts_kernel
+   51020.8  __amd_rocclr_copyBuffer -> routed_counts_kernel
+   50227.4  hc_expand_sum_kernel -> dense_f16_kernel<Q6K, true, float,
+   49719.3  hc_expand_sum_kernel -> dense_f16_kernel<Q6K, true, float,
+   47926.7  __amd_rocclr_copyBuffer -> routed_counts_kernel
