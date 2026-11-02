@@ -2444,3 +2444,35 @@ step, which no file order makes adjacent; prompt misses form long runs for
 at most 15% of their bytes, worth ~0.5 s of the session at E30's +36% for
 long runs. A rank-ordered or replicated expert file does not pay for this
 workload; single-expert decode misses (~12% of the session) are the cost.
+
+## E71 — narrow BF16 matrix-core tiles for short prompt passes (retained)
+
+A served follow-up turn is one 20-40 row prefill pass. At 20 rows its BF16
+router (384 × 5120) took 350 µs per layer in the 128-row WMMA kernel: three
+blocks for the whole matrix. `matmul_bf16_wmma_narrow_kernel` handles
+16-64 tokens with 64 weight rows × 16 tokens per block (four waves sharing
+one split of the activations), four 32-value K steps per barrier, and the
+next group's loads in flight during the matrix-core work. Products, K
+steps, hi/mid/lo part order and FP32 sums match the wide kernel; the test
+compares both bit for bit at 384 × 5120, 512 × 5120 and 4096 × 1280 for
+16-64 tokens.
+
+| Router variant (pp20 @ d8192) | Mean per call |
+|---|---:|
+| 128-row wide kernel | 350 µs |
+| one wave, 16 rows × 32 tokens | 146 µs |
+| four waves sharing activations | 149 µs |
+| + four K steps per barrier | 115 µs |
+| + 16-token tiles (retained) | 89 µs |
+
+Unprofiled `UD-IQ2_XXS` with streamed experts, depth 8192, two alternated
+rounds of three repetitions each:
+
+| Test | Before | After |
+|---|---:|---:|
+| pp20 | 91.3 / 92.2 tok/s | 98.5 / 98.4 tok/s (+7%) |
+| pp32 | 122.1 / 121.6 tok/s | 129.3 / 129.8 tok/s (+6%) |
+| pp64 | 198.0 / 204.0 tok/s | 214.5 / 213.7 tok/s (+6%) |
+| pp2048 | 1162.0 / 1156.7 tok/s | 1161.6 / 1156.7 tok/s |
+
+pp16, the first test after warmup, varies by ±25 tok/s in both builds.
