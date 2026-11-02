@@ -28,8 +28,8 @@ keeping about 90% of resident speed needs about 99% of routes to hit.
 
 Streaming is opt-in. `--stream-experts` (`serve`, `bench`, `prompt`) keeps
 dense weights resident and streams the routed experts; `--expert-cache-bytes
-N` caps the expert cache (default: available memory minus a 4 GiB reserve)
-and requires `--stream-experts`. Without the flag, a model that does not fit
+N` caps the expert cache (default: the memory the server's sessions leave,
+minus 2 GiB) and requires `--stream-experts`. Without the flag, a model that does not fit
 the available memory (free CMA excluded) fails to load and states what it
 needs, rather than running slower. While streaming, weight placement counts
 only the resident tensors, so the dense weights go through the device heap.
@@ -39,7 +39,9 @@ only the resident tensors, so the dense weights go through the device heap.
 
 - **Slots by size class.** Each distinct per-layer expert size (gate, up and
   down together, rounded to 256 B) is a class. A class grows by 128 MiB
-  managed-memory chunks while the cap and the 4 GiB reserve allow. An expert
+  managed-memory chunks while the cap and the reserve allow (4 GiB until
+  the server fits the cache, then 2 GiB plus RAM-cache backing still to
+  commit). An expert
   takes a free slot of its own class, or the smallest larger free slot once
   its class can no longer grow.
 - **Admission and eviction.** Each expert keeps a decayed use score, raised
@@ -61,6 +63,14 @@ only the resident tensors, so the dense weights go through the device heap.
   interleaved across layers. The seed fills 15/16 of min(cap, free memory −
   reserve), leaving room for session allocations and request-specific
   experts; seed reads do not count in the statistics.
+- **Fit after the sessions.** Once `gufo serve` has created its sessions
+  and the RAM prompt cache's backing, it allocates the prefetch stage and
+  sets the limit to the cache plus the free memory minus the reserve. Over
+  it, the newest chunks are freed: each size class keeps its highest-scored
+  experts, moving survivors out of the freed chunks into the slots of the
+  evicted ones. The ranking then seeds whatever room is left, so the first
+  prompt does not grow the cache. With `--cache-disk`, a streamed model's
+  automatic RAM prompt cache is 1 GiB (3 GiB without it).
 
 ## A layer's prepare
 

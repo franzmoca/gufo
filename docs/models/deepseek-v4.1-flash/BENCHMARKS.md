@@ -288,8 +288,8 @@ routed experts before it is ready.
 Capacity 262144 tokens, AR. Device total minus free, which on this unified
 memory APU tracks system-wide use (3.01 GiB idle before the server starts);
 it includes the prompt cache's retained checkpoints. Streamed `IQ2_XXS` and
-`UD-IQ1_M` fill the memory left after their 4 GiB reserve with the expert
-cache, so their rows show the cache's size, not a requirement.
+`UD-IQ1_M` fill the memory their sessions leave, minus 2 GiB, with the
+expert cache, so their rows show the cache's size, not a requirement.
 
 <!-- bench:memory -->
 | DS4.1 Flash IQ1_M AR<br>Workload | Gufo GiB |

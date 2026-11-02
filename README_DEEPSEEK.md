@@ -241,8 +241,10 @@ start it with `--stream-experts`.
 Streaming is never chosen automatically: without `--stream-experts`, a model
 that does not fit the available memory fails to load and states what it
 needs. `--expert-cache-bytes N` bounds the streamed expert cache (default:
-available memory minus 4 GiB); a smaller cache leaves more memory free and
-reads more experts from the SSD.
+the memory the server's sessions leave, minus 2 GiB); a smaller cache leaves
+more memory free and reads more experts from the SSD. Streamed, the
+automatic RAM prompt cache is 1 GiB with `--cache-disk` (3 GiB without), so
+the expert cache gets the rest; `--cache-ram-bytes` sets it explicitly.
 
 `--stream-experts` also runs the `IQ1_M` build in less memory, more slowly.
 `gufo bench` (pp2048, tg128, no drafter) and the host memory free once the
@@ -256,9 +258,8 @@ server is ready at a 256K context:
 | Streamed, 16 GiB cache | 93.3 GiB | 384 | 9.7 |
 
 Decode depends on how many routed experts the cache already holds, so it
-varies with the text. The automatic prompt cache may later take up to half
-of the free memory (at most 32 GiB); add `--cache-ram-bytes` to keep that
-memory free as well.
+varies with the text. Streamed, the automatic prompt cache takes 1 GiB with
+`--cache-disk` and 3 GiB without; add `--cache-ram-bytes` to change that.
 
 Optionally seed the expert cache from recorded oracle routes. For example,
 this histogram comes from the 3,000-token repository-documentation quality
