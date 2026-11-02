@@ -5,6 +5,49 @@ first. Each entry is a brief summary; its pull request has the details,
 measurements and validation. Upstream Gufo's changes are in
 [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-11-03: DeepSeek V4.1 Flash: expert cache sized after the sessions ([#17](https://github.com/franzmoca/gufo/pull/17))
+
+- On streamed builds, `gufo serve` now sizes the expert cache after it has
+  created its sessions and the RAM prompt cache, leaving 2 GiB free. Before,
+  the cache was sized at load and everything allocated later had to fit in
+  a fixed 4 GiB. With one session at the native 1M context, the
+  `UD-IQ2_XXS` expert cache grows from 95.5 to 97.4 GiB. Decode is about 3%
+  faster and SSD reads per decoded token drop 6-11%. With four sessions the
+  cache shrinks to 94.6 GiB and the server stops swapping (8 GB swapped
+  before). Greedy outputs are unchanged.
+- The automatic RAM prompt cache of a streamed model is 1 GiB with
+  `--cache-disk` and 3 GiB without, instead of half the free memory.
+  `--cache-ram-bytes` still sets it explicitly.
+- The benchmark card adds `UD-IQ2_XXS` streamed: 16.8-18.8 tok/s AR and up
+  to 61 tok/s DSpark for a single user, 76.3 tok/s AR and 93.4 tok/s DSpark
+  for eight users, 17.1 s cold load.
+
+## 2026-11-03: DeepSeek V4.1 Flash: Unsloth UD-IQ2_XXS and faster streamed prefill ([#16](https://github.com/franzmoca/gufo/pull/16))
+
+- Streamed builds run Unsloth's `UD-IQ2_XXS`: five shards, with the ISTA
+  `IQ4_NL` Engram linked as shard 6. New IQ3_XXS, Q2_K and IQ2_S expert
+  kernels cover decode, batched verification and prefill. Its 18.5K-token
+  perplexity is 5.71, against 6.27 for `IQ1_M`.
+- Streamed prefill reads experts ahead and computes while they arrive. Cached
+  experts run while misses stream from the SSD. Batches of 17-1,023 rows,
+  and each batch's first layer, predict their experts, and Engram rows are
+  read one batch ahead. `gufo bench` pp2048 on `UD-IQ2_XXS` gains 4-5%, and
+  a fresh 24K-token document gets its first token about 2 s sooner.
+- Served prompts replay the decoder layers once per prompt instead of once
+  per cache checkpoint: 2.4-2.7 s off the first token of a 14-24K-token
+  document. Checkpoints record where their decoder rows start. Checkpoints
+  saved by older builds are not restored.
+- Fixed nondeterministic cold first requests: a batch could evict an expert
+  it had just routed as a cache hit. Eviction now pops from short
+  per-size-class victim lists instead of scanning every slot.
+- Decode: greedy DSpark drafts only when drafts save time (chat, code and
+  document decode +3-9%), sampled top-p takes its softmax totals from the
+  device (+2-4%), short passes use a narrow BF16 router (pp20-64 +6-7%),
+  and the Q8_0 `q_b` GEMV is split four ways.
+- `PREFILL.md` and `DECODE.md` profile served prefill and decode against
+  the gfx1151 ceilings, and `BACKLOG.md` ranks the open work.
+  `tools/ds41/evict_sim.py` and `route_occupancy.py` replay expert traces.
+
 ## 2026-11-01: DeepSeek V4.1 Flash: split expert reads across two drives and DSpark drafter fixes ([#15](https://github.com/franzmoca/gufo/pull/15))
 
 - Streamed builds (`--stream-experts`) can read every expert miss from two
