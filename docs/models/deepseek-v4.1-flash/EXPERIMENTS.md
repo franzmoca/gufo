@@ -2678,3 +2678,68 @@ alternated rounds of seven repetitions: down 12.87-12.91 ms before,
 13.82-13.87 ms after (+7%); the IQ2_XXS gate+up control is unchanged
 (23.18-23.29 ms). Reverted.
 
+## E81 — routed FP16: down-fragment sharing off, and why tile surgery is closed (rejected)
+
+Three checks on `ds41_mmq_bench --f16 1` over E76's recorded served routes
+(counts regenerated from the surviving served trace; line 10, seven
+repetitions, three rounds; gate+up 23.06-23.13 / down 12.88-12.91 ms
+baseline, reproducing E76):
+
+- Activation-fragment sharing off for the down kernels (each down fragment
+  feeds one product, where a pair fragment feeds two, so the exchange
+  permutes buy half as much): IQ2_S down 12.91 → 13.25 ms, IQ2_XS down
+  12.07 → 12.35, IQ1_S control unchanged. The two 16-byte LDS reads cost
+  more than the permutes even for single-product fragments, as in E25's
+  dense kernel. Reverted.
+- Tile-width arithmetic on the served traces: 2,048-row encoder batches
+  hold 493,128 live 16-slot groups against 399,360 ideal (23.5% padding),
+  and the live count is identical for 64- and 32-slot tiles (per-expert
+  `ceil(count/16)` is invariant), so E8's direction cannot reduce WMMA
+  work. Cutting the remaining padding needs cross-expert groups, which
+  share no B fragment: one decoded fragment per group raises decode work
+  948/419 = 2.26x and re-reads each expert's weights per group (an extra
+  ~2.5 GiB of DRAM per gate+up call). Dead on arithmetic, not worth
+  building.
+- A wave64 rewrite would halve the issue count only if the w64 fragments
+  held half the data per lane; the gfx11 builtin signatures
+  (`wmma_f32_16x16x16_f16_w64` "V4fV16xV16xV4f" against w32's
+  "V8fV16xV16xV8f") keep 16 halves per lane in both, doubling operand
+  redundancy. Ruled out from the ISA definition, no build.
+
+## E82 — two-wave prefill: the resident experts' gate+up during the read stall (retained)
+
+The store's read overlap already split decode batches (`hit_ids`/`miss_ids`
+kept route positions); prefill batches never got the split (`kSplitRows`
+covered only speculative rows), so every 2,048-row layer idled ~10.5 ms
+waiting for its misses' reads before the routed FP16 kernel could start.
+`kSplitRows` now covers `DS41_MAX_PREFILL_BATCH` rows, and the overlap
+callback plans `hit_ids` on the device and launches the routed FP16
+gate+up over the resident experts while the readers stream; after the
+prepare the same kernel runs over `miss_ids` (the plan buffer is
+stream-ordered per use), and the down pass replans the full routes. Each
+slot is written once by the same arithmetic, so outputs are unchanged;
+batches without a hit/miss mix keep one full pass, and decode-sized
+batches keep their grouped-GEMV split (non-FP16 prefill builds skip the
+split).
+
+Correctness: `ds41.mmq_typed`, `ds41.attention`, `ds41.expert_store` pass;
+the 3,000-position decode and batched scores and an 18,499-position
+4096-token-batch score are bit-identical to the pre-change build over
+every position, argmax and NLL (`ds41_load_probe --stream-experts`, fresh
+cache per run, tails attached).
+
+Speed, production binaries, alternating runs:
+
+| Test | Before | After |
+| --- | ---: | ---: |
+| `gufo bench -p 2048 -n 0 -d 8192 -r 3` | 1109.35 / 1108.03 tok/s | 1160.17 / 1161.78 |
+| 18.5K probe, 4,096-token batches (logits per position) | 33.3 s | 31.4 s (−5.9%) |
+| Served doc 1 (23,954 tokens, fresh server) | 26.30 / 26.28 s | 24.73 / 24.47 s |
+| Served doc 2 (19,927 tokens, same server) | 20.21 / 20.75 s | 19.19 / 19.31 s |
+
+The store's host wait per token barely moves (1.66 → 1.53 ms at 4,096
+tokens): the gain is the resident experts' ~20 ms of gate+up filling the
+read stall, not shorter reads. Full-model 3K teacher scores and DSpark
+qualification were not rerun; the bit-identical teacher-forced scores
+above cover the changed path.
+

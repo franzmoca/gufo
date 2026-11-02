@@ -1133,24 +1133,45 @@ bool moe(ds41_decoder* d, uint32_t il, uint32_t n) {
     int gate_type;
     int32_t* plan_hit;
     bool fused;
+    bool small;  // a decode-sized batch keeps the grouped-GEMV split below
+    bool f16;    // the batched FP16 pair path: its kernels take device plans
     const uint16_t* x16;
+    uint16_t* mid16 = nullptr;
     bool gate_up_done = false;
     bool shared_done = false;
     ds41_expert_overlap info{};
   };
   StreamWork work{d,         l,          il,        n,         (uint32_t)rows, (uint32_t)used, gate_type,
-                  d->expert_plan_split[0], fused_pair, shared_x16};
+                  d->expert_plan_split[0], fused_pair, small, f16_gate && f16_down, shared_x16,
+                  f16_gate ? reinterpret_cast<uint16_t*>(d->u6) : nullptr};
   const auto streamed_overlap = [](void* context, const ds41_expert_overlap* info) {
     StreamWork& w = *static_cast<StreamWork*>(context);
     if (!w.shared_done && !shared_moe(w.d, w.layer, w.n, w.x16))
       return false;
     predict_next_layer(w.d, w.il, w.n, info && info->miss_rows > 0);
-    if (!info || !info->hit_ids || info->miss_rows == 0 || info->miss_rows == info->rows || !w.fused)
+    if (!info || !info->hit_ids || info->miss_rows == 0 || info->miss_rows == info->rows || !w.fused ||
+        !(w.f16 || w.small))
       return true;
     w.info = *info;
     w.gate_up_done = true;
     const uint64_t expert_bytes =
         (uint64_t)DS41_N_FF_EXP * kDim / 256 * expert_block_bytes(w.gate_type);
+    if (w.f16) {
+      /* The resident experts' gate+up runs while the reads stream: the plan
+       * and launch go into the routed plan buffer the batch's own kernels
+       * use, stream-ordered after this callback's work. */
+      int32_t* plan_rows = w.d->routed_plan;
+      int32_t* plan_bounds = plan_rows + w.rows;
+      int32_t* plan_tiles = plan_bounds + DS41_N_EXPERT + 1;
+      if (ds41_v41_routed_plan_device(info->hit_ids, w.rows, DS41_N_EXPERT, plan_rows, plan_bounds,
+                                      plan_tiles))
+        return false;
+      return ds41_v41_routed_f16(w.gate_type, info->table[0], info->table[1], expert_bytes, w.x16, w.used,
+                                 plan_rows, plan_bounds, plan_tiles, w.rows / 64 + DS41_N_EXPERT,
+                                 w.d->route_w, kSwigluLimit, w.mid16, 1, DS41_N_FF_EXP, kDim,
+                                 static_cast<const void* const*>(info->table[0]),
+                                 static_cast<const void* const*>(info->table[1])) == 0;
+    }
     if (w.n == 1)
       return ds41_v41_gemv_experts_swiglu(w.gate_type, info->table[0], info->table[1], expert_bytes,
                                           info->hit_ids, w.used, w.d->xn, 0, 1, w.d->route_w, kSwigluLimit,
@@ -1224,10 +1245,12 @@ bool moe(ds41_decoder* d, uint32_t il, uint32_t n) {
   uint32_t n_tiles = 0;
   if (f16_gate && f16_down) {
     // Both projections consume the device plan; MMQ's host bucket classes
-    // and maximum-row bounds are unused on this path.
+    // and maximum-row bounds are unused on this path.  When the store's read
+    // overlap already ran the resident experts' gate+up, this pass plans the
+    // rows the reads filled (down below replans the full routes).
     n_tiles = (uint32_t)rows / 64 + DS41_N_EXPERT;
-    if (ds41_v41_routed_plan_device(d->route_ids, (uint32_t)rows, DS41_N_EXPERT, d->routed_plan,
-                                     plan_bounds, plan_tiles))
+    if (ds41_v41_routed_plan_device(work.gate_up_done ? work.info.miss_ids : d->route_ids, (uint32_t)rows,
+                                    DS41_N_EXPERT, d->routed_plan, plan_bounds, plan_tiles))
       return false;
   } else if (!small) {
     std::vector<int32_t> ids((size_t)rows);
@@ -1348,6 +1371,10 @@ bool moe(ds41_decoder* d, uint32_t il, uint32_t n) {
     if (status) return false;
   } else if (f16_down) {
     const uint64_t expert_bytes = (uint64_t)DS41_N_FF_EXP * kDim / 256 * expert_block_bytes(down_type);
+    if (work.gate_up_done &&
+        ds41_v41_routed_plan_device(d->route_ids, (uint32_t)rows, DS41_N_EXPERT, d->routed_plan, plan_bounds,
+                                    plan_tiles))
+      return false;  // the split gate+up left the plan covering only its rows
     if (ds41_v41_routed_f16(down_type, down, nullptr, expert_bytes, mid16, 1, plan_rows, plan_bounds, plan_tiles,
                             n_tiles, nullptr, 0.0f, d->down6, 0, kDim, DS41_N_FF_EXP, down_table,
                             nullptr))

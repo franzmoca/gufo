@@ -59,9 +59,11 @@ constexpr uint64_t kReadBytes = 32ull << 20;
 constexpr uint64_t kDirectAlign = 4096;
 constexpr uint32_t kReadWorkers = 8;
 constexpr uint32_t kRecentRows = 16;
-/* Route rows of the largest split evaluation (decode, DSpark verification
- * and joint rows); larger batches read their experts in one pass. */
-constexpr uint32_t kSplitRows = DS41_DECODER_MAX_SPECULATIVE * DS41_N_EXPERT_USED;
+/* Route rows of the largest split evaluation: prefill batches split their
+ * resident rows from the rows their reads fill, so the resident experts'
+ * kernels run while the reads stream (smaller batches are decode, DSpark
+ * verification and joint rows). */
+constexpr uint32_t kSplitRows = DS41_MAX_PREFILL_BATCH * DS41_N_EXPERT_USED;
 /* Batches of at least this many tokens adopt a wide (prefill-scale)
  * prediction job for their layer; smaller batches drop it instead of reading
  * a whole prompt's experts. */
