@@ -2743,3 +2743,54 @@ read stall, not shorter reads. Full-model 3K teacher scores and DSpark
 qualification were not rerun; the bit-identical teacher-forced scores
 above cover the changed path.
 
+## E83 — layer-0 prediction, encoder batches stop at layer 19, Engram rows in layer order (retained)
+
+A served profile after E82 (two fresh documents, `PREFILL.md` method,
+attributing each idle gap to the routed kernel that follows it) left
+1.53 s of encoder read idle across 400 layer calls, median 0.9 ms. Layer
+0 of every 2,048-row batch carried most of it, 15-73 ms per batch (228 ms
+on a fresh server): it has no earlier layer to predict its experts.
+Meanwhile layer 19 of each encoder-only batch predicted layer 20, which
+the batch never runs, and the next batch's layer-0 prepare dropped that
+job (9-10 GiB of dropped prefetch per served run). The Engram projection
+of layer 1 also waited 50-117 ms per batch: layer 14's 49K row reads
+started at the same time and shared the drive.
+
+- `predict_first_layer`: prompt batches of 1,024+ rows route layer 0 on
+  the embedding, normed with layer 0's FFN norm, before its attention;
+  `ds41_expert_store_expect` reopens the prediction window at layer 0 (the
+  previous evaluation's kernels are ordered before the prediction event
+  the store waits on, so the parity half is free).
+- `pass_end`: a batch whose rows all stop at the replay boundary predicts
+  nothing past layer 19.
+- Engram rows are read on one thread chain in layer order, layer 1 first.
+
+Correctness: predictions and reads only move data earlier, so the 3K and
+18.5K (4,096-token batches) batched scores match the previous build at
+every position; `ds41.expert_store` passes.
+
+Profile of the same two documents:
+
+| | E82 | E83 |
+| --- | ---: | ---: |
+| Encoder read idle (400 calls) | 1.53 s | 0.96 s |
+| Largest encoder idle | 228 ms | 40 ms |
+| Engram row waits | 1.55 s | 1.07 s |
+| Decoder replay idle (40 calls) | 1.71 s | 1.67 s |
+| Dropped prefetch per run | 9-10 GiB | 0.7-1.0 GiB |
+
+Served, fresh server per round, three alternated rounds (ms):
+
+| Request | E82 | E83 |
+| --- | --- | --- |
+| 23,954-token document | 24,460 / 24,275 / 24,526 | 24,043 / 24,115 / 24,125 |
+| 19,927-token document, same server | 19,945 / 20,746 / 21,095 | 20,064 / 21,146 / 20,926 |
+
+The fresh document gains 0.2-0.4 s every round; the follow-up is within
+noise (both builds drifted ~2 s slower over the session's runs, drive at
+71-73 °C without throttling). Layer-0 prediction alone (without the
+Engram order) left the follow-up 0.3-1.9% slower in three rounds: its
+reads competed with layer 1's Engram rows. `gufo bench -p 2048 -n 0 -d
+8192` warm repetitions are unchanged (UD-IQ2_XXS 1,169-1,193 against
+1,169-1,190; GSQ IQ2_XXS 1,310-1,317 against 1,312-1,318).
+

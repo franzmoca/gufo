@@ -94,6 +94,13 @@ bool ds41_expert_store_predict(ds41_expert_store* store, uint32_t layer,
                                hipEvent_t done, const int32_t* ids, uint32_t count,
                                bool wide);
 
+/* Reopens the prediction window at `layer`, the next prepare's target, when
+ * an evaluation starts somewhere other than after the last prepared layer
+ * (a prompt batch that stopped at the replay boundary). Every kernel of the
+ * previous evaluation's layers has been ordered before that prepare's
+ * route read, so no running kernel reads the layer's parity half. */
+void ds41_expert_store_expect(ds41_expert_store* store, uint32_t layer);
+
 /* Waits until every recorded prediction has been submitted, so the ids and
  * event may be released. */
 void ds41_expert_store_predict_flush(ds41_expert_store* store);

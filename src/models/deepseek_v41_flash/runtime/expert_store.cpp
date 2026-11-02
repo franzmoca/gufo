@@ -1700,6 +1700,11 @@ bool ds41_expert_store_predict(ds41_expert_store* store, uint32_t layer,
   return true;
 }
 
+void ds41_expert_store_expect(ds41_expert_store* store, uint32_t layer) {
+  if (store && layer < DS41_N_LAYER)
+    store->pf_expected.store(layer, std::memory_order_release);
+}
+
 void ds41_expert_store_predict_flush(ds41_expert_store* store) {
   if (!store)
     return;

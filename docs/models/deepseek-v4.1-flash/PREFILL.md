@@ -209,6 +209,11 @@ experts are warm.
 
 About 10.5 ms per 2,048-row layer, with wide next-layer prediction already
 on (E68).
+- **Layer-0 prediction (E83, retained):** each batch's first layer, with
+  no earlier layer to predict it, waited 15-73 ms; routing it on the
+  normed embedding before its attention and dropping encoder batches'
+  layer-20 predictions cut the encoder read idle from 1.53 to 0.96 s over
+  two documents.
 - **Two-wave layers (E82, retained):** the overlap callback now runs the
   routed FP16 gate+up over the resident experts while the misses stream,
   and the read rows complete it after the prepare. −1.7 s on a fresh
@@ -370,7 +375,11 @@ numerics.
 
 Two Engram layers per 2,048-row batch wait ~20 ms each for host row
 reads before the projection. Prefetching the rows one layer early would
-hide this. E26 already moved the rows into pinned staging.
+hide this. E26 already moved the rows into pinned staging. After E82 the
+first Engram layer waited 50-117 ms per batch on the fresh document; E83
+reads layer 1's rows before layer 14's (1.55 → 1.07 s over two
+documents). What remains is layer 1's own 49K random 144-byte reads,
+issued when the batch starts.
 
 ## Things that look like levers but are not
 

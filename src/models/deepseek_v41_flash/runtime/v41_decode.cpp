@@ -350,6 +350,9 @@ struct ds41_decoder : Activations {
   hipEvent_t pred_events[DS41_N_LAYER] = {};
   bool pred_ok = true;
   bool pass_missed = false;  // a layer of this eval waited on expert reads
+  /* Layers this eval runs: a prompt batch whose rows all stop at the replay
+   * boundary ends at the first decoder layer, and predicts nothing past it. */
+  uint32_t pass_end = DS41_N_LAYER;
   /* Expert trace (ds41_expert_store_tracing): top-kTraceK router predictions
    * for the next kTraceLeads layers of every batch of up to kTraceRows
    * rows, copied asynchronously and written once the target layer's prepare
@@ -1052,30 +1055,49 @@ bool trace_predict(ds41_decoder* d, uint32_t il, uint32_t n) {
   return true;
 }
 
+/* Routes layer `target` on xn and records the prediction with the store. */
+void predict_layer(ds41_decoder* d, uint32_t target, uint32_t n) {
+  const ds41_layer_weights* nl = &d->engine->weights->layer[target];
+  const uint32_t used = DS41_N_EXPERT_USED;
+  const uint64_t rows = (uint64_t)d->capacity * DS41_N_EXPERT_USED;
+  int32_t* ids = d->pred_pinned + (size_t)target * rows;
+  if (!router_logits(d, target, n) ||
+      ds41_v41_route(d->router, f32(d, nl->ffn_exp_probs_b), d->pred_ids, d->pred_w,
+                     DS41_N_EXPERT, used, DS41_EXPERT_WEIGHT_SCALE, n) ||
+      hipMemcpyAsync(ids, d->pred_ids, (size_t)n * used * sizeof(int32_t),
+                     hipMemcpyDeviceToHost, nullptr) != hipSuccess ||
+      hipEventRecord(d->pred_events[target], nullptr) != hipSuccess)
+    d->pred_ok = false;
+  else
+    (void)ds41_expert_store_predict(d->engine->expert_store, target,
+                                    d->pred_events[target], ids, n * used,
+                                    n >= kPrefillPredictTokens);
+}
+
 void predict_next_layer(ds41_decoder* d, uint32_t il, uint32_t n, bool misses_now) {
   if (d->tracing) return;
-  if (!d->engine->expert_store || !d->pred_ok || il + 1 >= DS41_N_LAYER)
+  if (!d->engine->expert_store || !d->pred_ok || il + 1 >= d->pass_end)
     return;
   d->pass_missed = d->pass_missed || misses_now;
   if (n < kPrefillPredictTokens && !d->pass_missed)
     return;
   if (n <= DS41_DECODER_MAX_JOINT && !misses_now)
     return;
-  const ds41_layer_weights* nl = &d->engine->weights->layer[il + 1];
-  const uint32_t used = DS41_N_EXPERT_USED;
-  const uint64_t rows = (uint64_t)d->capacity * DS41_N_EXPERT_USED;
-  int32_t* ids = d->pred_pinned + (size_t)(il + 1) * rows;
-  if (!router_logits(d, il + 1, n) ||
-      ds41_v41_route(d->router, f32(d, nl->ffn_exp_probs_b), d->pred_ids, d->pred_w,
-                     DS41_N_EXPERT, used, DS41_EXPERT_WEIGHT_SCALE, n) ||
-      hipMemcpyAsync(ids, d->pred_ids, (size_t)n * used * sizeof(int32_t),
-                     hipMemcpyDeviceToHost, nullptr) != hipSuccess ||
-      hipEventRecord(d->pred_events[il + 1], nullptr) != hipSuccess)
-    d->pred_ok = false;
-  else
-    (void)ds41_expert_store_predict(d->engine->expert_store, il + 1,
-                                    d->pred_events[il + 1], ids, n * used,
-                                    n >= kPrefillPredictTokens);
+  predict_layer(d, il + 1, n);
+}
+
+/* A prompt batch's first layer has no layer before it to predict its
+ * experts: route it on the embedding, normed with its FFN norm, so its
+ * reads run during its attention. xn is free once the streams are copied. */
+bool predict_first_layer(ds41_decoder* d, uint32_t n) {
+  if (d->tracing || !d->engine->expert_store || !d->pred_ok || n < kPrefillPredictTokens)
+    return true;
+  const ds41_layer_weights* l = &d->engine->weights->layer[0];
+  if (!l->ffn_exp_probs_b) return true;
+  if (ds41_v41_rms_norm(d->xn, f32(d, l->ffn_norm), d->xn, n, kDim, DS41_RMS_EPS)) return false;
+  ds41_expert_store_expect(d->engine->expert_store, 0);
+  predict_layer(d, 0, n);
+  return true;
 }
 
 bool moe(ds41_decoder* d, uint32_t il, uint32_t n) {
@@ -1940,14 +1962,19 @@ int eval_rows(ds41_decoder* d, const int* tokens, uint32_t n, uint32_t keep_from
       memcpy(&engram_rows[((uint64_t)layer * n + t) * DS41_ENGRAM_COLS], rows[layer], sizeof(rows[layer]));
   }
 
-  /* Every Engram layer's rows are read while the GPU runs the layers before it. */
+  /* Every Engram layer's rows are read while the GPU runs the layers before
+   * it, one layer after the other in layer order: the first Engram layer
+   * runs a layer after the batch starts, and the later layer's rows only
+   * slowed it down. Slots are in layer order. The chain is joined before
+   * the promises and rows it writes go out of scope. */
+  std::promise<bool> engram_done[DS41_N_ENGRAM_LAYER];
   std::future<bool> engram_reads[DS41_N_ENGRAM_LAYER];
-  for (uint32_t il = 0; il < DS41_N_LAYER; il++) {
-    const int slot = ds41_layer_engram_slot(il);
-    if (slot < 0) continue;
-    engram_reads[slot] = std::async(std::launch::async, engram_read, d,
-                                    &engram_rows[(uint64_t)slot * n * DS41_ENGRAM_COLS], n, d->engram_pinned[slot]);
-  }
+  for (uint32_t slot = 0; slot < DS41_N_ENGRAM_LAYER; slot++) engram_reads[slot] = engram_done[slot].get_future();
+  std::future<void> engram_chain = std::async(std::launch::async, [&] {
+    for (uint32_t slot = 0; slot < DS41_N_ENGRAM_LAYER; slot++)
+      engram_done[slot].set_value(
+          engram_read(d, &engram_rows[(uint64_t)slot * n * DS41_ENGRAM_COLS], n, d->engram_pinned[slot]));
+  });
 
   /* Embedding, replicated over the hc residual streams; layer 0 pre-mix is one-hot. */
   const ds41_tensor* embd = w->token_embd;
@@ -1985,6 +2012,8 @@ int eval_rows(ds41_decoder* d, const int* tokens, uint32_t n, uint32_t keep_from
                           hipMemcpyDeviceToDevice, 0) == hipSuccess;
   ok = ok && hipMemcpyAsync(d->pre[0], one_hot, (uint64_t)n * kHc * sizeof(float), hipMemcpyHostToDevice, 0) ==
                  hipSuccess;
+  d->pass_end = kept ? DS41_N_LAYER : DS41_FIRST_DECODER_LAYER;
+  ok = ok && predict_first_layer(d, n);
 
   const int prev = 0;
   const uint32_t feature_rows = std::min(kept, DS41_DSPARK_FEATURE_ROWS);
@@ -2017,6 +2046,7 @@ int eval_rows(ds41_decoder* d, const int* tokens, uint32_t n, uint32_t keep_from
     }
   }
   d->window_floor = 0;
+  d->pass_end = DS41_N_LAYER;
 
   /* Final mix and norm for the requested rows, then the vocabulary projection in passes. */
   const uint32_t first = rows - logit_rows;
