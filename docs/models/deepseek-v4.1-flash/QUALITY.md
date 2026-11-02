@@ -612,3 +612,13 @@ user, pp2048 / tg128, tok/s:
 [Scores](artifacts/2026-11-01-ud-iq2xxs/scores.json),
 [speed](artifacts/2026-11-01-ud-iq2xxs/speed/),
 [functional reports](artifacts/2026-11-01-ud-iq2xxs/functional/).
+
+### E75 BF16 prefill dispatch
+
+The 32-token, four-wave, two-K-step router/compressor candidate matches the
+existing wide kernel bit for bit at 65, 140 and 2,048 tokens in the standalone
+probe. `ds41.attention` passes with additional 65/140-token comparisons to
+double precision. Two-document HTTP AR repeats produce identical single-token
+outputs. This does not replace the 3K teacher scores or DSpark qualification,
+which were not repeated for E75. See [E75](EXPERIMENTS.md#e75--grouped-bf16-routercompressor-prefill-retained)
+for timing scope and limits.

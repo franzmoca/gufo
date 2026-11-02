@@ -2801,6 +2801,9 @@ extern "C" int ds41_v41_matmul_bf16(const uint16_t* w, const float* x, float* ou
       matmul_bf16_wmma_narrow_kernel<kBf16NarrowTokens, kBf16NarrowWaves, kBf16NarrowSteps>
           <<<dim3(rows / (16 * kBf16NarrowWaves), (n + kBf16NarrowTokens - 1) / kBf16NarrowTokens),
              32 * kBf16NarrowWaves>>>(w, x, out, rows, k, n);
+    else if (rows <= 512 && k % 64 == 0)
+      matmul_bf16_wmma_narrow_kernel<32, 4, 2>
+          <<<dim3(rows / 64, (n + 31) / 32), 128>>>(w, x, out, rows, k, n);
     else if (rows % 128 == 0)
       matmul_bf16_wmma_kernel<128><<<dim3(rows / 128, tiles.y), 256>>>(w, x, out, rows, k, n);
     else

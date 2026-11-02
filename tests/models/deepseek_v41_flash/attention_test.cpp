@@ -816,8 +816,9 @@ int main(int argc, char** argv) {
   }
   /* Router, compressor and indexer shapes: FP32 kernel below 16 tokens, the
    * matrix cores above (tile edges at 37 and 200 tokens). */
-  const uint32_t matmuls[][3] = {
-      {384, 5120, 1}, {384, 5120, 37}, {512, 5120, 200}, {4096, 1280, 64}};
+  const uint32_t matmuls[][3] = {{384, 5120, 1},   {384, 5120, 37},
+                                 {384, 5120, 65},  {384, 5120, 140},
+                                 {512, 5120, 200}, {4096, 1280, 64}};
   for (const auto& m : matmuls) {
     const double e = Bf16MatmulCase(m[0], m[1], m[2], rng);
     std::printf("bf16 matmul rows=%u k=%u n=%u rel_err=%.2e\n", m[0], m[1],

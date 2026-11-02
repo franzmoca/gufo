@@ -2568,3 +2568,59 @@ exports 2,048-token `COUNTS` lines for `ds41_mmq_bench`. The existing
 mean 419.19 64-slot tiles, mean useful-slot occupancy 45.86%. This covers
 the complete trace, not an isolated request. Older count files lack matched
 provenance; these figures do not establish the cause of the served/bench gap.
+
+## E75 — grouped BF16 router/compressor prefill (retained)
+
+Reuse the existing narrow kernel at 32 tokens × 64 weight rows, four waves,
+two 32-value K steps per barrier, for batches above 64 tokens with at most
+512 weight rows and K divisible by 64. Smaller batches and the 4,096-row
+indexer keep their existing dispatch. No new arithmetic or runtime switch.
+
+Warm HIP-event microbenchmarks, four warmups, 30 calls, three repetitions,
+`-O2 -ffast-math -fno-finite-math-only`, 2,048 tokens:
+
+| Shape | Existing ms | Candidate ms |
+|---|---:|---:|
+| Router 384 × 5,120 | 1.274 | 1.159 |
+| Compressor 512 × 5,120 | 1.640 | 1.425 |
+| Indexer 4,096 × 1,280 (excluded) | 2.605 | 2.772 |
+
+All outputs match bit for bit, also at 65 and 140 tokens. The candidate
+passes `ds41.attention`, including added double-precision cases at 65 and
+140 tokens; the shared formatting check passes. Full model 3K teacher
+scores and DSpark qualification were not rerun for this experiment.
+
+Production AR pp2048/tg128 at depth 8192, UD-IQ2_XXS streamed, fixed 96 GiB
+expert budget, three repetitions per process in ABBA order:
+
+| Run | pp tok/s | tg tok/s |
+|---|---:|---:|
+| Baseline A1 | 1091.14 ± 59.85 | 19.04 ± 0.48 |
+| Candidate B1 | 1095.30 ± 65.38 | 19.05 ± 0.47 |
+| Candidate B2 | 1094.55 ± 62.76 | 19.04 ± 0.46 |
+| Baseline A2 | 1089.00 ± 59.41 | 19.04 ± 0.48 |
+
+HTTP AR, context 65536, one session, fixed 90 GiB expert budget, two fresh
+documents per process, one generated token (no draft/accepted tokens):
+
+| Request | A1 prompt ms | B1 | B2 | A2 |
+|---|---:|---:|---:|---:|
+| 23,954 tokens | 25965.90 | 25071.84 | 25152.41 | 25247.44 |
+| 19,927 tokens | 19784.48 | 19505.21 | 20307.85 | 21185.86 |
+
+All responses produced the same single token; this is limited output
+agreement, not a full quality evaluation. Request timing remains inconclusive:
+streaming/cache variance is larger than the expected kernel saving. Retained
+at the user's explicit preference based on the measured kernel gain; do not
+claim a qualified end-to-end speedup or update headline benchmark numbers.
+Initial automatic-cache runs and an HTTP model-name setup failure are retained
+alongside the fixed-budget runs in the [artifacts](artifacts/2026-11-02-bf16-prefill/).
+
+The excluded indexer already launches 1,024 wide blocks at 2,048 tokens,
+versus 96 for the router. The candidate makes four times as many blocks,
+with half the rows and half the tokens per tile: nominal weight loads and
+activation splitting are each duplicated across twice as many tiles.
+Reduced synchronization and more blocks benefit the small-row shapes; for
+the already-wide indexer the extra work likely outweighs that benefit.
+This explanation follows the tile geometry; no hardware-counter ablation
+has isolated the dominant cause.
