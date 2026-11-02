@@ -2624,3 +2624,14 @@ Reduced synchronization and more blocks benefit the small-row shapes; for
 the already-wide indexer the extra work likely outweighs that benefit.
 This explanation follows the tile geometry; no hardware-counter ablation
 has isolated the dominant cause.
+
+## E76 — routed FP16 128-value activation stages (rejected)
+
+Double `kStageK` from 64 to 128, leaving slot tiles, decode and WMMA order
+unchanged. Recorded served trace exported by `route_occupancy.py`, counts
+line 10, 2,048 tokens, IQ2_XXS gate/up and IQ2_S down, seven repetitions:
+gate/up 23.18 → 23.45 ms, down 12.91 → 13.44 ms. Both benchmark numerical
+checks have identical errors against their independent reference. Halving
+the stage barriers does not pay for the larger shared activation allocation
+on this shape. Reverted before full-model timing.
+[Raw results](artifacts/2026-11-02-routed-stages/).
