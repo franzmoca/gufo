@@ -15,10 +15,12 @@ Scripts and outputs are in [artifacts/2026-11-02-decode](artifacts/2026-11-02-de
 Read [STREAMING.md](STREAMING.md) for the expert store, [PREFILL.md](PREFILL.md)
 for prompt processing, and [EXPERIMENTS.md](EXPERIMENTS.md) for every
 experiment cited as `E<n>`. Follow-ups measured the same day on the same
-workloads are E89-E91: more decode prediction does not pay as the store
+workloads are E89-E92: more decode prediction does not pay as the store
 stands, the verification-row expert count closes the grouped-GEMV
-question, and the eviction victim lists (retained) removed a 1-2 ms
-per-admission host scan.
+question, the eviction victim lists (retained, with E92's exact pops)
+removed the per-admission scan without changing served speed, and
+Belady's optimum would halve decode misses where past-use eviction rules
+gain 4-8% in replay (E92).
 
 ## Summary
 
@@ -422,12 +424,13 @@ Route hits per 64-token interval
     24K prompt read 2-3× the steady rate.
   - **More cache memory** (item 30): replays put +3.7 GiB at −28% decode
     misses.
-  - ~~The eviction scan~~: fixed by E91's per-class victim lists. Each
-    admitted miss scanned every occupied slot (~13,000 at a 96 GiB cache,
-    1-2 ms of random host access, not the 48 µs first estimated) between
-    the routes and the miss launch; the lists keep one scan per 32
-    evictions or 512 prepares and cut the single-token probe by
-    2.7 ms/token.
+  - ~~The eviction scan~~: replaced by per-class victim lists (E91, with
+    E92's exact pops). Served, the scan cost at most ~0.15 ms per
+    admission and decode did not change.
+  - **Eviction choice** (E92): Belady's optimum would remove about half
+    of the decode misses (−4.9 s of 10.2 s modeled stall on this
+    workload); the best past-use rule gains 4-8% in replay and is
+    unconfirmed on the agent session.
 - **A fresh server's start** costs ~24 ms per token for its first 64
   tokens. The built-in ranking is a calibration trace and does not match
   chat text. A chat-and-code histogram (`MODEL.gguf.expert-histogram`), or

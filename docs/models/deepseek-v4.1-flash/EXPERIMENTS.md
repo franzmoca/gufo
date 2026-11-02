@@ -3066,7 +3066,7 @@ mean |dNLL| 0.12 from position 0), so every output moves for a
 sub-noise gain. The sweep numbers and the tool stay for the next time a
 decode GEMV changes.
 
-## E91 — eviction victim lists (retained)
+## E91 — eviction victim lists (retained; pop check corrected in E92)
 
 BACKLOG item 31. Once the cache fills, every admitted miss ran `acquire`,
 which scans all occupied slots (~13,000 at a 96 GiB cache, ~99 GiB with
@@ -3106,3 +3106,81 @@ Gates and results:
   prefill 876/813 → 1038/898 tok/s (+10-15%). AR sampled and greedy were
   within noise. The functional cache suite passes with identical
   outputs.
+
+**Corrected by E92.** A pop skipped a slot only when its score had risen
+by more than 8.0 since the build, but one route adds 1-5, so slots used
+since the build were still evicted. On served sampled DSpark that read
+4-6 MiB more per decoded token and cost chat 2.6% (19.4 → 18.9 tok/s in
+both rounds against five baseline runs); sampled DSpark does not have
+E87's greedy spread. The long-request and long-prefill gains above did
+not reproduce against a baseline that decoded 27.9-28.1 tok/s there, and
+served host time outside route and read waits puts the old scan at
+≤ ~0.15 ms, not 1-2 ms (E92).
+
+## E92 — exact victim-list pops; eviction scoring against the offline optimum
+
+E91's pop test (`score > score_built + 8.0`) missed most uses since the
+list was built. Each list entry now records the slot's occupant (layer,
+expert) and its last-use tick at build; a pop skips the slot when either
+changed, so freed, reoccupied and used slots are all skipped and the
+order among the remaining ones is the scan's. `ds41.expert_store` passes.
+
+Served sampled DSpark (T 0.7, top-p 0.95; DECODE.md chat, code and 24K
+document, 512 tokens each), fresh server per run, alternated; outputs and
+draft counts identical in every run:
+
+| Build | Runs | Decode chat / code / long (tok/s) | Prefill code / long (tok/s) | Decode route hits | MiB read per decoded token |
+| --- | --- | --- | --- | --- | --- |
+| Before E91 | 5 | 19.4-19.5 / 25.5-25.8 / 27.9-28.1 | 600-613 / 1,033-1,042 | 97.28-97.35% | 63.6-65.3 |
+| E91 as committed | 2 | 18.9, 18.9 / 25.7, 25.7 / 28.0, 27.8 | 630, 634 / 1,043, 1,046 | 97.08-97.12% | 69.0-69.8 |
+| Exact pops (retained) | 2 | 19.2, 19.4 / 25.6, 25.8 / 28.1, 28.1 | 614, 614 / 1,038, 1,040 | 97.32-97.36% | 63.1-64.4 |
+
+E91's +4% code prefill came from the looser victims and goes with them.
+Neither version changes decode: the server's per-token host wait splits
+into route wait 18.3-18.5 ms, read wait 4.8-5.5 ms and 0.9-1.0 ms of
+everything else, admission included, in every build. At ~6 admitted
+experts per decoded token the old scan cost at most ~0.15 ms each, in
+line with item 31's original ~48 µs estimate.
+
+**Eviction scoring.** `tools/ds41/evict_sim.py` replays a trace on
+`prefetch_sim.py`'s cache model (without prefetch) under other rules,
+including Belady's offline optimum. Two traces: the workload above
+(`DS41_EXPERT_TRACE`, 24,160 prepares) and E86's Pi agent session (52,280
+prepares). Decode misses relative to the current rule (decay 1,600
+prepares, recency bonus 4), and modeled stall changes:
+
+| Rule | DECODE.md misses | Decode / prefill stall | Agent misses | Decode / prefill stall |
+| --- | --- | --- | --- | --- |
+| Current | 1.67% | 10.24 s / 14.27 s | 1.07% | 22.68 s / 10.24 s |
+| Decay 3,200, bonus 8 | −3.6% | −0.26 / +0.13 s | −7.5% | −1.32 / −0.26 s |
+| Decay 800, bonus 8 | −8.4% | −0.76 / +0.47 s | +7.5% | +1.55 / +0.77 s |
+| Decay 6,400, bonus 16 | 0% | +0.06 / +0.10 s | −9.3% | −1.49 / −0.50 s |
+| LRU | −15.3% | −1.60 / +1.04 s | +10.1% | +2.10 / +0.64 s |
+| Next use from each expert's reuse interval (3 forms) | +83 to +173% | | +31 to +95% | |
+| Belady, always admitting | −47.9% | −4.87 / −6.68 s | −53.5% | −11.74 / −4.96 s |
+| Belady with its admission bypass | −47.9% | −4.87 / −6.67 s | −53.8% | −11.82 / −4.98 s |
+
+Unrelated requests reward recency, a long conversation rewards frequency,
+and the current rule sits between them; decay 3,200 with bonus 8 (or 16,
+slightly behind) is the only setting tried that helps both. Belady's gain is all victim choice (the
+bypass adds nothing), and about half of all decode misses: what it knows
+is which experts come back soon, which no rule built from past uses
+recovers here. Reading ahead (DECODE.md lever 2) is the way toward it.
+
+Decay 3,200 / bonus 8 was measured served (exact pops in both builds):
+- DECODE.md workload, two runs: chat 19.9 / 20.2 tok/s against the five
+  baseline runs' 19.4-19.5; code 25.4 / 25.7, long 27.7 / 28.0, prefill
+  595 / 619 and 1,032 / 1,039 tok/s, all within the baseline; outputs
+  identical.
+- Pi agent session, two ABBA rounds, 15/15 tasks in every session:
+
+| Scoring | Route hits | MiB read per evaluated token | Read wait (ms per token) | Decode tokens | Decode tok/s |
+| --- | --- | --- | --- | --- | --- |
+| Current | 97.19%, 97.18% | 36.7, 34.6 | 2.52, 2.36 | 5,085, 4,849 | 34.0, 34.9 |
+| 3,200 / 8 | 97.32%, 97.51% | 35.3, 36.4 | 2.49, 2.62 | 5,636, 6,766 | 33.0, 33.4 |
+
+  Hits rose in both rounds, but reads and read wait did not fall, and the
+  unseeded sessions diverged (11-40% more decode tokens), so the lower
+  decode rate cannot be attributed: inconclusive. Not retained; the change
+  is kept on `wip/ds41-eviction-score` until a fixed-conversation replay
+  can measure it.

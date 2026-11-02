@@ -590,14 +590,20 @@ passes could cost prefill.
 
 ### 31. Per-layer eviction ranking and prompt admission
 
-**The per-eviction scan is fixed (E91):** each size class keeps its 32
-lowest-scoring occupied slots as a victim list, rebuilt by one scan when
-it runs dry or ages past 512 prepares, with pops recomputing scores so
-freed, reoccupied or newly hot slots are skipped without invalidation.
-The scan it replaces cost 1-2 ms per admitted miss at a 96 GiB cache
-(~13,000 randomly accessed slots), not the ~48 µs first estimated — the
-single-token probe lost 2.7 ms/token to it. Outputs are bit-identical;
-route hits moved 98.8 -> 98.7% (the near-argmin lists).
+**The per-eviction scan is gone (E91, E92):** each size class keeps its
+32 lowest-scoring occupied slots as a victim list, rebuilt by one scan
+when it runs dry or ages past 512 prepares; pops skip slots freed,
+reoccupied or used since the build (E92), so victims match the full scan
+except for decay drift. Served decode and prefill are unchanged by it:
+the scan cost at most ~0.15 ms per admission in serving, near the ~48 µs
+first estimated.
+
+The eviction score itself was replayed against LRU, reuse-interval
+prediction and Belady's optimum (E92, `tools/ds41/evict_sim.py`): Belady
+would halve decode misses, the best past-use rule (decay 3,200, bonus 8)
+gains 4-8% in replay, and served it was +3% on chat and inconclusive on
+the agent. It waits on `wip/ds41-eviction-score` for a fixed-conversation
+agent replay.
 
 Prompt admission waits on it. Letting a prefill batch admit every expert
 it routes at least twice (instead of its final rows and experts routed at
