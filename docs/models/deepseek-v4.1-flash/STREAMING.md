@@ -49,7 +49,9 @@ only the resident tensors, so the dense weights go through the device heap.
   16 rows and its unusually frequent experts (count ≥ max(4, tokens / 32)),
   so a scan does not displace the decode working set. The victim is the
   lowest-scored slot of the same or a larger class, and only if it scores
-  below the newcomer; a larger expert never takes a smaller slot.
+  below the newcomer; a larger expert never takes a smaller slot. A batch's
+  own hits are never victims: its weight table points at their slots, and
+  the admission copies land before its kernels run.
 - **Startup seed.** The cache is filled at load from the built-in ranking of
   all 15,360 experts (`expert_rank.inc`, imported from Xolotl's calibration
   trace by `tools/ds41/import_expert_rank.py`), or from
@@ -107,7 +109,9 @@ its pinned mirror is rewritten.
   allocated when prefetch first runs, so it never shrinks the seed. A job's
   experts take rows in its layer's half, addressed with the allocation
   stride (the stride of the largest expert). A job beyond 96 experts
-  truncates; the excess stays a demand read.
+  truncates; the excess stays a demand read. A job starts only while its
+  layer is the next one to prepare, checked under the read pool's lock: an
+  overtaken job's half may hold the rows of the layer in compute.
 
 ## Split reads across two drives
 

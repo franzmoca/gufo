@@ -331,11 +331,17 @@ public:
   /* Time the last phase blocked on its reads after the overlapped work. */
   uint64_t last_wait_ns() const { return last_wait_ns_; }
 
-  bool SubmitPrefetch(std::shared_ptr<PrefetchJob> job) {
+  /* `expected` is the layer the next prepare handles. Checked under the
+   * lock a prepare's Resolve takes after advancing it, so a job that an
+   * evaluation overtook while it was built never starts: its parity half
+   * may hold the rows the current layer's kernels are reading. */
+  bool SubmitPrefetch(std::shared_ptr<PrefetchJob> job,
+                      const std::atomic<uint32_t>& expected) {
     std::unique_lock lock(mutex_);
     // A submission racing a phase's job resolution is simply dropped: the
     // prediction is best effort, and adopting half-resolved state is unsound.
-    if (stopping_ || resolving_ || !job || job->tasks.empty())
+    if (stopping_ || resolving_ || !job || job->tasks.empty() ||
+        job->layer != expected.load(std::memory_order_acquire))
       return false;
     if (demand_) {
       // Submitted mid-phase: run right after it, replacing any queued job
@@ -705,7 +711,12 @@ struct ds41_expert_store {
     return true;
   }
 
-  uint32_t acquire(uint32_t layer, uint32_t expert, bool allow_evict) {
+  /* `hits` marks the experts of `layer` the current batch found resident:
+   * its weight table points at their slots and its kernels run after the
+   * admission copies, so they are never victims. (A miss admitted earlier
+   * in the same batch may be: its table entry is the stage row.) */
+  uint32_t acquire(uint32_t layer, uint32_t expert, bool allow_evict,
+                   const std::array<bool, DS41_N_EXPERT>& hits) {
     const uint32_t own = layer_class[layer];
     if (free_slots[own].empty() && grow_failure[own] != tick && !grow(own))
       grow_failure[own] = tick;
@@ -722,7 +733,8 @@ struct ds41_expert_store {
     double lowest = std::numeric_limits<double>::infinity();
     for (uint32_t i = 0; i < slots.size(); ++i) {
       const Slot& s = slots[i];
-      if (s.layer == kNoSlot || s.size_class < own)
+      if (s.layer == kNoSlot || s.size_class < own ||
+          (s.layer == layer && hits[s.expert]))
         continue;
       const double score = decayed(entries[s.layer][s.expert], tick);
       if (score < lowest) {
@@ -1422,7 +1434,7 @@ bool ds41_expert_store_prepare(ds41_expert_store* store, uint32_t layer,
   ++store->tick;
   if (layer == 0)
     store->stats.tokens += n_tokens;
-  std::array<bool, DS41_N_EXPERT> missing{}, admit{};
+  std::array<bool, DS41_N_EXPERT> missing{}, admit{}, hits{};
   for (uint32_t e = 0; e < DS41_N_EXPERT; ++e) {
     if (!counts[e])
       continue;
@@ -1431,6 +1443,7 @@ bool ds41_expert_store_prepare(ds41_expert_store* store, uint32_t layer,
     if (entry.slot != kNoSlot)
       store->stats.hits += counts[e];
     missing[e] = entry.slot == kNoSlot;
+    hits[e] = !missing[e];
     entry.score = decayed(entry, store->tick) + std::min(counts[e], 4u) +
                   (recent[e] ? 4.0 : 0.0);
     entry.last = store->tick;
@@ -1444,10 +1457,11 @@ bool ds41_expert_store_prepare(ds41_expert_store* store, uint32_t layer,
   uint32_t misses = 0;
   for (uint32_t e = 0; e < DS41_N_EXPERT; ++e)
     misses += missing[e] ? 1u : 0u;
-  /* Predictions may target this layer or the next; after the last layer the
-   * next evaluation's first prepare reopens the window. */
+  /* From here predictions may target only the next layer, whose parity
+   * half no running kernel reads; after the last layer the next
+   * evaluation's first prepare reopens the window. */
   store->pf_expected.store(layer + 1 < DS41_N_LAYER ? layer + 1 : 0,
-                           std::memory_order_relaxed);
+                           std::memory_order_release);
   const uint64_t orphaned = store->readers->TakeOrphaned();
   store->stats.bytes_read += orphaned;
   store->stats.prefetch_dropped_bytes += orphaned;
@@ -1571,7 +1585,7 @@ bool ds41_expert_store_prepare(ds41_expert_store* store, uint32_t layer,
       continue;
     // Fill unused capacity during a scan. Once full, only promoted prefill
     // experts may displace the existing working set.
-    const uint32_t slot_id = store->acquire(layer, e, admit[e]);
+    const uint32_t slot_id = store->acquire(layer, e, admit[e], hits);
     if (slot_id == kNoSlot)
       continue;
     Slot& slot = store->slots[slot_id];
@@ -1647,11 +1661,11 @@ bool ds41_expert_store_prefetch(ds41_expert_store* store, uint32_t layer,
                                 const int32_t* experts, uint32_t count, bool wide) {
   if (!store || layer >= DS41_N_LAYER || !experts || !count)
     return false;
-  // Only the layer the next prepare handles, or its successor, is accepted:
-  // an overtaken prediction would never be adopted, and an older layer's
-  // rows may be in compute.
-  const uint32_t expected = store->pf_expected.load(std::memory_order_relaxed);
-  if (layer != expected && layer != expected + 1)
+  // Only the layer the next prepare handles is accepted: an overtaken
+  // prediction would never be adopted, and its parity half may hold rows in
+  // compute. SubmitPrefetch repeats the check under the pool's lock, since
+  // the first job also allocates the prefetch stage.
+  if (layer != store->pf_expected.load(std::memory_order_acquire))
     return false;
   std::array<bool, DS41_N_EXPERT> want{};
   for (uint32_t i = 0; i < count; ++i) {
@@ -1665,7 +1679,7 @@ bool ds41_expert_store_prefetch(ds41_expert_store* store, uint32_t layer,
   std::shared_ptr<PrefetchJob> job = build_prefetch_job(store, layer, want, wide);
   if (!job)
     return false;
-  return store->readers->SubmitPrefetch(std::move(job));
+  return store->readers->SubmitPrefetch(std::move(job), store->pf_expected);
 }
 
 bool ds41_expert_store_predict(ds41_expert_store* store, uint32_t layer,

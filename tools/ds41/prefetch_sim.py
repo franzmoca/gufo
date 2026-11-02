@@ -126,6 +126,7 @@ class Cache:
 
     def __init__(self, snap: Snapshot, limit=None, policy: CachePolicy = CachePolicy()):
         self.policy = policy
+        self.routed = None
         self.base = snap.score.copy() * policy.floor
         self.snap = snap
         self.tick = snap.tick
@@ -177,6 +178,9 @@ class Cache:
         if not allow_evict:
             return None
         live = (self.s_layer >= 0) & (self.s_class >= own)
+        # The batch's own hits are read from their slots: never victims.
+        if self.routed is not None and self.routed[0] == layer:
+            live &= ~((self.s_layer == layer) & self.routed[1][np.maximum(self.s_expert, 0)])
         if not live.any():
             return None
         idx = np.nonzero(live)[0]
@@ -226,6 +230,7 @@ class Cache:
         flat = ids.reshape(-1)
         valid = flat >= 0
         counts = np.bincount(flat[valid], minlength=self.snap.n_expert)
+        self.routed = (layer, (counts > 0) & (self.slot_of[layer] >= 0))
         recent_rows = ids[n - min(n, RECENT_ROWS):].reshape(-1)
         recent = np.bincount(recent_rows[recent_rows >= 0], minlength=self.snap.n_expert)
         self.tick += 1
