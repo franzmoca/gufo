@@ -2643,3 +2643,15 @@ Same E76 served route counts and seven-repeat benchmark, but halve the
 Benchmark reference errors remain identical. Reverted: neither direction
 improves this recorded IQ2_XXS/IQ2_S layer. E76's full `ds41.mmq_typed`
 check also passed (25.82 seconds); its log is retained with these artifacts.
+
+## E78 — IQ2_S sign masks without LDS lookup (rejected)
+
+On the E76 recorded route workload, replace the sign-byte LDS lookup with
+integer bit spreading. Shift/mask expansion: down 13.46 ms versus 12.91 ms
+baseline. Two nibble multiplies by `0x10204080`, masked by `0x80808080`:
+12.96 ms. Removing the now-unused 2 KiB sign table and its initialization:
+12.99 ms. All three give identical independent benchmark-reference errors;
+all 16 nibble inputs were exhaustively checked for exact bit spreading.
+Gate/up (unchanged IQ2_XXS control) is 23.05–23.11 ms versus 23.18 ms.
+No demonstrated benefit, so all variants are reverted. No full model run
+or full operator suite is claimed for these rejected variants.
