@@ -74,8 +74,8 @@ constexpr uint32_t kNoSlot = std::numeric_limits<uint32_t>::max();
 /* Eviction candidates kept per size class: the kVictims lowest decayed
  * scores of the slots an expert of that class could take, rebuilt by one
  * scan when the list runs dry or ages past kVictimsTicks prepares. Pops
- * recompute the score, so freed slots, reoccupied ones and experts that
- * turned hot are skipped without invalidation. */
+ * skip slots freed, reoccupied or used since the build, so the lists need
+ * no invalidation and the order among untouched slots is the scan's. */
 constexpr size_t kVictims = 32;
 constexpr uint64_t kVictimsTicks = 512;
 constexpr uint64_t kTableEntries = uint64_t{DS41_N_LAYER} * DS41_N_EXPERT;
@@ -640,11 +640,17 @@ struct ds41_expert_store {
   std::vector<uint64_t> grow_failure;             // tick, per class
   /* Eviction candidates, one list per size class: the kVictims lowest
    * decayed scores at build time of the occupied slots an expert of that
-   * class could take, ascending. Pops recompute each score and skip freed,
-   * reoccupied or newly hot slots, so the lists need no invalidation; one
+   * class could take, ascending. Pops skip slots freed, reoccupied or used
+   * since the build, so the lists need no invalidation; one
    * full scan rebuilds a list when it runs dry or ages out. */
+  struct Victim {
+    double score;           // decayed score at build
+    uint32_t slot;
+    uint32_t layer, expert;  // the occupant at build
+    uint64_t last;           // its last use at build
+  };
   struct VictimList {
-    std::vector<std::pair<double, uint32_t>> entries;  // (score at build, slot)
+    std::vector<Victim> entries;
     size_t next = 0;
     uint64_t built = 0;  // tick of the build; 0 never built
   };
@@ -740,21 +746,21 @@ struct ds41_expert_store {
     list.entries.clear();
     list.next = 0;
     list.built = tick;
-    const auto lower = [](const std::pair<double, uint32_t>& a,
-                          const std::pair<double, uint32_t>& b) {
-      return a.first < b.first;  // max-heap of the kVictims smallest
+    const auto lower = [](const Victim& a, const Victim& b) {
+      return a.score < b.score;  // max-heap of the kVictims smallest
     };
     for (uint32_t i = 0; i < slots.size(); ++i) {
       const Slot& s = slots[i];
       if (s.layer == kNoSlot || s.size_class < own)
         continue;
-      const double score = decayed(entries[s.layer][s.expert], tick);
+      const Entry& e = entries[s.layer][s.expert];
+      const Victim v{decayed(e, tick), i, s.layer, s.expert, e.last};
       if (list.entries.size() < kVictims) {
-        list.entries.emplace_back(score, i);
+        list.entries.push_back(v);
         std::push_heap(list.entries.begin(), list.entries.end(), lower);
-      } else if (score < list.entries.front().first) {
+      } else if (v.score < list.entries.front().score) {
         std::pop_heap(list.entries.begin(), list.entries.end(), lower);
-        list.entries.back() = {score, i};
+        list.entries.back() = v;
         std::push_heap(list.entries.begin(), list.entries.end(), lower);
       }
     }
@@ -789,14 +795,14 @@ struct ds41_expert_store {
         rebuilt = true;
       }
       while (list.next < list.entries.size()) {
-        const auto [score_built, victim] = list.entries[list.next++];
+        const Victim& v = list.entries[list.next++];
+        const uint32_t victim = v.slot;
         const Slot& s = slots[victim];
-        if (s.layer == kNoSlot || s.size_class < own ||
+        if (s.layer != v.layer || s.expert != v.expert || s.size_class < own ||
+            entries[s.layer][s.expert].last != v.last ||
             (s.layer == layer && hits[s.expert]))
-          continue;  // freed, smaller than this class, or protected
+          continue;  // freed, reoccupied, used since the build, or protected
         const double score = decayed(entries[s.layer][s.expert], tick);
-        if (score > score_built + 8.0)
-          continue;  // touched since the build: no longer this cold
         if (incoming < score)
           return kNoSlot;  // the remaining victims all outscore it
         entries[s.layer][s.expert].slot = kNoSlot;
