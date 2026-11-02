@@ -2,8 +2,8 @@
 """Replay a DS41 expert trace (DS41_EXPERT_TRACE) to compare prefetch policies offline.
 
 The engine writes the seeded cache, then every expert-store prepare (routes,
-per-route hits, timing) and, for batches of up to 16 rows, the router's
-top-12 predictions for the next two layers from each layer's FFN input.
+per-route hits, timing) and, for batches of up to 64 rows, the router's
+top-12 predictions for the next three layers from each layer's FFN input.
 This tool mirrors the store's cache policy (decayed scores, size classes,
 scan-resistant admission, lowest-score victim), checks that the replay
 reproduces the recorded hits, and estimates each policy's read stalls.
@@ -291,7 +291,7 @@ def summary(snap, prepares):
 def recall(prepares):
     """Share of decode misses each lead's top-k prediction contains."""
     out = {}
-    for lead in (1, 2):
+    for lead in (1, 2, 3):
         for k in (4, 6, 8, 12):
             caught = misses = 0
             for p in prepares:
