@@ -123,9 +123,9 @@ public:
   // Evaluates the prompt from the longest evaluated prefix. `prompt` is the
   // first part of a prompt ending at `prompt_end` (0: its own end), which
   // bounds the decoder layers' replay to its last tokens; a state synced to
-  // a shorter part only continues to that same end. `images` hold the input
-  // embeddings of the image spans (the positions holding DS41_IMAGE_TOKEN)
-  // that this part evaluates; they need EnableImageRouting.
+  // a shorter part continues the prompts CanContinue accepts. `images` hold
+  // the input embeddings of the image spans (the positions holding
+  // DS41_IMAGE_TOKEN) that this part evaluates; they need EnableImageRouting.
   [[nodiscard]] bool Sync(std::span<const int> prompt,
                           std::string* error_msg = nullptr,
                           std::size_t prompt_end = 0,
@@ -138,6 +138,10 @@ public:
   [[nodiscard]] bool DsparkEnabled() const;
   /// Reset request statistics and draft policy, retaining a restored prefix.
   void BeginRequest();
+  /// Whether the evaluated state continues a prompt of `prompt_end` tokens:
+  /// a state synced to part of a longer prompt lacks the decoder rows that
+  /// a shorter prompt's replay reads (see Sync).
+  [[nodiscard]] bool CanContinue(std::size_t prompt_end) const;
   /// Runs one speculative cycle; a sampler makes it a sampled cycle. A cycle
   /// verifies prompt-lookup copies where the context repeats earlier tokens,
   /// otherwise the drafter's block; without either it is a plain step. Also

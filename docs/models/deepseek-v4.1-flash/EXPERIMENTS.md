@@ -2502,3 +2502,50 @@ overlapped work at 20 rows (shared expert, next-layer router) is ~1 ms,
 too little to hide reads behind. pp20/pp64/pp2048 benches were within
 noise. The remaining idle is SSD reads, which only fewer or earlier reads
 reduce.
+
+## E73 — one decoder replay per served prompt (retained)
+
+Served prefill steps end at cache captures (grid checkpoints every 2,048
+tokens, the stable boundary, the prompt end). The server passed each step
+the prompt cut at that capture, so every step treated its end as the prompt
+end and ran the decoder layers (20-39) over its last 140 rows: five
+replays for a 20K-token document, ~0.9 s each on streamed `UD-IQ2_XXS`
+(cold decoder experts), see [PREFILL.md](PREFILL.md). The runner state now
+carries the whole prompt's length, and the decoder layers run only the rows
+within 140 of the real prompt end.
+
+A mid-prompt checkpoint then holds no decoder rows near its end. The
+session tracks where its decoder rows start; checkpoints and snapshots
+record it, and a restore (or live frontier) serves only prompts whose
+replay starts there or later. Shorter continuations fall back to the
+previous checkpoint (`BACKLOG.md` item 36); none of the 50 short resumes in
+the recorded agent and document sessions came from such a checkpoint. A
+step that skips all decoder rows empties the DSpark ring at its end, so
+these checkpoints restore with the drafter on.
+
+Prompts now run the decoder layers exactly as an uncached single pass does.
+Restores that resume (from the 22,528 checkpoint of a 24K-token document on
+`UD-IQ2_XXS` with DSpark; six prefixes of a 24K-token document on resident
+`IQ1_M`, including one that fell back) gave the same tokens and logprobs as
+uncached requests, bit for bit. The previous build's uncached requests
+differ slightly (first logprob -0.0892 against -0.0907): their extra
+replays sent rows through layer 20's full block instead of its
+compression-only path.
+
+Long-document Q&A on streamed `UD-IQ2_XXS` with DSpark, two alternated
+rounds, time to first token:
+
+| Request | Before | After |
+|---|---:|---:|
+| Fresh 24.0K-token document | 28.87 / 28.71 s | 26.11 / 26.13 s (-2.7 s) |
+| Fresh 20.0K-token document | 24.05 / 26.01 s | 21.22 / 23.98 s (-2.4 s) |
+| Fresh 14.2K-token document | 17.81 / 17.91 s | 14.55 / 15.73 s (-2.7 s) |
+| Reopened 24K document, 1,459 tokens past the 22,528 checkpoint | 2.74 / 2.80 s | 3.35 / 3.09 s |
+
+All 24 answers passed in every round. The reopened document reads more
+expert data per token in the new build (16.7 against 15.7-16.1 MiB); the
+earlier build's extra replays had left more decoder-layer experts cached.
+On resident `IQ1_M` a fresh 23,936-token prompt went from 19.5 to 17.8 s.
+The `cache`, `cache-edits` and `long-context` functional suites pass on
+`IQ1_M` with DSpark; `cache-depth` stops at its 16,384-token prompt
+minimum, which DS41 tokenizes to 16,210.

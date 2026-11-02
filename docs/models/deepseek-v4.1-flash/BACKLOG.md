@@ -7,6 +7,9 @@ figures are estimates unless stated.
 
 ## Where the time goes
 
+Served streamed `UD-IQ2_XXS` prefill (budget, per-kernel rates, ceilings and
+ranked levers, 2026-11-02): [PREFILL.md](PREFILL.md).
+
 **All modes, 2026-10-29** ([trace sweep](artifacts/2026-10-29-trace-sweep/summary.txt);
 measured ceilings 240 GB/s DRAM read, 55.4 TFLOP/s FP16/BF16 WMMA). A
 decoded token reads 7.15 GiB of weights (`IQ1_M`) or 7.4 GiB (`IQ2_XXS`),
@@ -87,6 +90,7 @@ pp2048 runs 1,182 tok/s at 32K, 1,155 at 64K and 1,098 at 128K.
 | 24 | Selection-only miss penalty, mako's form of item 13 (changes outputs) | Streamed decode, short prefills | Up to the ~5 ms/token of miss-read idle; more cold, after long prompts and in verification | Medium |
 | 25 | Direction projection and steering vectors | Feature | Per-request behavior edits; ~0.1–0.5 ms/token if unfused | Medium |
 | 26 | LoRA adapters (GGUF `adapter.type = lora`) | Feature | Adapter compatibility; rank-1 abliteration adapters reduce to item 25 | Medium |
+| 36 | Decoder rows for short continuations of mid-prompt checkpoints | Serving cache | A fallback prefill from the previous checkpoint (seconds) when a prompt ends within 140 tokens past one; none in recorded sessions | Medium |
 
 ### 3. Expert reads for rejected verification rows
 
@@ -182,7 +186,8 @@ the next turn can need it, or snapshot row N−3 from inside the final pass
 (compressor accumulators, SWA windows and bounded replay make this
 invasive). Gemma's generation-prompt lookahead is the local precedent. The
 policy is shared (`src/cache/retention.cpp`), so other models' reuse must
-hold.
+hold. Since E73 the stable step no longer runs a decoder replay of its
+own (on streamed builds that replay cost ~0.9 s); the 3-row pass remains.
 
 ### 10. Batch-level draft width
 
@@ -639,6 +644,29 @@ sums round differently from the one-token kernel used by AR
 Retain only together with an accepted rounding change in this path, e.g.
 both kernels with reassociation disabled so verification and AR keep the
 same bits.
+
+### 36. Decoder rows for short continuations of mid-prompt checkpoints
+
+Server prefill steps end at cache checkpoints; the decoder layers (20-39)
+replay only the last 140 rows of the whole prompt, so a mid-prompt grid
+checkpoint holds no decoder rows near its end. Its metadata records where
+its decoder rows start, and a restore accepts it only for prompts whose
+replay starts there or later (at least 140 tokens past a checkpoint without
+them). A prompt ending within 140 tokens past one falls back to the
+previous checkpoint and prefills from there: 1.9 s instead of 0.18 s for a
+10,261-token prompt past the 10,240 checkpoint on resident `IQ1_M`, more
+when streamed. The prompt-end checkpoint and live reply frontiers keep
+their decoder rows; in the recorded agent (52 requests) and document Q&A
+(12) sessions all 50 short resumes continued a live reply frontier, so none
+would fall back.
+
+To serve them without the fallback, keep the layer-19 output (hc stream and
+FFN pre-mix) of the 140 rows before each grid checkpoint (~11.5 MB) as a
+checkpoint component, and on such a restore run only the decoder layers over
+the rows from the new prompt's replay start to the checkpoint. That run must
+not store layer 20's compressed rows or advance its compressor pool again:
+the checkpoint already holds them. Check the result against an uncached
+prompt bit for bit, as the current restores are.
 
 ## Memory
 

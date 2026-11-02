@@ -361,6 +361,12 @@ void Session::BeginRequest() {
   ds41_session_begin_request(session_);
 }
 
+bool Session::CanContinue(std::size_t prompt_end) const {
+  return prompt_end <= std::numeric_limits<std::uint32_t>::max() &&
+         ds41_session_can_continue(session_,
+                                   static_cast<std::uint32_t>(prompt_end));
+}
+
 bool Session::DsparkStep(std::size_t max_tokens, std::uint32_t max_draft_tokens,
                          std::vector<int>* emitted, std::string* error_msg,
                          const ds41_dspark_sampler* sampler, bool stop_at_eos) {

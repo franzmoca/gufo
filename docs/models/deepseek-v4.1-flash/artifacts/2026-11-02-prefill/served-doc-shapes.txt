@@ -1,0 +1,45 @@
+ ms total calls   us/call  TFLOP/s  kernel / shape
+   2220.0    90   24667.1     23.5  routed_f16_kernel<16, true, true> grid 18x576x1 routed type 16 gate+up, 2048 rows
+   2134.9    90   23721.4     24.4  routed_f16_kernel<19, true, true> grid 18x576x1 routed type 19 gate+up, 2048 rows
+   1760.9   180    9782.5           attention_f16_kernel grid 2048x2x1 
+   1304.6    90   14495.4     20.0  routed_f16_kernel<22, false, false> grid 20x576x1 routed type 22 down, 2048 rows
+   1111.5   180    6174.9     27.8  dense_f16_kernel<Q8, true, _Float16, float> grid 128x16x1 attn_q_b, 2048 tokens
+   1092.3   333    3280.0           hc_state_pass_kernel<true> grid 1024x1x1 
+    876.5   180    4869.7     28.2  dense_f16_kernel<Q8, true, _Float16, _Float16> grid 4x16x8 attn_output_a (8 groups), 2048 tokens
+    871.6   180    4842.3     35.5  dense_f16_kernel<Q8, true, _Float16, float> grid 20x16x1 attn_output_b, 2048 tokens
+    740.8    54   13718.6     21.1  routed_f16_kernel<17, false, false> grid 20x576x1 routed type 17 down, 2048 rows
+    581.5    75    7753.0      5.1  routed_f16_kernel<22, true, true> grid 18x397x1 routed type 22 gate+up, 140 rows
+    567.4   360    1576.2      5.1  matmul_bf16_wmma_kernel<128u> grid 3x32x1 router (prediction + routing) (x3 BF16 terms)
+    483.9   180    2688.5     35.9  dense_f16_kernel<Q8, true, _Float16, float> grid 18x16x1 shared gate+up (paired), 2048 tokens
+    371.8    18   20656.2     31.2  dense_f16_kernel<Q6K, true, float, float> grid 100x16x1 Engram projection, 2048 tokens
+    353.6    27   13094.6     22.1  routed_f16_kernel<16, false, false> grid 20x576x1 routed type 16 down, 2048 rows
+    293.6    75    3914.0      5.1  routed_f16_kernel<18, false, false> grid 20x397x1 routed type 18 down, 140 rows
+    247.5   180    1375.2     35.1  dense_f16_kernel<Q8, true, float, float> grid 20x16x1 shared down, 2048 tokens
+    210.1   180    1167.4     32.2  dense_f16_kernel<Q8, true, _Float16, float> grid 7x16x1 attn_q_a + attn_kv (paired), 2048 tokens
+    204.7    10   20468.1           routed_f16_kernel<16, true, true> grid 18x523x1 
+    195.5    10   19546.1           routed_f16_kernel<19, true, true> grid 18x523x1 
+    130.3    25    5213.4      7.6  routed_f16_kernel<16, true, true> grid 18x397x1 routed type 16 gate+up, 140 rows
+    129.1    20    6453.2           attention_f16_kernel grid 1492x2x1 
+    121.3    10   12130.8           routed_f16_kernel<22, false, false> grid 20x523x1 
+    116.9     9   12985.1     22.3  routed_f16_kernel<10, false, false> grid 20x576x1 routed type 10 down, 2048 rows
+    115.2    59    1951.9      5.5  matmul_bf16_wmma_kernel<128u> grid 4x32x1 compressor kv (x3 BF16 terms)
+    107.0    25    4280.4      4.6  routed_f16_kernel<22, false, false> grid 20x397x1 routed type 22 down, 140 rows
+     87.1    37    2354.8           hc_state_pass_kernel<true> grid 746x1x1 
+     85.3    20    4267.3           dense_f16_kernel<Q8, true, _Float16, float> grid 128x11x1 
+     74.5   195     381.9      1.4  matmul_bf16_wmma_kernel<128u> grid 3x3x1 router, 140-row replay (x3 BF16 terms)
+     72.5    20    3625.2           dense_f16_kernel<Q8, true, _Float16, _Float16> grid 4x11x8 
+     71.4    27    2643.4      8.1  matmul_bf16_wmma_kernel<128u> grid 32x32x1 indexer q_b (x3 BF16 terms)
+     70.9    20    3544.1           dense_f16_kernel<Q8, true, _Float16, float> grid 20x11x1 
+     69.3     6   11549.8           routed_f16_kernel<17, false, false> grid 20x523x1 
+     68.1   100     681.0           attention_f16_kernel grid 140x2x1 
+     54.1    40    1352.2           matmul_bf16_wmma_kernel<128u> grid 3x24x1 
+     48.1    32    1502.4           hc_state_pass_kernel<false> grid 1024x1x1 
+     39.9   195     204.4           hc_state_pass_kernel<true> grid 70x1x1 
+     35.2    20    1759.6           dense_f16_kernel<Q8, true, _Float16, float> grid 18x11x1 
+     32.6     3   10859.0           routed_f16_kernel<16, false, false> grid 20x523x1 
+     32.5    65     499.6           dense_f16_kernel<Q6K, true, _Float16, float> grid 128x1x1 
+     30.2     2   15100.8           dense_f16_kernel<Q6K, true, float, float> grid 100x11x1 
+     29.9    65     460.1           dense_f16_kernel<Q6K, true, _Float16, _Float16> grid 4x1x8 
+     26.4    65     406.7           dense_f16_kernel<Q6K, true, _Float16, float> grid 20x1x1 
+     21.3    55     387.4           dense_f16_kernel<Q8, false, _Float16, float> grid 128x1x1 
+     20.2    20    1008.4           dense_f16_kernel<Q8, true, float, float> grid 20x11x1 

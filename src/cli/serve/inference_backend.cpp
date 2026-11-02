@@ -2099,6 +2099,15 @@ public:
     deepseek.session().BeginRequest();
   }
 
+  [[nodiscard]] bool CanContinue(const TextRunnerState& state,
+                                 std::size_t prompt_tokens) const override {
+    if constexpr (Ds::kComponentCache)
+      return RequireDeepSeekState<Ds>(state).session().CanContinue(
+          prompt_tokens);
+    else
+      return true;
+  }
+
   [[nodiscard]] TextPrefillStep Prefill(
       TextRunnerState& state, std::span<const TextRunnerToken> prompt,
       std::size_t offset, std::size_t max_input_tokens) const override {
@@ -2117,8 +2126,11 @@ public:
     const std::size_t next_position = offset + consumed;
     const auto prefix = DeepSeekEngineTokens(prompt.first(next_position));
     std::string error;
-    // The prompt ends at this step's frontier, where the state may be
-    // captured; V4.1 runs its decoder layers over the last tokens only.
+    // V4.1 runs its decoder layers over the whole prompt's last tokens only,
+    // also when this step ends at a cache boundary: a capture there continues
+    // only prompts whose replay starts within the rows it holds (CanContinue).
+    [[maybe_unused]] const std::size_t prompt_end =
+        std::max(prompt.size(), state.prefill_prompt_end());
     bool synced = false;
     if constexpr (Ds::kVision) {
       // The embeddings of the image rows this step evaluates; attention is
@@ -2138,7 +2150,7 @@ public:
                            deepseek.Embedding(*vision_, i)});
         }
       }
-      synced = deepseek.session().Sync(prefix, &error, prompt.size(), spans);
+      synced = deepseek.session().Sync(prefix, &error, prompt_end, spans);
     } else {
       synced = deepseek.session().Sync(prefix, &error);
     }
