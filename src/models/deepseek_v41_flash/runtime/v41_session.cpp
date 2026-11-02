@@ -62,18 +62,27 @@ struct ds41_session {
    * depends only on q, never on timing, so seeded replay is unaffected. */
   static constexpr float kConfidentDraft = 0.6f;
   /* Plain steps before a one-draft cycle re-measures acceptance: from the
-   * first, doubling while the policy keeps returning to plain steps. */
+   * first, doubling while the policy keeps returning to plain steps. Learned
+   * cycles probe the same way while drafting does not pay (gain_ms). */
   static constexpr uint32_t kProbeFirst = 4, kProbeMax = 64;
+  /* A learned cycle's drafting benefit before the request has any: high
+   * enough that its first cycles draft and measure it. */
+  static constexpr float kGainPrior = 50.0f;
   /* Draft length policy: drafts per cycle maximize the expected emitted
    * tokens over the cycle's time. accept[k] estimates P(draft k + 1 is
    * accepted | the drafts before it were); cycle_ms[w] is a cycle of w drafts
-   * (draft plus verification), cycle_ms[0] a plain step. Both start from
-   * gfx1151 measurements at 2K context and follow the session; estimates of
+   * (draft plus verification), cycle_ms[0] a plain step without a draft
+   * and draft_ms the drafter pass alone. All start from gfx1151
+   * measurements at 2K context and follow the session; estimates of
    * positions past the drafted ones relax toward the prior, so longer drafts
-   * are retried. */
+   * are retried. gain_ms estimates the time a learned cycle's draft saves
+   * (zero when it verifies none); learned cycles draft while it exceeds
+   * draft_ms. */
   struct {
     float accept[DS41_DSPARK_BLOCK] = {kAcceptPrior, kAcceptPrior, kAcceptPrior, kAcceptPrior, kAcceptPrior};
     float cycle_ms[DS41_DSPARK_BLOCK + 1] = {42.4f, 69.6f, 83.6f, 95.5f, 106.1f, 117.2f};
+    float draft_ms = 8.0f;
+    float gain_ms = kGainPrior;
     uint32_t plain = 0;   // plain steps since the last cycle
     uint32_t probe = kProbeFirst;  // plain steps before a one-draft cycle re-measures
   } policy;
@@ -303,6 +312,7 @@ void ds41_session_begin_request(ds41_session* s) {
   std::fill(std::begin(s->policy.accept), std::end(s->policy.accept), ds41_session::kAcceptPrior);
   s->policy.plain = 0;
   s->policy.probe = ds41_session::kProbeFirst;
+  s->policy.gain_ms = ds41_session::kGainPrior;
   s->lookup.BeginRequest();
   s->next = -1;
 }
@@ -312,23 +322,41 @@ namespace {
 /* A cycle's time also moves the other widths' estimates by kPolicyShift of
  * its error: widths the policy rarely picks otherwise keep their prior. */
 constexpr float kPolicyRate = 0.1f, kPolicyRelax = 0.02f, kPolicyShift = 0.05f;
+/* gain_ms follows the request's drafts faster: acceptance shifts with content. */
+constexpr float kGainRate = 0.25f;
 
 /* The drafts per cycle that maximize the expected emitted tokens over the
  * cycle's time; accept[k] estimates P(draft k + 1 is accepted | the drafts
- * before it were). */
-uint32_t best_width(const ds41_session* s, const float* accept, uint32_t limit) {
+ * before it were). A cycle that has already drafted (drafted) compares the
+ * widths' remaining time, without the draft. *gain, when set, receives the
+ * time the chosen width saves against plain steps emitting as many tokens. */
+uint32_t best_width(const ds41_session* s, const float* accept, uint32_t limit, bool drafted = false,
+                    float* gain = nullptr) {
   const auto& p = s->policy;
+  const float sunk = drafted ? p.draft_ms : 0.0f;
   uint32_t best_w = 0;
-  float best = 1.0f / p.cycle_ms[0], expected = 1.0f, reach = 1.0f;
+  float best = 1.0f / p.cycle_ms[0], best_expected = 1.0f, expected = 1.0f, reach = 1.0f;
   for (uint32_t w = 1; w <= limit; w++) {
     reach *= accept[w - 1];
     expected += reach;
-    if (expected / p.cycle_ms[w] > best) {
-      best = expected / p.cycle_ms[w];
+    const float cost = std::max(p.cycle_ms[w] - sunk, 1.0f);
+    if (expected / cost > best) {
+      best = expected / cost;
       best_w = w;
+      best_expected = expected;
     }
   }
+  if (gain)
+    *gain = best_w ? std::max(0.0f, best_expected * p.cycle_ms[0] - (p.cycle_ms[best_w] - sunk)) : 0.0f;
   return best_w;
+}
+
+/* Whether a learned cycle drafts: while a draft is expected to save more
+ * time than it costs, and otherwise on probes that re-measure the saving. */
+bool learned_drafts(ds41_session* s) {
+  auto& p = s->policy;
+  if (p.gain_ms > p.draft_ms || ++p.plain >= p.probe) return true;
+  return false;
 }
 
 uint32_t draft_width(ds41_session* s, uint32_t limit) {
@@ -411,9 +439,11 @@ struct Cycle {
   bool plain = false;        // the drafter's policy chose a plain step
   bool speculative = false;  // the block's rows wait in spec_logits for the commit
   int32_t argmax[ds41_session::kVerifyRows] = {};  // each row's argmax, from the evaluation
-  /* A drafter pass this cycle waits for (draft), its learned width policy
-   * and the drafter's outputs. */
-  bool draft = false, learned = false;
+  /* A drafter pass this cycle waits for (draft), its learned width policy,
+   * whether a learned cycle drafted and the saving its width predicts, and
+   * the drafter's outputs. */
+  bool draft = false, learned = false, drafted = false;
+  float gain = 0.0f;
   float top[DS41_DSPARK_BLOCK] = {}, confidence[DS41_DSPARK_BLOCK] = {};
   std::chrono::steady_clock::time_point t0, t1;
 };
@@ -490,7 +520,7 @@ int prepare(Cycle& c, char* error, size_t capacity) {
     const uint32_t limit =
         std::min({(uint32_t)DS41_DSPARK_BLOCK, item.max_draft_tokens, room, c.stochastic ? UINT32_MAX : c.cap});
     c.learned = !c.stochastic && ds41_dspark_has_confidence(s->engine->dspark);
-    c.tail = c.stochastic || c.learned ? limit : draft_width(s, limit);
+    c.tail = c.stochastic ? limit : c.learned ? (learned_drafts(s) ? limit : 0) : draft_width(s, limit);
     c.plain = c.tail == 0;
     if (c.tail != 0 && ds41_dspark_state_end(s->dspark) != c.first) c.tail = 0;
     c.draft = c.tail != 0;
@@ -514,18 +544,41 @@ ds41_dspark_draft_request draft_request(Cycle& c) {
 }
 
 /* After the drafter pass: the cycle's width from its drafts. */
+/* After a learned cycle that drafted: gain_ms follows the time its draft
+ * saved, the emitted tokens' time as plain steps minus the cycle's time after
+ * the draft (zero when it verified none). A joint cycle's time is not its
+ * own, so it counts the saving its width predicted. A draft that did not pay
+ * starts or doubles the probe interval; one that did resets it. */
+void learned_outcome(ds41_session* s, const Cycle& c, uint32_t emitted, std::chrono::steady_clock::time_point t2) {
+  auto& p = s->policy;
+  float gain = 0.0f;
+  if (c.tail != 0) gain = c.shared ? c.gain : emitted * p.cycle_ms[0] - ms(c.t1, t2);
+  ema(p.gain_ms, gain, kGainRate);
+  if (p.gain_ms > p.draft_ms) {
+    p.probe = ds41_session::kProbeFirst;
+  } else if (p.plain >= p.probe) {
+    p.probe = std::min(2 * p.probe, ds41_session::kProbeMax);
+  }
+  p.plain = 0;
+}
+
 void finish_draft(Cycle& c, bool drafted) {
   ds41_session* s = c.item->session;
   if (!drafted) c.tail = 0;
-  if (c.learned) {
-    c.tail = best_width(s, c.confidence, c.tail);
+  c.t1 = std::chrono::steady_clock::now();
+  if (c.learned && drafted) {
+    auto& p = s->policy;
+    if (!c.shared) ema(p.draft_ms, ms(c.t0, c.t1));
+    c.drafted = true;
+    c.tail = best_width(s, c.confidence, c.tail, true, &c.gain);
+  } else if (c.learned) {
+    c.tail = 0;
   } else if (c.stochastic) {
     uint32_t confident = 0;
     while (confident < c.tail && c.top[confident] >= ds41_session::kConfidentDraft) ++confident;
     c.tail = confident;
   }
   c.m = c.tail + 1;
-  c.t1 = std::chrono::steady_clock::now();
 }
 
 /* Evaluates one cycle's block on its own. */
@@ -644,8 +697,17 @@ int finish(Cycle& c, char* error, size_t capacity) {
   s->next = ends(next) ? -1 : next;
   const auto t2 = std::chrono::steady_clock::now();
   auto& p = s->policy;
+  if (c.drafted) learned_outcome(s, c, accepted, t2);
+  if (trace && c.learned)
+    fprintf(stderr,
+            "ds41: learned pos=%u drafted=%d width=%u emitted=%u conf=%.3f,%.3f,%.3f,%.3f,%.3f draft=%.1fms "
+            "verify=%.1fms gain_ms=%.1f draft_ms=%.1f plain_ms=%.1f\n",
+            c.first, c.drafted, c.tail, accepted, c.confidence[0], c.confidence[1], c.confidence[2], c.confidence[3],
+            c.confidence[4], c.drafted ? ms(c.t0, c.t1) : 0.0f, ms(c.drafted ? c.t1 : c.t0, t2), p.gain_ms, p.draft_ms,
+            p.cycle_ms[0]);
   if (m == 1) {
-    if (c.plain && !c.shared) ema(p.cycle_ms[0], ms(c.t0, t2));
+    /* A plain step's time; after a discarded draft, the part after it. */
+    if (!c.shared && (c.plain || c.learned)) ema(p.cycle_ms[0], ms(c.plain ? c.t0 : c.t1, t2));
     return 0;
   }
   auto& st = s->stats;
