@@ -3626,8 +3626,6 @@ bool InferenceBackend::load(const std::string& model_path, std::string* error,
             .exact_prefill = deepseek_exact_prefill_,
             .stream_experts = deepseek_stream_experts_,
             .expert_cache_bytes = deepseek_expert_cache_bytes_,
-            // Sized and seeded after the sessions (LoadDeepSeek).
-            .defer_expert_seed = deepseek_stream_experts_,
             .dspark_model_path =
                 dspark ? speculative_config.draft_model_path : std::string{}},
         &load_error);
@@ -4065,7 +4063,7 @@ bool InferenceBackend::LoadDeepSeek(
     auto runner_pool = std::make_shared<TextRunnerPool>(
         std::move(runner), session_count, std::move(runner_disk_cache),
         ram_cache_config);
-    if constexpr (requires { streamed->WarmExpertCache(0); }) {
+    if constexpr (requires { streamed->FitExpertCache(0); }) {
       if (streamed) {
         // The sessions and the committed cache backing exist now; the
         // backing past its grow-ahead still commits with captures.
@@ -4073,9 +4071,9 @@ bool InferenceBackend::LoadDeepSeek(
                                 : ram_cache_config.capacity_bytes != 0
                                     ? ram_cache_config.capacity_bytes
                                     : ram_share;
-        streamed->WarmExpertCache(ram > kCacheBackingGrowAheadBytes
-                                      ? ram - kCacheBackingGrowAheadBytes
-                                      : 0);
+        streamed->FitExpertCache(ram > kCacheBackingGrowAheadBytes
+                                     ? ram - kCacheBackingGrowAheadBytes
+                                     : 0);
       }
     }
     new_state->scheduler = std::make_shared<TextGenerationScheduler>(

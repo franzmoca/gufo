@@ -1821,7 +1821,6 @@ static void ds41_acquire_instance_lock(void) {
 /* Primes the streamed expert cache from the model's histogram file when one
  * sits beside it, otherwise from the built-in ranking. */
 static void seed_experts(ds41_engine* e) {
-  e->expert_seeded = true;
   const char* histogram = e->expert_histogram;
   const bool custom = access(histogram, F_OK) == 0;
   if (custom && !ds41_expert_store_seed(e->expert_store, histogram)) {
@@ -1994,8 +1993,7 @@ int ds41_engine_open(ds41_engine** out, const ds41_engine_options* opt) {
       if (access(tails.c_str(), F_OK) == 0)
         (void)ds41_expert_store_attach_tails(e->expert_store, tails.c_str());
       e->expert_histogram = strdup((std::string(opt->model_path) + ".expert-histogram").c_str());
-      if (!opt->defer_expert_seed)
-        seed_experts(e);
+      seed_experts(e);
     }
 
     *out = e;
@@ -2047,11 +2045,11 @@ bool ds41_engine_has_image_bias(const ds41_engine* e) {
  * sessions), transient prefill peaks (~0.3-0.6 GiB) and margin against swap. */
 static constexpr uint64_t kWarmHeadroom = 2ull << 30;
 
-int ds41_engine_warm_experts(ds41_engine* e, uint64_t pending_bytes) {
-  if (!e || !e->expert_store || e->expert_seeded)
+int ds41_engine_fit_experts(ds41_engine* e, uint64_t pending_bytes) {
+  if (!e || !e->expert_store)
     return 1;
   if (!ds41_expert_store_set_reserve(e->expert_store, kWarmHeadroom + pending_bytes))
-    fprintf(stderr, "ds41: unable to allocate the expert prefetch stage at startup\n");
+    fprintf(stderr, "ds41: unable to fit the expert cache to the memory left after the sessions\n");
   seed_experts(e);
   return 0;
 }

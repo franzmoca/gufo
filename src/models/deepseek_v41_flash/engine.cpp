@@ -77,7 +77,6 @@ std::shared_ptr<Model> Model::Load(const std::string& model_path,
   engine_options.exact_prefill = options.exact_prefill;
   engine_options.stream_experts = options.stream_experts;
   engine_options.expert_cache_bytes = options.expert_cache_bytes;
-  engine_options.defer_expert_seed = options.defer_expert_seed;
   engine_options.dspark_model_path = options.dspark_model_path.empty()
                                          ? nullptr
                                          : options.dspark_model_path.c_str();
@@ -270,9 +269,9 @@ bool Model::StreamsExperts() const noexcept {
   return options_.stream_experts;
 }
 
-void Model::WarmExpertCache(std::uint64_t pending_bytes) {
-  if (options_.stream_experts && options_.defer_expert_seed)
-    (void)ds41_engine_warm_experts(engine_, pending_bytes);
+void Model::FitExpertCache(std::uint64_t pending_bytes) {
+  if (options_.stream_experts)
+    (void)ds41_engine_fit_experts(engine_, pending_bytes);
 }
 
 bool Model::EnableImageRouting(std::string* error_msg) {
