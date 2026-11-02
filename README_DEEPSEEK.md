@@ -328,8 +328,8 @@ podman logs -f gufo-ds41
 Measured over HTTP with `gufo serve` (greedy, thinking off, real chat text);
 the [benchmark card](docs/models/deepseek-v4.1-flash/BENCHMARKS.md) has the
 single-user, concurrent, loading and memory tables for `IQ1_M` resident and
-for `IQ2_XXS` and `UD-IQ1_M` streamed. `UD-IQ2_XXS` against `UD-IQ1_M` on
-the same build is in [QUALITY.md](docs/models/deepseek-v4.1-flash/QUALITY.md#streamed-ud-iq2_xxs).
+for `IQ2_XXS`, `UD-IQ1_M` and `UD-IQ2_XXS` streamed. `UD-IQ2_XXS` against
+`UD-IQ1_M` on the same build is in [QUALITY.md](docs/models/deepseek-v4.1-flash/QUALITY.md#streamed-ud-iq2_xxs).
 
 ## Model notes
 

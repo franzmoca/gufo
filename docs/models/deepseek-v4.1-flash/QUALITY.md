@@ -549,6 +549,24 @@ These hashes show that speculative and concurrent execution reproduce plain
 decoding; they do not measure accuracy against the original model (see the
 teacher-forced sections above).
 
+### UD-IQ2_XXS tables (2026-11-02/03)
+
+The `udiq2xxs` variant (Unsloth `UD-IQ2_XXS`, first shard of six, the ISTA
+`IQ4_NL` Engram as shard 6, `--stream-experts`) was measured the same way on
+the production `nix build` of `26c7598f` (binary SHA-256 `082f68e6…`),
+which sizes the expert cache after the server's sessions (EXPERIMENTS E93).
+Tuned profile `accelerator-performance`, GPU DPM level `auto`, Tctl 54 °C at
+the start. The loading table was refreshed for all four variants on this
+build, each launch after `sync; echo 3 > /proc/sys/vm/drop_caches`.
+The multi-user DSpark tables compare against isolated C1 AR references
+generated on this build (`multi-mixed-udiq2xxs-gufo-ar.json`,
+`multi-repetition-udiq2xxs-gufo-ar.json`).
+
+- Single user: the greedy DSpark completion equals the AR completion at
+  all eight depths (8 of 8 hashes).
+- Multiple users: every AR and DSpark cohort, C1–C8, mixed and repetitive,
+  matches its isolated C1 reference (30 of 30).
+
 ## Streamed UD-IQ2_XXS
 
 Unsloth's `UD-IQ2_XXS` (165.3 GB backbone in five shards, the shared
