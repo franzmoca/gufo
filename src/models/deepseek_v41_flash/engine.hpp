@@ -30,6 +30,9 @@ struct ModelOptions {
   bool stream_experts = false;
   /// Streamed expert cache bytes (0 sizes it from available memory).
   std::uint64_t expert_cache_bytes = 0;
+  /// Leave the streamed expert cache empty at load; WarmExpertCache sizes and
+  /// seeds it once the caller's sessions exist.
+  bool defer_expert_seed = false;
   /// Optional DSpark support model. Empty leaves speculative decoding off.
   std::string dspark_model_path;
 };
@@ -96,6 +99,12 @@ public:
   [[nodiscard]] std::uint32_t MaxContext() const noexcept;
   [[nodiscard]] bool HasDspark() const;
   [[nodiscard]] bool ExactPrefill() const;
+  /// Routed experts stream from the SSD through a bounded cache.
+  [[nodiscard]] bool StreamsExperts() const noexcept;
+  /// With defer_expert_seed: sizes the expert cache from the memory free now
+  /// and seeds it. Call once the sessions exist; pending_bytes is memory the
+  /// caller still allocates later (cache backing that grows with use).
+  void WarmExpertCache(std::uint64_t pending_bytes);
   /// Routes image positions with the MoE gates' image bias, for image
   /// prompts; enable it before creating sessions.
   [[nodiscard]] bool EnableImageRouting(std::string* error_msg = nullptr);

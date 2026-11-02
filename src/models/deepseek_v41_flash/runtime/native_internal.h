@@ -31,6 +31,8 @@ struct ds41_engine {
   ds41_dspark_model* dspark;
   ds41_engram_tables* engram;
   ds41_expert_store* expert_store;
+  char* expert_histogram;  // optional seed ranking beside the model (owned)
+  bool expert_seeded;
   bool rocm_ready;
   uint32_t prefill_batch;  // most tokens per prefill batch
   bool exact_prefill;      // no decoder SWA bounded replay

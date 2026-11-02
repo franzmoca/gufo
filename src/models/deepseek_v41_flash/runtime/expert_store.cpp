@@ -41,11 +41,11 @@
 namespace {
 
 constexpr uint64_t kGiB = 1ull << 30;
-/* Headroom kept above the cache for everything allocated after it: the
- * shared batch scratch (~1.4 GiB at 1M context), one session's FP4 state
- * (~0.9 GiB at 1M, far less at serving depths) and transient prefill peaks.
- * The resident path keeps a 1 GiB dispatch reserve under the same loads;
- * sessions that no longer fit fall back to the disk prompt cache. */
+/* Headroom kept above the cache for everything allocated after it, when the
+ * cache is sized before the sessions exist (tools, benches): the shared batch
+ * scratch (~1.4 GiB at 1M context), one session's FP4 state (~0.9 GiB at 1M)
+ * and transient prefill peaks. The server sizes the cache after its sessions
+ * instead (ds41_expert_store_set_reserve). */
 constexpr uint64_t kReserve = 4 * kGiB;
 /* Rows of the compact prefetch stage: two parity halves, so the job a layer
  * adopts and the job submitted for the layer after never share rows. A
@@ -658,6 +658,9 @@ struct ds41_expert_store {
   std::array<uint8_t*, kReadWorkers> read_buffers{};
   std::unique_ptr<ReadPool> readers;
   uint64_t cache_limit = 0;
+  uint64_t requested_limit = 0;  // --expert-cache-bytes; 0 sizes from memory
+  uint64_t reserve = kReserve;   // free memory the cache never grows into
+  bool sized_after_sessions = false;  // set_reserve ran: seed the whole budget
   uint64_t tick = 0;
   uint64_t logged_tokens = 0;
   /* DS41_EXPERT_TRACE=path: binary routing trace for
@@ -713,9 +716,9 @@ struct ds41_expert_store {
 
   bool grow(uint32_t size_class) {
     const uint64_t free_bytes = ds41_expert_available_memory();
-    if (free_bytes <= kReserve)
+    if (free_bytes <= reserve)
       return false;
-    uint64_t available = free_bytes - kReserve;
+    uint64_t available = free_bytes - reserve;
     if (stats.cache_bytes >= cache_limit)
       return false;
     available = std::min(available, cache_limit - stats.cache_bytes);
@@ -930,6 +933,7 @@ ds41_expert_store* ds41_expert_store_create(const ds41_model* model,
   }
   const uint64_t available = ds41_expert_available_memory();
   store->cache_limit = available > kReserve ? available - kReserve : 0;
+  store->requested_limit = cache_limit_bytes;
   if (cache_limit_bytes)
     store->cache_limit = std::min(store->cache_limit, cache_limit_bytes);
   if (const char* path = std::getenv("DS41_EXPERT_TRACE"); path && *path) {
@@ -1086,10 +1090,14 @@ bool seed_ranked(ds41_expert_store* store, std::vector<SeedItem> ranked,
       if (!ranked_set[l][e])
         ranked.push_back({l, e, 0});
   const uint64_t available = ds41_expert_available_memory();
-  const uint64_t free_budget = available > kReserve ? available - kReserve : 0;
-  // Leave capacity for session allocations and for experts learned from the
-  // actual request. At startup the slots are otherwise all free.
-  const uint64_t budget = std::min(store->cache_limit, free_budget) / 16 * 15;
+  const uint64_t free_budget =
+      available > store->reserve ? available - store->reserve : 0;
+  // Before the sessions exist, leave capacity for their allocations and for
+  // experts learned from the actual request; once they exist, growing the
+  // last sixteenth during the first prompt slows it, so seed everything.
+  uint64_t budget = std::min(store->cache_limit, free_budget);
+  if (!store->sized_after_sessions)
+    budget = budget / 16 * 15;
   size_t target = 0;
   for (uint64_t used = 0; target < ranked.size(); ++target) {
     used += store->class_bytes[store->layer_class[ranked[target].layer]];
@@ -1121,7 +1129,7 @@ bool seed_ranked(ds41_expert_store* store, std::vector<SeedItem> ranked,
     }
     if (ids.empty())
       continue;
-    if (ds41_expert_available_memory() <= kReserve)
+    if (ds41_expert_available_memory() <= store->reserve)
       break;
     while (ids.size() % DS41_N_EXPERT_USED)
       ids.push_back(ids.back());
@@ -1272,8 +1280,8 @@ std::vector<ReadTask> build_read_tasks(const ds41_expert_store* store, uint32_t 
   return tasks;
 }
 
-/* The compact prefetch stage is bought only when prefetch actually starts,
- * so it never shrinks the startup seed's memory budget. */
+/* The compact prefetch stage is bought when prefetch first starts, or by
+ * ds41_expert_store_set_reserve before a server seeds the cache. */
 bool ensure_stage_pairs(ds41_expert_store* store) {
   if (store->stage_pairs)
     return true;
@@ -1810,4 +1818,21 @@ void ds41_expert_store_log(const ds41_expert_store* store) {
       "expert reads: %llu direct, %llu buffered",
       static_cast<unsigned long long>(store->readers->direct_reads()),
       static_cast<unsigned long long>(store->readers->buffered_reads()));
+}
+
+bool ds41_expert_store_set_reserve(ds41_expert_store* store,
+                                   uint64_t reserve_bytes) {
+  if (!store)
+    return false;
+  /* The prefetch stage is bought on the first prompt anyway; buying it now
+   * puts it in the measurement instead of under the cache. */
+  const bool staged = ensure_stage_pairs(store);
+  store->reserve = reserve_bytes;
+  store->sized_after_sessions = true;
+  const uint64_t available = ds41_expert_available_memory();
+  store->cache_limit = store->stats.cache_bytes +
+                       (available > reserve_bytes ? available - reserve_bytes : 0);
+  if (store->requested_limit)
+    store->cache_limit = std::min(store->cache_limit, store->requested_limit);
+  return staged;
 }

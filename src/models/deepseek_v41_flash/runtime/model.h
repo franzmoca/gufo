@@ -38,6 +38,9 @@ struct ds41_engine_options {
   /* Streamed expert cache bytes; 0 sizes it from available memory. Requires
    * stream_experts. */
   uint64_t expert_cache_bytes;
+  /* Leave the streamed expert cache empty at open, for a caller that
+   * allocates its sessions first and then calls ds41_engine_warm_experts. */
+  bool defer_expert_seed;
 };
 
 inline constexpr uint32_t DS41_MIN_PREFILL_BATCH = 16;
@@ -141,6 +144,11 @@ inline constexpr std::uint32_t DS41_SESSION_PAYLOAD_VERSION = 6;
 
 int ds41_engine_open(ds41_engine** out, const ds41_engine_options* options);
 void ds41_engine_close(ds41_engine* engine);
+/* Streamed engines opened with defer_expert_seed: sizes the expert cache from
+ * the memory free now, then seeds it. Call once the sessions and other
+ * long-lived buffers exist; pending_bytes is what the caller will still
+ * allocate later (cache backing that grows with use). 0 on success. */
+int ds41_engine_warm_experts(ds41_engine* engine, uint64_t pending_bytes);
 int ds41_engine_vocab_size(const ds41_engine* engine);
 const char* ds41_engine_model_name(const ds41_engine* engine);
 
