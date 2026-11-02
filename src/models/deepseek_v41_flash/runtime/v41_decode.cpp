@@ -2427,6 +2427,14 @@ bool ds41_decoder_sample(ds41_decoder* d, uint32_t row, const ds41_v41_proposal*
          ds41_v41_sample_row(logits, DS41_N_VOCAB, q, temperature, u, u2, d->sample_scratch, out) == 0;
 }
 
+bool ds41_decoder_softmax_totals(ds41_decoder* d, uint32_t row, float temperature, double* maximum, double* sum) {
+  if (!d || row >= d->resident_logits || d->logits_gen != d->shared->logits_gen) return false;
+  if (!d->sample_scratch) d->sample_scratch = alloc<uint8_t>(d->allocations, DS41_V41_SAMPLE_SCRATCH_BYTES);
+  const float* logits = d->shared->views.logits + (uint64_t)(d->logits_row0 + row) * DS41_N_VOCAB;
+  return d->sample_scratch &&
+         ds41_v41_softmax_totals(logits, DS41_N_VOCAB, temperature, d->sample_scratch, maximum, sum) == 0;
+}
+
 bool ds41_decoder_enable_features(ds41_decoder* d) {
   if (!d) return false;
   if (!d->features)

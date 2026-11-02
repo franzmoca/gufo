@@ -244,6 +244,58 @@ void TestCompactTargetContract() {
   }
 }
 
+// Totals computed elsewhere stand for SamplerState's own full-row passes:
+// with the same values, top-p selection and draws are unchanged.
+void TestSoftmaxTotals() {
+  std::vector<float> logits(4096);
+  for (std::size_t i = 0; i < logits.size(); ++i)
+    logits[i] = std::sin(0.37F * static_cast<float>(i)) * 6.0F;
+  logits[17] = -INFINITY;
+  SamplingConfig config{.temperature = 0.7F, .top_p = 0.95F, .seed = 9};
+  for (const float min_p : {0.0F, 0.05F}) {
+    config.min_p = min_p;
+    SamplerState host(config), assisted(config);
+    Expect(assisted.UsesSoftmaxTotals(logits.size()) &&
+               !assisted.UsesSoftmaxTotals(1024),
+           "unbounded top-p over a large row uses whole-row totals");
+    double maximum = -INFINITY;
+    for (const float x : logits)
+      if (std::isfinite(x))
+        maximum = std::max(maximum, static_cast<double>(x));
+    double sum = 0.0;
+    for (const float x : logits)
+      if (std::isfinite(x))
+        sum +=
+            std::exp((static_cast<double>(x) - maximum) / config.temperature);
+    const SamplerState::SoftmaxTotals totals{.maximum = maximum, .sum = sum};
+    const auto expected = host.Distribution(logits);
+    const auto actual = assisted.Distribution(logits, totals);
+    Expect(expected.entries().size() == actual.entries().size(),
+           "totals keep the top-p support");
+    for (std::size_t i = 0; i < expected.entries().size(); ++i)
+      Expect(expected.entries()[i].token == actual.entries()[i].token &&
+                 std::bit_cast<std::uint64_t>(expected.entries()[i].value) ==
+                     std::bit_cast<std::uint64_t>(actual.entries()[i].value),
+             "totals keep exact FP64 probabilities");
+    for (int i = 0; i < 32; ++i) {
+      const auto a = host.Sample(logits), b = assisted.Sample(logits, totals);
+      Expect(a == b && host.rng_state() == assisted.rng_state(),
+             "totals keep draws and RNG");
+    }
+  }
+  // Other selections ignore totals: they never sum the whole row.
+  SamplingConfig other{.temperature = 0.7F, .top_k = 40, .top_p = 0.95F};
+  Expect(!SamplerState(other).UsesSoftmaxTotals(logits.size()),
+         "top-k selections do not use whole-row totals");
+  other = {.temperature = 0.7F, .top_p = 0.95F, .presence_penalty = 0.5F};
+  SamplerState penalized(other);
+  penalized.Accept(3);
+  Expect(!penalized.UsesSoftmaxTotals(logits.size()),
+         "penalized logits do not use raw-row totals");
+  Expect(!SamplerState({.temperature = 0.7F}).UsesSoftmaxTotals(logits.size()),
+         "plain sampling does not use totals");
+}
+
 }  // namespace
 
 void TestRawLogprobs() {
@@ -325,6 +377,7 @@ int main() {
   TestReasoningBudgetKeepsLiteralAnswer();
   TestReasoningBudgetWithGrammar();
   TestCompactTargetContract();
+  TestSoftmaxTotals();
   std::cout << "sampling_test passed\n";
   return 0;
 }

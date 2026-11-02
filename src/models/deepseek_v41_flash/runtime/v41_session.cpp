@@ -383,6 +383,18 @@ int draw(const ds41_session* s, const ds41_dspark_sampler* sampler, const float*
   return sampler->sample(sampler->ctx, row, vocab(s));
 }
 
+/* Before a host draw from row `row` of the last evaluation: when the
+ * request's selection sums the whole row (top-p), the device computes that
+ * sum and hands it to the sampler, which then skips its two passes over the
+ * row. Without it the sampler computes them itself. */
+void device_totals(ds41_session* s, const ds41_dspark_sampler* sampler, uint32_t row) {
+  if (!sampler || !sampler->totals_temperature || !sampler->totals) return;
+  const float temperature = sampler->totals_temperature(sampler->ctx, vocab(s));
+  double maximum = 0.0, sum = 0.0;
+  if (temperature > 0.0f && ds41_decoder_softmax_totals(s->decoder, row, temperature, &maximum, &sum))
+    sampler->totals(sampler->ctx, maximum, sum);
+}
+
 /* Draws row `row` of the last evaluation on the device when the request's
  * selection is plain softmax sampling (ds41_v41_sample_row): q's exact p/q
  * acceptance or residual draw, or a plain draw without q (or for a point
@@ -659,6 +671,7 @@ int finish(Cycle& c, char* error, size_t capacity) {
     int drawn = -1, argmax = -1;
     if (!device_draw(s, sampler, i - 1, proposals ? proposals + (i - 1) : nullptr, &drawn, &argmax)) {
       argmax = top ? *top : ds41_sample_argmax(row, n_vocab);
+      device_totals(s, sampler, i - 1);
       drawn = c.stochastic && c.copied == 0 ? sampler->verify(sampler->ctx, i - 1, row, n_vocab, block[i])
                                             : draw(s, sampler, row, &argmax);
     }
@@ -685,8 +698,10 @@ int finish(Cycle& c, char* error, size_t capacity) {
   }
   /* The token after a fully accepted block (or a plain step): the last row. */
   int bonus_argmax = -1;
-  if (next < 0 && !device_draw(s, sampler, m - 1, nullptr, &next, &bonus_argmax))
+  if (next < 0 && !device_draw(s, sampler, m - 1, nullptr, &next, &bonus_argmax)) {
+    device_totals(s, sampler, m - 1);
     next = draw(s, sampler, s->logits.data(), row_argmax ? row_argmax + m - 1 : nullptr);
+  }
   if (next < 0 || next >= (int)n_vocab) {
     set_error(error, capacity, "DSpark target logits contain no finite values");
     s->valid = false;

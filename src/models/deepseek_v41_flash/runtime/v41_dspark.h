@@ -134,6 +134,8 @@ bool ds41_decoder_enable_features(ds41_decoder* d);
  * resident (evaluations of at most 64 logit rows). */
 bool ds41_decoder_sample(ds41_decoder* d, uint32_t row, const ds41_v41_proposal* q, float temperature, double u,
                          double u2, ds41_v41_sample_result* out);
+/* ds41_v41_softmax_totals on the same resident row. */
+bool ds41_decoder_softmax_totals(ds41_decoder* d, uint32_t row, float temperature, double* maximum, double* sum);
 /* Device features [rows][3 * dim] of positions [*pos0, *pos0 + *rows). */
 const float* ds41_decoder_features(const ds41_decoder* d, uint32_t* pos0, uint32_t* rows);
 /* Row-major out[t] = W x[t] for a [rows, k] weight of GGUF `type`. */

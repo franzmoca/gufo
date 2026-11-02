@@ -2980,6 +2980,31 @@ extern "C" int ds41_v41_sample_row(const float* logits, uint32_t n, const ds41_v
   return hipMemcpy(out, &s->result, sizeof(*out), hipMemcpyDeviceToHost) == hipSuccess ? 0 : 1;
 }
 
+extern "C" int ds41_v41_softmax_totals(const float* logits, uint32_t n, float temperature, void* scratch,
+                                       double* maximum, double* sum) {
+  if (!logits || !scratch || !maximum || !sum || n == 0 ||
+      (n + kSampleBlocks - 1) / kSampleBlocks > kSampleThreads * kSamplePer || !(temperature > 0.0f))
+    return 1;
+  auto* s = static_cast<SampleScratch*>(scratch);
+  sample_max_kernel<<<kSampleBlocks, kSampleThreads>>>(logits, n, s);
+  sample_sum_kernel<<<kSampleBlocks, kSampleThreads>>>(logits, n, temperature, s);
+  if (launch_ok("softmax totals") != 0) return 1;
+  SampleScratch host;
+  if (hipMemcpy(&host, s, sizeof(host), hipMemcpyDeviceToHost) != hipSuccess) return 1;
+  /* sample_global_max and sample_pick_kernel's total, in the same order. */
+  float best = -INFINITY;
+  int32_t arg = -1;
+  double total = 0.0;
+  for (uint32_t b = 0; b < kSampleBlocks; b++) {
+    const int32_t a = host.arg[b];
+    if (a >= 0 && (arg < 0 || host.max[b] > best || (host.max[b] == best && a < arg))) best = host.max[b], arg = a;
+    total += host.sum[b];
+  }
+  *maximum = arg < 0 ? -INFINITY : (double)best;
+  *sum = total;
+  return 0;
+}
+
 extern "C" int ds41_v41_hc_expand(const float* y, const float* residual, const float* post, const float* comb,
                                   float* out, uint32_t hc, uint32_t dim, uint32_t n) {
   hc_expand_kernel<<<dim3(blocks_for(dim), n), kThreads>>>(y, residual, post, comb, out, hc, dim);

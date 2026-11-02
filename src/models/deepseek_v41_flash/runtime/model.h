@@ -100,6 +100,13 @@ struct ds41_dspark_sampler {
   // else 0. `uniform` draws the request's next uniform; `rng`/`set_rng` save
   // and restore its state. Drawn tokens are recorded with `accept`.
   float (*device_temperature)(void* ctx) = nullptr;
+  // Filtered draws on the host: `totals_temperature` returns the temperature
+  // while the request's next selection sums the whole row's softmax (top-p
+  // without top-k or penalties), else 0. `totals` hands the next `sample` or
+  // `verify` call that row's largest logit and softmax sum, computed on the
+  // device, in place of its own two passes over the row.
+  float (*totals_temperature)(void* ctx, uint32_t vocabulary_size) = nullptr;
+  void (*totals)(void* ctx, double maximum, double sum) = nullptr;
   double (*uniform)(void* ctx) = nullptr;
   uint64_t (*rng)(void* ctx) = nullptr;
   void (*set_rng)(void* ctx, uint64_t state) = nullptr;
