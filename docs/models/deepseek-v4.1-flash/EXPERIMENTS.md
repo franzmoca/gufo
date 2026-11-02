@@ -2930,3 +2930,60 @@ more than the reads they saved. In the agent trace none of the policies
 moves anything by more than 0.15 s; its reads are dominated by decode
 (177 GiB against 24 GiB for replays). Not built.
 
+
+## E87 — greedy DSpark: learn the plain step, price the draft, decide before drafting (retained)
+
+DECODE.md lever 1. With the confidence head, every greedy cycle ran the
+drafter (~9 ms) and only then picked a width, and `cycle_ms[0]` was never
+learned in that mode: it stayed at its 42.4 ms resident prior while a
+streamed plain step costs ~57 ms. The policy now:
+- learns `cycle_ms[0]` from every one-row cycle, after the draft when one
+  was discarded;
+- learns the drafter pass alone (`draft_ms`) and, once a cycle has
+  drafted, compares widths on their cost after the draft;
+- drafts only while `gain_ms` exceeds `draft_ms`. `gain_ms` follows the
+  time each drafting cycle actually saved: its emitted tokens at the
+  plain-step cost minus its time after the draft, zero when it verified
+  none. Joint cycles, whose time is shared, count the saving the width
+  predicted. While drafting does not pay, single probes re-measure it
+  after 4 plain steps, doubling up to 64.
+
+`GUFO_DEEPSEEK41_DSPARK_TRACE` now also prints each learned cycle.
+Served on UD-IQ2_XXS streamed (chat, code, 24K document; 512 tokens
+each), alternating builds; outputs identical across builds and to AR
+greedy:
+
+| Greedy DSpark tok/s | Chat | Code | Long |
+| --- | --- | --- | --- |
+| Before (3 runs) | 16.5-16.9 | 26.6-27.4 | 24.7-26.2 |
+| After (3 runs) | 17.6-18.9 | 28.3-28.7 | 26.4-26.7 |
+
+A first version that ranked drafting by the saving its width *predicted*
+(from the confidence head) gave 17.0 and 19.2 on chat: the confidence
+underestimates chat acceptance, and the estimate could settle below the
+draft cost. Chat still varies with the realized saving, because there a
+draft saves about what it costs; that variance is left open.
+
+## E88 — top-p softmax totals on the device (retained)
+
+DECODE.md lever 4. With top-p, `SamplerState` made two passes over the
+129,280-entry row (maximum, then an FP64 exp-sum) before selecting
+candidates, ~0.85 ms per verified row while the GPU idled. The session
+now runs the device sampler's max and sum kernels on the row
+(`ds41_v41_softmax_totals`), reduces the 128 block partials on the host in
+the same order as the device pick, and hands the totals to the sampler,
+which skips its own passes. `SamplerState::UsesSoftmaxTotals` limits this
+to temperature with top-p (min-p allowed) and no top-k, penalties, forced
+tokens or constraints; everything else keeps the host path.
+`sampling_test` checks bit-identical distributions and draws with and
+without the totals.
+
+Served as in E87, T 0.7, top-p 0.95, seeded; outputs and draft counts
+identical across builds (two rounds, alternated):
+
+| tok/s | Chat | Code | Long |
+| --- | --- | --- | --- |
+| Sampled DSpark, before | 18.9-19.0 | 24.8 | 26.9 |
+| Sampled DSpark, after | 19.3 | 25.7 | 27.9-28.0 |
+| AR sampled, before | 16.9 | 18.3 | 17.4-17.5 |
+| AR sampled, after | 17.0-17.1 | 18.4-18.5 | 17.6 |

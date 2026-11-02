@@ -56,10 +56,12 @@ ceiling** for this build. Steady AR runs at 53-58 ms per token. The gap of
 3. **Launch gaps (~2.9 ms/token traced, ~975 launches).** These are partly
    added by the tracer (E60).
 
-DSpark has three problems of its own, all found while writing this document:
+DSpark had three problems of its own, all found while writing this
+document. The first two are fixed (E87, E88); the rates above predate the
+fixes.
 
-- **The greedy width policy drafts every cycle, then mostly verifies only
-  the anchor (bug, lever 1).** The plain-step cost it compares against is
+- **Fixed (E87): the greedy width policy drafted every cycle, then mostly
+  verified only the anchor (bug, lever 1).** The plain-step cost it compares against is
   never learned in this mode. It stays at its 42.4 ms prior, from resident
   `IQ1_M`, while a streamed plain cycle costs ~72 ms including the wasted
   draft.
@@ -67,7 +69,8 @@ DSpark has three problems of its own, all found while writing this document:
     verified one row.
   - Greedy DSpark ties AR on chat (16.9 against 16.5 tok/s) and trails
     sampled DSpark (19.0), which uses a different width rule.
-- **Sampled requests with top-p, top-k or min-p sample on the host (lever 4).**
+- **Partly fixed (E88): sampled requests with top-p, top-k or min-p sample
+  on the host (lever 4).**
   The device sampler takes only plain temperature sampling. Every verified
   row then waits ~0.85 ms on the host for a full-vocabulary distribution:
   2-5 ms per DSpark cycle, ~0.9 ms per AR token.
@@ -340,7 +343,15 @@ bandwidth it takes from them, the critical-path kernels are ~3.9 ms/token
 
 ## Levers, by measured size
 
-### 1. DSpark greedy width policy (bug; up to AR-equal on chat)
+### 1. DSpark greedy width policy (bug; fixed in E87)
+
+**Status:** fixed in E87. Over three alternated runs per build, greedy
+DSpark went from 16.5-16.9 to 17.6-18.9 tok/s on chat, from 26.6-27.4 to
+28.3-28.7 on code, and from 24.7-26.2 to 26.4-26.7 after the 24K
+document. Outputs are unchanged. Chat still varies between runs (17.6-19.2 tok/s),
+because the time a draft saves on chat sits close to the draft's own cost.
+That variance is left open; the analysis below describes the bug as it was.
+
 
 With a drafter that has the confidence head, greedy cycles are `learned`:
 - `prepare` sets `c.tail = limit`, so every cycle runs the drafter
@@ -428,6 +439,14 @@ streaming.
   before working on the kernel.
 
 ### 4. Host sampling with top-p, top-k or min-p (0.9 ms/token AR, 2-5 ms per DSpark cycle)
+
+**Status:** top-p without top-k is fixed in E88: the device computes the
+row's softmax maximum and sum, and the host sampler skips its two passes
+over the full row. Sampled DSpark is +0.3 to +1.1 tok/s and AR sampled
++0.1 to +0.2, with identical seeded outputs. Top-k, penalties and
+constraints still take the host path; the analysis below is from before
+the fix.
+
 
 `DsparkSamplerBridge::DeviceTemperature` allows the device sampler
 (`ds41_v41_sample_row`) only for plain temperature sampling. With top-p
