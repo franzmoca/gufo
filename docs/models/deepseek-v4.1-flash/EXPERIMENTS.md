@@ -2655,3 +2655,15 @@ all 16 nibble inputs were exhaustively checked for exact bit spreading.
 Gate/up (unchanged IQ2_XXS control) is 23.05–23.11 ms versus 23.18 ms.
 No demonstrated benefit, so all variants are reverted. No full model run
 or full operator suite is claimed for these rejected variants.
+
+## E79 — routed iterative-ILP scheduler (not retained)
+
+Apply `-mllvm -amdgpu-sched-strategy=iterative-ilp` only to routed FP16.
+E76's recorded-route benchmark: IQ2_XXS gate/up 23.07 ms, IQ2_S down
+12.89 ms against 23.18 / 12.91 ms. Reference errors unchanged. This is
+not a meaningful demonstrated gain, so restore the compiler settings.
+Baseline resource analysis shows 186 VGPRs/23,808 B LDS for IQ2_XXS pair
+and 208 VGPRs/37,120 B LDS for IQ2_S down, with no spills. The gate/up
+static ISA has 401 half-wave exchanges and 530 delay instructions versus
+128 WMMA instructions; these static counts are not dynamic cycle costs.
+[Resources and timing](artifacts/2026-11-02-routed-layout/).
