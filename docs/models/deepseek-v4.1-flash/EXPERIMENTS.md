@@ -2549,3 +2549,22 @@ On resident `IQ1_M` a fresh 23,936-token prompt went from 19.5 to 17.8 s.
 The `cache`, `cache-edits` and `long-context` functional suites pass on
 `IQ1_M` with DSpark; `cache-depth` stops at its 16,384-token prompt
 minimum, which DS41 tokenizes to 16,210.
+
+## E74 — BF16 64-row wide tiles (rejected)
+
+On `c49e1fec`, compare the existing 128- and 64-row wide specializations
+on the same inputs, 30 event-timed calls after four warmups, three repeats.
+At 2,048 tokens, 64-row tiles regress the router (384 × 5,120) from
+~1.27 to ~1.30 ms, compressor (512 × 5,120) from ~1.65 to ~1.80 ms,
+and indexer (4,096 × 1,280) from ~2.60 to ~3.01 ms. Every output is
+bit-identical, also at 65 and 140 tokens. These are warm microbenchmarks,
+not request timings; reject the long-prefill proposal before model runs.
+Built with HIP `-O3 -ffast-math -fno-finite-math-only --offload-arch=gfx1151`.
+[Source and raw results](artifacts/2026-11-02-bf16-prefill/).
+
+The new `tools/ds41/route_occupancy.py` reports per-prepare occupancy and
+exports 2,048-token `COUNTS` lines for `ds41_mmq_bench`. The existing
+`/tmp/qcmp/served/doc2-trace3/routes.trace` contains 520 such batches:
+mean 419.19 64-slot tiles, mean useful-slot occupancy 45.86%. This covers
+the complete trace, not an isolated request. Older count files lack matched
+provenance; these figures do not establish the cause of the served/bench gap.
