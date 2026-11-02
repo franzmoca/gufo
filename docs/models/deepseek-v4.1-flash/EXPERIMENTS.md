@@ -2563,10 +2563,10 @@ Built with HIP `-O3 -ffast-math -fno-finite-math-only --offload-arch=gfx1151`.
 [Source and raw results](artifacts/2026-11-02-bf16-prefill/).
 
 The new `tools/ds41/route_occupancy.py` reports per-prepare occupancy and
-exports 2,048-token `COUNTS` lines for `ds41_mmq_bench`. The existing
-`/tmp/qcmp/served/doc2-trace3/routes.trace` contains 520 such batches:
-mean 419.19 64-slot tiles, mean useful-slot occupancy 45.86%. This covers
-the complete trace, not an isolated request. Older count files lack matched
+exports 2,048-token `COUNTS` lines for `ds41_mmq_bench`. A route trace
+(`DS41_EXPERT_TRACE`) of the served long-document Q&A session contains 520
+such batches: mean 419.19 64-slot tiles, mean useful-slot occupancy 45.86%.
+This covers the complete session, not an isolated request. Older count files lack matched
 provenance; these figures do not establish the cause of the served/bench gap.
 
 ## E75 — grouped BF16 router/compressor prefill (retained)
@@ -2610,11 +2610,10 @@ documents per process, one generated token (no draft/accepted tokens):
 
 All responses produced the same single token; this is limited output
 agreement, not a full quality evaluation. Request timing remains inconclusive:
-streaming/cache variance is larger than the expected kernel saving. Retained
-at the user's explicit preference based on the measured kernel gain; do not
-claim a qualified end-to-end speedup or update headline benchmark numbers.
-Initial automatic-cache runs and an HTTP model-name setup failure are retained
-alongside the fixed-budget runs in the [artifacts](artifacts/2026-11-02-bf16-prefill/).
+streaming/cache variance is larger than the expected kernel saving (~0.05 s
+per 20K-token prompt from the kernel times above). Retained for the measured,
+bit-identical kernel gain; it is not a qualified end-to-end speedup. Raw runs
+are in the [artifacts](artifacts/2026-11-02-bf16-prefill/).
 
 The excluded indexer already launches 1,024 wide blocks at 2,048 tokens,
 versus 96 for the router. The candidate makes four times as many blocks,
@@ -2667,3 +2666,15 @@ and 208 VGPRs/37,120 B LDS for IQ2_S down, with no spills. The gate/up
 static ISA has 401 half-wave exchanges and 530 delay instructions versus
 128 WMMA instructions; these static counts are not dynamic cycle costs.
 [Resources and timing](artifacts/2026-11-02-routed-layout/).
+
+## E80 — IQ2_S grid table as packed bytes in LDS (rejected)
+
+The IQ2_S down keeps 37,120 B of LDS per block (E79), 16 KiB of it the
+grid table decoded to FP16. Storing the grid as its packed bytes (8 KiB)
+and converting to FP16 at each decode leaves the values and outputs
+unchanged (identical benchmark reference errors), but costs more ALU work
+than the smaller table saves. On E76's recorded served routes, three
+alternated rounds of seven repetitions: down 12.87-12.91 ms before,
+13.82-13.87 ms after (+7%); the IQ2_XXS gate+up control is unchanged
+(23.18-23.29 ms). Reverted.
+

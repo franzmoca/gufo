@@ -148,11 +148,10 @@ replays had warmed them: the five replays averaged 29.5 ms per layer.
 
 Served ranges are two profiles of the same request (`c8220c2b` and
 `984ad880`; the kernels are unchanged between them). Both prompts run 12,288
-routes per layer. The likely cause is the spread of routes over experts:
-more distinct experts mean more partly filled 64-slot tiles, and each tile
-decodes its expert's weights again. This hasn't been confirmed. Check it
-with `ds41_mmq_bench --f16 1` on routes recorded from the served document
-(E25 and E35 used recorded counts this way).
+routes per layer; the difference is in how they spread over experts:
+recorded served routes reproduce the served kernel times in
+`ds41_mmq_bench`, and a served batch fills its 64-slot tiles only 46% (see
+lever 3).
 
 ## Per-kernel position (served document)
 
@@ -257,6 +256,10 @@ Already measured:
 | Rolled weight loop (I-cache) | Retained | `EXPERIMENTS.md` table |
 | Nontemporal weight loads | Worse (refetches) | `EXPERIMENTS.md` table |
 | IQ2_S, IQ3_XXS, Q2_K formats | Retained, correctness first | E67 |
+| 128- or 32-value activation stages (on served routes) | Both slower: gate+up +0.2-0.3 ms, down +0.5 ms | E76, E77 |
+| IQ2_S sign masks by bit spreading instead of the LDS table | Flat to +4% on the down | E78 |
+| `iterative-ilp` scheduler for the routed kernels | Flat (23.07 / 12.89 against 23.18 / 12.91 ms) | E79 |
+| IQ2_S grid table as packed bytes in LDS (16 → 8 KiB), converted at decode | Down +7% (13.82-13.87 against 12.87-12.91 ms) | E80 |
 
 E25's ablation of a 2,048-token layer (IQ1_M gate+up, 21.8 ms):
 - 14.7 ms skeleton: block fields, fragment reads, products, at ~39 TFLOP/s.
@@ -264,15 +267,24 @@ E25's ablation of a 2,048-token layer (IQ1_M gate+up, 21.8 ms):
 - +1.7 ms activation staging with two barriers per stage (+4.9 for IQ2_XXS).
 - +4.4 ms weight decode with its permutes.
 
+The bench-against-served gap comes from the routes themselves.
+`tools/ds41/route_occupancy.py` turns a route trace into `--counts` lines
+for `ds41_mmq_bench`; on a 2,048-row batch recorded from the served
+document, the microbenchmark reproduces the served times (IQ2_XXS gate+up
+23.2 ms, IQ2_S down 12.9 ms; `ds41_mmq_bench --f16 1 --type 16
+--down-type 22 --counts FILE --line 10`). Over the served session's 520
+prompt batches, a batch fills 419 64-slot tiles on average, with 46% of
+their slots holding a route: more than half of each tile's products are
+padding. Use these recorded counts, not the bench prompt, for routed
+kernel work.
+
 Untried:
-- **Measure on recorded served routes first.** The 25-35% gap between the
-  bench and the document (30-45% per call) is the largest unexplained
-  number here.
-- **Count the tiles a real 2,048-row batch produces,** and the live 16-slot
-  groups per tile. If partly filled tiles dominate, try grouping two small
-  experts into one tile's activation stage. That shares no weights, so the
-  win would come only from more products per barrier; measure before
-  building.
+- **Fuller tiles.** With 46% of slots used, grouping two small experts
+  into one tile's activation stage, or tiles of 16/32 slots for small
+  experts alongside 64 for large ones, attacks the padding directly. Both
+  share no weights across experts, so the gain comes from fewer padded
+  products per barrier. E8 (32-slot tiles) found no gain; repeat it on the
+  recorded counts before building anything new.
 - **IQ2_S and IQ2_XS downs** run 5-10% slower than IQ2_XXS down per call. If
   their decode is the gap, a 2% prefill gain.
 - **The 140-row replay calls** run at 4-7 TFLOP/s (0.25 s per prompt). With
@@ -299,19 +311,20 @@ Already measured:
 Tools: `ds41_mmq_bench --dense [--x-half 1]` and
 `tools/bench/ds41_dense_f16_tune.hip`.
 
-### 5. BF16 router (0.57 s, ~2.8%)
+### 5. BF16 router (0.57 s, ~2.8%, before E75)
 
-`matmul_bf16_wmma_kernel<128>` on 384 rows launches only 3 × 32 = 96
-workgroups for 2,048 tokens and reaches 5.1 TFLOP/s per pass of the matrix
-(15 across its three terms). It runs twice per encoder layer: routing, plus
-the wide next-layer prediction.
-- A grid with more workgroups (64-row tiles, or split K with an FP32
-  reduction in the same order) could reach the rate of the larger BF16
-  shapes.
-- The result must stay bit-identical. E71's narrow kernel shows how: keep
-  the 32-value K steps, the part order and the FP32 sums per step.
-
-Worth ~0.3-0.4 s per 20K prompt.
+In the profile above, `matmul_bf16_wmma_kernel<128>` on 384 rows launches
+only 3 × 32 = 96 workgroups for 2,048 tokens and reaches 5.1 TFLOP/s per
+pass of the matrix (15 across its three terms). It runs twice per encoder
+layer: routing, plus the wide next-layer prediction.
+- E75 moved the router and compressor (≤ 512 rows) to E71's narrow kernel
+  with 32-token tiles above 64 tokens: 1.27 → 1.16 ms and 1.64 → 1.43 ms
+  per call in a warm microbenchmark, bit-identical. About 0.05 s per 20K
+  prompt; reprofile the served document to see the per-call time there.
+- 64-row tiles of the wide kernel were slower for all three shapes (E74).
+- Still open: split K with an FP32 reduction in the same order, which
+  keeps the sums bit-identical (E71: the 32-value K steps, the part order
+  and the FP32 sums per step must stay).
 
 ### 6. Attention (1.64 s, ~8%)
 
