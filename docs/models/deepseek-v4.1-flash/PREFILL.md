@@ -10,7 +10,8 @@ After E82 (two-wave prefill) the same two served documents take 24.5/19.2 s
 (from 26.3/20.2) and pp2048 at 8K depth reaches 1,160 tok/s; the encoder
 read-stall column below has shrunk accordingly, the kernels are unchanged.
 
-Read [STREAMING.md](STREAMING.md) for the expert store and
+Decode has its own analysis in [DECODE.md](DECODE.md). Read
+[STREAMING.md](STREAMING.md) for the expert store and
 [EXPERIMENTS.md](EXPERIMENTS.md) for every experiment cited as `E<n>`.
 
 ## Summary

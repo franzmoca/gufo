@@ -1,0 +1,66 @@
+
+## p-ar-sampled chat: 512 steps, 512 rows, wall 31.51 s, 61.55 ms/step (median 58.88), busy 50.70 ms/step
+    29.385 ms  dense GEMV
+    11.773 ms  routed experts
+     3.488 ms  hyper-connections
+     2.749 ms  copy kernels
+     2.338 ms  output head
+     2.123 ms  memcpy: expert uploads
+     1.693 ms  router/BF16
+     1.411 ms  attention+misc
+     1.119 ms  engram
+     0.020 ms  memcpy: small
+     5.836 ms  idle: expert reads (upload next)
+     2.943 ms  idle: launch gaps <20us
+     1.209 ms  idle: step start (host)
+     0.577 ms  idle: expert reads
+     0.095 ms  idle: engram
+     0.086 ms  idle: other >20us (__amd_rocclr_copyBuffer)
+     0.054 ms  idle: other >20us (__amd_rocclr_copyBufferRectA)
+     0.036 ms  idle: before copy 517120B
+     0.004 ms  idle: other >20us (__amd_rocclr_fillBufferUnAli)
+     0.002 ms  idle: before copy 20480B
+
+## p-ar-sampled code: 469 steps, 514 rows, wall 30.14 s, 64.26 ms/step (median 60.59), busy 54.24 ms/step
+    30.671 ms  dense GEMV
+    13.167 ms  routed experts
+     3.651 ms  hyper-connections
+     2.862 ms  copy kernels
+     2.446 ms  output head
+     2.120 ms  attention+misc
+     2.068 ms  memcpy: expert uploads
+     1.767 ms  router/BF16
+     1.180 ms  engram
+     0.019 ms  memcpy: small
+     5.275 ms  idle: expert reads (upload next)
+     2.900 ms  idle: launch gaps <20us
+     1.287 ms  idle: step start (host)
+     0.119 ms  idle: other >20us (__amd_rocclr_copyBufferRectA)
+     0.118 ms  idle: expert reads
+     0.109 ms  idle: engram
+     0.079 ms  idle: other >20us (copy_list_kernel)
+     0.066 ms  idle: other >20us (__amd_rocclr_copyBuffer)
+     0.050 ms  idle: before copy 517120B
+     0.005 ms  idle: before copy 327680B
+
+## p-ar-sampled long: 512 steps, 512 rows, wall 31.49 s, 61.51 ms/step (median 60.56), busy 52.99 ms/step
+    30.524 ms  dense GEMV
+    12.287 ms  routed experts
+     3.588 ms  hyper-connections
+     2.869 ms  copy kernels
+     2.444 ms  output head
+     2.433 ms  attention+misc
+     1.700 ms  router/BF16
+     1.272 ms  memcpy: expert uploads
+     1.174 ms  engram
+     0.019 ms  memcpy: small
+     3.928 ms  idle: expert reads (upload next)
+     2.888 ms  idle: launch gaps <20us
+     1.282 ms  idle: step start (host)
+     0.120 ms  idle: other >20us (__amd_rocclr_copyBufferRectA)
+     0.108 ms  idle: engram
+     0.097 ms  idle: expert reads
+     0.050 ms  idle: before copy 517120B
+     0.039 ms  idle: other >20us (__amd_rocclr_copyBuffer)
+     0.003 ms  idle: before copy 61440B
+     0.002 ms  idle: before copy 20480B

@@ -1,0 +1,32 @@
+    149613.8 MiB    120  routed experts (all)
+    105471.9 MiB      1  other per_layer_token_embd.weight
+      1574.1 MiB     40  attention (attn_output_b)
+      1574.1 MiB     40  attention (attn_q_b)
+      1269.8 MiB    120  shared expert
+      1259.2 MiB     40  attention (attn_output_a)
+       670.7 MiB      1  token embedding (host)
+       517.8 MiB      1  output head
+       300.0 MiB     40  router
+       246.1 MiB      2  engram engram_kv.weight
+       245.9 MiB     40  attention (attn_q_a)
+        98.4 MiB     40  attention (attn_kv)
+        83.0 MiB     24  attention (indexer)
+        75.0 MiB     40  attention (hc_attn_fn)
+        75.0 MiB     40  other hc_ffn_fn.weight
+        20.0 MiB      4  attention (attn_compressor_kv)
+        15.0 MiB      3  attention (attn_compressor_gate)
+         0.8 MiB     40  attention (attn_norm)
+         0.8 MiB     40  other ffn_norm.weight
+         0.2 MiB     40  attention (attn_q_a_norm)
+         0.2 MiB      2  engram engram_gate.weight
+         0.1 MiB     40  attention (attn_kv_a_norm)
+         0.1 MiB     40  other exp_probs_b.bias
+         0.1 MiB     40  other exp_probs_b_vl.bias
+         0.0 MiB      1  other output_norm.weight
+         0.0 MiB     40  attention (attn_sinks)
+         0.0 MiB      4  attention (attn_compressor_norm)
+         0.0 MiB     40  attention (hc_attn_base)
+         0.0 MiB     40  other hc_ffn_base.weight
+         0.0 MiB     40  attention (hc_attn_scale)
+         0.0 MiB     40  other hc_ffn_scale.weight
+routed per token (6/layer): 2337.71484375 MiB

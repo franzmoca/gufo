@@ -1,0 +1,26 @@
+p-ar-greedy request -3: 511 steps
+  attn output_b (8)                   27.00/tok  median   208.9 us    44.56 MB   213.4 GB/s   5.677 ms/tok  at 240:  5.014
+  attn q_b (8)                        27.00/tok  median   202.5 us    44.56 MB   220.1 GB/s   5.502 ms/tok  at 240:  5.014
+  attn output_a (8)                   27.00/tok  median   163.6 us    35.65 MB   218.0 GB/s   4.457 ms/tok  at 240:  4.011
+  routed gate+up type 22              17.39/tok  median   207.8 us    45.34 MB   218.2 GB/s   3.187 ms/tok  at 240:  3.286
+  shared gate+up (8)                  27.00/tok  median   114.9 us    25.07 MB   218.1 GB/s   3.119 ms/tok  at 240:  2.820
+  routed gate+up type 16              16.60/tok  median   171.0 us    36.50 MB   213.4 GB/s   2.611 ms/tok  at 240:  2.524
+  output head (14)                     1.00/tok  median  2334.3 us   542.98 MB   232.6 GB/s   2.337 ms/tok  at 240:  2.262
+  hc mix (FP32 weights)               80.00/tok  median    28.6 us     1.97 MB    68.8 GB/s   2.280 ms/tok  at 240:  0.655
+  attn output_b (14)                  13.00/tok  median   164.7 us    34.41 MB   208.9 GB/s   2.168 ms/tok  at 240:  1.864
+  attn q_b (14)                       13.00/tok  median   148.2 us    34.41 MB   232.2 GB/s   1.956 ms/tok  at 240:  1.864
+  routed down type 18                 15.00/tok  median   123.4 us    27.10 MB   219.6 GB/s   1.913 ms/tok  at 240:  1.693
+  routed down type 22                 15.00/tok  median   108.4 us    22.67 MB   209.1 GB/s   1.666 ms/tok  at 240:  1.417
+  shared down (8)                     27.00/tok  median    60.0 us    12.53 MB   208.7 GB/s   1.626 ms/tok  at 240:  1.410
+  attn output_a (14)                  13.00/tok  median   119.0 us    27.53 MB   231.3 GB/s   1.571 ms/tok  at 240:  1.491
+  routed gate+up type 19              11.12/tok  median   133.0 us    27.65 MB   207.9 GB/s   1.351 ms/tok  at 240:  1.281
+  attn q_a+kv (8)                     27.00/tok  median    46.2 us     9.75 MB   211.2 GB/s   1.264 ms/tok  at 240:  1.097
+  engram projection (14)               2.00/tok  median   546.8 us   129.02 MB   235.9 GB/s   1.106 ms/tok  at 240:  1.075
+  shared gate+up (13)                 13.00/tok  median    74.0 us    16.22 MB   219.3 GB/s   0.975 ms/tok  at 240:  0.879
+  router BF16                         44.93/tok  median    18.6 us     3.93 MB   211.4 GB/s   0.842 ms/tok  at 240:  0.736
+  routed down type 17                  6.00/tok  median   100.0 us    20.46 MB   204.5 GB/s   0.607 ms/tok  at 240:  0.511
+  shared down (13)                    13.00/tok  median    39.0 us     8.11 MB   208.1 GB/s   0.514 ms/tok  at 240:  0.439
+  attn q_a+kv (14)                    13.00/tok  median    38.2 us     7.53 MB   196.8 GB/s   0.505 ms/tok  at 240:  0.408
+  routed down type 16                  3.00/tok  median    88.9 us    18.25 MB   205.2 GB/s   0.270 ms/tok  at 240:  0.228
+  routed down type 10                  1.00/tok  median   108.4 us    23.22 MB   214.2 GB/s   0.109 ms/tok  at 240:  0.097
+  total 47.61 ms/tok, at 240 GB/s 42.07

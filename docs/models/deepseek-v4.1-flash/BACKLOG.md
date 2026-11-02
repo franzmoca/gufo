@@ -9,6 +9,8 @@ figures are estimates unless stated.
 
 Served streamed `UD-IQ2_XXS` prefill (budget, per-kernel rates, ceilings and
 ranked levers, 2026-11-02): [PREFILL.md](PREFILL.md).
+Served streamed `UD-IQ2_XXS` decode, AR, sampled and DSpark (same form,
+2026-11-02): [DECODE.md](DECODE.md).
 
 **All modes, 2026-10-29** ([trace sweep](artifacts/2026-10-29-trace-sweep/summary.txt);
 measured ceilings 240 GB/s DRAM read, 55.4 TFLOP/s FP16/BF16 WMMA). A

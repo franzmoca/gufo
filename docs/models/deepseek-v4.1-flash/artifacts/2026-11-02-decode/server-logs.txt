@@ -1,0 +1,274 @@
+== p-ar-greedy
+[ds41] expert seed (built-in V4.1 ranking): cached 10456 of 10456 experts (10456 ranked) from 99.26 GiB in 14.22 s
+[ds41] expert cache interval: 77.6% route hits, 266.47 MiB read/token (66.0% prefetched), 64.66 ms host wait/token (31.96 routes, 23.56 reads), 99.55 GiB allocated, 64 tokens
+[ds41] expert cache interval: 95.9% route hits, 114.71 MiB read/token (30.9% prefetched), 58.39 ms host wait/token (43.72 routes, 12.73 reads), 99.55 GiB allocated, 64 tokens
+[ds41] expert cache interval: 97.5% route hits, 68.07 MiB read/token (26.0% prefetched), 51.01 ms host wait/token (43.12 routes, 6.64 reads), 99.55 GiB allocated, 64 tokens
+[ds41] expert cache interval: 98.1% route hits, 54.85 MiB read/token (24.6% prefetched), 49.70 ms host wait/token (42.89 routes, 5.82 reads), 99.55 GiB allocated, 64 tokens
+[ds41] expert cache interval: 98.2% route hits, 48.62 MiB read/token (21.2% prefetched), 48.65 ms host wait/token (42.77 routes, 4.94 reads), 99.55 GiB allocated, 64 tokens
+[ds41] expert cache interval: 98.5% route hits, 42.54 MiB read/token (17.1% prefetched), 48.25 ms host wait/token (42.91 routes, 4.53 reads), 99.55 GiB allocated, 64 tokens
+[ds41] expert cache interval: 98.4% route hits, 43.24 MiB read/token (14.7% prefetched), 48.28 ms host wait/token (42.77 routes, 4.67 reads), 99.55 GiB allocated, 64 tokens
+[ds41] expert cache interval: 98.8% route hits, 29.43 MiB read/token (11.9% prefetched), 46.56 ms host wait/token (42.64 routes, 3.31 reads), 99.55 GiB allocated, 64 tokens
+[http] request=r3 event=completed prompt_tokens=41 ttft_ms=2605.8 decode_tps=16.5 draft_accepted=0 draft_proposed=0 draft_rounds=0
+[ds41] expert cache interval: 93.8% route hits, 10.99 MiB read/token (77.4% prefetched), 1.96 ms host wait/token (1.25 routes, 0.67 reads), 99.55 GiB allocated, 3514 tokens
+[ds41] expert cache interval: 96.4% route hits, 106.40 MiB read/token (32.0% prefetched), 54.57 ms host wait/token (42.62 routes, 10.11 reads), 99.55 GiB allocated, 64 tokens
+[ds41] expert cache interval: 96.6% route hits, 83.71 MiB read/token (44.5% prefetched), 43.65 ms host wait/token (35.22 routes, 7.11 reads), 99.55 GiB allocated, 64 tokens
+[ds41] expert cache interval: 98.3% route hits, 50.78 MiB read/token (26.1% prefetched), 49.06 ms host wait/token (43.14 routes, 4.94 reads), 99.55 GiB allocated, 64 tokens
+[ds41] expert cache interval: 98.9% route hits, 29.44 MiB read/token (17.8% prefetched), 46.78 ms host wait/token (43.03 routes, 3.11 reads), 99.55 GiB allocated, 64 tokens
+[ds41] expert cache interval: 97.1% route hits, 84.66 MiB read/token (34.6% prefetched), 41.02 ms host wait/token (32.35 routes, 7.41 reads), 99.55 GiB allocated, 64 tokens
+[ds41] expert cache interval: 98.2% route hits, 54.23 MiB read/token (38.0% prefetched), 31.93 ms host wait/token (26.46 routes, 4.66 reads), 99.55 GiB allocated, 73 tokens
+[ds41] expert cache interval: 98.9% route hits, 31.16 MiB read/token (17.5% prefetched), 45.32 ms host wait/token (41.38 routes, 3.29 reads), 99.55 GiB allocated, 64 tokens
+[ds41] expert cache interval: 99.2% route hits, 21.08 MiB read/token (12.8% prefetched), 45.59 ms host wait/token (42.78 routes, 2.33 reads), 99.55 GiB allocated, 64 tokens
+[http] request=r4 event=completed prompt_tokens=3477 ttft_ms=5399.7 decode_tps=18.2 draft_accepted=51 draft_proposed=75 draft_rounds=11
+[ds41] expert cache interval: 97.3% route hits, 5.36 MiB read/token (84.5% prefetched), 0.93 ms host wait/token (0.71 routes, 0.21 reads), 99.55 GiB allocated, 23988 tokens
+[ds41] expert cache interval: 97.2% route hits, 82.26 MiB read/token (29.3% prefetched), 52.87 ms host wait/token (43.30 routes, 8.08 reads), 99.55 GiB allocated, 64 tokens
+[ds41] expert cache interval: 98.4% route hits, 46.29 MiB read/token (25.4% prefetched), 49.03 ms host wait/token (43.65 routes, 4.48 reads), 99.55 GiB allocated, 64 tokens
+[ds41] expert cache interval: 98.5% route hits, 45.56 MiB read/token (25.2% prefetched), 50.02 ms host wait/token (44.66 routes, 4.44 reads), 99.55 GiB allocated, 64 tokens
+[ds41] expert cache interval: 98.8% route hits, 32.36 MiB read/token (27.2% prefetched), 41.08 ms host wait/token (37.17 routes, 3.32 reads), 99.55 GiB allocated, 64 tokens
+[ds41] expert cache interval: 98.4% route hits, 46.21 MiB read/token (31.9% prefetched), 41.80 ms host wait/token (35.66 routes, 5.33 reads), 99.55 GiB allocated, 64 tokens
+[ds41] expert cache interval: 99.0% route hits, 28.35 MiB read/token (17.0% prefetched), 46.89 ms host wait/token (43.38 routes, 2.96 reads), 99.55 GiB allocated, 64 tokens
+[ds41] expert cache interval: 98.4% route hits, 48.00 MiB read/token (35.5% prefetched), 40.94 ms host wait/token (35.59 routes, 4.52 reads), 99.55 GiB allocated, 64 tokens
+[ds41] expert cache interval: 98.5% route hits, 44.68 MiB read/token (26.6% prefetched), 48.83 ms host wait/token (43.64 routes, 4.34 reads), 99.55 GiB allocated, 64 tokens
+[http] request=r5 event=completed prompt_tokens=23974 ttft_ms=22667.5 decode_tps=16.9 draft_accepted=8 draft_proposed=45 draft_rounds=3
+== p-ar-sampled
+[ds41] expert seed (built-in V4.1 ranking): cached 10454 of 10454 experts (10454 ranked) from 99.23 GiB in 14.29 s
+[ds41] expert cache interval: 77.6% route hits, 267.25 MiB read/token (66.4% prefetched), 61.91 ms host wait/token (29.73 routes, 19.26 reads), 99.55 GiB allocated, 64 tokens
+[ds41] expert cache interval: 95.6% route hits, 120.80 MiB read/token (31.1% prefetched), 56.79 ms host wait/token (43.91 routes, 10.88 reads), 99.55 GiB allocated, 64 tokens
+[ds41] expert cache interval: 97.7% route hits, 63.10 MiB read/token (24.2% prefetched), 50.68 ms host wait/token (43.09 routes, 6.44 reads), 99.55 GiB allocated, 64 tokens
+[ds41] expert cache interval: 97.8% route hits, 59.25 MiB read/token (23.7% prefetched), 50.35 ms host wait/token (43.09 routes, 6.17 reads), 99.55 GiB allocated, 64 tokens
+[ds41] expert cache interval: 98.1% route hits, 53.47 MiB read/token (20.6% prefetched), 49.41 ms host wait/token (42.92 routes, 5.49 reads), 99.55 GiB allocated, 64 tokens
+[ds41] expert cache interval: 98.7% route hits, 36.74 MiB read/token (18.2% prefetched), 47.50 ms host wait/token (42.84 routes, 3.91 reads), 99.55 GiB allocated, 64 tokens
+[ds41] expert cache interval: 98.4% route hits, 42.52 MiB read/token (16.2% prefetched), 48.23 ms host wait/token (42.76 routes, 4.62 reads), 99.55 GiB allocated, 64 tokens
+[ds41] expert cache interval: 98.4% route hits, 45.77 MiB read/token (21.0% prefetched), 48.41 ms host wait/token (42.90 routes, 4.65 reads), 99.55 GiB allocated, 64 tokens
+[http] request=r3 event=completed prompt_tokens=41 ttft_ms=2318.2 decode_tps=16.4 draft_accepted=0 draft_proposed=0 draft_rounds=0
+[ds41] expert cache interval: 94.2% route hits, 11.12 MiB read/token (77.5% prefetched), 1.98 ms host wait/token (1.25 routes, 0.69 reads), 99.55 GiB allocated, 3514 tokens
+[ds41] expert cache interval: 96.9% route hits, 90.46 MiB read/token (27.8% prefetched), 54.22 ms host wait/token (43.93 routes, 8.37 reads), 99.55 GiB allocated, 64 tokens
+[ds41] expert cache interval: 96.5% route hits, 105.72 MiB read/token (35.2% prefetched), 56.75 ms host wait/token (45.82 routes, 8.79 reads), 99.55 GiB allocated, 64 tokens
+[ds41] expert cache interval: 97.0% route hits, 76.05 MiB read/token (52.8% prefetched), 26.76 ms host wait/token (19.69 routes, 6.05 reads), 99.55 GiB allocated, 64 tokens
+[ds41] expert cache interval: 98.4% route hits, 45.91 MiB read/token (34.9% prefetched), 50.40 ms host wait/token (44.92 routes, 4.21 reads), 99.55 GiB allocated, 64 tokens
+[ds41] expert cache interval: 99.1% route hits, 23.79 MiB read/token (19.2% prefetched), 47.80 ms host wait/token (44.34 routes, 2.54 reads), 99.55 GiB allocated, 64 tokens
+[ds41] expert cache interval: 97.9% route hits, 61.70 MiB read/token (32.7% prefetched), 51.73 ms host wait/token (44.81 routes, 5.41 reads), 99.55 GiB allocated, 64 tokens
+[ds41] expert cache interval: 98.2% route hits, 54.57 MiB read/token (23.4% prefetched), 51.44 ms host wait/token (44.79 routes, 5.38 reads), 99.55 GiB allocated, 64 tokens
+[ds41] expert cache interval: 98.9% route hits, 31.92 MiB read/token (14.4% prefetched), 48.94 ms host wait/token (44.37 routes, 3.56 reads), 99.55 GiB allocated, 64 tokens
+[http] request=r4 event=completed prompt_tokens=3477 ttft_ms=5374.9 decode_tps=17.1 draft_accepted=43 draft_proposed=45 draft_rounds=3
+[ds41] expert cache interval: 97.4% route hits, 5.48 MiB read/token (83.8% prefetched), 0.91 ms host wait/token (0.68 routes, 0.21 reads), 99.55 GiB allocated, 23975 tokens
+[ds41] expert cache interval: 97.3% route hits, 77.63 MiB read/token (31.2% prefetched), 53.17 ms host wait/token (44.53 routes, 6.96 reads), 99.55 GiB allocated, 64 tokens
+[ds41] expert cache interval: 97.8% route hits, 62.52 MiB read/token (23.6% prefetched), 52.99 ms host wait/token (45.50 routes, 6.09 reads), 99.55 GiB allocated, 64 tokens
+[ds41] expert cache interval: 98.8% route hits, 33.13 MiB read/token (16.4% prefetched), 49.58 ms host wait/token (45.02 routes, 3.53 reads), 99.55 GiB allocated, 64 tokens
+[ds41] expert cache interval: 98.7% route hits, 37.11 MiB read/token (21.2% prefetched), 49.87 ms host wait/token (44.94 routes, 3.82 reads), 99.55 GiB allocated, 64 tokens
+[ds41] expert cache interval: 99.0% route hits, 31.03 MiB read/token (22.2% prefetched), 48.99 ms host wait/token (44.86 routes, 3.14 reads), 99.55 GiB allocated, 64 tokens
+[ds41] expert cache interval: 98.9% route hits, 31.70 MiB read/token (16.6% prefetched), 49.59 ms host wait/token (45.19 routes, 3.44 reads), 99.55 GiB allocated, 64 tokens
+[ds41] expert cache interval: 98.8% route hits, 34.74 MiB read/token (21.1% prefetched), 49.66 ms host wait/token (45.10 routes, 3.54 reads), 99.55 GiB allocated, 64 tokens
+[ds41] expert cache interval: 98.7% route hits, 42.07 MiB read/token (26.5% prefetched), 50.35 ms host wait/token (45.16 routes, 3.99 reads), 99.55 GiB allocated, 64 tokens
+[http] request=r5 event=completed prompt_tokens=23974 ttft_ms=22682.1 decode_tps=16.3 draft_accepted=0 draft_proposed=0 draft_rounds=0
+== p-ds-greedy
+[ds41] expert seed (built-in V4.1 ranking): cached 9861 of 9861 experts (9861 ranked) from 93.60 GiB in 13.25 s
+[ds41] expert cache interval: 74.3% route hits, 304.08 MiB read/token (70.4% prefetched), 58.46 ms host wait/token (21.52 routes, 24.51 reads), 94.13 GiB allocated, 64 tokens
+[ds41] expert cache interval: 95.1% route hits, 137.73 MiB read/token (34.3% prefetched), 60.33 ms host wait/token (43.21 routes, 14.47 reads), 94.13 GiB allocated, 64 tokens
+[ds41] expert cache interval: 97.1% route hits, 78.78 MiB read/token (30.1% prefetched), 66.78 ms host wait/token (43.95 routes, 7.34 reads), 94.48 GiB allocated, 64 tokens
+[ds41] expert cache interval: 97.7% route hits, 64.76 MiB read/token (24.8% prefetched), 52.36 ms host wait/token (44.52 routes, 6.34 reads), 94.48 GiB allocated, 64 tokens
+[ds41] expert cache interval: 98.0% route hits, 55.40 MiB read/token (19.3% prefetched), 51.96 ms host wait/token (44.76 routes, 5.79 reads), 94.48 GiB allocated, 64 tokens
+[ds41] expert cache interval: 98.2% route hits, 49.97 MiB read/token (19.2% prefetched), 50.91 ms host wait/token (44.35 routes, 5.22 reads), 94.48 GiB allocated, 64 tokens
+[ds41] expert cache interval: 98.0% route hits, 52.54 MiB read/token (18.2% prefetched), 51.48 ms host wait/token (44.45 routes, 5.58 reads), 94.48 GiB allocated, 64 tokens
+[ds41] expert cache interval: 98.6% route hits, 37.61 MiB read/token (15.4% prefetched), 49.68 ms host wait/token (44.38 routes, 4.16 reads), 94.48 GiB allocated, 64 tokens
+[http] request=r3 event=completed prompt_tokens=41 ttft_ms=1928.2 decode_tps=13.5 draft_accepted=13 draft_proposed=14 draft_rounds=7
+[ds41] expert cache interval: 89.0% route hits, 12.67 MiB read/token (77.0% prefetched), 2.11 ms host wait/token (1.23 routes, 0.84 reads), 94.48 GiB allocated, 3515 tokens
+[ds41] expert cache interval: 95.6% route hits, 127.96 MiB read/token (44.4% prefetched), 42.49 ms host wait/token (30.67 routes, 9.95 reads), 94.48 GiB allocated, 64 tokens
+[ds41] expert cache interval: 96.1% route hits, 95.52 MiB read/token (47.0% prefetched), 40.07 ms host wait/token (30.97 routes, 7.90 reads), 94.48 GiB allocated, 64 tokens
+[ds41] expert cache interval: 98.0% route hits, 62.51 MiB read/token (37.6% prefetched), 39.15 ms host wait/token (32.89 routes, 5.22 reads), 94.48 GiB allocated, 66 tokens
+[ds41] expert cache interval: 98.8% route hits, 39.41 MiB read/token (35.5% prefetched), 29.76 ms host wait/token (25.80 routes, 3.35 reads), 94.48 GiB allocated, 64 tokens
+[ds41] expert cache interval: 96.6% route hits, 95.73 MiB read/token (52.4% prefetched), 26.40 ms host wait/token (18.25 routes, 7.14 reads), 94.48 GiB allocated, 66 tokens
+[ds41] expert cache interval: 98.0% route hits, 66.67 MiB read/token (45.3% prefetched), 23.67 ms host wait/token (17.69 routes, 5.08 reads), 94.48 GiB allocated, 64 tokens
+[ds41] expert cache interval: 98.5% route hits, 43.86 MiB read/token (45.9% prefetched), 25.78 ms host wait/token (21.73 routes, 3.43 reads), 94.48 GiB allocated, 66 tokens
+[ds41] expert cache interval: 98.6% route hits, 41.02 MiB read/token (39.9% prefetched), 25.21 ms host wait/token (21.13 routes, 3.35 reads), 94.48 GiB allocated, 66 tokens
+[http] request=r4 event=completed prompt_tokens=3477 ttft_ms=5779.2 decode_tps=22.4 draft_accepted=252 draft_proposed=321 draft_rounds=69
+[ds41] expert cache interval: 96.3% route hits, 6.33 MiB read/token (83.8% prefetched), 1.01 ms host wait/token (0.72 routes, 0.27 reads), 94.48 GiB allocated, 24034 tokens
+[ds41] expert cache interval: 96.6% route hits, 100.85 MiB read/token (51.0% prefetched), 33.73 ms host wait/token (25.03 routes, 7.46 reads), 94.48 GiB allocated, 65 tokens
+[ds41] expert cache interval: 97.9% route hits, 62.60 MiB read/token (42.7% prefetched), 33.16 ms host wait/token (27.26 routes, 4.99 reads), 94.48 GiB allocated, 68 tokens
+[ds41] expert cache interval: 98.3% route hits, 50.79 MiB read/token (34.5% prefetched), 36.04 ms host wait/token (30.83 routes, 4.44 reads), 94.48 GiB allocated, 64 tokens
+[ds41] expert cache interval: 98.6% route hits, 42.39 MiB read/token (33.6% prefetched), 34.43 ms host wait/token (29.62 routes, 3.66 reads), 94.48 GiB allocated, 66 tokens
+[ds41] expert cache interval: 97.8% route hits, 65.99 MiB read/token (49.8% prefetched), 21.45 ms host wait/token (15.75 routes, 5.01 reads), 94.48 GiB allocated, 64 tokens
+[ds41] expert cache interval: 98.4% route hits, 43.60 MiB read/token (44.8% prefetched), 25.86 ms host wait/token (21.69 routes, 3.58 reads), 94.48 GiB allocated, 65 tokens
+[ds41] expert cache interval: 98.4% route hits, 48.05 MiB read/token (41.1% prefetched), 25.05 ms host wait/token (20.49 routes, 3.87 reads), 94.48 GiB allocated, 64 tokens
+[ds41] expert cache interval: 98.0% route hits, 65.09 MiB read/token (52.7% prefetched), 21.54 ms host wait/token (15.93 routes, 4.60 reads), 94.48 GiB allocated, 64 tokens
+[ds41] expert cache interval: 98.4% route hits, 49.74 MiB read/token (46.0% prefetched), 24.13 ms host wait/token (19.73 routes, 3.59 reads), 94.48 GiB allocated, 66 tokens
+[http] request=r5 event=completed prompt_tokens=23974 ttft_ms=23386.8 decode_tps=22.9 draft_accepted=276 draft_proposed=398 draft_rounds=89
+== p-ds-sampled
+[ds41] expert seed (built-in V4.1 ranking): cached 10005 of 10005 experts (10005 ranked) from 94.97 GiB in 13.67 s
+[ds41] expert cache interval: 75.9% route hits, 270.95 MiB read/token (74.5% prefetched), 47.91 ms host wait/token (17.47 routes, 22.76 reads), 95.45 GiB allocated, 66 tokens
+[ds41] expert cache interval: 94.5% route hits, 137.94 MiB read/token (50.6% prefetched), 33.33 ms host wait/token (21.26 routes, 10.29 reads), 95.45 GiB allocated, 67 tokens
+[ds41] expert cache interval: 95.9% route hits, 103.92 MiB read/token (51.9% prefetched), 30.27 ms host wait/token (21.27 routes, 7.53 reads), 95.45 GiB allocated, 64 tokens
+[ds41] expert cache interval: 97.6% route hits, 67.41 MiB read/token (43.4% prefetched), 24.60 ms host wait/token (18.57 routes, 5.06 reads), 95.45 GiB allocated, 65 tokens
+[ds41] expert cache interval: 97.7% route hits, 62.78 MiB read/token (37.8% prefetched), 26.81 ms host wait/token (20.71 routes, 5.06 reads), 95.45 GiB allocated, 67 tokens
+[ds41] expert cache interval: 98.6% route hits, 35.39 MiB read/token (31.0% prefetched), 21.96 ms host wait/token (18.31 routes, 3.07 reads), 95.45 GiB allocated, 65 tokens
+[ds41] expert cache interval: 98.4% route hits, 47.52 MiB read/token (38.9% prefetched), 23.04 ms host wait/token (18.48 routes, 3.84 reads), 95.45 GiB allocated, 68 tokens
+[ds41] expert cache interval: 98.6% route hits, 41.10 MiB read/token (36.2% prefetched), 23.26 ms host wait/token (19.15 routes, 3.43 reads), 95.45 GiB allocated, 66 tokens
+[ds41] expert cache interval: 99.1% route hits, 25.90 MiB read/token (30.5% prefetched), 19.69 ms host wait/token (16.90 routes, 2.32 reads), 95.45 GiB allocated, 66 tokens
+[ds41] expert cache interval: 98.5% route hits, 45.04 MiB read/token (37.5% prefetched), 23.76 ms host wait/token (18.84 routes, 4.22 reads), 95.45 GiB allocated, 68 tokens
+[ds41] expert cache interval: 98.9% route hits, 30.72 MiB read/token (28.2% prefetched), 21.90 ms host wait/token (18.53 routes, 2.86 reads), 95.45 GiB allocated, 64 tokens
+[ds41] expert cache interval: 98.5% route hits, 41.78 MiB read/token (36.1% prefetched), 22.00 ms host wait/token (17.81 routes, 3.58 reads), 95.45 GiB allocated, 67 tokens
+[ds41] expert cache interval: 98.8% route hits, 36.86 MiB read/token (33.1% prefetched), 22.31 ms host wait/token (18.61 routes, 3.12 reads), 95.45 GiB allocated, 66 tokens
+[ds41] expert cache interval: 99.2% route hits, 22.54 MiB read/token (33.4% prefetched), 20.15 ms host wait/token (17.64 routes, 1.94 reads), 95.45 GiB allocated, 66 tokens
+[http] request=r3 event=completed prompt_tokens=41 ttft_ms=2044.1 decode_tps=18.2 draft_accepted=247 draft_proposed=638 draft_rounds=230
+[ds41] expert cache interval: 84.9% route hits, 12.43 MiB read/token (76.7% prefetched), 1.65 ms host wait/token (0.86 routes, 0.76 reads), 95.45 GiB allocated, 3492 tokens
+[ds41] expert cache interval: 95.9% route hits, 111.98 MiB read/token (53.8% prefetched), 27.48 ms host wait/token (18.29 routes, 7.89 reads), 95.45 GiB allocated, 68 tokens
+[ds41] expert cache interval: 97.1% route hits, 77.33 MiB read/token (54.5% prefetched), 27.70 ms host wait/token (20.81 routes, 6.00 reads), 95.45 GiB allocated, 64 tokens
+[ds41] expert cache interval: 98.6% route hits, 40.85 MiB read/token (44.7% prefetched), 23.80 ms host wait/token (19.98 routes, 3.15 reads), 95.45 GiB allocated, 65 tokens
+[ds41] expert cache interval: 99.2% route hits, 25.09 MiB read/token (36.3% prefetched), 21.22 ms host wait/token (18.71 routes, 2.13 reads), 95.45 GiB allocated, 64 tokens
+[ds41] expert cache interval: 95.3% route hits, 125.55 MiB read/token (59.2% prefetched), 24.88 ms host wait/token (14.45 routes, 9.23 reads), 95.45 GiB allocated, 69 tokens
+[ds41] expert cache interval: 97.6% route hits, 61.98 MiB read/token (60.7% prefetched), 23.17 ms host wait/token (17.56 routes, 4.70 reads), 95.45 GiB allocated, 66 tokens
+[ds41] expert cache interval: 98.0% route hits, 51.13 MiB read/token (51.4% prefetched), 20.52 ms host wait/token (15.82 routes, 3.91 reads), 95.45 GiB allocated, 64 tokens
+[ds41] expert cache interval: 98.9% route hits, 34.37 MiB read/token (42.1% prefetched), 22.25 ms host wait/token (18.60 routes, 2.68 reads), 95.45 GiB allocated, 64 tokens
+[ds41] expert cache interval: 97.9% route hits, 63.28 MiB read/token (46.7% prefetched), 23.30 ms host wait/token (17.30 routes, 4.73 reads), 95.45 GiB allocated, 67 tokens
+[ds41] expert cache interval: 98.6% route hits, 42.37 MiB read/token (38.7% prefetched), 22.25 ms host wait/token (17.78 routes, 3.51 reads), 95.45 GiB allocated, 66 tokens
+[ds41] expert cache interval: 98.3% route hits, 52.48 MiB read/token (44.3% prefetched), 22.88 ms host wait/token (17.54 routes, 4.03 reads), 95.45 GiB allocated, 64 tokens
+[http] request=r4 event=completed prompt_tokens=3477 ttft_ms=5776.3 decode_tps=24.1 draft_accepted=337 draft_proposed=548 draft_rounds=148
+[ds41] expert cache interval: 96.5% route hits, 6.08 MiB read/token (83.6% prefetched), 0.94 ms host wait/token (0.64 routes, 0.28 reads), 95.45 GiB allocated, 23975 tokens
+[ds41] expert cache interval: 96.6% route hits, 94.94 MiB read/token (55.6% prefetched), 26.59 ms host wait/token (18.84 routes, 6.39 reads), 95.45 GiB allocated, 65 tokens
+[ds41] expert cache interval: 98.4% route hits, 44.17 MiB read/token (38.7% prefetched), 25.61 ms host wait/token (21.34 routes, 3.59 reads), 95.45 GiB allocated, 64 tokens
+[ds41] expert cache interval: 98.0% route hits, 62.00 MiB read/token (45.7% prefetched), 23.78 ms host wait/token (18.26 routes, 4.76 reads), 95.45 GiB allocated, 69 tokens
+[ds41] expert cache interval: 98.3% route hits, 58.50 MiB read/token (44.0% prefetched), 22.36 ms host wait/token (16.75 routes, 4.36 reads), 95.45 GiB allocated, 69 tokens
+[ds41] expert cache interval: 98.0% route hits, 54.48 MiB read/token (49.2% prefetched), 21.95 ms host wait/token (17.14 routes, 3.98 reads), 95.45 GiB allocated, 65 tokens
+[ds41] expert cache interval: 98.1% route hits, 59.64 MiB read/token (46.1% prefetched), 23.55 ms host wait/token (18.09 routes, 4.37 reads), 95.45 GiB allocated, 69 tokens
+[ds41] expert cache interval: 98.4% route hits, 51.28 MiB read/token (47.2% prefetched), 24.16 ms host wait/token (19.14 routes, 3.94 reads), 95.45 GiB allocated, 67 tokens
+[ds41] expert cache interval: 98.1% route hits, 61.60 MiB read/token (54.8% prefetched), 21.94 ms host wait/token (16.68 routes, 4.23 reads), 95.45 GiB allocated, 64 tokens
+[ds41] expert cache interval: 98.5% route hits, 49.41 MiB read/token (48.3% prefetched), 21.07 ms host wait/token (16.57 routes, 3.52 reads), 95.45 GiB allocated, 68 tokens
+[ds41] expert cache interval: 98.6% route hits, 45.08 MiB read/token (48.8% prefetched), 21.77 ms host wait/token (17.61 routes, 3.35 reads), 95.45 GiB allocated, 66 tokens
+[http] request=r5 event=completed prompt_tokens=23974 ttft_ms=23370.9 decode_tps=26.2 draft_accepted=357 draft_proposed=524 draft_rounds=141
+== u-ar-greedy
+[ds41] expert seed (built-in V4.1 ranking): cached 10491 of 10491 experts (10491 ranked) from 99.58 GiB in 14.50 s
+[ds41] expert cache interval: 77.8% route hits, 262.96 MiB read/token (63.0% prefetched), 50.58 ms host wait/token (28.07 routes, 19.18 reads), 100.14 GiB allocated, 64 tokens
+[ds41] expert cache interval: 95.9% route hits, 113.47 MiB read/token (31.0% prefetched), 58.15 ms host wait/token (46.44 routes, 9.96 reads), 100.14 GiB allocated, 64 tokens
+[ds41] expert cache interval: 97.5% route hits, 67.25 MiB read/token (25.8% prefetched), 53.88 ms host wait/token (46.07 routes, 6.43 reads), 100.14 GiB allocated, 64 tokens
+[ds41] expert cache interval: 98.1% route hits, 53.26 MiB read/token (23.7% prefetched), 52.17 ms host wait/token (45.81 routes, 5.25 reads), 100.14 GiB allocated, 64 tokens
+[ds41] expert cache interval: 98.3% route hits, 47.75 MiB read/token (21.0% prefetched), 51.39 ms host wait/token (45.55 routes, 4.78 reads), 100.14 GiB allocated, 64 tokens
+[ds41] expert cache interval: 98.5% route hits, 42.37 MiB read/token (16.8% prefetched), 51.43 ms host wait/token (45.99 routes, 4.47 reads), 100.14 GiB allocated, 64 tokens
+[ds41] expert cache interval: 98.4% route hits, 42.81 MiB read/token (14.9% prefetched), 51.50 ms host wait/token (45.77 routes, 4.66 reads), 100.14 GiB allocated, 64 tokens
+[ds41] expert cache interval: 98.9% route hits, 28.84 MiB read/token (12.1% prefetched), 48.86 ms host wait/token (44.98 routes, 3.24 reads), 100.14 GiB allocated, 64 tokens
+[http] request=r3 event=completed prompt_tokens=41 ttft_ms=1084.8 decode_tps=16.5 draft_accepted=0 draft_proposed=0 draft_rounds=0
+[ds41] expert cache interval: 94.8% route hits, 10.76 MiB read/token (77.7% prefetched), 1.94 ms host wait/token (1.26 routes, 0.66 reads), 100.14 GiB allocated, 3514 tokens
+[ds41] expert cache interval: 96.5% route hits, 103.50 MiB read/token (31.8% prefetched), 54.58 ms host wait/token (44.03 routes, 9.09 reads), 100.14 GiB allocated, 64 tokens
+[ds41] expert cache interval: 96.6% route hits, 83.06 MiB read/token (44.0% prefetched), 45.00 ms host wait/token (36.54 routes, 7.45 reads), 100.14 GiB allocated, 64 tokens
+[ds41] expert cache interval: 98.4% route hits, 48.89 MiB read/token (26.0% prefetched), 50.73 ms host wait/token (44.83 routes, 5.15 reads), 100.14 GiB allocated, 64 tokens
+[ds41] expert cache interval: 98.9% route hits, 28.98 MiB read/token (17.7% prefetched), 48.18 ms host wait/token (44.66 routes, 3.05 reads), 100.14 GiB allocated, 64 tokens
+[ds41] expert cache interval: 97.2% route hits, 82.58 MiB read/token (34.9% prefetched), 41.37 ms host wait/token (33.15 routes, 7.14 reads), 100.14 GiB allocated, 64 tokens
+[ds41] expert cache interval: 98.2% route hits, 52.96 MiB read/token (37.7% prefetched), 32.36 ms host wait/token (27.21 routes, 4.49 reads), 100.14 GiB allocated, 73 tokens
+[ds41] expert cache interval: 98.9% route hits, 29.98 MiB read/token (17.6% prefetched), 46.82 ms host wait/token (43.15 routes, 3.18 reads), 100.14 GiB allocated, 64 tokens
+[ds41] expert cache interval: 99.2% route hits, 20.48 MiB read/token (11.7% prefetched), 47.48 ms host wait/token (44.73 routes, 2.38 reads), 100.14 GiB allocated, 64 tokens
+[http] request=r4 event=completed prompt_tokens=3477 ttft_ms=5251.5 decode_tps=18.7 draft_accepted=51 draft_proposed=75 draft_rounds=11
+[ds41] expert cache interval: 97.3% route hits, 5.27 MiB read/token (84.6% prefetched), 0.93 ms host wait/token (0.72 routes, 0.20 reads), 100.14 GiB allocated, 23988 tokens
+[ds41] expert cache interval: 97.2% route hits, 81.44 MiB read/token (29.0% prefetched), 54.37 ms host wait/token (45.51 routes, 7.39 reads), 100.14 GiB allocated, 64 tokens
+[ds41] expert cache interval: 98.4% route hits, 45.20 MiB read/token (25.4% prefetched), 52.70 ms host wait/token (47.28 routes, 4.35 reads), 100.14 GiB allocated, 64 tokens
+[ds41] expert cache interval: 98.5% route hits, 44.88 MiB read/token (24.8% prefetched), 50.80 ms host wait/token (45.70 routes, 4.29 reads), 100.14 GiB allocated, 64 tokens
+[ds41] expert cache interval: 98.9% route hits, 31.63 MiB read/token (28.4% prefetched), 40.42 ms host wait/token (36.78 routes, 3.16 reads), 100.14 GiB allocated, 64 tokens
+[ds41] expert cache interval: 98.5% route hits, 45.82 MiB read/token (31.9% prefetched), 41.67 ms host wait/token (36.82 routes, 4.24 reads), 100.14 GiB allocated, 64 tokens
+[ds41] expert cache interval: 99.0% route hits, 27.04 MiB read/token (16.1% prefetched), 48.43 ms host wait/token (45.17 routes, 2.85 reads), 100.14 GiB allocated, 64 tokens
+[ds41] expert cache interval: 98.4% route hits, 46.64 MiB read/token (35.1% prefetched), 42.24 ms host wait/token (37.16 routes, 4.24 reads), 100.14 GiB allocated, 64 tokens
+[ds41] expert cache interval: 98.5% route hits, 44.26 MiB read/token (26.7% prefetched), 52.01 ms host wait/token (46.72 routes, 4.26 reads), 100.14 GiB allocated, 64 tokens
+[http] request=r5 event=completed prompt_tokens=23974 ttft_ms=22590.3 decode_tps=17.2 draft_accepted=8 draft_proposed=45 draft_rounds=3
+== u-ar-sampled
+[ds41] expert seed (built-in V4.1 ranking): cached 10469 of 10469 experts (10469 ranked) from 99.38 GiB in 14.49 s
+[ds41] expert cache interval: 77.7% route hits, 264.42 MiB read/token (66.3% prefetched), 69.13 ms host wait/token (29.48 routes, 28.23 reads), 99.90 GiB allocated, 64 tokens
+[ds41] expert cache interval: 95.6% route hits, 120.59 MiB read/token (31.0% prefetched), 56.84 ms host wait/token (44.49 routes, 10.66 reads), 99.90 GiB allocated, 64 tokens
+[ds41] expert cache interval: 97.7% route hits, 62.64 MiB read/token (24.1% prefetched), 51.15 ms host wait/token (44.22 routes, 6.00 reads), 99.90 GiB allocated, 64 tokens
+[ds41] expert cache interval: 97.8% route hits, 58.79 MiB read/token (23.9% prefetched), 50.81 ms host wait/token (44.21 routes, 5.67 reads), 99.90 GiB allocated, 64 tokens
+[ds41] expert cache interval: 98.1% route hits, 52.68 MiB read/token (20.8% prefetched), 50.23 ms host wait/token (44.21 routes, 5.25 reads), 99.90 GiB allocated, 64 tokens
+[ds41] expert cache interval: 98.7% route hits, 36.49 MiB read/token (18.0% prefetched), 48.57 ms host wait/token (44.23 routes, 3.76 reads), 99.90 GiB allocated, 64 tokens
+[ds41] expert cache interval: 98.4% route hits, 41.76 MiB read/token (15.9% prefetched), 49.47 ms host wait/token (44.36 routes, 4.44 reads), 99.90 GiB allocated, 64 tokens
+[ds41] expert cache interval: 98.4% route hits, 44.89 MiB read/token (20.8% prefetched), 49.72 ms host wait/token (44.53 routes, 4.49 reads), 99.90 GiB allocated, 64 tokens
+[http] request=r3 event=completed prompt_tokens=41 ttft_ms=2623.7 decode_tps=16.9 draft_accepted=0 draft_proposed=0 draft_rounds=0
+[ds41] expert cache interval: 95.0% route hits, 10.95 MiB read/token (77.6% prefetched), 1.95 ms host wait/token (1.25 routes, 0.67 reads), 99.90 GiB allocated, 3514 tokens
+[ds41] expert cache interval: 96.9% route hits, 88.91 MiB read/token (27.3% prefetched), 53.50 ms host wait/token (44.05 routes, 8.18 reads), 99.90 GiB allocated, 64 tokens
+[ds41] expert cache interval: 96.6% route hits, 104.60 MiB read/token (35.4% prefetched), 55.51 ms host wait/token (45.36 routes, 8.59 reads), 99.90 GiB allocated, 64 tokens
+[ds41] expert cache interval: 97.0% route hits, 75.92 MiB read/token (52.0% prefetched), 26.03 ms host wait/token (19.33 routes, 5.97 reads), 99.90 GiB allocated, 64 tokens
+[ds41] expert cache interval: 98.4% route hits, 45.32 MiB read/token (34.4% prefetched), 49.65 ms host wait/token (44.89 routes, 4.09 reads), 99.90 GiB allocated, 64 tokens
+[ds41] expert cache interval: 99.2% route hits, 23.30 MiB read/token (19.6% prefetched), 47.50 ms host wait/token (44.68 routes, 2.40 reads), 99.90 GiB allocated, 64 tokens
+[ds41] expert cache interval: 97.9% route hits, 60.70 MiB read/token (32.6% prefetched), 51.12 ms host wait/token (44.96 routes, 5.22 reads), 99.90 GiB allocated, 64 tokens
+[ds41] expert cache interval: 98.2% route hits, 53.91 MiB read/token (23.0% prefetched), 50.75 ms host wait/token (44.76 routes, 5.21 reads), 99.90 GiB allocated, 64 tokens
+[ds41] expert cache interval: 98.9% route hits, 31.76 MiB read/token (14.4% prefetched), 48.67 ms host wait/token (44.69 routes, 3.46 reads), 99.90 GiB allocated, 64 tokens
+[http] request=r4 event=completed prompt_tokens=3477 ttft_ms=5187.1 decode_tps=18.3 draft_accepted=43 draft_proposed=45 draft_rounds=3
+[ds41] expert cache interval: 97.4% route hits, 5.41 MiB read/token (83.8% prefetched), 0.91 ms host wait/token (0.69 routes, 0.22 reads), 99.90 GiB allocated, 23975 tokens
+[ds41] expert cache interval: 97.3% route hits, 75.58 MiB read/token (30.2% prefetched), 52.64 ms host wait/token (44.54 routes, 7.00 reads), 99.90 GiB allocated, 64 tokens
+[ds41] expert cache interval: 97.9% route hits, 61.75 MiB read/token (23.1% prefetched), 52.29 ms host wait/token (45.45 routes, 5.96 reads), 99.90 GiB allocated, 64 tokens
+[ds41] expert cache interval: 98.8% route hits, 32.33 MiB read/token (16.2% prefetched), 49.14 ms host wait/token (45.22 routes, 3.42 reads), 99.90 GiB allocated, 64 tokens
+[ds41] expert cache interval: 98.8% route hits, 36.74 MiB read/token (21.2% prefetched), 49.59 ms host wait/token (45.31 routes, 3.69 reads), 99.90 GiB allocated, 64 tokens
+[ds41] expert cache interval: 99.0% route hits, 30.33 MiB read/token (22.7% prefetched), 48.63 ms host wait/token (45.18 routes, 2.96 reads), 99.90 GiB allocated, 64 tokens
+[ds41] expert cache interval: 98.9% route hits, 31.52 MiB read/token (16.7% prefetched), 49.64 ms host wait/token (45.23 routes, 3.91 reads), 99.90 GiB allocated, 64 tokens
+[ds41] expert cache interval: 98.9% route hits, 33.20 MiB read/token (21.1% prefetched), 49.06 ms host wait/token (45.25 routes, 3.29 reads), 99.90 GiB allocated, 64 tokens
+[ds41] expert cache interval: 98.7% route hits, 41.46 MiB read/token (26.7% prefetched), 49.82 ms host wait/token (45.21 routes, 3.92 reads), 99.90 GiB allocated, 64 tokens
+[http] request=r5 event=completed prompt_tokens=23974 ttft_ms=22755.8 decode_tps=17.4 draft_accepted=0 draft_proposed=0 draft_rounds=0
+== u-ds-greedy
+[ds41] expert seed (built-in V4.1 ranking): cached 10015 of 10015 experts (10015 ranked) from 95.07 GiB in 13.83 s
+[ds41] expert cache interval: 75.1% route hits, 292.71 MiB read/token (70.0% prefetched), 48.22 ms host wait/token (19.13 routes, 21.44 reads), 95.58 GiB allocated, 64 tokens
+[ds41] expert cache interval: 95.2% route hits, 132.19 MiB read/token (35.4% prefetched), 54.07 ms host wait/token (41.24 routes, 11.03 reads), 95.58 GiB allocated, 64 tokens
+[ds41] expert cache interval: 97.3% route hits, 74.33 MiB read/token (37.3% prefetched), 41.52 ms host wait/token (34.18 routes, 6.34 reads), 95.58 GiB allocated, 66 tokens
+[ds41] expert cache interval: 97.7% route hits, 65.43 MiB read/token (26.7% prefetched), 49.20 ms host wait/token (42.09 routes, 6.15 reads), 95.58 GiB allocated, 64 tokens
+[ds41] expert cache interval: 98.1% route hits, 53.38 MiB read/token (23.7% prefetched), 45.70 ms host wait/token (39.39 routes, 5.53 reads), 95.58 GiB allocated, 64 tokens
+[ds41] expert cache interval: 98.3% route hits, 49.48 MiB read/token (28.3% prefetched), 41.53 ms host wait/token (36.22 routes, 4.55 reads), 95.58 GiB allocated, 64 tokens
+[ds41] expert cache interval: 98.0% route hits, 53.61 MiB read/token (23.5% prefetched), 40.42 ms host wait/token (34.40 routes, 5.21 reads), 95.58 GiB allocated, 64 tokens
+[ds41] expert cache interval: 98.7% route hits, 34.65 MiB read/token (17.4% prefetched), 37.76 ms host wait/token (33.58 routes, 3.57 reads), 95.58 GiB allocated, 64 tokens
+[ds41] expert cache interval: 98.8% route hits, 33.09 MiB read/token (25.9% prefetched), 36.90 ms host wait/token (33.27 routes, 3.08 reads), 95.58 GiB allocated, 64 tokens
+[http] request=r3 event=completed prompt_tokens=41 ttft_ms=1574.3 decode_tps=16.9 draft_accepted=88 draft_proposed=115 draft_rounds=52
+[ds41] expert cache interval: 89.4% route hits, 12.05 MiB read/token (78.9% prefetched), 1.52 ms host wait/token (0.76 routes, 0.73 reads), 95.58 GiB allocated, 3475 tokens
+[ds41] expert cache interval: 96.0% route hits, 111.56 MiB read/token (52.1% prefetched), 27.85 ms host wait/token (18.73 routes, 8.01 reads), 95.58 GiB allocated, 64 tokens
+[ds41] expert cache interval: 97.0% route hits, 85.91 MiB read/token (51.6% prefetched), 29.33 ms host wait/token (22.26 routes, 6.12 reads), 95.58 GiB allocated, 68 tokens
+[ds41] expert cache interval: 98.2% route hits, 55.58 MiB read/token (39.3% prefetched), 32.04 ms host wait/token (26.82 routes, 4.53 reads), 95.58 GiB allocated, 65 tokens
+[ds41] expert cache interval: 98.6% route hits, 41.91 MiB read/token (39.3% prefetched), 26.58 ms host wait/token (22.69 routes, 3.37 reads), 95.58 GiB allocated, 64 tokens
+[ds41] expert cache interval: 96.8% route hits, 91.99 MiB read/token (50.2% prefetched), 25.73 ms host wait/token (18.09 routes, 6.72 reads), 95.58 GiB allocated, 65 tokens
+[ds41] expert cache interval: 97.6% route hits, 73.34 MiB read/token (52.3% prefetched), 20.98 ms host wait/token (14.79 routes, 5.54 reads), 95.58 GiB allocated, 66 tokens
+[ds41] expert cache interval: 98.1% route hits, 58.73 MiB read/token (49.6% prefetched), 19.66 ms host wait/token (14.51 routes, 4.38 reads), 95.58 GiB allocated, 66 tokens
+[ds41] expert cache interval: 98.8% route hits, 37.47 MiB read/token (37.9% prefetched), 26.83 ms host wait/token (23.24 routes, 3.06 reads), 95.58 GiB allocated, 64 tokens
+[ds41] expert cache interval: 99.1% route hits, 25.68 MiB read/token (32.8% prefetched), 23.63 ms host wait/token (20.92 routes, 2.19 reads), 95.58 GiB allocated, 64 tokens
+[http] request=r4 event=completed prompt_tokens=3477 ttft_ms=5554.1 decode_tps=27.3 draft_accepted=327 draft_proposed=437 draft_rounds=125
+[ds41] expert cache interval: 96.5% route hits, 6.07 MiB read/token (84.2% prefetched), 0.96 ms host wait/token (0.71 routes, 0.24 reads), 95.58 GiB allocated, 24009 tokens
+[ds41] expert cache interval: 96.4% route hits, 102.70 MiB read/token (49.5% prefetched), 33.03 ms host wait/token (24.31 routes, 7.63 reads), 95.58 GiB allocated, 64 tokens
+[ds41] expert cache interval: 97.8% route hits, 61.99 MiB read/token (42.9% prefetched), 29.71 ms host wait/token (24.23 routes, 4.79 reads), 95.58 GiB allocated, 66 tokens
+[ds41] expert cache interval: 98.3% route hits, 51.92 MiB read/token (38.2% prefetched), 31.81 ms host wait/token (26.88 routes, 4.30 reads), 95.58 GiB allocated, 64 tokens
+[ds41] expert cache interval: 98.8% route hits, 37.72 MiB read/token (33.6% prefetched), 32.14 ms host wait/token (28.44 routes, 3.18 reads), 95.58 GiB allocated, 65 tokens
+[ds41] expert cache interval: 97.9% route hits, 62.73 MiB read/token (45.0% prefetched), 22.35 ms host wait/token (16.92 routes, 4.76 reads), 95.58 GiB allocated, 67 tokens
+[ds41] expert cache interval: 98.5% route hits, 40.86 MiB read/token (40.6% prefetched), 25.73 ms host wait/token (21.87 routes, 3.42 reads), 95.58 GiB allocated, 64 tokens
+[ds41] expert cache interval: 98.3% route hits, 52.71 MiB read/token (46.8% prefetched), 26.09 ms host wait/token (21.54 routes, 3.89 reads), 95.58 GiB allocated, 68 tokens
+[ds41] expert cache interval: 98.1% route hits, 61.01 MiB read/token (51.9% prefetched), 21.66 ms host wait/token (16.51 routes, 4.47 reads), 95.58 GiB allocated, 67 tokens
+[ds41] expert cache interval: 98.5% route hits, 45.85 MiB read/token (40.2% prefetched), 24.85 ms host wait/token (20.76 routes, 3.51 reads), 95.58 GiB allocated, 66 tokens
+[http] request=r5 event=completed prompt_tokens=23974 ttft_ms=23234.7 decode_tps=25.8 draft_accepted=307 draft_proposed=403 draft_rounds=124
+== u-ds-sampled
+[ds41] expert seed (built-in V4.1 ranking): cached 10003 of 10003 experts (10003 ranked) from 94.95 GiB in 13.91 s
+[ds41] expert cache interval: 76.0% route hits, 268.92 MiB read/token (75.1% prefetched), 43.68 ms host wait/token (11.75 routes, 20.84 reads), 95.57 GiB allocated, 66 tokens
+[ds41] expert cache interval: 94.6% route hits, 137.52 MiB read/token (50.3% prefetched), 32.50 ms host wait/token (20.97 routes, 10.11 reads), 95.57 GiB allocated, 67 tokens
+[ds41] expert cache interval: 95.9% route hits, 103.38 MiB read/token (51.9% prefetched), 30.19 ms host wait/token (21.02 routes, 8.00 reads), 95.57 GiB allocated, 64 tokens
+[ds41] expert cache interval: 97.6% route hits, 66.70 MiB read/token (43.3% prefetched), 24.23 ms host wait/token (18.53 routes, 4.92 reads), 95.57 GiB allocated, 65 tokens
+[ds41] expert cache interval: 97.7% route hits, 62.13 MiB read/token (37.9% prefetched), 26.57 ms host wait/token (20.80 routes, 4.94 reads), 95.57 GiB allocated, 67 tokens
+[ds41] expert cache interval: 98.6% route hits, 35.38 MiB read/token (31.0% prefetched), 21.97 ms host wait/token (18.49 routes, 3.03 reads), 95.57 GiB allocated, 65 tokens
+[ds41] expert cache interval: 98.4% route hits, 47.46 MiB read/token (39.1% prefetched), 22.99 ms host wait/token (18.63 routes, 3.77 reads), 95.57 GiB allocated, 68 tokens
+[ds41] expert cache interval: 98.6% route hits, 41.05 MiB read/token (36.1% prefetched), 23.44 ms host wait/token (19.54 routes, 3.35 reads), 95.57 GiB allocated, 66 tokens
+[ds41] expert cache interval: 99.1% route hits, 25.46 MiB read/token (30.4% prefetched), 19.83 ms host wait/token (17.21 routes, 2.27 reads), 95.57 GiB allocated, 66 tokens
+[ds41] expert cache interval: 98.5% route hits, 44.87 MiB read/token (36.9% prefetched), 23.20 ms host wait/token (18.97 routes, 3.67 reads), 95.57 GiB allocated, 68 tokens
+[ds41] expert cache interval: 98.9% route hits, 30.24 MiB read/token (27.6% prefetched), 22.00 ms host wait/token (18.81 routes, 2.78 reads), 95.57 GiB allocated, 64 tokens
+[ds41] expert cache interval: 98.5% route hits, 41.61 MiB read/token (36.1% prefetched), 21.96 ms host wait/token (17.65 routes, 3.54 reads), 95.57 GiB allocated, 67 tokens
+[ds41] expert cache interval: 98.8% route hits, 37.03 MiB read/token (33.4% prefetched), 22.42 ms host wait/token (18.58 routes, 3.10 reads), 95.57 GiB allocated, 66 tokens
+[ds41] expert cache interval: 99.2% route hits, 22.34 MiB read/token (32.8% prefetched), 20.88 ms host wait/token (18.44 routes, 1.94 reads), 95.57 GiB allocated, 66 tokens
+[http] request=r3 event=completed prompt_tokens=41 ttft_ms=1811.9 decode_tps=19.0 draft_accepted=247 draft_proposed=638 draft_rounds=230
+[ds41] expert cache interval: 85.1% route hits, 12.38 MiB read/token (76.7% prefetched), 1.63 ms host wait/token (0.83 routes, 0.77 reads), 95.57 GiB allocated, 3492 tokens
+[ds41] expert cache interval: 96.0% route hits, 110.48 MiB read/token (54.0% prefetched), 26.88 ms host wait/token (18.10 routes, 7.73 reads), 95.57 GiB allocated, 68 tokens
+[ds41] expert cache interval: 97.1% route hits, 76.73 MiB read/token (54.4% prefetched), 27.56 ms host wait/token (20.87 routes, 5.89 reads), 95.57 GiB allocated, 64 tokens
+[ds41] expert cache interval: 98.6% route hits, 40.46 MiB read/token (44.7% prefetched), 23.74 ms host wait/token (20.20 routes, 3.04 reads), 95.57 GiB allocated, 65 tokens
+[ds41] expert cache interval: 99.2% route hits, 24.95 MiB read/token (37.2% prefetched), 21.34 ms host wait/token (18.96 routes, 2.07 reads), 95.57 GiB allocated, 64 tokens
+[ds41] expert cache interval: 95.3% route hits, 125.09 MiB read/token (59.4% prefetched), 24.10 ms host wait/token (14.06 routes, 9.06 reads), 95.57 GiB allocated, 69 tokens
+[ds41] expert cache interval: 97.6% route hits, 61.95 MiB read/token (60.9% prefetched), 23.15 ms host wait/token (17.80 routes, 4.63 reads), 95.57 GiB allocated, 66 tokens
+[ds41] expert cache interval: 98.0% route hits, 51.21 MiB read/token (51.4% prefetched), 20.93 ms host wait/token (15.93 routes, 3.85 reads), 95.57 GiB allocated, 64 tokens
+[ds41] expert cache interval: 99.0% route hits, 33.57 MiB read/token (41.7% prefetched), 22.76 ms host wait/token (19.46 routes, 2.62 reads), 95.57 GiB allocated, 64 tokens
+[ds41] expert cache interval: 97.9% route hits, 63.16 MiB read/token (46.3% prefetched), 23.44 ms host wait/token (17.66 routes, 4.72 reads), 95.57 GiB allocated, 67 tokens
+[ds41] expert cache interval: 98.6% route hits, 42.07 MiB read/token (38.6% prefetched), 22.60 ms host wait/token (18.36 routes, 3.42 reads), 95.57 GiB allocated, 66 tokens
+[ds41] expert cache interval: 98.3% route hits, 52.11 MiB read/token (44.5% prefetched), 23.65 ms host wait/token (18.24 routes, 4.44 reads), 95.57 GiB allocated, 64 tokens
+[http] request=r4 event=completed prompt_tokens=3477 ttft_ms=5659.4 decode_tps=24.8 draft_accepted=337 draft_proposed=548 draft_rounds=148
+[ds41] expert cache interval: 96.5% route hits, 6.06 MiB read/token (83.7% prefetched), 0.94 ms host wait/token (0.68 routes, 0.25 reads), 95.57 GiB allocated, 23975 tokens
+[ds41] expert cache interval: 96.7% route hits, 93.46 MiB read/token (55.2% prefetched), 26.16 ms host wait/token (18.84 routes, 6.35 reads), 95.57 GiB allocated, 65 tokens
+[ds41] expert cache interval: 98.5% route hits, 43.31 MiB read/token (37.9% prefetched), 25.68 ms host wait/token (21.65 routes, 3.49 reads), 95.57 GiB allocated, 64 tokens
+[ds41] expert cache interval: 98.0% route hits, 61.96 MiB read/token (45.9% prefetched), 23.65 ms host wait/token (18.29 routes, 4.69 reads), 95.57 GiB allocated, 69 tokens
+[ds41] expert cache interval: 98.3% route hits, 58.25 MiB read/token (44.0% prefetched), 21.77 ms host wait/token (16.86 routes, 4.29 reads), 95.57 GiB allocated, 69 tokens
+[ds41] expert cache interval: 98.0% route hits, 54.15 MiB read/token (50.0% prefetched), 22.01 ms host wait/token (17.36 routes, 3.87 reads), 95.57 GiB allocated, 65 tokens
+[ds41] expert cache interval: 98.1% route hits, 59.55 MiB read/token (46.0% prefetched), 23.68 ms host wait/token (18.52 routes, 4.38 reads), 95.57 GiB allocated, 69 tokens
+[ds41] expert cache interval: 98.4% route hits, 50.52 MiB read/token (47.4% prefetched), 24.47 ms host wait/token (19.84 routes, 3.88 reads), 95.57 GiB allocated, 67 tokens
+[ds41] expert cache interval: 98.2% route hits, 60.76 MiB read/token (55.0% prefetched), 22.15 ms host wait/token (17.27 routes, 4.12 reads), 95.57 GiB allocated, 64 tokens
+[ds41] expert cache interval: 98.5% route hits, 49.37 MiB read/token (48.0% prefetched), 22.16 ms host wait/token (17.85 routes, 3.53 reads), 95.57 GiB allocated, 68 tokens
+[ds41] expert cache interval: 98.6% route hits, 44.53 MiB read/token (48.5% prefetched), 23.11 ms host wait/token (19.12 routes, 3.37 reads), 95.57 GiB allocated, 66 tokens
+[http] request=r5 event=completed prompt_tokens=23974 ttft_ms=23539.9 decode_tps=26.9 draft_accepted=357 draft_proposed=524 draft_rounds=141
