@@ -6,8 +6,10 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
+#include <optional>
 #include <span>
 #include <stdexcept>
+#include <utility>
 #include <vector>
 
 #include "src/core/sampling.hpp"
@@ -43,6 +45,9 @@ public:
                                      : nullptr,
             .device_temperature =
                 sampler.config().logprobs ? nullptr : &DeviceTemperature,
+            .totals_temperature =
+                sampler.config().logprobs ? nullptr : &TotalsTemperature,
+            .totals = sampler.config().logprobs ? nullptr : &Totals,
             .uniform = &DrawUniform,
             .rng = &Rng,
             .set_rng = &SetRng,
@@ -183,7 +188,7 @@ private:
     // and retains the fast AR sampler, without materializing target p.
     if (proposal.size == 1)
       return Sample(ctx, logits, vocabulary_size);
-    const auto target = self.working_.Distribution({logits, vocabulary_size});
+    const auto target = self.Target({logits, vocabulary_size});
     const auto token =
         self.working_.Uniform() * proposal.probability <
                 target.probability(proposal.token)
@@ -207,8 +212,10 @@ private:
                     std::uint32_t vocabulary_size) {
     auto& self = *static_cast<DsparkSamplerBridge*>(ctx);
     auto& working = self.working_;
+    const std::span<const float> row(logits, vocabulary_size);
+    const auto totals = std::exchange(self.totals_, std::nullopt);
     const auto token =
-        working.Sample(std::span<const float>(logits, vocabulary_size));
+        totals ? working.Sample(row, *totals) : working.Sample(row);
     self.Observe(logits, vocabulary_size, static_cast<int>(token));
     working.Accept(token);
     return static_cast<int>(token);
@@ -229,6 +236,28 @@ private:
         config.min_p <= 0.F && !config.penalties_enabled() &&
         !working.NeedsConstraintMask() && !working.SaveDrawState().pending;
     return plain ? config.temperature : 0.F;
+  }
+
+  // Unbounded top-p over raw logits: SamplerState sums the whole row, which
+  // the device can do instead.
+  static float TotalsTemperature(void* ctx, uint32_t vocabulary_size) {
+    const auto& working = static_cast<DsparkSamplerBridge*>(ctx)->working_;
+    return working.UsesSoftmaxTotals(vocabulary_size)
+               ? working.config().temperature
+               : 0.F;
+  }
+
+  static void Totals(void* ctx, double maximum, double sum) {
+    static_cast<DsparkSamplerBridge*>(ctx)->totals_ =
+        sampling::SamplerState::SoftmaxTotals{.maximum = maximum, .sum = sum};
+  }
+
+  // The target distribution of a row, with the device totals when the
+  // session handed them over for it.
+  sampling::SamplingDistribution Target(std::span<const float> row) {
+    const auto totals = std::exchange(totals_, std::nullopt);
+    return totals ? working_.Distribution(row, *totals)
+                  : working_.Distribution(row);
   }
 
   static double DrawUniform(void* ctx) {
@@ -255,6 +284,7 @@ private:
   sampling::SamplerState working_;
   std::vector<sampling::TokenLogprobs> logprobs_;
   std::array<Proposal, 16> proposals_{};
+  std::optional<sampling::SamplerState::SoftmaxTotals> totals_;
   ds41_dspark_sampler hook_;
 };
 

@@ -710,6 +710,26 @@ void SamplerState::Accept(std::span<const TokenId> tokens) {
 
 SamplingDistribution SamplerState::Distribution(
     std::span<const float> logits) const {
+  return Distribution(logits, nullptr);
+}
+
+SamplingDistribution SamplerState::Distribution(
+    std::span<const float> logits, const SoftmaxTotals& totals) const {
+  return Distribution(logits,
+                      UsesSoftmaxTotals(logits.size()) ? &totals : nullptr);
+}
+
+bool SamplerState::UsesSoftmaxTotals(std::size_t vocabulary_size) const {
+  // The conditions under which Distribution reaches PrepareSelected's
+  // unbounded top-p branch, with no penalty adjusting a logit.
+  return !ForcedToken() && !pending_sample_ && !config_.constraint &&
+         !NeedsConstraintMask() && config_.temperature > 0.0F &&
+         config_.top_k == 0 && config_.top_p < 1.0F && vocabulary_size > 1024 &&
+         penalty_counts_.empty();
+}
+
+SamplingDistribution SamplerState::Distribution(
+    std::span<const float> logits, const SoftmaxTotals* totals) const {
   if (const auto forced = ForcedToken()) {
     if (*forced >= logits.size())
       throw std::invalid_argument("forced token exceeds vocabulary");
@@ -733,7 +753,7 @@ SamplingDistribution SamplerState::Distribution(
   if (config_.top_k == 0 && config_.top_p == 1 && !needs_floor)
     return LinearDistribution(logits);
   auto working = *this;
-  working.PrepareSelected(logits);
+  working.PrepareSelected(logits, totals);
   return working.SelectedDistribution();
 }
 
@@ -821,6 +841,16 @@ void SamplerState::DeferSample(TokenId token) {
 }
 
 TokenId SamplerState::Sample(std::span<const float> logits) {
+  return Sample(logits, nullptr);
+}
+
+TokenId SamplerState::Sample(std::span<const float> logits,
+                             const SoftmaxTotals& totals) {
+  return Sample(logits, UsesSoftmaxTotals(logits.size()) ? &totals : nullptr);
+}
+
+TokenId SamplerState::Sample(std::span<const float> logits,
+                             const SoftmaxTotals* totals) {
   config_.Validate();
   if (logits.empty()) {
     throw std::invalid_argument("cannot sample an empty logit distribution");
@@ -854,7 +884,7 @@ TokenId SamplerState::Sample(std::span<const float> logits) {
   if (config_.temperature == 0.0F) {
     return SampleGreedy(logits);
   }
-  return Distribution(logits).Sample(&rng_state_);
+  return Distribution(logits, totals).Sample(&rng_state_);
 }
 
 TokenId SamplerState::SampleResidual(
@@ -1019,7 +1049,8 @@ SamplingDistribution SamplerState::LinearDistribution(
   return SamplingDistribution(std::move(candidates), total);
 }
 
-void SamplerState::PrepareSelected(std::span<const float> logits) {
+void SamplerState::PrepareSelected(std::span<const float> logits,
+                                   const SoftmaxTotals* totals) {
   candidate_scratch_.clear();
   // Vocabulary IDs and sparse penalties are both sorted. Walk them together
   // instead of searching the penalties for every vocabulary entry.
@@ -1107,17 +1138,29 @@ void SamplerState::PrepareSelected(std::span<const float> logits) {
     select_best(keep);
   } else if (config_.top_p < 1.0F && logits.size() > 1024) {
     double maximum = -std::numeric_limits<double>::infinity();
-    bool found = false;
-    for_each_adjusted([&](std::size_t, double adjusted) {
-      maximum = std::max(maximum, adjusted);
-      found = true;
-    });
-    if (!found) {
-      throw std::runtime_error("logit distribution contains no finite values");
+    if (totals) {
+      // Totals computed elsewhere stand for the two full-row passes below.
+      maximum = totals->maximum;
+      full_softmax_sum = totals->sum;
+      if (!std::isfinite(maximum)) {
+        throw std::runtime_error(
+            "logit distribution contains no finite values");
+      }
+    } else {
+      bool found = false;
+      for_each_adjusted([&](std::size_t, double adjusted) {
+        maximum = std::max(maximum, adjusted);
+        found = true;
+      });
+      if (!found) {
+        throw std::runtime_error(
+            "logit distribution contains no finite values");
+      }
+      for_each_adjusted([&](std::size_t, double adjusted) {
+        full_softmax_sum +=
+            std::exp((adjusted - maximum) / config_.temperature);
+      });
     }
-    for_each_adjusted([&](std::size_t, double adjusted) {
-      full_softmax_sum += std::exp((adjusted - maximum) / config_.temperature);
-    });
     if (!(full_softmax_sum > 0.0) || !std::isfinite(full_softmax_sum)) {
       throw std::runtime_error("logit softmax normalization failed");
     }

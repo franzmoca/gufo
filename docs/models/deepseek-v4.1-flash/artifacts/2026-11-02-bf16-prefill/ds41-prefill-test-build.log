@@ -1,0 +1,49 @@
+Using saved setting for 'extra-substituters = https://gufo.cachix.org' from ~/.local/share/nix/trusted-settings.json.
+warning: ignoring untrusted flake configuration setting 'extra-substituters'.
+Pass '--accept-flake-config' to trust it
+Using saved setting for 'extra-trusted-public-keys = gufo.cachix.org-1:rfZe3n4lHINgyoACKzs5EthIZmBNvEyCCtufUpth0PE=' from ~/.local/share/nix/trusted-settings.json.
+warning: ignoring the client-specified setting 'trusted-public-keys', because it is a restricted setting and you are not a trusted user
+warning: ignoring the client-specified setting 'trusted-public-keys', because it is a restricted setting and you are not a trusted user
+warning: ignoring the client-specified setting 'trusted-public-keys', because it is a restricted setting and you are not a trusted user
+evaluation warning: stdenv.isLinux is deprecated, use stdenv.hostPlatform.isLinux instead
+evaluation warning: stdenv.isDarwin is deprecated, use stdenv.hostPlatform.isDarwin instead
+warning: ignoring the client-specified setting 'trusted-public-keys', because it is a restricted setting and you are not a trusted user
+[1/13] Building CXX object src/models/deepseek_v41_flash/CMakeFiles/gufo_deepseek_v41_flash.dir/engine.cpp.o
+[2/13] Building CXX object src/models/deepseek_v41_flash/CMakeFiles/gufo_deepseek_v41_flash.dir/runtime/model_data.cpp.o
+../../src/models/deepseek_v41_flash/runtime/model_data.cpp: In function ‘std::vector<std::__cxx11::basic_string<char> > model_shard_paths(const char*)’:
+../../src/models/deepseek_v41_flash/runtime/model_data.cpp:675:37: warning: ‘%05d’ directive output may be truncated writing between 5 and 10 bytes into a region of size 8 [-Wformat-truncation=]
+  675 |     snprintf(index, sizeof(index), "%05d", i);
+      |                                     ^~~~
+../../src/models/deepseek_v41_flash/runtime/model_data.cpp:675:36: note: directive argument in the range [1, 2147483647]
+  675 |     snprintf(index, sizeof(index), "%05d", i);
+      |                                    ^~~~~~
+In file included from /nix/store/3zlgjcfm8j3nscrldjv8izxciybg0nh3-glibc-2.44-57-dev/include/stdio.h:974,
+                 from /nix/store/xpaz3fi6ibqxb9sla4gjlp0c82v566y8-gcc-16.2.0/include/c++/16.2.0/cstdio:47,
+                 from /nix/store/xpaz3fi6ibqxb9sla4gjlp0c82v566y8-gcc-16.2.0/include/c++/16.2.0/ext/string_conversions.h:47,
+                 from /nix/store/xpaz3fi6ibqxb9sla4gjlp0c82v566y8-gcc-16.2.0/include/c++/16.2.0/bits/basic_string.h:4499,
+                 from /nix/store/xpaz3fi6ibqxb9sla4gjlp0c82v566y8-gcc-16.2.0/include/c++/16.2.0/string:58,
+                 from /nix/store/xpaz3fi6ibqxb9sla4gjlp0c82v566y8-gcc-16.2.0/include/c++/16.2.0/bits/locale_classes.h:43,
+                 from /nix/store/xpaz3fi6ibqxb9sla4gjlp0c82v566y8-gcc-16.2.0/include/c++/16.2.0/locale:43,
+                 from /nix/store/xpaz3fi6ibqxb9sla4gjlp0c82v566y8-gcc-16.2.0/include/c++/16.2.0/format:50,
+                 from ./../../src/core/hip/libstdcxx_noinline.hpp:8,
+                 from <command-line>:
+In function ‘int snprintf(char*, size_t, const char*, ...)’,
+    inlined from ‘std::vector<std::__cxx11::basic_string<char> > model_shard_paths(const char*)’ at ../../src/models/deepseek_v41_flash/runtime/model_data.cpp:675:13:
+/nix/store/3zlgjcfm8j3nscrldjv8izxciybg0nh3-glibc-2.44-57-dev/include/bits/stdio2.h:68:35: note: ‘__builtin___snprintf_chk’ output between 6 and 11 bytes into a destination of size 8
+   68 |   return __builtin___snprintf_chk (__s, __n, __USE_FORTIFY_LEVEL - 1,
+      |          ~~~~~~~~~~~~~~~~~~~~~~~~~^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+   69 |                                    __glibc_objsize (__s), __fmt,
+      |                                    ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+   70 |                                    __va_arg_pack ());
+      |                                    ~~~~~~~~~~~~~~~~~
+[3/13] Building CXX object src/models/deepseek_v41_flash/CMakeFiles/gufo_deepseek_v41_flash.dir/runtime/sampling.cpp.o
+[4/13] Building CXX object src/models/deepseek_v41_flash/CMakeFiles/gufo_deepseek_v41_flash.dir/continuation_adapter.cpp.o
+[5/13] Building CXX object src/models/deepseek_v41_flash/CMakeFiles/gufo_deepseek_v41_flash.dir/runtime/tokenizer.cpp.o
+[6/13] Building CXX object src/models/deepseek_v41_flash/CMakeFiles/gufo_deepseek_v41_flash.dir/runtime/expert_store.cpp.o
+[7/13] Building CXX object src/models/deepseek_v41_flash/CMakeFiles/gufo_deepseek_v41_flash.dir/runtime/v41_dspark.cpp.o
+[8/13] Building CXX object src/models/deepseek_v41_flash/CMakeFiles/gufo_deepseek_v41_flash.dir/runtime/v41_session.cpp.o
+[9/13] Building CXX object tests/models/deepseek_v41_flash/CMakeFiles/ds41_attention_test.dir/attention_test.cpp.o
+[10/13] Building CXX object src/models/deepseek_v41_flash/CMakeFiles/gufo_deepseek_v41_flash.dir/runtime/v41_decode.cpp.o
+[11/13] Building HIP object src/models/deepseek_v41_flash/CMakeFiles/gufo_deepseek_v41_flash.dir/kernels/rocm/ds41_v41.hip.cpp.o
+[12/13] Linking HIP static library src/models/deepseek_v41_flash/libgufo_deepseek_v41_flash.a
+[13/13] Linking HIP executable tests/models/deepseek_v41_flash/ds41_attention_test

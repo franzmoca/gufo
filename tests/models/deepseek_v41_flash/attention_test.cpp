@@ -411,6 +411,45 @@ double QkvNormCase(uint32_t pos0, uint32_t n, std::mt19937& rng) {
   return worst;
 }
 
+/* The narrow BF16 kernel (up to 64 tokens) against the wide one: each token's
+ * outputs do not depend on the batch, so the first n tokens of a 128-token
+ * batch must match an n-token batch bit for bit. */
+bool Bf16NarrowCase(uint32_t rows, uint32_t k, uint32_t n, std::mt19937& rng) {
+  constexpr uint32_t kWide = 128;
+  std::normal_distribution<float> normal;
+  std::vector<uint16_t> w((std::size_t)rows * k);
+  std::vector<float> x((std::size_t)kWide * k);
+  for (auto& v : w) {
+    const float f = normal(rng) * 0.05f;
+    uint32_t u = 0;
+    std::memcpy(&u, &f, sizeof(u));
+    v = (uint16_t)(u >> 16);
+  }
+  for (std::size_t i = 0; i < x.size(); i++)
+    x[i] = normal(rng) * (i % 7 == 0 ? 30.0f : 1.0f);
+  uint16_t* dw = Device(w);
+  float* dx = Device(x);
+  float *wide = nullptr, *narrow = nullptr;
+  (void)hipMalloc(&wide, (std::size_t)kWide * rows * sizeof(float));
+  (void)hipMalloc(&narrow, (std::size_t)n * rows * sizeof(float));
+  bool ok = dw && dx && wide && narrow &&
+            ds41_v41_matmul_bf16(dw, dx, wide, rows, k, kWide) == 0 &&
+            ds41_v41_matmul_bf16(dw, dx, narrow, rows, k, n) == 0 &&
+            hipDeviceSynchronize() == hipSuccess;
+  std::vector<float> a((std::size_t)n * rows), b(a.size());
+  if (ok)
+    ok = hipMemcpy(a.data(), wide, a.size() * sizeof(float),
+                   hipMemcpyDeviceToHost) == hipSuccess &&
+         hipMemcpy(b.data(), narrow, b.size() * sizeof(float),
+                   hipMemcpyDeviceToHost) == hipSuccess &&
+         std::memcmp(a.data(), b.data(), a.size() * sizeof(float)) == 0;
+  (void)hipFree(dw);
+  (void)hipFree(dx);
+  (void)hipFree(wide);
+  (void)hipFree(narrow);
+  return ok;
+}
+
 /* ds41_v41_matmul_bf16 (rows x k BF16 weights, n FP32 tokens) against
  * double precision; returns the worst error relative to the largest output
  * magnitude of a token. The batched form splits the activations into three
@@ -777,14 +816,26 @@ int main(int argc, char** argv) {
   }
   /* Router, compressor and indexer shapes: FP32 kernel below 16 tokens, the
    * matrix cores above (tile edges at 37 and 200 tokens). */
-  const uint32_t matmuls[][3] = {
-      {384, 5120, 1}, {384, 5120, 37}, {512, 5120, 200}, {4096, 1280, 64}};
+  const uint32_t matmuls[][3] = {{384, 5120, 1},   {384, 5120, 37},
+                                 {384, 5120, 65},  {384, 5120, 140},
+                                 {512, 5120, 200}, {4096, 1280, 64}};
   for (const auto& m : matmuls) {
     const double e = Bf16MatmulCase(m[0], m[1], m[2], rng);
     std::printf("bf16 matmul rows=%u k=%u n=%u rel_err=%.2e\n", m[0], m[1],
                 m[2], e);
     ok = e < 2e-6 && ok;
   }
+  const uint32_t narrow_shapes[][2] = {{384, 5120}, {512, 5120}, {4096, 1280}};
+  for (const auto& shape : narrow_shapes)
+    for (const uint32_t n : {16u, 17u, 20u, 31u, 32u, 33u, 48u, 64u}) {
+      const bool same = Bf16NarrowCase(shape[0], shape[1], n, rng);
+      if (!same)
+        std::printf(
+            "bf16 narrow rows=%u k=%u n=%u differs from the wide kernel\n",
+            shape[0], shape[1], n);
+      ok = same && ok;
+    }
+  std::printf("bf16 narrow kernel checked against the wide kernel\n");
   const uint32_t dspark[][3] = {{1743, 128, 5}, {0, 3, 5}, {60, 61, 2}};
   for (const auto& c : dspark) {
     const double e = DsparkCase(c[0], c[1], c[2], rng);

@@ -781,6 +781,43 @@ void PartialFrontierDoesNotServeAnEqualPrompt() {
     resend.Invalidate();
   }
 }
+void RefusedFrontierServesFromShallowerBoundary() {
+  // A model may keep only the state that longer prompts need (DeepSeek V4.1
+  // skips the decoder rows before the prompt's last tokens). A prompt the
+  // runner refuses recomputes from a shallower boundary, live or restored;
+  // a longer one continues the frontier.
+  class RefusingRunner final : public Runner {
+  public:
+    bool CanContinue(const TextRunnerState& state,
+                     std::size_t prompt_tokens) const override {
+      return prompt_tokens >= CheckpointPosition(state) + 8;
+    }
+  };
+  for (const bool replace_slot : {false, true}) {
+    auto runner = std::make_shared<RefusingRunner>();
+    runner->partial = true;
+    TextRunnerPool pool(runner, 1);
+    std::vector<TextRunnerToken> prompt(40);
+    std::iota(prompt.begin(), prompt.end(), 10);
+    auto request = pool.Acquire(prompt, {}, [] { return false; }, {}, true, 0);
+    assert(request.Prefill(16).consumed_tokens == 16);
+    (void)request.Cancel();
+    if (replace_slot) {
+      auto unrelated = prompt;
+      unrelated.front() = 999;
+      auto other = pool.Acquire(unrelated, {}, {}, {}, true, 0);
+      Prefill(other);
+      (void)other.Commit();
+    }
+    const std::vector<TextRunnerToken> short_prompt(prompt.begin(),
+                                                    prompt.begin() + 20);
+    auto refused = pool.Acquire(short_prompt, {}, {}, {}, true, 0);
+    assert(refused.cached_prompt_tokens() < 16);
+    Prefill(refused);
+    (void)Generate(refused);
+    refused.Invalidate();
+  }
+}
 void CompletedCancelledPromptGetsARetrySnapshot() {
   auto runner = std::make_shared<Runner>();
   runner->partial = true;
@@ -2429,6 +2466,7 @@ int main() {
   BackingPreparationFollowsCaptures();
   PrefillLookaheadReachesTheNextFrontier();
   PartialFrontierDoesNotServeAnEqualPrompt();
+  RefusedFrontierServesFromShallowerBoundary();
   CompletedCancelledPromptGetsARetrySnapshot();
   BudgetUsesAllocatedSlotsInsteadOfLazyStateClaim();
   InPassCapturePreservesBoundaryAndLiveTail();

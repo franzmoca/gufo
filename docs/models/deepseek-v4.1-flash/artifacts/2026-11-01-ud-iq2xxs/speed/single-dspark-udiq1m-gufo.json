@@ -1,0 +1,118 @@
+{
+  "artifactType": "model-bench-table",
+  "fingerprint": {
+    "canonical": {
+      "cppStandard": "C++20",
+      "cpuArchitecture": "x86_64",
+      "cpuLogicalCores": 32,
+      "cpuModel": "AMD RYZEN AI MAX+ 395 w/ Radeon 8060S",
+      "cpuPhysicalCores": 16,
+      "cxxCompiler": "GCC 15.3.0",
+      "gpuArchitecture": "gfx1151",
+      "gpuComputeUnits": 20,
+      "gpuDriver": "amdgpu",
+      "gpuName": "AMD Radeon 8060S Graphics",
+      "gpuPciId": "1002:1586",
+      "kernelRelease": "7.2.11-200.fc44.x86_64",
+      "memoryTotalBytes": 133616861184,
+      "memoryType": "LPDDR5X (Unified)",
+      "rocmVersion": "10.1.0",
+      "schemaVersion": "1.0.0"
+    },
+    "fingerprintId": "bff8ae3f0e7bae9e46a319778d68e9c56b96e0828aaba08ce884dedf8aa82cdc",
+    "schemaVersion": "1.0.0"
+  },
+  "measuredOn": "2026-11-01",
+  "mode": "dspark",
+  "model": {
+    "id": "DeepSeek-V4.1-Flash-1017",
+    "variant": "udiq1m"
+  },
+  "notes": [
+    "pp2048/tg128; depth is a cached conversation prefix of synthetic text (8-token reply); measured turn task is recorded per row; tolerance max(32, 0.500%) on cache_n and prompt_n; actual counts per sample in rows",
+    "synthetic text: 1.138 tokens/word, template overhead 4 tokens"
+  ],
+  "referenceName": "reference",
+  "rows": {
+    "0": {
+      "acceptance": 67.0,
+      "acceptance_sd": null,
+      "accepted_per_step": 1.1,
+      "accepted_per_step_sd": null,
+      "command": "gufo serve --port 59793 --sessions 1 llm --model DeepSeek-V4.1-Flash-1017-UD-IQ1_M-00001-of-00005.gguf --context 133760 --served-model-name bench --think off --max-pending-per-client 8 --stream-experts --speculative dspark --dspark-model DeepSeek-V4.1-Flash-1017-DSpark-draft-Q2K-Q4K.gguf",
+      "counts": [
+        {
+          "cache_n": 0,
+          "completion_sha256": "9501636a6dce72cd94d39442a256449fb3cbc792f5f01d42e3babdaa802d79d4",
+          "draft_n": 100,
+          "draft_n_accepted": 67,
+          "predicted_n": 128,
+          "prompt_n": 2035
+        }
+      ],
+      "pp": 960.3,
+      "pp_sd": null,
+      "samples": 1,
+      "tg": 26.91,
+      "tg_sd": null,
+      "workload": "prose"
+    },
+    "16384": {
+      "acceptance": 77.55,
+      "acceptance_sd": null,
+      "accepted_per_step": 1.46,
+      "accepted_per_step_sd": null,
+      "command": "gufo serve --port 59793 --sessions 1 llm --model DeepSeek-V4.1-Flash-1017-UD-IQ1_M-00001-of-00005.gguf --context 133760 --served-model-name bench --think off --max-pending-per-client 8 --stream-experts --speculative dspark --dspark-model DeepSeek-V4.1-Flash-1017-DSpark-draft-Q2K-Q4K.gguf",
+      "counts": [
+        {
+          "cache_n": 16364,
+          "completion_sha256": "3ca454ed06d893c9604e63dd4a8cfe15dd9fc5f26940307d744016b5de2f3d07",
+          "draft_n": 98,
+          "draft_n_accepted": 76,
+          "predicted_n": 128,
+          "prompt_n": 2054
+        }
+      ],
+      "pp": 897.32,
+      "pp_sd": null,
+      "samples": 1,
+      "tg": 30.33,
+      "tg_sd": null,
+      "workload": "prose"
+    }
+  },
+  "schemaVersion": 1,
+  "server": {
+    "command": [
+      "gufo",
+      "serve",
+      "--port",
+      "59793",
+      "--sessions",
+      "1",
+      "llm",
+      "--model",
+      "DeepSeek-V4.1-Flash-1017-UD-IQ1_M-00001-of-00005.gguf",
+      "--context",
+      "133760",
+      "--served-model-name",
+      "bench",
+      "--think",
+      "off",
+      "--max-pending-per-client",
+      "8",
+      "--stream-experts",
+      "--speculative",
+      "dspark",
+      "--dspark-model",
+      "DeepSeek-V4.1-Flash-1017-DSpark-draft-Q2K-Q4K.gguf"
+    ]
+  },
+  "source": {
+    "buildMode": "nix-release",
+    "dirty": false,
+    "revision": "4974ef9aa845471816b0e545b53c597772bc7763"
+  },
+  "table": "single-dspark-udiq1m",
+  "target": "gufo"
+}

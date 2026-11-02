@@ -31,6 +31,12 @@ constexpr TypeCase kTypes[] = {
 };
 // The DSpark drafter's dense projections: GEMV cases only.
 constexpr TypeCase kQ4K = {"Q4_K", 12, 144, 256};
+// Routed down projections of the Unsloth Dynamic builds, which stream their
+// experts: expert GEMV and FP16 matrix-core cases only (no batched MMQ).
+constexpr TypeCase kExpertOnlyTypes[] = {
+    {"IQ3_XXS", 18, 98, 256},
+    {"Q2_K", 10, 84, 256},
+};
 
 uint16_t RandomHalf(std::mt19937& rng) {
   // Normal f16 scales in [2^-8, 2^-5) with a random sign.
@@ -61,6 +67,9 @@ std::vector<uint8_t> RandomBlocks(const TypeCase& t, std::size_t blocks,
       }
     } else if (t.type == 14) {
       put(208, RandomHalf(rng));  // Q6_K keeps d after its scales
+    } else if (t.type == 10) {
+      put(80, RandomHalf(rng));  // Q2_K keeps d and dmin after its codes
+      put(82, RandomHalf(rng));
     } else {
       put(0, RandomHalf(rng));
       if (t.type == 13 || t.type == 12)
@@ -666,7 +675,7 @@ bool ExpertTokensCase(const TypeCase& t, int M, int K, int n,
                                single + (std::size_t)c * kSlots * M, M, K) == 0;
   const bool plain = ok && same();
   bool fused = true;
-  if (t.type == 19 || t.type == 29 || t.type == 16) {
+  if (t.type == 19 || t.type == 29 || t.type == 16 || t.type == 22) {
     ok = ds41_v41_gemv_experts_swiglu(t.type, dg, du, expert_bytes, dids,
                                       (uint32_t)ids.size(), dx, K, kSlots,
                                       droute, 10.0f, batched, M, K) == 0;
@@ -1178,7 +1187,8 @@ int main(int argc, char** argv) {
       ok = ExpertGemvCase(t, 512, 2304, true, rng) && ok;
       for (const int n : {2, 3, 4, 5, 6, 7, 8, 12, 16})
         ok = ExpertTokensCase(t, 512, 2304, n, rng) && ok;
-      if (t.type == 19 || t.type == 29 || t.type == 16 || t.type == 17)
+      if (t.type == 19 || t.type == 29 || t.type == 16 || t.type == 17 ||
+          t.type == 22)
         ok = SwigluCase(t, 2304, 5120, rng) && ok;
     }
     ok = GroupedCase(t, 128, 1, 1024, 8, rng) && ok;
@@ -1203,6 +1213,17 @@ int main(int argc, char** argv) {
       }
     }
     ok = MoeClassCase(t, 256, 1024, 600, 384, 6, rng) && ok;
+  }
+  for (const auto& t : kExpertOnlyTypes) {
+    ok = ExpertGemvCase(t, 2304, 5120, false, rng) && ok;
+    ok = ExpertGemvCase(t, 512, 2304, true, rng) && ok;
+    ok = ExpertGemvCase(t, 5120, 2304, true, rng) && ok;
+    for (const int n : {2, 3, 4, 5, 6, 7, 8, 12, 16})
+      ok = ExpertTokensCase(t, 512, 2304, n, rng) && ok;
+    for (const int n_experts : {16, 384})
+      ok = RoutedF16Case(t, 512, 2304, 200, n_experts, 6, false, rng) && ok;
+    ok = RoutedF16Case(t, 5120, 2304, 300, 384, 6, false, rng) && ok;
+    ok = RoutedF16Case(t, 33, 256, 33, 16, 6, false, rng) && ok;
   }
   ds41_mmq_cleanup();
   std::printf("%s\n", ok ? "PASS" : "FAIL");

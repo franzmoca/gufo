@@ -1,0 +1,40 @@
+p-ds-greedy req -2: 250 drafting cycles, drafter span (first kernel..token download) 9.18 ms
+     1.0/cycle   2544.0 us  split_gemv_kernel<14, 8, false, 6> head
+     5.0/cycle   1481.5 us  markov_select_kernel<1u>
+     6.1/cycle    800.1 us  gemv_kernel<12, 8, false, 6>
+     3.0/cycle    606.3 us  dspark_attention_kernel
+     3.0/cycle    601.9 us  expert_group_kernel<10, 1, true, 2, false>
+     6.0/cycle    586.7 us  gemv_kernel<12, 2, false, 6>
+     3.0/cycle    392.8 us  expert_group_kernel<10, 1, true, 16, false>
+     3.0/cycle    306.1 us  expert_group_kernel<10, 1, false, 2, false>
+     3.0/cycle    285.9 us  gemv_kernel<12, 8, true, 6>
+     3.0/cycle    195.7 us  expert_group_kernel<10, 1, false, 6, false>
+     0.8/cycle    155.0 us  gemv_kernel<12, 8, false, 1>
+     6.0/cycle    126.0 us  hc_mix_small_kernel<4u>
+     6.4/cycle    117.5 us  gemv_kernel<12, 4, false, 6>
+     3.0/cycle    105.2 us  matmul_f32_row_token_kernel
+     7.0/cycle     28.5 us  hc_collapse_norm_kernel<4u>
+     5.0/cycle     22.5 us  dspark_confidence_kernel
+     2.3/cycle     21.1 us  gemv_kernel<12, 4, false, 1>
+     4.0/cycle     18.0 us  rms_norm_kernel
+  listed 8.39 ms
+p-ds-sampled req -2: 170 drafting cycles, drafter span (first kernel..token download) 10.27 ms
+     1.0/cycle   2523.7 us  split_gemv_kernel<14, 8, false, 6> head
+     5.0/cycle   1528.1 us  markov_select_kernel<8u>
+     6.2/cycle    901.9 us  gemv_kernel<12, 8, false, 6>
+     3.0/cycle    661.8 us  expert_group_kernel<10, 1, true, 2, false>
+     3.0/cycle    644.8 us  dspark_attention_kernel
+     6.0/cycle    620.2 us  gemv_kernel<12, 2, false, 6>
+     3.0/cycle    366.9 us  expert_group_kernel<10, 1, true, 16, false>
+     3.0/cycle    334.5 us  expert_group_kernel<10, 1, false, 2, false>
+     3.0/cycle    285.1 us  gemv_kernel<12, 8, true, 6>
+     3.0/cycle    183.0 us  expert_group_kernel<10, 1, false, 6, false>
+     6.5/cycle    141.1 us  gemv_kernel<12, 4, false, 6>
+     0.3/cycle    136.8 us  gemv_kernel<12, 8, false, 4>
+     6.0/cycle    136.4 us  hc_mix_small_kernel<4u>
+     3.0/cycle    104.5 us  matmul_f32_row_token_kernel
+     0.3/cycle     75.2 us  gemv_kernel<12, 8, false, 2>
+     5.0/cycle     66.2 us  top8_bias_kernel<true>
+     0.3/cycle     61.9 us  gemv_kernel<12, 8, false, 1>
+     4.0/cycle     39.0 us  rms_norm_kernel
+  listed 8.81 ms

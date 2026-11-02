@@ -1,0 +1,16 @@
+p-ar-greedy
+  rows  1 n=1462 cycle   59.5 ms = pre-verify   0.0 + verify   59.5 (busy  49.6, experts  11.7)
+  rows 16 n=   7 cycle  293.3 ms = pre-verify   0.0 + verify  293.3 (busy 225.4, experts 130.2)
+p-ds-greedy
+  rows  1 n= 830 cycle   72.0 ms = pre-verify   9.3 + verify   62.6 (busy  51.0, experts  12.1)
+  rows  3 n=   6 cycle  273.1 ms = pre-verify   8.0 + verify  265.2 (busy  77.1, experts  31.7)
+  rows  5 n= 124 cycle  131.8 ms = pre-verify   9.3 + verify  122.4 (busy  99.5, experts  47.7)
+  rows  6 n=  22 cycle  155.0 ms = pre-verify   9.4 + verify  145.6 (busy 111.3, experts  56.7)
+  rows 16 n=   7 cycle  300.0 ms = pre-verify   0.0 + verify  300.0 (busy 226.0, experts 130.5)
+p-ds-sampled
+  rows  1 n=  76 cycle   79.7 ms = pre-verify  11.5 + verify   68.1 (busy  53.6, experts  12.5)
+  rows  2 n= 106 cycle   86.0 ms = pre-verify  12.0 + verify   74.0 (busy  60.8, experts  20.2)
+  rows  3 n=  95 cycle  107.1 ms = pre-verify  12.5 + verify   94.5 (busy  75.7, experts  28.3)
+  rows  4 n=  76 cycle  114.2 ms = pre-verify  11.9 + verify  102.4 (busy  81.9, experts  35.3)
+  rows  5 n=  64 cycle  136.7 ms = pre-verify  12.2 + verify  124.5 (busy  96.9, experts  46.4)
+  rows  6 n= 174 cycle  147.0 ms = pre-verify  12.9 + verify  134.1 (busy 107.6, experts  54.0)

@@ -41,11 +41,11 @@
 namespace {
 
 constexpr uint64_t kGiB = 1ull << 30;
-/* Headroom kept above the cache for everything allocated after it: the
- * shared batch scratch (~1.4 GiB at 1M context), one session's FP4 state
- * (~0.9 GiB at 1M, far less at serving depths) and transient prefill peaks.
- * The resident path keeps a 1 GiB dispatch reserve under the same loads;
- * sessions that no longer fit fall back to the disk prompt cache. */
+/* Headroom kept above the cache for everything allocated after it, when the
+ * cache is sized before the sessions exist (tools, benches): the shared batch
+ * scratch (~1.4 GiB at 1M context), one session's FP4 state (~0.9 GiB at 1M)
+ * and transient prefill peaks. The server sizes the cache after its sessions
+ * instead (ds41_expert_store_set_reserve). */
 constexpr uint64_t kReserve = 4 * kGiB;
 /* Rows of the compact prefetch stage: two parity halves, so the job a layer
  * adopts and the job submitted for the layer after never share rows. A
@@ -59,9 +59,11 @@ constexpr uint64_t kReadBytes = 32ull << 20;
 constexpr uint64_t kDirectAlign = 4096;
 constexpr uint32_t kReadWorkers = 8;
 constexpr uint32_t kRecentRows = 16;
-/* Route rows of the largest split evaluation (decode, DSpark verification
- * and joint rows); larger batches read their experts in one pass. */
-constexpr uint32_t kSplitRows = DS41_DECODER_MAX_SPECULATIVE * DS41_N_EXPERT_USED;
+/* Route rows of the largest split evaluation: prefill batches split their
+ * resident rows from the rows their reads fill, so the resident experts'
+ * kernels run while the reads stream (smaller batches are decode, DSpark
+ * verification and joint rows). */
+constexpr uint32_t kSplitRows = DS41_MAX_PREFILL_BATCH * DS41_N_EXPERT_USED;
 /* Batches of at least this many tokens adopt a wide (prefill-scale)
  * prediction job for their layer; smaller batches drop it instead of reading
  * a whole prompt's experts. */
@@ -69,6 +71,13 @@ constexpr uint32_t kSweepTokens = 1024;
 
 constexpr uint32_t kSeedPerLayer = DS41_N_EXPERT;
 constexpr uint32_t kNoSlot = std::numeric_limits<uint32_t>::max();
+/* Eviction candidates kept per size class: the kVictims lowest decayed
+ * scores of the slots an expert of that class could take, rebuilt by one
+ * scan when the list runs dry or ages past kVictimsTicks prepares. Pops
+ * skip slots freed, reoccupied or used since the build, so the lists need
+ * no invalidation and the order among untouched slots is the scan's. */
+constexpr size_t kVictims = 32;
+constexpr uint64_t kVictimsTicks = 512;
 constexpr uint64_t kTableEntries = uint64_t{DS41_N_LAYER} * DS41_N_EXPERT;
 constexpr uint32_t kNoLayer = std::numeric_limits<uint32_t>::max();
 constexpr std::array<uint16_t, DS41_N_LAYER * DS41_N_EXPERT> kDefaultExpertRank = {
@@ -331,11 +340,17 @@ public:
   /* Time the last phase blocked on its reads after the overlapped work. */
   uint64_t last_wait_ns() const { return last_wait_ns_; }
 
-  bool SubmitPrefetch(std::shared_ptr<PrefetchJob> job) {
+  /* `expected` is the layer the next prepare handles. Checked under the
+   * lock a prepare's Resolve takes after advancing it, so a job that an
+   * evaluation overtook while it was built never starts: its parity half
+   * may hold the rows the current layer's kernels are reading. */
+  bool SubmitPrefetch(std::shared_ptr<PrefetchJob> job,
+                      const std::atomic<uint32_t>& expected) {
     std::unique_lock lock(mutex_);
     // A submission racing a phase's job resolution is simply dropped: the
     // prediction is best effort, and adopting half-resolved state is unsound.
-    if (stopping_ || resolving_ || !job || job->tasks.empty())
+    if (stopping_ || resolving_ || !job || job->tasks.empty() ||
+        job->layer != expected.load(std::memory_order_acquire))
       return false;
     if (demand_) {
       // Submitted mid-phase: run right after it, replacing any queued job
@@ -588,6 +603,7 @@ struct ds41_expert_store {
   bool pred_active = false;
   bool pred_stopping = false;
   std::vector<void*> chunks;
+  std::vector<uint32_t> chunk_first;  // first slot index of each chunk
   /* Per-layer device tables of each expert's weight base (slot data or stage
    * row) with pinned host mirrors of what was uploaded, and the hit/miss
    * route rows of the current prepare call (hit rows, then miss rows) with
@@ -623,9 +639,29 @@ struct ds41_expert_store {
   std::array<uint32_t, DS41_N_LAYER> layer_class{};
   std::vector<std::vector<uint32_t>> free_slots;  // per class
   std::vector<uint64_t> grow_failure;             // tick, per class
+  /* Eviction candidates, one list per size class: the kVictims lowest
+   * decayed scores at build time of the occupied slots an expert of that
+   * class could take, ascending. Pops skip slots freed, reoccupied or used
+   * since the build, so the lists need no invalidation; one
+   * full scan rebuilds a list when it runs dry or ages out. */
+  struct Victim {
+    double score;           // decayed score at build
+    uint32_t slot;
+    uint32_t layer, expert;  // the occupant at build
+    uint64_t last;           // its last use at build
+  };
+  struct VictimList {
+    std::vector<Victim> entries;
+    size_t next = 0;
+    uint64_t built = 0;  // tick of the build; 0 never built
+  };
+  std::vector<VictimList> victims;  // per class, indexed like free_slots
   std::array<uint8_t*, kReadWorkers> read_buffers{};
   std::unique_ptr<ReadPool> readers;
   uint64_t cache_limit = 0;
+  uint64_t requested_limit = 0;  // --expert-cache-bytes; 0 sizes from memory
+  uint64_t reserve = kReserve;   // free memory the cache never grows into
+  bool sized_after_sessions = false;  // set_reserve ran: seed the whole budget
   uint64_t tick = 0;
   uint64_t logged_tokens = 0;
   /* DS41_EXPERT_TRACE=path: binary routing trace for
@@ -681,9 +717,9 @@ struct ds41_expert_store {
 
   bool grow(uint32_t size_class) {
     const uint64_t free_bytes = ds41_expert_available_memory();
-    if (free_bytes <= kReserve)
+    if (free_bytes <= reserve)
       return false;
-    uint64_t available = free_bytes - kReserve;
+    uint64_t available = free_bytes - reserve;
     if (stats.cache_bytes >= cache_limit)
       return false;
     available = std::min(available, cache_limit - stats.cache_bytes);
@@ -696,6 +732,7 @@ struct ds41_expert_store {
     if (gufo::hip::AllocateManaged(&allocation, bytes) != hipSuccess)
       return false;
     chunks.push_back(allocation);
+    chunk_first.push_back(static_cast<uint32_t>(slots.size()));
     stats.cache_bytes += bytes;
     for (uint64_t i = 0; i < count; ++i) {
       free_slots[size_class].push_back(static_cast<uint32_t>(slots.size()));
@@ -705,7 +742,42 @@ struct ds41_expert_store {
     return true;
   }
 
-  uint32_t acquire(uint32_t layer, uint32_t expert, bool allow_evict) {
+  /* Refills the class's victim list with one pass over the slots: the
+   * kVictims lowest decayed scores among occupied slots of class `own` or
+   * larger, ascending. A batch's protected hits are handled at pop time
+   * (the protection differs per prepare). */
+  void rebuild_victims(uint32_t own) {
+    VictimList& list = victims[own];
+    list.entries.clear();
+    list.next = 0;
+    list.built = tick;
+    const auto lower = [](const Victim& a, const Victim& b) {
+      return a.score < b.score;  // max-heap of the kVictims smallest
+    };
+    for (uint32_t i = 0; i < slots.size(); ++i) {
+      const Slot& s = slots[i];
+      if (s.layer == kNoSlot || s.size_class < own)
+        continue;
+      const Entry& e = entries[s.layer][s.expert];
+      const Victim v{decayed(e, tick), i, s.layer, s.expert, e.last};
+      if (list.entries.size() < kVictims) {
+        list.entries.push_back(v);
+        std::push_heap(list.entries.begin(), list.entries.end(), lower);
+      } else if (v.score < list.entries.front().score) {
+        std::pop_heap(list.entries.begin(), list.entries.end(), lower);
+        list.entries.back() = v;
+        std::push_heap(list.entries.begin(), list.entries.end(), lower);
+      }
+    }
+    std::sort(list.entries.begin(), list.entries.end(), lower);
+  }
+
+  /* `hits` marks the experts of `layer` the current batch found resident:
+   * its weight table points at their slots and its kernels run after the
+   * admission copies, so they are never victims. (A miss admitted earlier
+   * in the same batch may be: its table entry is the stage row.) */
+  uint32_t acquire(uint32_t layer, uint32_t expert, bool allow_evict,
+                   const std::array<bool, DS41_N_EXPERT>& hits) {
     const uint32_t own = layer_class[layer];
     if (free_slots[own].empty() && grow_failure[own] != tick && !grow(own))
       grow_failure[own] = tick;
@@ -718,23 +790,129 @@ struct ds41_expert_store {
       }
     if (!allow_evict)
       return kNoSlot;
-    uint32_t victim = kNoSlot;
-    double lowest = std::numeric_limits<double>::infinity();
-    for (uint32_t i = 0; i < slots.size(); ++i) {
-      const Slot& s = slots[i];
-      if (s.layer == kNoSlot || s.size_class < own)
-        continue;
-      const double score = decayed(entries[s.layer][s.expert], tick);
-      if (score < lowest) {
-        lowest = score;
-        victim = i;
+    const double incoming = decayed(entries[layer][expert], tick);
+    bool rebuilt = false;
+    for (;;) {
+      VictimList& list = victims[own];
+      if (!rebuilt && (list.built == 0 || tick - list.built >= kVictimsTicks ||
+                       list.next >= list.entries.size())) {
+        rebuild_victims(own);
+        rebuilt = true;
+      }
+      while (list.next < list.entries.size()) {
+        const Victim& v = list.entries[list.next++];
+        const uint32_t victim = v.slot;
+        const Slot& s = slots[victim];
+        if (s.layer != v.layer || s.expert != v.expert || s.size_class < own ||
+            entries[s.layer][s.expert].last != v.last ||
+            (s.layer == layer && hits[s.expert]))
+          continue;  // freed, reoccupied, used since the build, or protected
+        const double score = decayed(entries[s.layer][s.expert], tick);
+        if (incoming < score)
+          return kNoSlot;  // the remaining victims all outscore it
+        entries[s.layer][s.expert].slot = kNoSlot;
+        return victim;
+      }
+      if (rebuilt)
+        return kNoSlot;
+      // A fresh list ran out of usable entries: one rebuild, then give up.
+    }
+  }
+
+  /* Frees the newest chunks until the cache fits `limit`, keeping the
+   * highest-scored experts of each size class: survivors in the freed chunks
+   * move into the kept slots of the lowest-scored experts, which are evicted.
+   * Startup only: no prepare or prefetch may be running. */
+  bool shrink_to(uint64_t limit) {
+    if (stats.cache_bytes <= limit || chunks.empty())
+      return true;
+    size_t drop = chunks.size();
+    uint64_t freed = 0;
+    while (drop > 0 && stats.cache_bytes - freed > limit) {
+      --drop;
+      const uint32_t first = chunk_first[drop];
+      const uint32_t end =
+          drop + 1 < chunks.size() ? chunk_first[drop + 1] : slots.size();
+      freed += uint64_t(end - first) * class_bytes[slots[first].size_class];
+    }
+    const uint32_t cut = chunk_first[drop];
+    if (hipDeviceSynchronize() != hipSuccess)
+      return false;
+    for (uint32_t c = 0; c < class_bytes.size(); ++c) {
+      // Occupied slots of this class, kept region and freed region.
+      std::vector<uint32_t> kept, moving;
+      uint32_t kept_slots = 0;
+      for (uint32_t i = 0; i < slots.size(); ++i) {
+        if (slots[i].size_class != c)
+          continue;
+        if (i < cut)
+          ++kept_slots;
+        if (slots[i].layer != kNoSlot)
+          (i < cut ? kept : moving).push_back(i);
+      }
+      std::vector<uint32_t> all = kept;
+      all.insert(all.end(), moving.begin(), moving.end());
+      const auto score = [&](uint32_t i) {
+        return decayed(entries[slots[i].layer][slots[i].expert], tick);
+      };
+      std::stable_sort(all.begin(), all.end(), [&](uint32_t a, uint32_t b) {
+        return score(a) > score(b);
+      });
+      std::vector<bool> keep(slots.size(), false);
+      for (size_t k = 0; k < all.size() && k < kept_slots; ++k)
+        keep[all[k]] = true;
+      // Kept slots freed by eviction, plus kept slots that were empty.
+      std::vector<uint32_t> open;
+      for (uint32_t i = 0; i < cut; ++i) {
+        if (slots[i].size_class != c)
+          continue;
+        if (slots[i].layer == kNoSlot) {
+          open.push_back(i);
+        } else if (!keep[i]) {
+          entries[slots[i].layer][slots[i].expert].slot = kNoSlot;
+          slots[i].layer = slots[i].expert = kNoSlot;
+          open.push_back(i);
+        }
+      }
+      size_t next = 0;
+      for (uint32_t i : moving) {
+        Slot& from = slots[i];
+        Entry& entry = entries[from.layer][from.expert];
+        if (!keep[i] || next >= open.size()) {
+          entry.slot = kNoSlot;
+        } else {
+          Slot& to = slots[open[next++]];
+          if (hipMemcpy(to.data, from.data, class_bytes[c],
+                        hipMemcpyDeviceToDevice) != hipSuccess)
+            return false;
+          to.layer = from.layer;
+          to.expert = from.expert;
+          entry.slot = static_cast<uint32_t>(&to - slots.data());
+        }
+        from.layer = from.expert = kNoSlot;
       }
     }
-    if (victim == kNoSlot || decayed(entries[layer][expert], tick) < lowest)
-      return kNoSlot;
-    Slot& s = slots[victim];
-    entries[s.layer][s.expert].slot = kNoSlot;
-    return victim;
+    for (size_t k = drop; k < chunks.size(); ++k)
+      (void)hipFree(chunks[k]);
+    chunks.resize(drop);
+    chunk_first.resize(drop);
+    slots.resize(cut);
+    stats.cache_bytes -= freed;
+    for (auto& list : free_slots) {
+      list.clear();
+    }
+    for (uint32_t i = 0; i < slots.size(); ++i)
+      if (slots[i].layer == kNoSlot)
+        free_slots[slots[i].size_class].push_back(i);
+    for (auto& list : victims) {
+      list.entries.clear();
+      list.next = 0;
+      list.built = 0;
+    }
+    // Uploaded tables may name freed slots: force the next uploads.
+    for (uint32_t p = 0; p < 3; ++p)
+      std::fill_n(table_host[p], kTableEntries, nullptr);
+    return true;
   }
 
   void release(uint32_t slot_id) {
@@ -807,6 +985,7 @@ ds41_expert_store* ds41_expert_store_create(const ds41_model* model,
         store->class_bytes.begin());
   }
   store->free_slots.resize(store->class_bytes.size());
+  store->victims.resize(store->class_bytes.size());
   store->grow_failure.assign(store->class_bytes.size(), ~0ull);
   bool ok = true;
   for (uint32_t i = 0; i < kReadWorkers && ok; ++i)
@@ -852,6 +1031,7 @@ ds41_expert_store* ds41_expert_store_create(const ds41_model* model,
   }
   const uint64_t available = ds41_expert_available_memory();
   store->cache_limit = available > kReserve ? available - kReserve : 0;
+  store->requested_limit = cache_limit_bytes;
   if (cache_limit_bytes)
     store->cache_limit = std::min(store->cache_limit, cache_limit_bytes);
   if (const char* path = std::getenv("DS41_EXPERT_TRACE"); path && *path) {
@@ -1008,10 +1188,17 @@ bool seed_ranked(ds41_expert_store* store, std::vector<SeedItem> ranked,
       if (!ranked_set[l][e])
         ranked.push_back({l, e, 0});
   const uint64_t available = ds41_expert_available_memory();
-  const uint64_t free_budget = available > kReserve ? available - kReserve : 0;
-  // Leave capacity for session allocations and for experts learned from the
-  // actual request. At startup the slots are otherwise all free.
-  const uint64_t budget = std::min(store->cache_limit, free_budget) / 16 * 15;
+  const uint64_t free_budget =
+      available > store->reserve ? available - store->reserve : 0;
+  // Before the sessions exist, leave capacity for their allocations and for
+  // experts learned from the actual request; once they exist, growing the
+  // last sixteenth during the first prompt slows it, so seed everything.
+  // The ranking prefix to hold: what is cached plus the room left (a second
+  // seed after the sessions keeps the experts already resident).
+  uint64_t budget =
+      std::min(store->cache_limit, store->stats.cache_bytes + free_budget);
+  if (!store->sized_after_sessions)
+    budget = budget / 16 * 15;
   size_t target = 0;
   for (uint64_t used = 0; target < ranked.size(); ++target) {
     used += store->class_bytes[store->layer_class[ranked[target].layer]];
@@ -1043,7 +1230,7 @@ bool seed_ranked(ds41_expert_store* store, std::vector<SeedItem> ranked,
     }
     if (ids.empty())
       continue;
-    if (ds41_expert_available_memory() <= kReserve)
+    if (ds41_expert_available_memory() <= store->reserve)
       break;
     while (ids.size() % DS41_N_EXPERT_USED)
       ids.push_back(ids.back());
@@ -1194,8 +1381,8 @@ std::vector<ReadTask> build_read_tasks(const ds41_expert_store* store, uint32_t 
   return tasks;
 }
 
-/* The compact prefetch stage is bought only when prefetch actually starts,
- * so it never shrinks the startup seed's memory budget. */
+/* The compact prefetch stage is bought when prefetch first starts, or by
+ * ds41_expert_store_set_reserve before a server seeds the cache. */
 bool ensure_stage_pairs(ds41_expert_store* store) {
   if (store->stage_pairs)
     return true;
@@ -1422,7 +1609,7 @@ bool ds41_expert_store_prepare(ds41_expert_store* store, uint32_t layer,
   ++store->tick;
   if (layer == 0)
     store->stats.tokens += n_tokens;
-  std::array<bool, DS41_N_EXPERT> missing{}, admit{};
+  std::array<bool, DS41_N_EXPERT> missing{}, admit{}, hits{};
   for (uint32_t e = 0; e < DS41_N_EXPERT; ++e) {
     if (!counts[e])
       continue;
@@ -1431,6 +1618,7 @@ bool ds41_expert_store_prepare(ds41_expert_store* store, uint32_t layer,
     if (entry.slot != kNoSlot)
       store->stats.hits += counts[e];
     missing[e] = entry.slot == kNoSlot;
+    hits[e] = !missing[e];
     entry.score = decayed(entry, store->tick) + std::min(counts[e], 4u) +
                   (recent[e] ? 4.0 : 0.0);
     entry.last = store->tick;
@@ -1444,10 +1632,11 @@ bool ds41_expert_store_prepare(ds41_expert_store* store, uint32_t layer,
   uint32_t misses = 0;
   for (uint32_t e = 0; e < DS41_N_EXPERT; ++e)
     misses += missing[e] ? 1u : 0u;
-  /* Predictions may target this layer or the next; after the last layer the
-   * next evaluation's first prepare reopens the window. */
+  /* From here predictions may target only the next layer, whose parity
+   * half no running kernel reads; after the last layer the next
+   * evaluation's first prepare reopens the window. */
   store->pf_expected.store(layer + 1 < DS41_N_LAYER ? layer + 1 : 0,
-                           std::memory_order_relaxed);
+                           std::memory_order_release);
   const uint64_t orphaned = store->readers->TakeOrphaned();
   store->stats.bytes_read += orphaned;
   store->stats.prefetch_dropped_bytes += orphaned;
@@ -1502,11 +1691,11 @@ bool ds41_expert_store_prepare(ds41_expert_store* store, uint32_t layer,
   info.rows = static_cast<uint32_t>(n_routes);
   for (uint32_t p = 0; p < 3; ++p)
     info.table[p] = device_table[p];
+  uint32_t miss_rows = 0;
+  for (size_t i = 0; i < ids.size(); ++i)
+    miss_rows += ids[i] >= 0 && missing[ids[i]];
+  info.miss_rows = miss_rows;
   if (n_routes <= kSplitRows) {
-    uint32_t miss_rows = 0;
-    for (size_t i = 0; i < ids.size(); ++i)
-      miss_rows += ids[i] >= 0 && missing[ids[i]];
-    info.miss_rows = miss_rows;
     /* Only a batch with both hits and misses splits its launches; any other
      * batch keeps one pass over the routes, so its rows are not uploaded. */
     if (miss_rows && miss_rows < n_routes) {
@@ -1571,7 +1760,7 @@ bool ds41_expert_store_prepare(ds41_expert_store* store, uint32_t layer,
       continue;
     // Fill unused capacity during a scan. Once full, only promoted prefill
     // experts may displace the existing working set.
-    const uint32_t slot_id = store->acquire(layer, e, admit[e]);
+    const uint32_t slot_id = store->acquire(layer, e, admit[e], hits);
     if (slot_id == kNoSlot)
       continue;
     Slot& slot = store->slots[slot_id];
@@ -1647,11 +1836,11 @@ bool ds41_expert_store_prefetch(ds41_expert_store* store, uint32_t layer,
                                 const int32_t* experts, uint32_t count, bool wide) {
   if (!store || layer >= DS41_N_LAYER || !experts || !count)
     return false;
-  // Only the layer the next prepare handles, or its successor, is accepted:
-  // an overtaken prediction would never be adopted, and an older layer's
-  // rows may be in compute.
-  const uint32_t expected = store->pf_expected.load(std::memory_order_relaxed);
-  if (layer != expected && layer != expected + 1)
+  // Only the layer the next prepare handles is accepted: an overtaken
+  // prediction would never be adopted, and its parity half may hold rows in
+  // compute. SubmitPrefetch repeats the check under the pool's lock, since
+  // the first job also allocates the prefetch stage.
+  if (layer != store->pf_expected.load(std::memory_order_acquire))
     return false;
   std::array<bool, DS41_N_EXPERT> want{};
   for (uint32_t i = 0; i < count; ++i) {
@@ -1665,7 +1854,7 @@ bool ds41_expert_store_prefetch(ds41_expert_store* store, uint32_t layer,
   std::shared_ptr<PrefetchJob> job = build_prefetch_job(store, layer, want, wide);
   if (!job)
     return false;
-  return store->readers->SubmitPrefetch(std::move(job));
+  return store->readers->SubmitPrefetch(std::move(job), store->pf_expected);
 }
 
 bool ds41_expert_store_predict(ds41_expert_store* store, uint32_t layer,
@@ -1682,6 +1871,11 @@ bool ds41_expert_store_predict(ds41_expert_store* store, uint32_t layer,
   store->pred_queue.push_back({done, layer, ids, count, wide});
   store->pred_cv.notify_one();
   return true;
+}
+
+void ds41_expert_store_expect(ds41_expert_store* store, uint32_t layer) {
+  if (store && layer < DS41_N_LAYER)
+    store->pf_expected.store(layer, std::memory_order_release);
 }
 
 void ds41_expert_store_predict_flush(ds41_expert_store* store) {
@@ -1725,4 +1919,25 @@ void ds41_expert_store_log(const ds41_expert_store* store) {
       "expert reads: %llu direct, %llu buffered",
       static_cast<unsigned long long>(store->readers->direct_reads()),
       static_cast<unsigned long long>(store->readers->buffered_reads()));
+}
+
+bool ds41_expert_store_set_reserve(ds41_expert_store* store,
+                                   uint64_t reserve_bytes) {
+  if (!store)
+    return false;
+  /* The prefetch stage is bought on the first prompt anyway; buying it now
+   * puts it in the measurement instead of under the cache. */
+  const bool staged = ensure_stage_pairs(store);
+  store->reserve = reserve_bytes;
+  store->sized_after_sessions = true;
+  const uint64_t available = ds41_expert_available_memory();
+  const uint64_t cached = store->stats.cache_bytes;
+  const uint64_t keep = reserve_bytes;
+  uint64_t limit = available > keep
+                       ? cached + (available - keep)
+                       : cached - std::min(cached, keep - available);
+  if (store->requested_limit)
+    limit = std::min(limit, store->requested_limit);
+  store->cache_limit = limit;
+  return store->shrink_to(limit) && staged;
 }

@@ -1,0 +1,29 @@
+
+_ZN12_GLOBAL__N_117routed_f16_kernelILi16ELb1ELb1EEEvPKhS2_PKS2_S4_mPKtjPKiS8_S8_PKffPvjj
+  total instructions            4343
+  matrix (wmma)                  128    2.9%
+  global load                     60    1.4%
+  global store                    32    0.7%
+  lds read                       161    3.7%
+  lds write                       13    0.3%
+  valu fp32 fma/mul/add          101    2.3%
+  valu convert                    32    0.7%
+  valu packed                    255    5.9%
+  valu other                    2102   48.4%
+  salu                           400    9.2%
+  waitcnt                        208    4.8%
+  barrier                          6    0.1%
+  branch                         177    4.1%
+  top opcodes:
+    s_delay_alu                      530
+    v_permlanex16_b32                401
+    v_bfi_b32                        256
+    s_waitcnt                        208
+    s_and_b32                        134
+    v_xor_b32_e32                    130
+    v_perm_b32                       128
+    v_pk_mul_f16                     128
+    v_wmma_f32_16x16x16_f16          128
+    s_cselect_b32                    104
+    v_cndmask_b32_e64                101
+    ds_load_b128                      96

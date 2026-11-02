@@ -1,0 +1,24 @@
+Using saved setting for 'extra-substituters = https://gufo.cachix.org' from ~/.local/share/nix/trusted-settings.json.
+warning: ignoring untrusted flake configuration setting 'extra-substituters'.
+Pass '--accept-flake-config' to trust it
+Using saved setting for 'extra-trusted-public-keys = gufo.cachix.org-1:rfZe3n4lHINgyoACKzs5EthIZmBNvEyCCtufUpth0PE=' from ~/.local/share/nix/trusted-settings.json.
+warning: ignoring the client-specified setting 'trusted-public-keys', because it is a restricted setting and you are not a trusted user
+warning: ignoring the client-specified setting 'trusted-public-keys', because it is a restricted setting and you are not a trusted user
+warning: ignoring the client-specified setting 'trusted-public-keys', because it is a restricted setting and you are not a trusted user
+evaluation warning: stdenv.isLinux is deprecated, use stdenv.hostPlatform.isLinux instead
+evaluation warning: stdenv.isDarwin is deprecated, use stdenv.hostPlatform.isDarwin instead
+warning: ignoring the client-specified setting 'trusted-public-keys', because it is a restricted setting and you are not a trusted user
+Test project /home/franz/projects/gufo/build/gpu-test
+    Start 227: ds41.attention
+1/1 Test #227: ds41.attention ...................   Passed    9.69 sec
+
+100% tests passed out of 1
+
+Label Time Summary:
+ds41       =   9.69 sec*proc (1 test)
+gfx1151    =   9.69 sec*proc (1 test)
+gpu        =   9.69 sec*proc (1 test)
+hip        =   9.69 sec*proc (1 test)
+quality    =   9.69 sec*proc (1 test)
+
+Total Test time (real) =   9.69 sec

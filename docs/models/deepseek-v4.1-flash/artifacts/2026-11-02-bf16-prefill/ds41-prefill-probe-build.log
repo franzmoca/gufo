@@ -1,0 +1,12 @@
+Using saved setting for 'extra-substituters = https://gufo.cachix.org' from ~/.local/share/nix/trusted-settings.json.
+warning: ignoring untrusted flake configuration setting 'extra-substituters'.
+Pass '--accept-flake-config' to trust it
+Using saved setting for 'extra-trusted-public-keys = gufo.cachix.org-1:rfZe3n4lHINgyoACKzs5EthIZmBNvEyCCtufUpth0PE=' from ~/.local/share/nix/trusted-settings.json.
+warning: ignoring the client-specified setting 'trusted-public-keys', because it is a restricted setting and you are not a trusted user
+warning: ignoring the client-specified setting 'trusted-public-keys', because it is a restricted setting and you are not a trusted user
+warning: ignoring the client-specified setting 'trusted-public-keys', because it is a restricted setting and you are not a trusted user
+evaluation warning: stdenv.isLinux is deprecated, use stdenv.hostPlatform.isLinux instead
+evaluation warning: stdenv.isDarwin is deprecated, use stdenv.hostPlatform.isDarwin instead
+warning: ignoring the client-specified setting 'trusted-public-keys', because it is a restricted setting and you are not a trusted user
+[1/2] Building CXX object tests/models/deepseek_v41_flash/CMakeFiles/ds41_load_probe.dir/load_probe.cpp.o
+[2/2] Linking HIP executable tests/models/deepseek_v41_flash/ds41_load_probe

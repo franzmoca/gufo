@@ -35,6 +35,9 @@ struct ds41_session {
   std::vector<int> tokens;
   std::vector<float> logits;
   bool valid = false;
+  /* The first position whose decoder-layer rows the windows hold, through
+   * the frontier: rows before it skipped the decoder (bounded replay). */
+  uint32_t decoder_from = 0;
   ds41_session_cancel_fn cancel = nullptr;
   void* cancel_data = nullptr;
   ds41_session_write_fn before_write = nullptr;
@@ -59,18 +62,27 @@ struct ds41_session {
    * depends only on q, never on timing, so seeded replay is unaffected. */
   static constexpr float kConfidentDraft = 0.6f;
   /* Plain steps before a one-draft cycle re-measures acceptance: from the
-   * first, doubling while the policy keeps returning to plain steps. */
+   * first, doubling while the policy keeps returning to plain steps. Learned
+   * cycles probe the same way while drafting does not pay (gain_ms). */
   static constexpr uint32_t kProbeFirst = 4, kProbeMax = 64;
+  /* A learned cycle's drafting benefit before the request has any: high
+   * enough that its first cycles draft and measure it. */
+  static constexpr float kGainPrior = 50.0f;
   /* Draft length policy: drafts per cycle maximize the expected emitted
    * tokens over the cycle's time. accept[k] estimates P(draft k + 1 is
    * accepted | the drafts before it were); cycle_ms[w] is a cycle of w drafts
-   * (draft plus verification), cycle_ms[0] a plain step. Both start from
-   * gfx1151 measurements at 2K context and follow the session; estimates of
+   * (draft plus verification), cycle_ms[0] a plain step without a draft
+   * and draft_ms the drafter pass alone. All start from gfx1151
+   * measurements at 2K context and follow the session; estimates of
    * positions past the drafted ones relax toward the prior, so longer drafts
-   * are retried. */
+   * are retried. gain_ms estimates the time a learned cycle's draft saves
+   * (zero when it verifies none); learned cycles draft while it exceeds
+   * draft_ms. */
   struct {
     float accept[DS41_DSPARK_BLOCK] = {kAcceptPrior, kAcceptPrior, kAcceptPrior, kAcceptPrior, kAcceptPrior};
     float cycle_ms[DS41_DSPARK_BLOCK + 1] = {42.4f, 69.6f, 83.6f, 95.5f, 106.1f, 117.2f};
+    float draft_ms = 8.0f;
+    float gain_ms = kGainPrior;
     uint32_t plain = 0;   // plain steps since the last cycle
     uint32_t probe = kProbeFirst;  // plain steps before a one-draft cycle re-measures
   } policy;
@@ -85,7 +97,7 @@ struct ds41_session {
 
 namespace {
 
-constexpr uint64_t kPayloadMagic = 0x3253534531345344ull;  // "DS41ESS2"
+constexpr uint64_t kPayloadMagic = 0x3353534531345344ull;  // "DS41ESS3"
 
 void set_error(char* error, size_t capacity, const char* message) {
   if (error && capacity) snprintf(error, capacity, "%s", message);
@@ -121,8 +133,16 @@ bool eval(ds41_session* s, const int* tokens, uint32_t n, char* error, size_t ca
   }
   s->tokens.insert(s->tokens.end(), tokens, tokens + n);
   s->valid = true;
-  /* The drafter keeps the newest rows' main KV, from the replayed rows. */
+  /* Kept rows continue the frontier's decoder rows unless the replay starts
+   * past them; a batch without kept rows leaves none. */
+  if (kept == 0)
+    s->decoder_from = first + n;
+  else if (first + n - kept > first)
+    s->decoder_from = first + n - kept;
+  /* The drafter keeps the newest rows' main KV, from the replayed rows; a
+   * batch without them leaves its ring empty at the frontier. */
   const uint32_t rows = std::min(kept, DS41_DSPARK_FEATURE_ROWS);
+  if (s->dspark && kept == 0) ds41_dspark_state_reset(s->dspark, first + n);
   if (s->dspark && !ds41_dspark_inject(s->dspark, first + n - rows, rows)) {
     set_error(error, capacity, "DSpark feature injection failed");
     s->valid = false;
@@ -200,7 +220,11 @@ int ds41_session_sync(ds41_session* s, const ds41_tokens* prompt, int prompt_end
   /* The prompt carries any token a speculative step left unevaluated. */
   s->next = -1;
   const size_t n = (size_t)prompt->len;
-  const bool extends = s->valid && s->tokens.size() <= n && std::equal(s->tokens.begin(), s->tokens.end(), prompt->v);
+  /* 0 evaluates every decoder row (exact prefill). */
+  const uint32_t replay_end = ds41_engine_exact_prefill(s->engine) ? 0 : (uint32_t)prompt_end;
+  /* The replay reads the decoder rows from replay_from(prompt_end) on. */
+  const bool extends = s->valid && s->tokens.size() <= n && s->decoder_from <= replay_from(replay_end) &&
+                       std::equal(s->tokens.begin(), s->tokens.end(), prompt->v);
   if (!extends || s->tokens.size() == n) {
     if (extends) return 0; /* already at this prompt; its logits are current */
     if (ds41_decoder_reset(s->decoder) != 0) {
@@ -209,6 +233,7 @@ int ds41_session_sync(ds41_session* s, const ds41_tokens* prompt, int prompt_end
     }
     s->tokens.clear();
     s->valid = false;
+    s->decoder_from = 0;
     s->next = -1;
     s->lookup.Clear();
     if (s->dspark) ds41_dspark_state_reset(s->dspark, 0);
@@ -230,18 +255,21 @@ int ds41_session_sync(ds41_session* s, const ds41_tokens* prompt, int prompt_end
     ds41_decoder* decoder;
     ~ClearImages() { ds41_decoder_set_images(decoder, nullptr, 0); }
   } clear_images{s->decoder};
+  /* Each batch reads the next batch's Engram rows once its own are in. */
+  struct ClearLookahead {
+    ds41_decoder* decoder;
+    ~ClearLookahead() { ds41_decoder_set_lookahead(decoder, nullptr, 0); }
+  } clear_lookahead{s->decoder};
   const size_t batch = ds41_decoder_batch_capacity(s->decoder);
   const size_t start = s->tokens.size();
-  /* 0 evaluates every decoder row (exact prefill). */
-  const uint32_t replay_end = ds41_engine_exact_prefill(s->engine) ? 0 : (uint32_t)prompt_end;
   for (size_t i = start; i < n;) {
     if (cancelled(s)) {
-      /* Skipped decoder rows leave windows that only this prompt end completes. */
-      if (start < std::min<size_t>(i, replay_from(replay_end))) s->valid = false;
       set_error(error, capacity, "prefill cancelled");
       return DS41_SESSION_SYNC_INTERRUPTED;
     }
     const uint32_t count = (uint32_t)std::min(batch, n - i);
+    const size_t next = i + count;
+    ds41_decoder_set_lookahead(s->decoder, prompt->v + next, (uint32_t)std::min(batch, n - next));
     if (!eval(s, prompt->v + i, count, error, capacity, replay_end)) return 1;
     i += count;
   }
@@ -284,6 +312,7 @@ void ds41_session_begin_request(ds41_session* s) {
   std::fill(std::begin(s->policy.accept), std::end(s->policy.accept), ds41_session::kAcceptPrior);
   s->policy.plain = 0;
   s->policy.probe = ds41_session::kProbeFirst;
+  s->policy.gain_ms = ds41_session::kGainPrior;
   s->lookup.BeginRequest();
   s->next = -1;
 }
@@ -293,23 +322,41 @@ namespace {
 /* A cycle's time also moves the other widths' estimates by kPolicyShift of
  * its error: widths the policy rarely picks otherwise keep their prior. */
 constexpr float kPolicyRate = 0.1f, kPolicyRelax = 0.02f, kPolicyShift = 0.05f;
+/* gain_ms follows the request's drafts faster: acceptance shifts with content. */
+constexpr float kGainRate = 0.25f;
 
 /* The drafts per cycle that maximize the expected emitted tokens over the
  * cycle's time; accept[k] estimates P(draft k + 1 is accepted | the drafts
- * before it were). */
-uint32_t best_width(const ds41_session* s, const float* accept, uint32_t limit) {
+ * before it were). A cycle that has already drafted (drafted) compares the
+ * widths' remaining time, without the draft. *gain, when set, receives the
+ * time the chosen width saves against plain steps emitting as many tokens. */
+uint32_t best_width(const ds41_session* s, const float* accept, uint32_t limit, bool drafted = false,
+                    float* gain = nullptr) {
   const auto& p = s->policy;
+  const float sunk = drafted ? p.draft_ms : 0.0f;
   uint32_t best_w = 0;
-  float best = 1.0f / p.cycle_ms[0], expected = 1.0f, reach = 1.0f;
+  float best = 1.0f / p.cycle_ms[0], best_expected = 1.0f, expected = 1.0f, reach = 1.0f;
   for (uint32_t w = 1; w <= limit; w++) {
     reach *= accept[w - 1];
     expected += reach;
-    if (expected / p.cycle_ms[w] > best) {
-      best = expected / p.cycle_ms[w];
+    const float cost = std::max(p.cycle_ms[w] - sunk, 1.0f);
+    if (expected / cost > best) {
+      best = expected / cost;
       best_w = w;
+      best_expected = expected;
     }
   }
+  if (gain)
+    *gain = best_w ? std::max(0.0f, best_expected * p.cycle_ms[0] - (p.cycle_ms[best_w] - sunk)) : 0.0f;
   return best_w;
+}
+
+/* Whether a learned cycle drafts: while a draft is expected to save more
+ * time than it costs, and otherwise on probes that re-measure the saving. */
+bool learned_drafts(ds41_session* s) {
+  auto& p = s->policy;
+  if (p.gain_ms > p.draft_ms || ++p.plain >= p.probe) return true;
+  return false;
 }
 
 uint32_t draft_width(ds41_session* s, uint32_t limit) {
@@ -334,6 +381,18 @@ int draw(const ds41_session* s, const ds41_dspark_sampler* sampler, const float*
   if (!sampler || (sampler->try_accept_argmax && top >= 0 && sampler->try_accept_argmax(sampler->ctx, top)))
     return top;
   return sampler->sample(sampler->ctx, row, vocab(s));
+}
+
+/* Before a host draw from row `row` of the last evaluation: when the
+ * request's selection sums the whole row (top-p), the device computes that
+ * sum and hands it to the sampler, which then skips its two passes over the
+ * row. Without it the sampler computes them itself. */
+void device_totals(ds41_session* s, const ds41_dspark_sampler* sampler, uint32_t row) {
+  if (!sampler || !sampler->totals_temperature || !sampler->totals) return;
+  const float temperature = sampler->totals_temperature(sampler->ctx, vocab(s));
+  double maximum = 0.0, sum = 0.0;
+  if (temperature > 0.0f && ds41_decoder_softmax_totals(s->decoder, row, temperature, &maximum, &sum))
+    sampler->totals(sampler->ctx, maximum, sum);
 }
 
 /* Draws row `row` of the last evaluation on the device when the request's
@@ -392,9 +451,11 @@ struct Cycle {
   bool plain = false;        // the drafter's policy chose a plain step
   bool speculative = false;  // the block's rows wait in spec_logits for the commit
   int32_t argmax[ds41_session::kVerifyRows] = {};  // each row's argmax, from the evaluation
-  /* A drafter pass this cycle waits for (draft), its learned width policy
-   * and the drafter's outputs. */
-  bool draft = false, learned = false;
+  /* A drafter pass this cycle waits for (draft), its learned width policy,
+   * whether a learned cycle drafted and the saving its width predicts, and
+   * the drafter's outputs. */
+  bool draft = false, learned = false, drafted = false;
+  float gain = 0.0f;
   float top[DS41_DSPARK_BLOCK] = {}, confidence[DS41_DSPARK_BLOCK] = {};
   std::chrono::steady_clock::time_point t0, t1;
 };
@@ -471,7 +532,7 @@ int prepare(Cycle& c, char* error, size_t capacity) {
     const uint32_t limit =
         std::min({(uint32_t)DS41_DSPARK_BLOCK, item.max_draft_tokens, room, c.stochastic ? UINT32_MAX : c.cap});
     c.learned = !c.stochastic && ds41_dspark_has_confidence(s->engine->dspark);
-    c.tail = c.stochastic || c.learned ? limit : draft_width(s, limit);
+    c.tail = c.stochastic ? limit : c.learned ? (learned_drafts(s) ? limit : 0) : draft_width(s, limit);
     c.plain = c.tail == 0;
     if (c.tail != 0 && ds41_dspark_state_end(s->dspark) != c.first) c.tail = 0;
     c.draft = c.tail != 0;
@@ -495,18 +556,41 @@ ds41_dspark_draft_request draft_request(Cycle& c) {
 }
 
 /* After the drafter pass: the cycle's width from its drafts. */
+/* After a learned cycle that drafted: gain_ms follows the time its draft
+ * saved, the emitted tokens' time as plain steps minus the cycle's time after
+ * the draft (zero when it verified none). A joint cycle's time is not its
+ * own, so it counts the saving its width predicted. A draft that did not pay
+ * starts or doubles the probe interval; one that did resets it. */
+void learned_outcome(ds41_session* s, const Cycle& c, uint32_t emitted, std::chrono::steady_clock::time_point t2) {
+  auto& p = s->policy;
+  float gain = 0.0f;
+  if (c.tail != 0) gain = c.shared ? c.gain : emitted * p.cycle_ms[0] - ms(c.t1, t2);
+  ema(p.gain_ms, gain, kGainRate);
+  if (p.gain_ms > p.draft_ms) {
+    p.probe = ds41_session::kProbeFirst;
+  } else if (p.plain >= p.probe) {
+    p.probe = std::min(2 * p.probe, ds41_session::kProbeMax);
+  }
+  p.plain = 0;
+}
+
 void finish_draft(Cycle& c, bool drafted) {
   ds41_session* s = c.item->session;
   if (!drafted) c.tail = 0;
-  if (c.learned) {
-    c.tail = best_width(s, c.confidence, c.tail);
+  c.t1 = std::chrono::steady_clock::now();
+  if (c.learned && drafted) {
+    auto& p = s->policy;
+    if (!c.shared) ema(p.draft_ms, ms(c.t0, c.t1));
+    c.drafted = true;
+    c.tail = best_width(s, c.confidence, c.tail, true, &c.gain);
+  } else if (c.learned) {
+    c.tail = 0;
   } else if (c.stochastic) {
     uint32_t confident = 0;
     while (confident < c.tail && c.top[confident] >= ds41_session::kConfidentDraft) ++confident;
     c.tail = confident;
   }
   c.m = c.tail + 1;
-  c.t1 = std::chrono::steady_clock::now();
 }
 
 /* Evaluates one cycle's block on its own. */
@@ -587,6 +671,7 @@ int finish(Cycle& c, char* error, size_t capacity) {
     int drawn = -1, argmax = -1;
     if (!device_draw(s, sampler, i - 1, proposals ? proposals + (i - 1) : nullptr, &drawn, &argmax)) {
       argmax = top ? *top : ds41_sample_argmax(row, n_vocab);
+      device_totals(s, sampler, i - 1);
       drawn = c.stochastic && c.copied == 0 ? sampler->verify(sampler->ctx, i - 1, row, n_vocab, block[i])
                                             : draw(s, sampler, row, &argmax);
     }
@@ -613,8 +698,10 @@ int finish(Cycle& c, char* error, size_t capacity) {
   }
   /* The token after a fully accepted block (or a plain step): the last row. */
   int bonus_argmax = -1;
-  if (next < 0 && !device_draw(s, sampler, m - 1, nullptr, &next, &bonus_argmax))
+  if (next < 0 && !device_draw(s, sampler, m - 1, nullptr, &next, &bonus_argmax)) {
+    device_totals(s, sampler, m - 1);
     next = draw(s, sampler, s->logits.data(), row_argmax ? row_argmax + m - 1 : nullptr);
+  }
   if (next < 0 || next >= (int)n_vocab) {
     set_error(error, capacity, "DSpark target logits contain no finite values");
     s->valid = false;
@@ -625,8 +712,17 @@ int finish(Cycle& c, char* error, size_t capacity) {
   s->next = ends(next) ? -1 : next;
   const auto t2 = std::chrono::steady_clock::now();
   auto& p = s->policy;
+  if (c.drafted) learned_outcome(s, c, accepted, t2);
+  if (trace && c.learned)
+    fprintf(stderr,
+            "ds41: learned pos=%u drafted=%d width=%u emitted=%u conf=%.3f,%.3f,%.3f,%.3f,%.3f draft=%.1fms "
+            "verify=%.1fms gain_ms=%.1f draft_ms=%.1f plain_ms=%.1f\n",
+            c.first, c.drafted, c.tail, accepted, c.confidence[0], c.confidence[1], c.confidence[2], c.confidence[3],
+            c.confidence[4], c.drafted ? ms(c.t0, c.t1) : 0.0f, ms(c.drafted ? c.t1 : c.t0, t2), p.gain_ms, p.draft_ms,
+            p.cycle_ms[0]);
   if (m == 1) {
-    if (c.plain && !c.shared) ema(p.cycle_ms[0], ms(c.t0, t2));
+    /* A plain step's time; after a discarded draft, the part after it. */
+    if (!c.shared && (c.plain || c.learned)) ema(p.cycle_ms[0], ms(c.plain ? c.t0 : c.t1, t2));
     return 0;
   }
   auto& st = s->stats;
@@ -764,8 +860,8 @@ int ds41_session_save_snapshot(const ds41_session* s, ds41_session_snapshot* sna
   }
   std::vector<uint8_t> payload;
   const auto lookup = s->lookup.Save();
-  const uint64_t header[4] = {kPayloadMagic, (uint64_t)s->tokens.size(), (uint64_t)s->logits.size(),
-                              (uint64_t)lookup.resume << 32 | lookup.request_start};
+  const uint64_t header[5] = {kPayloadMagic, (uint64_t)s->tokens.size(), (uint64_t)s->logits.size(),
+                              (uint64_t)lookup.resume << 32 | lookup.request_start, s->decoder_from};
   auto append = [&](const void* p, size_t bytes) {
     payload.insert(payload.end(), (const uint8_t*)p, (const uint8_t*)p + bytes);
   };
@@ -788,7 +884,7 @@ int ds41_session_save_snapshot(const ds41_session* s, ds41_session_snapshot* sna
 
 int ds41_session_load_snapshot(ds41_session* s, const ds41_session_snapshot* snapshot, char* error,
                                size_t capacity) {
-  uint64_t header[4];
+  uint64_t header[5];
   if (!s || !snapshot || !snapshot->ptr || snapshot->len < sizeof(header)) {
     set_error(error, capacity, "invalid snapshot");
     return 1;
@@ -798,7 +894,8 @@ int ds41_session_load_snapshot(ds41_session* s, const ds41_session_snapshot* sna
   const gufo::speculative::PromptLookup<int>::State lookup{.resume = (uint32_t)(header[3] >> 32),
                                                            .request_start = (uint32_t)header[3]};
   if (header[0] != kPayloadMagic || header[2] != vocab(s) || header[1] == 0 || header[1] >= (uint64_t)s->context ||
-      snapshot->len < fixed || !gufo::speculative::PromptLookup<int>::Valid(lookup, header[1])) {
+      header[4] > header[1] || snapshot->len < fixed ||
+      !gufo::speculative::PromptLookup<int>::Valid(lookup, header[1])) {
     set_error(error, capacity, "snapshot does not match this session");
     return 1;
   }
@@ -818,6 +915,7 @@ int ds41_session_load_snapshot(ds41_session* s, const ds41_session_snapshot* sna
   const uint8_t* at = snapshot->ptr + sizeof(header);
   s->tokens.assign((const int*)at, (const int*)at + header[1]);
   memcpy(s->logits.data(), at + header[1] * sizeof(int), header[2] * sizeof(float));
+  s->decoder_from = (uint32_t)header[4];
   s->valid = true;
   s->next = -1;
   s->lookup.Restore(lookup);
@@ -840,6 +938,7 @@ void ds41_session_invalidate(ds41_session* s) {
   if (!s) return;
   s->valid = false;
   s->tokens.clear();
+  s->decoder_from = 0;
   s->next = -1;
   s->lookup.Clear();
   if (s->dspark) ds41_dspark_state_reset(s->dspark, 0);
@@ -866,8 +965,8 @@ int* ds41_session_begin_restore(ds41_session* s, uint32_t n) {
   return s->tokens.data();
 }
 
-int ds41_session_finish_restore(ds41_session* s) {
-  if (!s || s->tokens.empty()) return 1;
+int ds41_session_finish_restore(ds41_session* s, uint32_t decoder_from) {
+  if (!s || s->tokens.empty() || decoder_from > s->tokens.size()) return 1;
   const int n_vocab = (int)vocab(s);
   if (std::any_of(s->tokens.begin(), s->tokens.end(), [n_vocab](int t) { return t < 0 || t >= n_vocab; }) ||
       ds41_decoder_adopt(s->decoder, s->tokens.data(), (uint32_t)s->tokens.size()) != 0)
@@ -876,8 +975,16 @@ int ds41_session_finish_restore(ds41_session* s) {
   if (s->dspark) ds41_dspark_state_reset(s->dspark, (uint32_t)s->tokens.size());
   s->lookup.Clear();
   s->next = -1;
+  s->decoder_from = decoder_from;
   s->valid = true;
   return 0;
+}
+
+uint32_t ds41_session_decoder_from(const ds41_session* s) { return s ? s->decoder_from : 0; }
+
+bool ds41_session_can_continue(const ds41_session* s, uint32_t prompt_end) {
+  return s && s->valid && s->tokens.size() <= prompt_end &&
+         (ds41_engine_exact_prefill(s->engine) || s->decoder_from <= replay_from(prompt_end));
 }
 
 void ds41_session_lookup_state(const ds41_session* s, uint32_t* resume, uint32_t* request_start) {

@@ -252,6 +252,15 @@ public:
       const noexcept {
     return prefill_lookahead_;
   }
+  /// The whole prompt's token count during a prefill step (0 outside one).
+  /// Prefill's prompt ends at the step's frontier, which may be a cache
+  /// boundary short of it.
+  void SetPrefillPromptEnd(std::size_t tokens) noexcept {
+    prefill_prompt_end_ = tokens;
+  }
+  [[nodiscard]] std::size_t prefill_prompt_end() const noexcept {
+    return prefill_prompt_end_;
+  }
 
   /// Installs a request-scoped cancellation check for model calls that can
   /// yield internally. Implementations that only yield between work units may
@@ -267,6 +276,7 @@ public:
 private:
   bool stop_at_eos_{true};
   std::span<const TextRunnerToken> prefill_lookahead_;
+  std::size_t prefill_prompt_end_ = 0;
 };
 
 /// Immutable model-owned continuation payload.
@@ -424,6 +434,12 @@ public:
   /// Whether restored component state can select its next token. A boundary
   /// captured between prefill passes cannot, so it serves only longer prompts.
   [[nodiscard]] virtual bool HasDecodeFrontier(const TextRunnerState&) const {
+    return true;
+  }
+  /// Whether restored component state continues a prompt of `prompt_tokens`
+  /// at all; a model may keep only the state that longer prompts need.
+  [[nodiscard]] virtual bool CanContinue(const TextRunnerState&,
+                                         std::size_t /*prompt_tokens*/) const {
     return true;
   }
 

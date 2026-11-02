@@ -100,6 +100,13 @@ struct ds41_dspark_sampler {
   // else 0. `uniform` draws the request's next uniform; `rng`/`set_rng` save
   // and restore its state. Drawn tokens are recorded with `accept`.
   float (*device_temperature)(void* ctx) = nullptr;
+  // Filtered draws on the host: `totals_temperature` returns the temperature
+  // while the request's next selection sums the whole row's softmax (top-p
+  // without top-k or penalties), else 0. `totals` hands the next `sample` or
+  // `verify` call that row's largest logit and softmax sum, computed on the
+  // device, in place of its own two passes over the row.
+  float (*totals_temperature)(void* ctx, uint32_t vocabulary_size) = nullptr;
+  void (*totals)(void* ctx, double maximum, double sum) = nullptr;
   double (*uniform)(void* ctx) = nullptr;
   uint64_t (*rng)(void* ctx) = nullptr;
   void (*set_rng)(void* ctx, uint64_t state) = nullptr;
@@ -130,10 +137,15 @@ struct ds41_image_span {
 };
 
 inline constexpr int DS41_SESSION_SYNC_INTERRUPTED = 2;
-inline constexpr std::uint32_t DS41_SESSION_PAYLOAD_VERSION = 5;
+inline constexpr std::uint32_t DS41_SESSION_PAYLOAD_VERSION = 6;
 
 int ds41_engine_open(ds41_engine** out, const ds41_engine_options* options);
 void ds41_engine_close(ds41_engine* engine);
+/* Streamed engines: re-sizes the expert cache seeded at open from the memory
+ * free now, shrinking it or seeding the room left. Call once the sessions and
+ * other long-lived buffers exist; pending_bytes is what the caller will still
+ * allocate later (cache backing that grows with use). 0 on success. */
+int ds41_engine_fit_experts(ds41_engine* engine, uint64_t pending_bytes);
 int ds41_engine_vocab_size(const ds41_engine* engine);
 const char* ds41_engine_model_name(const ds41_engine* engine);
 
@@ -153,8 +165,10 @@ bool ds41_session_dspark_enabled(const ds41_session* session);
 /* Evaluates the prompt from the longest evaluated prefix. The prompt is the
  * first part of a prompt ending at prompt_end (0: prompt->len), which
  * decides the decoder's bounded replay (ds41_decoder_eval_prompt; none with
- * the engine's exact_prefill); a state synced to a shorter part is complete
- * only for that same end. `images` replace the input embeddings of the
+ * the engine's exact_prefill). A state synced to a shorter part holds the
+ * decoder rows from replay_from(prompt_end) on, so it continues only prompts
+ * whose replay starts there or later (ds41_session_can_continue); any other
+ * prompt evaluates from the start. `images` replace the input embeddings of the
  * positions they cover (ds41_decoder_set_images). */
 int ds41_session_sync(ds41_session* session, const ds41_tokens* prompt,
                       int prompt_end, char* error, size_t error_capacity,
@@ -251,6 +265,12 @@ int ds41_decoder_eval(ds41_decoder* decoder, const int* tokens, uint32_t n,
 int ds41_decoder_eval_prompt(ds41_decoder* decoder, const int* tokens,
                              uint32_t n, uint32_t prompt_end, float* logits,
                              uint32_t logit_rows);
+/* Tokens of the prompt batch that follows the next evaluation (n = 0:
+ * none). Once that evaluation's Engram rows are read, it reads theirs, and
+ * the following evaluation uses them when it evaluates exactly these tokens
+ * at the next position after the same history. */
+int ds41_decoder_set_lookahead(ds41_decoder* decoder, const int* tokens,
+                               uint32_t n);
 /* Image spans whose rows replace the token embeddings of the positions
  * they cover in later evaluations, until replaced; the device rows must
  * outlive them. Positions holding DS41_IMAGE_TOKEN outside every span keep
@@ -329,8 +349,16 @@ float* ds41_session_logits(ds41_session* session);
 /* Starts a restore of `n` tokens: invalidates the session and returns its
  * token buffer, resized to n, for the caller to fill with the logits. */
 int* ds41_session_begin_restore(ds41_session* session, uint32_t n);
-/* Adopts the restored tokens, logits and decoder state. */
-int ds41_session_finish_restore(ds41_session* session);
+/* Adopts the restored tokens, logits and decoder state, whose decoder rows
+ * start at decoder_from (ds41_session_decoder_from at capture). */
+int ds41_session_finish_restore(ds41_session* session, uint32_t decoder_from);
+/* The first position whose decoder-layer rows the session holds through its
+ * frontier (the frontier itself when the last batch skipped them all). */
+uint32_t ds41_session_decoder_from(const ds41_session* session);
+/* Whether the session's state continues a prompt ending at prompt_end: its
+ * decoder rows cover the replay, and a prompt ending at the frontier gets
+ * its logits. */
+bool ds41_session_can_continue(const ds41_session* session, uint32_t prompt_end);
 /* The drafter's device rings and the positions [start, end) they hold
  * (null and 0 without a drafter). Restoring a range needs end equal to the
  * session position; finish_restore empties it first. */

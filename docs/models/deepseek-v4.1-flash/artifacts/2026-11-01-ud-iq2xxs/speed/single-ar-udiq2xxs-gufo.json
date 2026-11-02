@@ -1,0 +1,106 @@
+{
+  "artifactType": "model-bench-table",
+  "fingerprint": {
+    "canonical": {
+      "cppStandard": "C++20",
+      "cpuArchitecture": "x86_64",
+      "cpuLogicalCores": 32,
+      "cpuModel": "AMD RYZEN AI MAX+ 395 w/ Radeon 8060S",
+      "cpuPhysicalCores": 16,
+      "cxxCompiler": "GCC 15.3.0",
+      "gpuArchitecture": "gfx1151",
+      "gpuComputeUnits": 20,
+      "gpuDriver": "amdgpu",
+      "gpuName": "AMD Radeon 8060S Graphics",
+      "gpuPciId": "1002:1586",
+      "kernelRelease": "7.2.11-200.fc44.x86_64",
+      "memoryTotalBytes": 133616861184,
+      "memoryType": "LPDDR5X (Unified)",
+      "rocmVersion": "10.1.0",
+      "schemaVersion": "1.0.0"
+    },
+    "fingerprintId": "bff8ae3f0e7bae9e46a319778d68e9c56b96e0828aaba08ce884dedf8aa82cdc",
+    "schemaVersion": "1.0.0"
+  },
+  "measuredOn": "2026-11-01",
+  "mode": null,
+  "model": {
+    "id": "DeepSeek-V4.1-Flash-1017",
+    "variant": "udiq2xxs"
+  },
+  "notes": [
+    "pp2048/tg128; depth is a cached conversation prefix of synthetic text (8-token reply); measured turn task is recorded per row; tolerance max(32, 0.500%) on cache_n and prompt_n; actual counts per sample in rows",
+    "synthetic text: 1.138 tokens/word, template overhead 4 tokens"
+  ],
+  "referenceName": "reference",
+  "rows": {
+    "0": {
+      "command": "gufo serve --port 48633 --sessions 1 llm --model DeepSeek-V4.1-Flash-1017-UD-IQ2_XXS-00001-of-00006.gguf --context 133760 --served-model-name bench --think off --max-pending-per-client 8 --stream-experts",
+      "counts": [
+        {
+          "cache_n": 0,
+          "completion_sha256": "35056986ff4700382a8ce3015dc5d1d14341a2a241c0490ebf17c631c2b61c8b",
+          "draft_n": 0,
+          "draft_n_accepted": 0,
+          "predicted_n": 128,
+          "prompt_n": 2035
+        }
+      ],
+      "pp": 857.43,
+      "pp_sd": null,
+      "samples": 1,
+      "tg": 17.17,
+      "tg_sd": null,
+      "workload": "prose"
+    },
+    "16384": {
+      "command": "gufo serve --port 48633 --sessions 1 llm --model DeepSeek-V4.1-Flash-1017-UD-IQ2_XXS-00001-of-00006.gguf --context 133760 --served-model-name bench --think off --max-pending-per-client 8 --stream-experts",
+      "counts": [
+        {
+          "cache_n": 16364,
+          "completion_sha256": "bfd0441dd4ddc0d942328696609d43e4ffe8132913b9b314516ab9afecbea71c",
+          "draft_n": 0,
+          "draft_n_accepted": 0,
+          "predicted_n": 128,
+          "prompt_n": 2054
+        }
+      ],
+      "pp": 883.2,
+      "pp_sd": null,
+      "samples": 1,
+      "tg": 18.61,
+      "tg_sd": null,
+      "workload": "prose"
+    }
+  },
+  "schemaVersion": 1,
+  "server": {
+    "command": [
+      "gufo",
+      "serve",
+      "--port",
+      "48633",
+      "--sessions",
+      "1",
+      "llm",
+      "--model",
+      "DeepSeek-V4.1-Flash-1017-UD-IQ2_XXS-00001-of-00006.gguf",
+      "--context",
+      "133760",
+      "--served-model-name",
+      "bench",
+      "--think",
+      "off",
+      "--max-pending-per-client",
+      "8",
+      "--stream-experts"
+    ]
+  },
+  "source": {
+    "buildMode": "nix-release",
+    "dirty": false,
+    "revision": "4974ef9aa845471816b0e545b53c597772bc7763"
+  },
+  "table": "single-ar-udiq2xxs",
+  "target": "gufo"
+}

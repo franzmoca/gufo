@@ -1204,10 +1204,12 @@ std::unique_ptr<ComponentTextCache::Lease> ComponentTextCache::Acquire(
     // frontier) can also dirty a cold slot.
     bool clean = !live && !in_place;
     // A frontier captured between prefill passes cannot select the next token
-    // of a prompt that ends there; serve that prompt from a shallower boundary.
+    // of a prompt that ends there, and a model may refuse other prompts; serve
+    // those from a shallower boundary.
     const auto decodable = [&](std::size_t boundary) {
-      return boundary < prompt.size() ||
-             impl_->runner->HasDecodeFrontier(*request.state);
+      return (boundary < prompt.size() ||
+              impl_->runner->HasDecodeFrontier(*request.state)) &&
+             impl_->runner->CanContinue(*request.state, prompt.size());
     };
     if (live && !decodable(found.selected->boundary)) {
       live.reset();

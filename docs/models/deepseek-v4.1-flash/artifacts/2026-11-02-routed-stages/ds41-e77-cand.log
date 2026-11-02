@@ -1,0 +1,2 @@
+type 16/22 tokens 2048 rows 12288 max 672 classes 16/92/672: gate+up 23.38 ms (24.8 TOPS) down 13.45 ms (21.6 TOPS)
+check 384 slots: mid max err 0.193 of 25 (0.0077), down 0.827 of 2.79e+03 (0.0003)

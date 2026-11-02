@@ -265,6 +265,15 @@ bool Model::ExactPrefill() const {
   return ds41_engine_exact_prefill(engine_);
 }
 
+bool Model::StreamsExperts() const noexcept {
+  return options_.stream_experts;
+}
+
+void Model::FitExpertCache(std::uint64_t pending_bytes) {
+  if (options_.stream_experts)
+    (void)ds41_engine_fit_experts(engine_, pending_bytes);
+}
+
 bool Model::EnableImageRouting(std::string* error_msg) {
   if (ds41_engine_enable_image_routing(engine_) != 0) {
     AssignError(error_msg, "cannot set the DeepSeek V4.1 image routing bias");
@@ -359,6 +368,12 @@ bool Session::DsparkEnabled() const {
 
 void Session::BeginRequest() {
   ds41_session_begin_request(session_);
+}
+
+bool Session::CanContinue(std::size_t prompt_end) const {
+  return prompt_end <= std::numeric_limits<std::uint32_t>::max() &&
+         ds41_session_can_continue(session_,
+                                   static_cast<std::uint32_t>(prompt_end));
 }
 
 bool Session::DsparkStep(std::size_t max_tokens, std::uint32_t max_draft_tokens,

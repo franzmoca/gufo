@@ -1,0 +1,12 @@
+p-ar-greedy chat steps 511 host gap mean 0.49 ms median 0.46 rows1:0.49x511
+p-ar-greedy code steps 461 host gap mean 0.43 ms median 0.44 rows1:0.44x450 rows2:0.37x3 rows3:0.40x1 rows4:0.33x2 rows5:0.36x1 rows16:0.24x4
+p-ar-greedy long steps 504 host gap mean 0.44 ms median 0.45 rows1:0.44x501 rows16:0.34x3
+p-ar-sampled chat steps 512 host gap mean 1.29 ms median 1.26 rows1:1.29x512
+p-ar-sampled code steps 469 host gap mean 1.51 ms median 1.44 rows1:1.44x466 rows16:12.48x3
+p-ar-sampled long steps 512 host gap mean 1.42 ms median 1.43 rows1:1.42x512
+p-ds-greedy chat steps 499 host gap mean 0.30 ms median 0.30 rows1:0.30x492 rows2:0.48x1 rows3:0.49x5 rows4:0.41x1
+p-ds-greedy code steps 260 host gap mean 0.28 ms median 0.29 rows1:0.27x192 rows2:0.35x3 rows3:0.35x1 rows4:0.16x1 rows5:0.28x46 rows6:0.31x13 rows16:0.33x4
+p-ds-greedy long steps 236 host gap mean 0.27 ms median 0.28 rows1:0.27x148 rows5:0.27x76 rows6:0.28x9 rows16:0.27x3
+p-ds-sampled chat steps 265 host gap mean 1.73 ms median 1.22 rows1:0.71x36 rows2:1.18x59 rows3:1.73x54 rows4:2.19x43 rows5:2.13x25 rows6:2.54x48
+p-ds-sampled code steps 175 host gap mean 3.14 ms median 2.46 rows1:0.24x28 rows2:1.46x29 rows3:3.18x19 rows4:2.95x20 rows5:3.56x17 rows6:4.90x58 rows16:8.96x4
+p-ds-sampled long steps 155 host gap mean 3.56 ms median 3.55 rows1:0.28x15 rows2:1.49x18 rows3:2.64x20 rows4:3.54x12 rows5:3.90x22 rows6:4.98x68
