@@ -32,7 +32,7 @@ follow in their own sections.
 
 | Rank | # | Item | Expected gain (evidence) | Next step |
 | ---: | ---: | --- | --- | --- |
-| 1 | 30 | More memory for the expert cache | +3.7 GiB: −28% decode and −20% prefill misses in served-trace replays; ~3 GiB of the reserve idle | Let the cache grow into the reserve |
+| 1 | 30 | More memory for the expert cache | Replays: +3.7 GiB −28% decode misses; the decoder replay's cold experts (0.91 s) are capacity-bound (E86). E93 gave one session +1.9 GiB | Compact demand stage (~3 GiB) |
 | 2 | 37 | Cheap prefetch adoption, then every-layer decode prediction | +2.3-2.8% decode simulated once adoption is free (E89); Belady would halve decode misses (E92) | Stop resolving a running job on hit layers |
 | 3 | 31 | Eviction scoring and prompt admission | Decay 3,200 / bonus 8: −3.6% / −7.5% decode misses replayed; served chat 19.9 / 20.2 against 19.4-19.5 tok/s, agent inconclusive (E92) | Fixed-conversation agent replay of `wip/ds41-eviction-score` |
 | 4 | 9 | Stable-boundary prefill pass per chat request | 64.6 ms per chat request (measured pass cost) | Snapshot or skip the N−3 capture |
@@ -58,14 +58,18 @@ follow in their own sections.
 ### 30. More memory for the expert cache
 
 The cache gets what unified memory leaves after the dense weights, the
-drafter, a fixed 4 GiB reserve and the store's buffers; more cache cuts
-misses without changing outputs, and is the only lever left for the
-decoder replay's drive-bound stall (E86). Replay data:
+drafter, the sessions, the RAM prompt cache and the store's buffers; more
+cache cuts misses without changing outputs, and is the only lever left for
+the decoder replay's drive-bound stall (E86). Replay data:
 [EXPERIMENTS.md](EXPERIMENTS.md#item-30-expert-cache-memory-replays). Parts:
 
-- **Reserve the cache can give back** (~3 GiB idle at 131k): grow into it,
-  drop the lowest-scored chunks when free memory runs low (cached experts
-  are disk copies).
+- **Sized after the sessions** (done, E93): the server fits the cache to
+  the memory its sessions leave, minus 2 GiB, shrinking it by whole chunks
+  when needed; the automatic RAM prompt cache of a streamed model is 1 GiB
+  with a disk cache. One session +1.9 GiB of cache; 4 sessions at 1M no
+  longer swap. Context depth costs little (~0.06 GiB from 20K to 110K).
+  Open: what is left of the 2 GiB headroom is ~1.5 GiB at the floor; a
+  smaller margin needs the swap bursts below explained first.
 - **Admitted misses straight into their slot**: take the slot before the
   read, never evicting an expert the batch routes (replay −0.16% misses);
   removes one copy and frees the demand stage for the next part. Item 31's
@@ -75,6 +79,9 @@ decoder replay's drive-bound stall (E86). Replay data:
   and read routes), double-buffered.
 - **Prefetch stage** (~1.8 GiB, 192 rows): decode uses 6-12; measure what
   wide prompt predictions are worth.
+- **Swap bursts in long single-session runs** (E93): ~20M pages out around
+  the 11th-15th fresh 50-64K prompt in both builds, prefill down to
+  450-640 tok/s for those prompts; the server's own swap stays 9-20 MB.
 
 The drafter's size is settled (E62). Gate: outputs at a 24 GiB cap.
 
@@ -279,8 +286,9 @@ against an uncached prompt.
 - **Encoder SWA replay on a frontier miss.** Approximate; needs its own
   cache and quality contract.
 - **Streamed `-j 8` at the native 1M context** sometimes fails at startup
-  ("decoder allocation failed"): the seed reserves 4 GiB plus a sixteenth,
-  eight 1M sessions need ~8.6 GiB; reserve per session (item 30). `-c 4096`
+  ("decoder allocation failed"): the sessions are created after the load
+  seed, which leaves 4 GiB plus a sixteenth, and eight 1M sessions need
+  ~8.6 GiB; the cache is fitted only after they exist (E93). `-c 4096`
   starts reliably.
 
 ### 33. Attention partials written back during the dense GEMVs

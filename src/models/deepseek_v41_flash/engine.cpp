@@ -265,6 +265,15 @@ bool Model::ExactPrefill() const {
   return ds41_engine_exact_prefill(engine_);
 }
 
+bool Model::StreamsExperts() const noexcept {
+  return options_.stream_experts;
+}
+
+void Model::FitExpertCache(std::uint64_t pending_bytes) {
+  if (options_.stream_experts)
+    (void)ds41_engine_fit_experts(engine_, pending_bytes);
+}
+
 bool Model::EnableImageRouting(std::string* error_msg) {
   if (ds41_engine_enable_image_routing(engine_) != 0) {
     AssignError(error_msg, "cannot set the DeepSeek V4.1 image routing bias");

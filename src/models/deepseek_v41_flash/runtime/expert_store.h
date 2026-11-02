@@ -55,6 +55,14 @@ void ds41_expert_store_destroy(ds41_expert_store* store);
  * tensors byte for byte; false (with a message) leaves reads unchanged. */
 bool ds41_expert_store_attach_tails(ds41_expert_store* store, const char* path);
 
+/* Re-sizes the cache from the memory free now, leaving reserve_bytes that it
+ * never grows into, after allocating the prefetch stage: frees its newest
+ * chunks, keeping the highest-scored experts, when it is over the new limit.
+ * Call at startup once everything else long-lived is allocated, then seed
+ * again to fill any room left. A nonzero cache_limit_bytes still bounds the
+ * pool. False when the stage or the shrink failed. */
+bool ds41_expert_store_set_reserve(ds41_expert_store* store, uint64_t reserve_bytes);
+
 /* Prime the cache from the built-in V4.1 ranking or an optional
  * DS41_EXPERT_HISTOGRAM_V1 text file. Priming is startup work and does not
  * count as inference in the statistics. */

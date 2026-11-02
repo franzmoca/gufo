@@ -30,6 +30,7 @@ struct ModelOptions {
   bool stream_experts = false;
   /// Streamed expert cache bytes (0 sizes it from available memory).
   std::uint64_t expert_cache_bytes = 0;
+
   /// Optional DSpark support model. Empty leaves speculative decoding off.
   std::string dspark_model_path;
 };
@@ -96,6 +97,12 @@ public:
   [[nodiscard]] std::uint32_t MaxContext() const noexcept;
   [[nodiscard]] bool HasDspark() const;
   [[nodiscard]] bool ExactPrefill() const;
+  /// Routed experts stream from the SSD through a bounded cache.
+  [[nodiscard]] bool StreamsExperts() const noexcept;
+  /// Re-sizes the streamed expert cache from the memory free now, shrinking it
+  /// or seeding the room left. Call once the sessions exist; pending_bytes is
+  /// memory the caller still allocates later (cache backing that grows).
+  void FitExpertCache(std::uint64_t pending_bytes);
   /// Routes image positions with the MoE gates' image bias, for image
   /// prompts; enable it before creating sessions.
   [[nodiscard]] bool EnableImageRouting(std::string* error_msg = nullptr);

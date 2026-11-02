@@ -3304,6 +3304,54 @@ Decay 3,200 / bonus 8 was measured served (exact pops in both builds):
   is kept on `wip/ds41-eviction-score` until a fixed-conversation replay
   can measure it.
 
+## E93 — expert cache sized after the server's sessions (retained)
+
+BACKLOG item 30. The streamed cache was sized once at load, before the
+server created its sessions: available memory minus a fixed 4 GiB, with
+15/16 seeded. Session state (~0.85 GiB each at 1M context), the 1.8 GiB
+prefetch stage, ~0.8 GiB of first-request buffers and the RAM prompt
+cache's automatic budget (half the free memory left, 3.3-3.8 GB) all came
+out of that 4 GiB afterwards, so the cache was ~95.4 GiB with 1, 2 or 4
+sessions alike. Measured at the native 1M context, `UD-IQ2_XXS`, DSpark,
+disk cache on (free memory = MemAvailable − CmaFree, sampled every 5 ms):
+
+| Sessions | Free after load | Lowest free | Notes |
+| ---: | ---: | ---: | --- |
+| 1 | 5.0 GiB | 1.47 GiB | 19 fresh 50-110K prompts, RAM cache ~3.05 GB |
+| 2 | 4.0 GiB | 1.09 GiB | RAM cache not yet full |
+| 4 | 2.4 GiB | swapping | 8 GB swapped, ~60 s per 2,048-token batch |
+
+Context depth costs little: 20K → 110K moved the floor ~0.06 GiB, and
+prefill transients sit 0.2-0.6 GiB below the steady level.
+
+Now the store seeds at load as before, then the server fits it once its
+sessions exist: it allocates the prefetch stage, sets the limit to the
+cache plus the memory free minus 2 GiB (first-request buffers, transients,
+margin) and the RAM-cache backing still to commit, frees the newest
+chunks when over it (each size class keeps its highest-scored experts,
+moving survivors out of the freed chunks) and seeds the room left. With a
+disk cache, the automatic RAM-cache budget of a streamed model is 1 GiB
+(3 GiB without one); `--cache-ram-bytes` still sets it explicitly.
+
+| Sessions | Expert cache before → after | Swap-out pages |
+| ---: | ---: | ---: |
+| 1 | 95.5 → 97.4 GiB | burst in both builds after ~15 long prompts |
+| 4 | 95.3 (thrashing) → 94.6 GiB | 326 |
+
+Gates and results:
+
+- `ds41.expert_store` ctest passes; greedy DSpark output on a 4-session
+  server (shrunk and re-seeded) is byte-identical to the build before.
+- Served, one session, cold 256-token decode then two fresh 50K prompts,
+  run order balanced (new first): prefill 1061/939 and 1035/867 tok/s
+  against 1059/897 and 1046/860; warm decode 17.6/17.5 against 17.1/17.0
+  tok/s. SSD reads per decoded token −6 to −11% in a 22-request run.
+  Pairs that always ran the baseline first showed the candidate ~3%
+  slower on every kernel; reversing the order removed it.
+- Both builds swap in bursts late in long single-session runs (~20M pages
+  out around the 11th-15th fresh 50-64K prompt, the server's own swap
+  9-20 MB); not investigated here.
+
 ## Backlog measurements without an E-number
 
 Measurements and reference data first recorded in [BACKLOG.md](BACKLOG.md)

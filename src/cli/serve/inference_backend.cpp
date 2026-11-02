@@ -999,6 +999,9 @@ private:
 // than half the available host RAM (the automatic budget's rule) and more
 // than the explicit-limit ceiling. Pressure retries ask once per capture;
 // refusals are rechecked at most once a second.
+// Cache backing committed before readiness; the rest grows with captures.
+constexpr std::size_t kCacheBackingGrowAheadBytes = std::size_t{2} << 30;
+
 std::function<bool(std::size_t)> CacheBackingGrowthGate() {
   struct Limited {
     std::mutex mutex;
@@ -1090,7 +1093,7 @@ std::unique_ptr<ComponentCacheResources> CreateHipComponentCacheResources(
     // Prepare a bounded reserve before readiness. The first shared-prefix
     // capture needs more than one segment; preparing 2 GiB avoids moving
     // registration onto that request's capture or decode path.
-    backing->pool->GrowAhead(2ULL << 30);
+    backing->pool->GrowAhead(kCacheBackingGrowAheadBytes);
     backing->pool->WaitForGrowth();
     Logger::Info(
         "cache",
@@ -1952,10 +1955,19 @@ public:
         .state_capacity_bytes = capacity,
         .per_request_state_bytes = std::nullopt,
         .temporary_scratch_bytes = std::nullopt,
-        .retained_snapshot_capacity_bytes = HostSnapshotBudgetBytes(),
+        .retained_snapshot_capacity_bytes =
+            snapshot_budget_cap_
+                ? std::min(HostSnapshotBudgetBytes(), snapshot_budget_cap_)
+                : HostSnapshotBudgetBytes(),
         .retained_snapshot_ceiling_bytes = HostSnapshotCeilingBytes(),
         .requires_device_runtime_lock = true,
     };
+  }
+
+  /// Bounds the automatic RAM-cache budget; 0 leaves it at half the free
+  /// host memory.
+  void CapSnapshotBudget(std::size_t bytes) noexcept {
+    snapshot_budget_cap_ = bytes;
   }
 
   [[nodiscard]] std::vector<TextExecutionPlan> SupportedPlans() const override {
@@ -2687,6 +2699,7 @@ private:
   std::uint32_t max_context_;
   bool use_dspark_;
   std::uint32_t max_draft_tokens_;
+  std::size_t snapshot_budget_cap_{0};
   std::optional<TextRunnerPersistenceDescriptor> persistence_;
   std::vector<std::uint8_t> component_identity_;
 };
@@ -4019,6 +4032,18 @@ bool InferenceBackend::LoadDeepSeek(
       return false;
     }
     new_state->supports_images = vision != nullptr;
+    // A streamed model's expert cache takes the memory the sessions and the
+    // RAM cache leave, so the automatic RAM-cache budget is a fixed share,
+    // smaller when the disk cache holds the checkpoints.
+    std::shared_ptr<typename Ds::Model> streamed;
+    if constexpr (requires { model->StreamsExperts(); }) {
+      if (model->StreamsExperts())
+        streamed = model;
+    }
+    const std::size_t ram_share = !streamed ? 0
+                                  : DiskCacheEnabled(disk_cache_config)
+                                      ? std::size_t{1} << 30
+                                      : std::size_t{3} << 30;
     auto runner = std::make_shared<DeepSeekTextRunner<Ds>>(
         std::move(model), max_context, use_dspark,
         speculative_config.max_draft_tokens,
@@ -4034,9 +4059,23 @@ bool InferenceBackend::LoadDeepSeek(
           .staging_capacity_bytes = disk_cache_config.staging_capacity_bytes,
       };
     }
+    runner->CapSnapshotBudget(ram_share);
     auto runner_pool = std::make_shared<TextRunnerPool>(
         std::move(runner), session_count, std::move(runner_disk_cache),
         ram_cache_config);
+    if constexpr (requires { streamed->FitExpertCache(0); }) {
+      if (streamed) {
+        // The sessions and the committed cache backing exist now; the
+        // backing past its grow-ahead still commits with captures.
+        const std::size_t ram = !ram_cache_config.enabled ? 0
+                                : ram_cache_config.capacity_bytes != 0
+                                    ? ram_cache_config.capacity_bytes
+                                    : ram_share;
+        streamed->FitExpertCache(ram > kCacheBackingGrowAheadBytes
+                                     ? ram - kCacheBackingGrowAheadBytes
+                                     : 0);
+      }
+    }
     new_state->scheduler = std::make_shared<TextGenerationScheduler>(
         std::move(runner_pool), prefill_policy, scheduler_policy);
     {

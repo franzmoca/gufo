@@ -1,0 +1,220 @@
+{
+  "artifactType": "model-bench-table",
+  "fingerprint": {
+    "canonical": {
+      "cppStandard": "C++20",
+      "cpuArchitecture": "x86_64",
+      "cpuLogicalCores": 32,
+      "cpuModel": "AMD RYZEN AI MAX+ 395 w/ Radeon 8060S",
+      "cpuPhysicalCores": 16,
+      "cxxCompiler": "GCC 15.3.0",
+      "gpuArchitecture": "gfx1151",
+      "gpuComputeUnits": 20,
+      "gpuDriver": "amdgpu",
+      "gpuName": "AMD Radeon 8060S Graphics",
+      "gpuPciId": "1002:1586",
+      "kernelRelease": "7.2.11-200.fc44.x86_64",
+      "memoryTotalBytes": 133616861184,
+      "memoryType": "LPDDR5X (Unified)",
+      "rocmVersion": "10.1.0",
+      "schemaVersion": "1.0.0"
+    },
+    "fingerprintId": "bff8ae3f0e7bae9e46a319778d68e9c56b96e0828aaba08ce884dedf8aa82cdc",
+    "schemaVersion": "1.0.0"
+  },
+  "measuredOn": "2026-11-02",
+  "mode": null,
+  "model": {
+    "id": "DeepSeek-V4.1-Flash-1017",
+    "variant": "udiq2xxs"
+  },
+  "notes": [
+    "pp2048/tg128; depth is a cached conversation prefix of synthetic text (8-token reply); measured turn task is recorded per row; tolerance max(32, 0.500%) on cache_n and prompt_n; actual counts per sample in rows",
+    "synthetic text: 1.138 tokens/word, template overhead 4 tokens"
+  ],
+  "referenceName": "reference",
+  "rows": {
+    "0": {
+      "command": "gufo serve --port 42395 --sessions 1 llm --model DeepSeek-V4.1-Flash-1017-UD-IQ2_XXS-00001-of-00006.gguf --context 133760 --served-model-name bench --think off --max-pending-per-client 8 --stream-experts",
+      "counts": [
+        {
+          "cache_n": 0,
+          "completion_sha256": "33e3ab8624befcf9684eaf221723277809ad19c9e6767076c8debb9dd8a6d9ac",
+          "draft_n": 0,
+          "draft_n_accepted": 0,
+          "predicted_n": 128,
+          "prompt_n": 2035
+        }
+      ],
+      "pp": 964.54,
+      "pp_sd": null,
+      "samples": 1,
+      "tg": 16.8,
+      "tg_sd": null,
+      "workload": "prose"
+    },
+    "12288": {
+      "command": "gufo serve --port 42395 --sessions 1 llm --model DeepSeek-V4.1-Flash-1017-UD-IQ2_XXS-00001-of-00006.gguf --context 133760 --served-model-name bench --think off --max-pending-per-client 8 --stream-experts",
+      "counts": [
+        {
+          "cache_n": 12241,
+          "completion_sha256": "c6c82d476a559751eb38f1aadd2e8f06a727e05d77e625fb8523832665dd04a8",
+          "draft_n": 0,
+          "draft_n_accepted": 0,
+          "predicted_n": 128,
+          "prompt_n": 2042
+        }
+      ],
+      "pp": 1036.53,
+      "pp_sd": null,
+      "samples": 1,
+      "tg": 18.65,
+      "tg_sd": null,
+      "workload": "prose"
+    },
+    "131072": {
+      "command": "gufo serve --port 42395 --sessions 1 llm --model DeepSeek-V4.1-Flash-1017-UD-IQ2_XXS-00001-of-00006.gguf --context 133760 --served-model-name bench --think off --max-pending-per-client 8 --stream-experts",
+      "counts": [
+        {
+          "cache_n": 131248,
+          "completion_sha256": "76b0a68c6fc313a41b92d3faf41439128e43bb20b7d252712ae6736d0cb05e83",
+          "draft_n": 0,
+          "draft_n_accepted": 0,
+          "predicted_n": 128,
+          "prompt_n": 2052
+        }
+      ],
+      "pp": 732.04,
+      "pp_sd": null,
+      "samples": 1,
+      "tg": 18.17,
+      "tg_sd": null,
+      "workload": "prose"
+    },
+    "16384": {
+      "command": "gufo serve --port 42395 --sessions 1 llm --model DeepSeek-V4.1-Flash-1017-UD-IQ2_XXS-00001-of-00006.gguf --context 133760 --served-model-name bench --think off --max-pending-per-client 8 --stream-experts",
+      "counts": [
+        {
+          "cache_n": 16364,
+          "completion_sha256": "91488b143f7a0198d56fd559384deb4623532e29e51cd2eda33bd666f344a369",
+          "draft_n": 0,
+          "draft_n_accepted": 0,
+          "predicted_n": 128,
+          "prompt_n": 2054
+        }
+      ],
+      "pp": 978.15,
+      "pp_sd": null,
+      "samples": 1,
+      "tg": 18.74,
+      "tg_sd": null,
+      "workload": "prose"
+    },
+    "32768": {
+      "command": "gufo serve --port 42395 --sessions 1 llm --model DeepSeek-V4.1-Flash-1017-UD-IQ2_XXS-00001-of-00006.gguf --context 133760 --served-model-name bench --think off --max-pending-per-client 8 --stream-experts",
+      "counts": [
+        {
+          "cache_n": 32798,
+          "completion_sha256": "ab48b0c8c5646442bec630c96b3663a0baeff1d1ae0c316ffefd6ffb0f1a39ed",
+          "draft_n": 0,
+          "draft_n_accepted": 0,
+          "predicted_n": 128,
+          "prompt_n": 2035
+        }
+      ],
+      "pp": 988.06,
+      "pp_sd": null,
+      "samples": 1,
+      "tg": 18.81,
+      "tg_sd": null,
+      "workload": "prose"
+    },
+    "4096": {
+      "command": "gufo serve --port 42395 --sessions 1 llm --model DeepSeek-V4.1-Flash-1017-UD-IQ2_XXS-00001-of-00006.gguf --context 133760 --served-model-name bench --think off --max-pending-per-client 8 --stream-experts",
+      "counts": [
+        {
+          "cache_n": 4116,
+          "completion_sha256": "8f05c2a23aef2b9933eff5c7e94689bbb70b51c360da0c901ddf7c0836a8df19",
+          "draft_n": 0,
+          "draft_n_accepted": 0,
+          "predicted_n": 128,
+          "prompt_n": 2040
+        }
+      ],
+      "pp": 1015.62,
+      "pp_sd": null,
+      "samples": 1,
+      "tg": 18.1,
+      "tg_sd": null,
+      "workload": "prose"
+    },
+    "65536": {
+      "command": "gufo serve --port 42395 --sessions 1 llm --model DeepSeek-V4.1-Flash-1017-UD-IQ2_XXS-00001-of-00006.gguf --context 133760 --served-model-name bench --think off --max-pending-per-client 8 --stream-experts",
+      "counts": [
+        {
+          "cache_n": 65569,
+          "completion_sha256": "7cd7b3d26ee316f4a0b42bf8463da351f718c0e2c5bac795410592583b32c843",
+          "draft_n": 0,
+          "draft_n_accepted": 0,
+          "predicted_n": 128,
+          "prompt_n": 2056
+        }
+      ],
+      "pp": 770.45,
+      "pp_sd": null,
+      "samples": 1,
+      "tg": 16.9,
+      "tg_sd": null,
+      "workload": "story"
+    },
+    "8192": {
+      "command": "gufo serve --port 42395 --sessions 1 llm --model DeepSeek-V4.1-Flash-1017-UD-IQ2_XXS-00001-of-00006.gguf --context 133760 --served-model-name bench --think off --max-pending-per-client 8 --stream-experts",
+      "counts": [
+        {
+          "cache_n": 8177,
+          "completion_sha256": "ba8025a49e1e98bd3fc99f0c7c0d2bf0538c78d43382ec0c79276574bd1f423e",
+          "draft_n": 0,
+          "draft_n_accepted": 0,
+          "predicted_n": 128,
+          "prompt_n": 2028
+        }
+      ],
+      "pp": 1032.84,
+      "pp_sd": null,
+      "samples": 1,
+      "tg": 18.68,
+      "tg_sd": null,
+      "workload": "prose"
+    }
+  },
+  "schemaVersion": 1,
+  "server": {
+    "command": [
+      "gufo",
+      "serve",
+      "--port",
+      "42395",
+      "--sessions",
+      "1",
+      "llm",
+      "--model",
+      "DeepSeek-V4.1-Flash-1017-UD-IQ2_XXS-00001-of-00006.gguf",
+      "--context",
+      "133760",
+      "--served-model-name",
+      "bench",
+      "--think",
+      "off",
+      "--max-pending-per-client",
+      "8",
+      "--stream-experts"
+    ]
+  },
+  "source": {
+    "buildMode": "nix-release",
+    "dirty": true,
+    "revision": "26c7598f33d7b2df239eec3f3173cbba7b79e9c5"
+  },
+  "table": "single-ar-udiq2xxs",
+  "target": "gufo"
+}
