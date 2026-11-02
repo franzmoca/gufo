@@ -590,13 +590,14 @@ passes could cost prefill.
 
 ### 31. Per-layer eviction ranking and prompt admission
 
-`acquire` scans every slot (~12,000) for each eviction, ~48 µs on the
-host, and the miss kernels launch only after the admission loop. By miss
-counts that is an estimated 0.2-0.7 ms per decode token at an 88 GiB cap
-and more in prefill (not yet timed in the server). Rank
-eviction candidates once per prepare (or keep them ordered) and take
-victims from that list; ds4-argodrive ranks them while the CPU waits for
-the router (+0.5% decode there).
+**The per-eviction scan is fixed (E91):** each size class keeps its 32
+lowest-scoring occupied slots as a victim list, rebuilt by one scan when
+it runs dry or ages past 512 prepares, with pops recomputing scores so
+freed, reoccupied or newly hot slots are skipped without invalidation.
+The scan it replaces cost 1-2 ms per admitted miss at a 96 GiB cache
+(~13,000 randomly accessed slots), not the ~48 µs first estimated — the
+single-token probe lost 2.7 ms/token to it. Outputs are bit-identical;
+route hits moved 98.8 -> 98.7% (the near-argmin lists).
 
 Prompt admission waits on it. Letting a prefill batch admit every expert
 it routes at least twice (instead of its final rows and experts routed at
@@ -604,9 +605,9 @@ least max(4, n/32) times) cut misses on the 18k-token document's
 follow-ups by 32% in two served rounds at 88 GiB, but prefill got slower:
 797 -> 774 tok/s with tails, 700 -> 673 without; agent prefill -7%
 without tails, agent misses +16-25%. Fewer bytes were read while read
-wait rose, so the cost is in admitting: the per-eviction scan above and
-one stage-to-slot copy per admitted expert. Re-measure after the
-ranking change and #30's direct-to-slot uploads; the trace replay
+wait rose, so the cost is in admitting: one stage-to-slot copy per
+admitted expert. Re-measure after
+#30's direct-to-slot uploads; the trace replay
 (`tools/ds41/prefetch_sim.py`) predicted -16-19% prefill stall at full,
 88 GiB and no-tails caches and about even at 64 GiB.
 

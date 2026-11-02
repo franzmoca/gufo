@@ -14,7 +14,11 @@ Measured 2026-11-02 on `feat/ds41-ud-iq2xxs-prefill` at `c9faa470`.
 Scripts and outputs are in [artifacts/2026-11-02-decode](artifacts/2026-11-02-decode/).
 Read [STREAMING.md](STREAMING.md) for the expert store, [PREFILL.md](PREFILL.md)
 for prompt processing, and [EXPERIMENTS.md](EXPERIMENTS.md) for every
-experiment cited as `E<n>`.
+experiment cited as `E<n>`. Follow-ups measured the same day on the same
+workloads are E89-E91: more decode prediction does not pay as the store
+stands, the verification-row expert count closes the grouped-GEMV
+question, and the eviction victim lists (retained) removed a 1-2 ms
+per-admission host scan.
 
 ## Summary
 
@@ -402,17 +406,28 @@ Route hits per 64-token interval
   layer in the layers that miss. Each miss is ~10 MiB at ~10 GB/s on two
   drives, ~1 ms, and only part of it hides behind the hit experts' gate+up.
 - Prediction runs only after a layer missed (STREAMING.md); prefetched
-  shares are 12-50%.
+  shares are 12-50%. **Predicting more does not pay as the store stands**
+  (E89): two layers ahead loses to one layer ahead at the same cap (74.0%
+  vs 79.3% of misses predicted at top-6), and one layer ahead at every
+  layer — worth +2.3-2.8% in `prefetch_sim` — measured 3-7% *slower*
+  served-side: every layer's prepare then pays for resolving a running
+  prefetch job (the stop handshake, the in-flight read remainder and the
+  job bookkeeping, ~0.1 ms/layer, ~4 ms/cycle), which the simulator does
+  not price. Cheap adoption — a hit layer's prepare not stopping a
+  running job — is the prerequisite; open.
 - Open items:
-  - **Two-layer-ahead prediction with a usefulness gate** (`BACKLOG.md`
-    item 21). Mako's form gained +3.5% on a story.
+  - **Cheap prefetch adoption in the store** (E89 above): the per-prepare
+    job resolution cost is what every-layer prediction would pay.
   - **Decode after long prompts** (item 22): the first 64 tokens after the
     24K prompt read 2-3× the steady rate.
   - **More cache memory** (item 30): replays put +3.7 GiB at −28% decode
     misses.
-  - **The eviction scan** (item 31): ~48 µs per eviction on the host,
-    0.2-0.7 ms per token at an 88 GiB cap, sitting between the routes and
-    the miss launch.
+  - ~~The eviction scan~~: fixed by E91's per-class victim lists. Each
+    admitted miss scanned every occupied slot (~13,000 at a 96 GiB cache,
+    1-2 ms of random host access, not the 48 µs first estimated) between
+    the routes and the miss launch; the lists keep one scan per 32
+    evictions or 512 prepares and cut the single-token probe by
+    2.7 ms/token.
 - **A fresh server's start** costs ~24 ms per token for its first 64
   tokens. The built-in ranking is a calibration trace and does not match
   chat text. A chat-and-code histogram (`MODEL.gguf.expert-histogram`), or
@@ -432,11 +447,12 @@ streaming.
   when choosing the width. Today the policy prices misses only through
   average cycle times.
 - **Item 13 / 24, cache-aware routing:** changes outputs; opt-in only.
-- **Grouped expert GEMV for 2-6 rows** (`expert_group_kernel`): it already
-  reads each distinct expert once per layer. The verify routed time of
-  ~9 ms per row is ~2.4 MiB × new experts per row, at the same 205-220 GB/s
-  as AR. Count distinct experts per verification layer from a route trace
-  before working on the kernel.
+- **Grouped expert GEMV for 2-6 rows** (`expert_group_kernel`): the count
+  is in (E89): a 6-row verification layer routes 36 rows over 22.6
+  distinct experts, and each row past the first adds 2.7-3.9 new ones, so
+  the per-layer dedup is already at the arithmetic minimum and the ~9 ms
+  routed cost per row is genuinely distinct reads at the same 205-220 GB/s
+  as AR. No kernel redundancy left to remove.
 
 ### 4. Host sampling with top-p, top-k or min-p (0.9 ms/token AR, 2-5 ms per DSpark cycle)
 
@@ -469,7 +485,15 @@ stay on the host.
 See the per-kernel table. The Q8_0 GEMVs (`gemv_kernel<8, …>`) are the
 largest block: 27 layers × (`q_b`, `output_a`, `output_b`, shared) at
 208-220 GB/s, ~2.3 ms per token short of 240. The Q6_K ones reach 231-232
-on the same shapes.
+on the same shapes — **but not cold**: a DRAM-cold sweep over all five
+decode shapes and three formats (`tools/bench/ds41_dense_gemv_types.hip`,
+E90) puts every format at 199-224 GB/s at one token, so there is no
+Q8_0-specific gap to close; the served Q6_K outlier benefits from
+something the cold bench cannot reproduce. From 1 to 8 tokens the rates
+sag 3-20% (per-token FMAs per weight byte). Two production slice choices
+are beatable (shared down and q_a+kv prefer 8 slices at every width,
++5-14% per call at 6 tokens) but worth only 0.1-0.4% end to end, under
+the E65/E66 bar for a rounding change (E90, not retained).
 - Already measured:
   - E46: paired IQ1 down rows (retained);
   - E51: single-slot experts (retained);
@@ -534,7 +558,7 @@ Low priority.
 cmake --build --preset release --parallel 4
 
 # One mode, profiled (1) or not (0); D, CODE and DOC as in run.sh
-D=/models/ds41 CODE=tools/ds41/replay_sim.py DOC=docs/server.md OUT=prof \
+D=/models/ds41 CODE=tools/ds41/replay_sim.py DOC=docs/SERVER.md OUT=prof \
   docs/models/deepseek-v4.1-flash/artifacts/2026-11-02-decode/run.sh ar-greedy ar 0 1
 #   modes: "ar 0", "ar 1", "dspark 0", "dspark 1"
 

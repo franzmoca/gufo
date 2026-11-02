@@ -2987,3 +2987,122 @@ identical across builds (two rounds, alternated):
 | Sampled DSpark, after | 19.3 | 25.7 | 27.9-28.0 |
 | AR sampled, before | 16.9 | 18.3 | 17.4-17.5 |
 | AR sampled, after | 17.0-17.1 | 18.4-18.5 | 17.6 |
+
+## E89 — decode prediction every layer and two layers ahead (rejected)
+
+DECODE.md lever 2 and BACKLOG item 21. A sampled-DSpark trace
+(`DS41_EXPERT_TRACE`, the DECODE.md workloads, prediction off: 24,160
+prepares, 95.52% route hits, 8.99 MiB read/token) says the router predicts
+79.3% of the decode misses one layer ahead at top-6 but only 74.0% two
+layers ahead, and every lead-2 policy loses to lead-1 at the same cap. The
+policies the simulator (`tools/ds41/prefetch_sim.py`, router pass 30 µs,
+0-0.004 ms/MiB prefetch tax) prefers:
+
+| Policy | Decode estimate | Prefetch |
+| --- | ---: | ---: |
+| production: lead 1 top-6 after a miss | 72.6-72.9 s | 64 GiB (39.5% used) |
+| lead 2 top-6 | 72.2-72.4 s | 201 GiB |
+| lead 1 top-6, every layer while the previous evaluation missed | 70.6-71.2 s (+2.3-2.8%) | 148 GiB (30.2% used) |
+
+That window rule (`predict_hot`) was implemented — the previous
+evaluation's misses keep a decode batch predicting every layer — and the
+3K decode scores stayed bit-identical (argmax and NLL over 2,999
+positions). Direct measurement rejected it:
+
+- 3K single-token probe: 58.9 → 63.1 ms/token (+7.1%); demand reads
+  3.54 → 2.79/token, prefetch 21.5 → 87.7 GiB, dropped 0.1 → 21.5 GiB,
+  read wait 52.2 → 56.6 ms/token.
+- `--spec-bench`: 6-row cycles 119.3 → 123.3 ms, 8-row 133.5 → 138.0.
+  Gating the rule to multi-row batches (single rows keep the after-miss
+  rule) measured the same: 123.3/138.0.
+
+The simulator misses the per-prepare cost of resolving a running prefetch
+job — the stop handshake, the in-flight read's remainder and the job
+bookkeeping land on every layer's prepare (~0.1 ms/layer, ~4 ms/cycle at
+40 layers), which the +2.8% estimate does not price. Misses spread over
+all layers (13%/27%/61% of the n>1 miss experts by layers 10/20/30), so
+no narrower window captures the value. Reverted; the after-miss rule
+stands, and cheap adoption in the store (a hit layer's prepare not
+stopping a running job) is the prerequisite for any every-layer decode
+prediction.
+
+The same trace closes DECODE.md lever 3's count: a 6-row verification
+layer routes 36 rows over 22.6 distinct experts (62.8%), and each row
+past the first adds 2.7-3.9 new ones. `expert_group_kernel`'s per-layer
+dedup is already at that arithmetic minimum, so the ~9 ms routed cost per
+verification row is genuinely distinct reads, not kernel redundancy.
+
+## E90 — dense GEMV slice sweep over the decode shapes (measured, not retained)
+
+DECODE.md lever 5. `tools/bench/ds41_dense_gemv_types.hip` times the
+single-token GEMV over the five decode shapes for Q8_0, Q6_K and Q5_K at
+S 1-8 and 1-8 tokens, DRAM-cold (weights rotating through 768 MiB of
+copies, 50 reps), checking every multi-token result bit for bit against
+single-token launches. Three findings:
+
+- **No format gap.** At one token every format runs 199-224 GB/s on every
+  shape (`wo_b`: Q8_0 217.7, Q6_K 222.2, Q5_K 220.1 GB/s). The served
+  trace's Q6_K `attn_q_b` at 232 GB/s is not reproducible cold, so there
+  is no Q8_0-specific deficiency to fix; the remaining 8-12% under the
+  240 GB/s ceiling is common to all these GEMVs and, in the model, partly
+  the E65-class writeback and side-stream contention.
+- **Multi-token sag.** From 1 to 8 tokens the rates drop 3-20%
+  (`wq_akv` Q6_K 204 → 163 GB/s): each token adds its FMAs per weight
+  byte, and more slices hide that VALU work (`wq_akv` Q8_0 at 6 tokens:
+  135 GB/s at S1, 188 at S8).
+- **Two production splits are beatable.** The shared down rows (k 2304,
+  production S2) prefer S8 for Q8_0 and Q6_K at every width: 6 tokens
+  184.7 → 205.2 and 170.8 → 187.5 GB/s, one token a tie or +0.2-2.1%.
+  The q_a+kv rows (1792 x 5120, production S4) prefer S8 in every format
+  (6 tokens +4.8-14%, one token -0.2% to +5.7%). Q5_K's shared down
+  keeps S2, which wins one token by 3 µs.
+
+Not retained: the corrections are worth ~0.06 ms per AR token and
+0.4-0.6 ms per 6-8-row cycle (0.1-0.4%), under the E65/E66 bar for a
+rounding change. The S paths are pure reorderings (same-weight launches
+differ by at most 8e-3 per call, mean relative 1e-5), but a 3K decode
+score run drifts through expert-selection flips (5.8% argmax changes,
+mean |dNLL| 0.12 from position 0), so every output moves for a
+sub-noise gain. The sweep numbers and the tool stay for the next time a
+decode GEMV changes.
+
+## E91 — eviction victim lists (retained)
+
+BACKLOG item 31. Once the cache fills, every admitted miss ran `acquire`,
+which scans all occupied slots (~13,000 at a 96 GiB cache, ~99 GiB with
+the drafter resident) for the lowest decayed score — random host access
+over the slot and entry arrays, 1-2 ms per scan at that size, not the
+~48 µs the item estimated from a smaller cache. The scan sits in the
+admission loop, between the reads and the miss kernels' launch.
+
+Each size class now keeps a victim list: the 32 lowest decayed scores at
+build time among occupied slots of that class or larger, rebuilt by one
+scan when the list runs dry or ages past 512 prepares. Pops recompute
+each score and skip freed, reoccupied or newly hot slots (a touch adds
+at least 1 and the recency bonus), so nothing needs invalidation; the
+admission comparison uses the recomputed score, and a list that yields
+nothing rebuilds once before giving up. The lists make the eviction
+choice near-argmin instead of exact: route hits moved 98.8 → 98.7% on
+the 3K probe.
+
+Gates and results:
+
+- `ds41.expert_store` ctest passes (eviction, aging and batch-hit
+  protection unchanged); 3K decode scores bit-identical to the build
+  before (argmax and NLL over 2,999 positions).
+- 3K single-token probe: 58.85 → 56.15 ms/token (−4.6%), read wait
+  52.21 → 49.81 ms/token.
+- Served, DSpark sampled T 0.7/top-p 0.95, two alternated rounds
+  (decode_tps, chat/code/after-24K-document):
+
+| Build | Chat | Code | Long |
+| --- | --- | --- | --- |
+| Before | 19.1 / 19.3 | 25.6 / 24.9 | 24.9 / 23.3 |
+| After | 18.6 / 18.9 | 25.6 / 25.6 | 27.7 / 24.5 |
+
+  Chat sits inside its known run-to-run spread (E87: 17.6-19.2); the
+  long request, whose decode follows the 24K prompt in the phase where
+  misses and admissions cluster, gains 5-11% in both rounds, and its
+  prefill 876/813 → 1038/898 tok/s (+10-15%). AR sampled and greedy were
+  within noise. The functional cache suite passes with identical
+  outputs.

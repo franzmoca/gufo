@@ -71,6 +71,13 @@ constexpr uint32_t kSweepTokens = 1024;
 
 constexpr uint32_t kSeedPerLayer = DS41_N_EXPERT;
 constexpr uint32_t kNoSlot = std::numeric_limits<uint32_t>::max();
+/* Eviction candidates kept per size class: the kVictims lowest decayed
+ * scores of the slots an expert of that class could take, rebuilt by one
+ * scan when the list runs dry or ages past kVictimsTicks prepares. Pops
+ * recompute the score, so freed slots, reoccupied ones and experts that
+ * turned hot are skipped without invalidation. */
+constexpr size_t kVictims = 32;
+constexpr uint64_t kVictimsTicks = 512;
 constexpr uint64_t kTableEntries = uint64_t{DS41_N_LAYER} * DS41_N_EXPERT;
 constexpr uint32_t kNoLayer = std::numeric_limits<uint32_t>::max();
 constexpr std::array<uint16_t, DS41_N_LAYER * DS41_N_EXPERT> kDefaultExpertRank = {
@@ -631,6 +638,17 @@ struct ds41_expert_store {
   std::array<uint32_t, DS41_N_LAYER> layer_class{};
   std::vector<std::vector<uint32_t>> free_slots;  // per class
   std::vector<uint64_t> grow_failure;             // tick, per class
+  /* Eviction candidates, one list per size class: the kVictims lowest
+   * decayed scores at build time of the occupied slots an expert of that
+   * class could take, ascending. Pops recompute each score and skip freed,
+   * reoccupied or newly hot slots, so the lists need no invalidation; one
+   * full scan rebuilds a list when it runs dry or ages out. */
+  struct VictimList {
+    std::vector<std::pair<double, uint32_t>> entries;  // (score at build, slot)
+    size_t next = 0;
+    uint64_t built = 0;  // tick of the build; 0 never built
+  };
+  std::vector<VictimList> victims;  // per class, indexed like free_slots
   std::array<uint8_t*, kReadWorkers> read_buffers{};
   std::unique_ptr<ReadPool> readers;
   uint64_t cache_limit = 0;
@@ -713,6 +731,36 @@ struct ds41_expert_store {
     return true;
   }
 
+  /* Refills the class's victim list with one pass over the slots: the
+   * kVictims lowest decayed scores among occupied slots of class `own` or
+   * larger, ascending. A batch's protected hits are handled at pop time
+   * (the protection differs per prepare). */
+  void rebuild_victims(uint32_t own) {
+    VictimList& list = victims[own];
+    list.entries.clear();
+    list.next = 0;
+    list.built = tick;
+    const auto lower = [](const std::pair<double, uint32_t>& a,
+                          const std::pair<double, uint32_t>& b) {
+      return a.first < b.first;  // max-heap of the kVictims smallest
+    };
+    for (uint32_t i = 0; i < slots.size(); ++i) {
+      const Slot& s = slots[i];
+      if (s.layer == kNoSlot || s.size_class < own)
+        continue;
+      const double score = decayed(entries[s.layer][s.expert], tick);
+      if (list.entries.size() < kVictims) {
+        list.entries.emplace_back(score, i);
+        std::push_heap(list.entries.begin(), list.entries.end(), lower);
+      } else if (score < list.entries.front().first) {
+        std::pop_heap(list.entries.begin(), list.entries.end(), lower);
+        list.entries.back() = {score, i};
+        std::push_heap(list.entries.begin(), list.entries.end(), lower);
+      }
+    }
+    std::sort(list.entries.begin(), list.entries.end(), lower);
+  }
+
   /* `hits` marks the experts of `layer` the current batch found resident:
    * its weight table points at their slots and its kernels run after the
    * admission copies, so they are never victims. (A miss admitted earlier
@@ -731,24 +779,33 @@ struct ds41_expert_store {
       }
     if (!allow_evict)
       return kNoSlot;
-    uint32_t victim = kNoSlot;
-    double lowest = std::numeric_limits<double>::infinity();
-    for (uint32_t i = 0; i < slots.size(); ++i) {
-      const Slot& s = slots[i];
-      if (s.layer == kNoSlot || s.size_class < own ||
-          (s.layer == layer && hits[s.expert]))
-        continue;
-      const double score = decayed(entries[s.layer][s.expert], tick);
-      if (score < lowest) {
-        lowest = score;
-        victim = i;
+    const double incoming = decayed(entries[layer][expert], tick);
+    bool rebuilt = false;
+    for (;;) {
+      VictimList& list = victims[own];
+      if (!rebuilt && (list.built == 0 || tick - list.built >= kVictimsTicks ||
+                       list.next >= list.entries.size())) {
+        rebuild_victims(own);
+        rebuilt = true;
       }
+      while (list.next < list.entries.size()) {
+        const auto [score_built, victim] = list.entries[list.next++];
+        const Slot& s = slots[victim];
+        if (s.layer == kNoSlot || s.size_class < own ||
+            (s.layer == layer && hits[s.expert]))
+          continue;  // freed, smaller than this class, or protected
+        const double score = decayed(entries[s.layer][s.expert], tick);
+        if (score > score_built + 8.0)
+          continue;  // touched since the build: no longer this cold
+        if (incoming < score)
+          return kNoSlot;  // the remaining victims all outscore it
+        entries[s.layer][s.expert].slot = kNoSlot;
+        return victim;
+      }
+      if (rebuilt)
+        return kNoSlot;
+      // A fresh list ran out of usable entries: one rebuild, then give up.
     }
-    if (victim == kNoSlot || decayed(entries[layer][expert], tick) < lowest)
-      return kNoSlot;
-    Slot& s = slots[victim];
-    entries[s.layer][s.expert].slot = kNoSlot;
-    return victim;
   }
 
   void release(uint32_t slot_id) {
@@ -821,6 +878,7 @@ ds41_expert_store* ds41_expert_store_create(const ds41_model* model,
         store->class_bytes.begin());
   }
   store->free_slots.resize(store->class_bytes.size());
+  store->victims.resize(store->class_bytes.size());
   store->grow_failure.assign(store->class_bytes.size(), ~0ull);
   bool ok = true;
   for (uint32_t i = 0; i < kReadWorkers && ok; ++i)
