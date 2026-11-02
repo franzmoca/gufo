@@ -249,11 +249,13 @@ survives in the trace; no prediction records exist for 140-row prepares
   encoder reads hide behind prediction while replay reads do not, but not
   enough to fund the trade. A finer rule (protect only experts a replay or
   decode touched recently) is unexplored.
-- **Read the replay layers' experts early.** The replay's rows are known
-  once the last encoder batch starts; their layer-20 routes are known after
-  layer 19 of that batch. Predicting further ahead than one layer helped
-  little for short passes (see "Things that look like levers"), so measure
-  the recall at these rows before building anything.
+- **Read the replay layers' experts early: rejected by simulation (E86).**
+  Layer 19's predictions hold 54-83% of the replay's misses with 90-424%
+  extra reads, and reading them from the end of layer 19 recovers only
+  14-15% of the stall: a replay's ~8.5 GiB is bound by the drives, which
+  the prompt's encoder reads already keep ~70% busy. Protecting decoder
+  experts trades ~4 GiB of prompt reads per GiB saved. What remains is
+  bandwidth: more cache memory (item 30) or fewer bytes per expert.
 
 ### 3. Routed FP16 kernels (7.8 s busy, 46%)
 

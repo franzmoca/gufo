@@ -2884,3 +2884,49 @@ prefill size:
 
 Decode is unchanged (33.9 against 33.5 tok/s).
 
+## E86 — decoder replay: read-ahead and cache protection, simulated (rejected)
+
+Each prompt longer than 140 rows ends with layers 20-39 on its last 140
+rows, and each of those layers waited ~42 ms for reads (0.85 s per
+20-24K-token prompt after E85). Trace mode now records predictions for
+passes of up to 140 rows and every decoder layer ahead, and, for the last
+batch, the replayed rows' predictions of every decoder layer from the last
+encoder layer's FFN input. `tools/ds41/replay_sim.py` replays those traces
+on `prefetch_sim.py`'s cache model (99.2% and 99.6% of route hits
+reproduced). Two traces: the two served documents (2 replays, 2.03 s of
+recorded replay wait) and a Pi agent session (creation, bugfix and edit,
+five passes; 10 replays, 2.79 s).
+
+| | Documents | Agent session |
+| --- | --- | --- |
+| Replay misses caught by layer 19's top-6 / 8 / 12 | 65 / 73 / 83% | 54 / 61 / 71% |
+| Extra uncached experts those predictions read | 90 / 114 / 151% of the misses | 249 / 316 / 424% |
+| Replay stall, read-ahead from the end of layer 19 (top-6 to 12) | 2.03 → 1.72 s | 2.79 → 2.39-2.42 s |
+
+The read-ahead estimate charges nothing for the extra reads and still
+recovers only 14-15%: a replay needs ~8.5 GiB and runs ~100 ms of
+compute, so it is bound by the drives' ~10.4 GB/s, which the prompt's own
+encoder reads already hold at ~7.5 GB/s on average (7.9 MiB per token).
+
+Cache policies, documents trace (estimated stalls; trace mode runs
+without prediction, so prompt stalls are overstated against production,
+where prediction hides most of them):
+
+| Policy | Replay reads, stall | Prompt reads |
+| --- | --- | --- |
+| Current | 17.1 GiB, 1.75 s | 153.3 GiB |
+| Prompt batches never evict decoder-layer experts | 12.2 GiB, 1.25 s | 172.6 GiB |
+| Protect decoder experts a replay or decode used within 500-10,000 prepares | unchanged | unchanged |
+| Prompt admits experts routed ≥ 16 times (n/128) | 19.1 GiB, 1.95 s | 134.6 GiB |
+| Prompt admits every expert it reads | 32.5 GiB, 3.33 s | 67.0 GiB |
+
+Protection trades ~4 GiB of prompt reads per GiB of replay reads, as the
+earlier simulation found; the finer rule protects nothing, because a
+fresh server's replay misses were seeded experts the prompt evicted, not
+experts a replay had used. Admitting more halves the prompt's reads (a
+batch's misses recur in the next batch) but evicts the replay's experts,
+and item 31 measured admission's per-eviction scan and copies costing
+more than the reads they saved. In the agent trace none of the policies
+moves anything by more than 0.15 s; its reads are dominated by decode
+(177 GiB against 24 GiB for replays). Not built.
+

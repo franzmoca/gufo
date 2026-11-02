@@ -60,8 +60,10 @@ constexpr uint32_t kPromptDecodeRows = 6;
 constexpr uint32_t kPrefillPredictTokens = 1024;
 constexpr uint32_t kTraceK = 12;
 /* Trace mode records router predictions up to kTraceLeads layers ahead for
- * batches of up to kTraceRows rows (decode, verification, short turns). */
-constexpr uint32_t kTraceRows = 64, kTraceLeads = 3;
+ * batches of up to kTraceRows rows (decode, verification, short turns and
+ * the prompt's decoder replay), and for the replayed rows of a prompt's last
+ * batch from its last encoder layer: every decoder layer ahead. */
+constexpr uint32_t kTraceRows = DS41_DECODER_REPLAY_ROWS, kTraceLeads = DS41_N_LAYER - DS41_FIRST_DECODER_LAYER;
 
 float half_to_float(uint16_t h) {
   const uint32_t sign = (uint32_t)(h & 0x8000u) << 16;
@@ -385,6 +387,7 @@ struct ds41_decoder : Activations {
    * rows, copied asynchronously and written once the target layer's prepare
    * returns (its routes copy orders them). */
   bool tracing = false;
+  uint32_t trace_tail = 0;  // rows of this eval the decoder replay keeps (trace mode)
   int32_t* trace_ids = nullptr;     // device [kTraceLeads][kTraceRows][kTraceK]
   float* trace_w = nullptr;         // device, as trace_ids
   int32_t* trace_pinned = nullptr;  // pinned [DS41_N_LAYER][kTraceLeads][kTraceRows][kTraceK]
@@ -1072,15 +1075,17 @@ bool shared_moe(ds41_decoder* d, const ds41_layer_weights* l, uint32_t n, const 
  * extra reads still arrive before they are needed. A model whose experts
  * stay cached never pays for the extra router pass. */
 /* Router logits of layer il (the narrowed BF16 copy when there is one). */
-bool router_logits(ds41_decoder* d, uint32_t il, uint32_t n) {
+bool router_logits(ds41_decoder* d, uint32_t il, uint32_t n, const float* x = nullptr) {
   const ds41_weights* w = d->engine->weights;
-  if (!w->router_bf16) return linear(d, w->layer[il].ffn_gate_inp, d->xn, d->router, n);
+  if (!x) x = d->xn;
+  if (!w->router_bf16) return linear(d, w->layer[il].ffn_gate_inp, x, d->router, n);
   return linear_raw(DS41_TENSOR_BF16, w->router_bf16 + (uint64_t)il * DS41_N_EXPERT * DS41_N_EMBD, DS41_N_EXPERT,
-                    DS41_N_EMBD, d->xn, d->router, n, d->decode_rows);
+                    DS41_N_EMBD, x, d->router, n, d->decode_rows);
 }
 
-/* Trace mode: route the next kTraceLeads layers on this layer's FFN input. */
-bool trace_predict(ds41_decoder* d, uint32_t il, uint32_t n) {
+/* Trace mode: route the next kTraceLeads layers on this layer's FFN input
+ * (x: n rows of it; the whole input when null). */
+bool trace_predict(ds41_decoder* d, uint32_t il, uint32_t n, const float* x = nullptr) {
   const uint64_t span = (uint64_t)kTraceRows * kTraceK;
   for (uint32_t lead = 1; lead <= kTraceLeads; ++lead) {
     const uint32_t tl = il + lead;
@@ -1089,7 +1094,7 @@ bool trace_predict(ds41_decoder* d, uint32_t il, uint32_t n) {
     if (!nl->ffn_exp_probs_b) continue;
     int32_t* dev_ids = d->trace_ids + (lead - 1) * span;
     int32_t* host = d->trace_pinned + ((uint64_t)tl * kTraceLeads + (lead - 1)) * span;
-    if (!router_logits(d, tl, n) ||
+    if (!router_logits(d, tl, n, x) ||
         ds41_v41_route(d->router, f32(d, nl->ffn_exp_probs_b), dev_ids, d->trace_w + (lead - 1) * span,
                        DS41_N_EXPERT, kTraceK, DS41_EXPERT_WEIGHT_SCALE, n) ||
         hipMemcpyAsync(host, dev_ids, (size_t)n * kTraceK * sizeof(int32_t), hipMemcpyDeviceToHost, nullptr) !=
@@ -1164,6 +1169,10 @@ bool moe(ds41_decoder* d, uint32_t il, uint32_t n) {
       return false;
   }
   if (d->tracing && n <= kTraceRows && !trace_predict(d, il, n)) return false;
+  /* The replayed rows of a prompt's last batch are its last trace_tail rows. */
+  if (d->tracing && n > kTraceRows && d->trace_tail && il + 1 == DS41_FIRST_DECODER_LAYER &&
+      !trace_predict(d, il, d->trace_tail, d->xn + (uint64_t)(n - d->trace_tail) * kDim))
+    return false;
   const int gate_type = (int)l->ffn_gate_exps->type;
   const int up_type = (int)l->ffn_up_exps->type;
   const int down_type = (int)l->ffn_down_exps->type;
@@ -2117,6 +2126,7 @@ int eval_rows(ds41_decoder* d, const int* tokens, uint32_t n, uint32_t keep_from
   ok = ok && hipMemcpyAsync(d->pre[0], one_hot, (uint64_t)n * kHc * sizeof(float), hipMemcpyHostToDevice, 0) ==
                  hipSuccess;
   d->pass_end = kept ? DS41_N_LAYER : DS41_FIRST_DECODER_LAYER;
+  d->trace_tail = skip && kept <= kTraceRows ? kept : 0;
   ok = ok && predict_first_layer(d, n);
 
   const int prev = 0;
@@ -2151,6 +2161,7 @@ int eval_rows(ds41_decoder* d, const int* tokens, uint32_t n, uint32_t keep_from
   }
   d->window_floor = 0;
   d->pass_end = DS41_N_LAYER;
+  d->trace_tail = 0;
 
   /* Final mix and norm for the requested rows, then the vocabulary projection in passes. */
   const uint32_t first = rows - logit_rows;
