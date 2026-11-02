@@ -2635,3 +2635,11 @@ checks have identical errors against their independent reference. Halving
 the stage barriers does not pay for the larger shared activation allocation
 on this shape. Reverted before full-model timing.
 [Raw results](artifacts/2026-11-02-routed-stages/).
+
+## E77 — routed FP16 32-value activation stages (rejected)
+
+Same E76 served route counts and seven-repeat benchmark, but halve the
+64-value stage. Gate/up 23.18 → 23.38 ms; down 12.91 → 13.45 ms.
+Benchmark reference errors remain identical. Reverted: neither direction
+improves this recorded IQ2_XXS/IQ2_S layer. E76's full `ds41.mmq_typed`
+check also passed (25.82 seconds); its log is retained with these artifacts.
