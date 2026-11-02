@@ -236,6 +236,23 @@ int main() {
   after = ds41_expert_store_get_stats(store);
   check(after.hits == before.hits, "scan-resistant admission");
   ds41_expert_store_destroy(store);
+  // A batch's own hits are never evicted for its misses: the admission copy
+  // lands before the batch's kernels read the table. Expert 0 of layer 10
+  // decays to the lowest score while layer 15 stays hot, then a batch routes
+  // it with a new expert that outscores it.
+  store = ds41_expert_store_create(&f.model, &f.weights, 4 * kSlot);
+  check(store && run(10, {0, 0, 0, 0, 0, 0}) && run(15, {1, 1, 2, 2, 3, 3}),
+        "routed victim setup");
+  const std::vector<int32_t> hot15{1, 1, 2, 2, 3, 3};
+  bool aged = true;
+  for (int i = 0; i < 4000 && aged; ++i)
+    aged = hipMemcpy(routes, hot15.data(), hot15.size() * sizeof(int32_t),
+                     hipMemcpyHostToDevice) == hipSuccess &&
+           ds41_expert_store_prepare(store, 15, routes, 1, &stage[0], &stage[1],
+                                     &stage[2]);
+  check(aged, "routed victim aging");
+  check(run(10, {0, 9, 9, 9, 9, 9}), "routed hit kept with an admitted miss");
+  ds41_expert_store_destroy(store);
   // Background prefetch: the listed experts stage without a prepare, the
   // next prepare of that layer adopts them without re-reading, and any other
   // layer drops the job and reads its own experts again.

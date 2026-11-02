@@ -2,8 +2,8 @@
 """Replay a DS41 expert trace (DS41_EXPERT_TRACE) to compare prefetch policies offline.
 
 The engine writes the seeded cache, then every expert-store prepare (routes,
-per-route hits, timing) and, for batches of up to 16 rows, the router's
-top-12 predictions for the next two layers from each layer's FFN input.
+per-route hits, timing) and, for batches of up to 64 rows, the router's
+top-12 predictions for the next three layers from each layer's FFN input.
 This tool mirrors the store's cache policy (decayed scores, size classes,
 scan-resistant admission, lowest-score victim), checks that the replay
 reproduces the recorded hits, and estimates each policy's read stalls.
@@ -126,6 +126,7 @@ class Cache:
 
     def __init__(self, snap: Snapshot, limit=None, policy: CachePolicy = CachePolicy()):
         self.policy = policy
+        self.routed = None
         self.base = snap.score.copy() * policy.floor
         self.snap = snap
         self.tick = snap.tick
@@ -177,6 +178,9 @@ class Cache:
         if not allow_evict:
             return None
         live = (self.s_layer >= 0) & (self.s_class >= own)
+        # The batch's own hits are read from their slots: never victims.
+        if self.routed is not None and self.routed[0] == layer:
+            live &= ~((self.s_layer == layer) & self.routed[1][np.maximum(self.s_expert, 0)])
         if not live.any():
             return None
         idx = np.nonzero(live)[0]
@@ -226,6 +230,7 @@ class Cache:
         flat = ids.reshape(-1)
         valid = flat >= 0
         counts = np.bincount(flat[valid], minlength=self.snap.n_expert)
+        self.routed = (layer, (counts > 0) & (self.slot_of[layer] >= 0))
         recent_rows = ids[n - min(n, RECENT_ROWS):].reshape(-1)
         recent = np.bincount(recent_rows[recent_rows >= 0], minlength=self.snap.n_expert)
         self.tick += 1
@@ -286,7 +291,7 @@ def summary(snap, prepares):
 def recall(prepares):
     """Share of decode misses each lead's top-k prediction contains."""
     out = {}
-    for lead in (1, 2):
+    for lead in (1, 2, 3):
         for k in (4, 6, 8, 12):
             caught = misses = 0
             for p in prepares:

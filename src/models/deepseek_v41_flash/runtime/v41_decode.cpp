@@ -54,11 +54,16 @@ constexpr uint32_t kDecodeRows = 8;  // see ds41_decoder::decode_rows
 /* Prompt batches need no single-token arithmetic: from 7 rows the batched
  * paths are faster (7 rows 108 -> 99 ms, 8 rows 122 -> 99 ms). */
 constexpr uint32_t kPromptDecodeRows = 6;
-/* Batches of at least this many tokens predict the next layer's routed
- * experts and prefetch them during this layer's compute (the store's
- * adoption gate mirrors this threshold); single tokens predict for decode. */
+/* Batches of at least this many tokens send a wide (prompt-scale) prediction
+ * of the next layer's routed experts, which the store's adoption gate
+ * mirrors; smaller batches send ordinary ones (see predict_next_layer). */
 constexpr uint32_t kPrefillPredictTokens = 1024;
 constexpr uint32_t kTraceK = 12;
+/* Trace mode records router predictions up to kTraceLeads layers ahead for
+ * batches of up to kTraceRows rows (decode, verification, short turns and
+ * the prompt's decoder replay), and for the replayed rows of a prompt's last
+ * batch from its last encoder layer: every decoder layer ahead. */
+constexpr uint32_t kTraceRows = DS41_DECODER_REPLAY_ROWS, kTraceLeads = DS41_N_LAYER - DS41_FIRST_DECODER_LAYER;
 
 float half_to_float(uint16_t h) {
   const uint32_t sign = (uint32_t)(h & 0x8000u) << 16;
@@ -278,19 +283,46 @@ struct Activations {
   float* embd_pinned = nullptr;
 };
 
+/* The Engram rows of the prompt batch after the current one, read once the
+ * current batch's own rows are in (ds41_decoder_set_lookahead). Valid for
+ * the batch whose position, tokens and n-gram history match. */
+struct EngramAhead {
+  std::future<bool> read;
+  const ds41_decoder* owner = nullptr;
+  uint32_t pos = 0;
+  size_t history = 0;
+  int64_t tail[DS41_ENGRAM_MAX_NGRAM - 1] = {};
+  std::vector<int> tokens;
+  std::vector<int64_t> rows;  // [slot][token][column]
+  int set = 0;                // the buffer set holding the rows
+};
+
 struct SharedActivations {
   ds41_engine* engine = nullptr;
   uint32_t context = 0;
   Activations views;
   std::vector<void*> device;
   uint64_t logits_gen = 0;  // evaluations whose logits views.logits held
+  /* A second set of Engram row buffers: a batch reads its rows from one set
+   * while the next batch's rows land in the other. */
+  float* engram_ahead[DS41_N_ENGRAM_LAYER] = {};
+  EngramAhead ahead;
   ~SharedActivations() {
+    if (ahead.read.valid()) ahead.read.wait();
+    for (float* p : engram_ahead)
+      if (p) (void)hipHostFree(p);
     for (void* p : device) (void)hipFree(p);
     for (float* p : views.engram_pinned)
       if (p) (void)hipHostFree(p);
     if (views.embd_pinned) (void)hipHostFree(views.embd_pinned);
   }
 };
+
+/* Waits for a pending Engram lookahead read and drops it. */
+void join_engram_ahead(SharedActivations& sh) {
+  if (sh.ahead.read.valid()) (void)sh.ahead.read.get();
+  sh.ahead.owner = nullptr;
+}
 
 std::mutex g_shared_mutex;
 std::vector<std::weak_ptr<SharedActivations>> g_shared;
@@ -346,15 +378,20 @@ struct ds41_decoder : Activations {
   int32_t* pred_pinned = nullptr;  // pinned [DS41_N_LAYER][capacity][DS41_N_EXPERT_USED]
   hipEvent_t pred_events[DS41_N_LAYER] = {};
   bool pred_ok = true;
+  bool pass_missed = false;  // a layer of this eval waited on expert reads
+  /* Layers this eval runs: a prompt batch whose rows all stop at the replay
+   * boundary ends at the first decoder layer, and predicts nothing past it. */
+  uint32_t pass_end = DS41_N_LAYER;
   /* Expert trace (ds41_expert_store_tracing): top-kTraceK router predictions
-   * for the next two layers of every batch of up to DS41_DECODER_MAX_JOINT
+   * for the next kTraceLeads layers of every batch of up to kTraceRows
    * rows, copied asynchronously and written once the target layer's prepare
    * returns (its routes copy orders them). */
   bool tracing = false;
-  int32_t* trace_ids = nullptr;     // device [2][MAX_JOINT][kTraceK]
+  uint32_t trace_tail = 0;  // rows of this eval the decoder replay keeps (trace mode)
+  int32_t* trace_ids = nullptr;     // device [kTraceLeads][kTraceRows][kTraceK]
   float* trace_w = nullptr;         // device, as trace_ids
-  int32_t* trace_pinned = nullptr;  // pinned [DS41_N_LAYER][2][MAX_JOINT][kTraceK]
-  uint32_t trace_rows[DS41_N_LAYER][2] = {};
+  int32_t* trace_pinned = nullptr;  // pinned [DS41_N_LAYER][kTraceLeads][kTraceRows][kTraceK]
+  uint32_t trace_rows[DS41_N_LAYER][kTraceLeads] = {};
   /* Recorded after the router so the store reads the routes while the
    * shared expert runs; without it the store's copy waits for the stream. */
   hipEvent_t routes_ready = nullptr;
@@ -367,6 +404,8 @@ struct ds41_decoder : Activations {
    * DS41_V41_GEMV_MAX_TOKENS for joint evaluations of independent rows. */
   uint32_t decode_rows = kDecodeRows;
   std::vector<int64_t> engram_history;
+  /* Tokens of the prompt batch after the next evaluation (ds41_decoder_set_lookahead). */
+  std::vector<int> lookahead;
   /* Image spans (ds41_decoder_set_images) and, during an evaluation, its
    * runs of image positions as [first, end) pairs. */
   std::vector<ds41_image_span> images;
@@ -411,8 +450,11 @@ bool mmq_batched(uint32_t type) {
 }
 
 /* Waves per row group of the single-token GEMV, from a slice sweep over the
- * V4.1 shapes: short rows split fewer ways, so more rows run per block. */
-int gemv_slices(uint32_t rows, uint32_t k) {
+ * V4.1 shapes: short rows split fewer ways, so more rows run per block.
+ * Q8_0 q_b (k 1280) is faster with 4 at every verification width (1-16 rows:
+ * 208-267 us against 215-275 us with 2); 8 wins one row but loses from 8. */
+int gemv_slices(uint32_t type, uint32_t rows, uint32_t k) {
+  if (type == DS41_TENSOR_Q8_0 && k <= 1280) return 4;
   if (k <= 2304) return 2;
   if (k <= 5120 && rows <= 4096) return 4;
   return 8;
@@ -467,7 +509,7 @@ bool linear_raw(uint32_t type, const void* p, uint32_t rows, uint32_t k, const f
   default:
     /* Decode batches: FP32 activations, no Q8_1 pass, each weight read once. */
     if (n <= decode_rows && gemv_type(type))
-      return ds41_v41_gemv((int)type, p, x, out, rows, k, 0, gemv_slices(rows, k), n, k, rows) == 0;
+      return ds41_v41_gemv((int)type, p, x, out, rows, k, 0, gemv_slices(type, rows, k), n, k, rows) == 0;
     if (dense_f16(type, rows, k, n)) return ds41_v41_dense_f16((int)type, p, x, out, rows, n, k, 1, 0) == 0;
     if (n > decode_rows && mmq_batched(type))
       return ds41_mmq_dense_typed((int)type, p, x, out, (int)rows, (int)n, (int)k, 0) == 0;
@@ -515,20 +557,21 @@ bool is_image(const ds41_decoder* d, int token) { return d->engine->image_bias &
 
 /* Engram row ids for the newest token; mirrors NgramHashState.forward,
  * whose look-back stops at image positions. */
-void engram_hash(ds41_decoder* d, int token, int64_t (*rows)[DS41_ENGRAM_COLS]) {
+void engram_hash_on(const ds41_decoder* d, std::vector<int64_t>& history, int token,
+                    int64_t (*rows)[DS41_ENGRAM_COLS]) {
   const ds41_weights* w = d->engine->weights;
   const int32_t* token_map = w->engram_token_map;
   const int64_t* primes = w->engram_head_vocab;
   const int64_t* offsets = w->engram_head_offsets;
   const int64_t* multipliers = w->engram_multipliers;
   const int64_t pad = token_map[DS41_ENGRAM_PAD_TOKEN];
-  d->engram_history.push_back(is_image(d, token) ? kEngramDead : token_map[token]);
-  const int64_t p = (int64_t)d->engram_history.size() - 1;
+  history.push_back(is_image(d, token) ? kEngramDead : token_map[token]);
+  const int64_t p = (int64_t)history.size() - 1;
   int64_t grams[DS41_ENGRAM_MAX_NGRAM];
   bool blocked = false;
   for (int64_t shift = 0; shift < DS41_ENGRAM_MAX_NGRAM; shift++) {
-    blocked = blocked || p < shift || d->engram_history[p - shift] == kEngramDead;
-    grams[shift] = blocked ? pad : d->engram_history[p - shift];
+    blocked = blocked || p < shift || history[p - shift] == kEngramDead;
+    grams[shift] = blocked ? pad : history[p - shift];
   }
   for (uint32_t layer = 0; layer < DS41_N_ENGRAM_LAYER; layer++) {
     const int64_t* mult = multipliers + layer * DS41_ENGRAM_MAX_NGRAM;
@@ -543,13 +586,28 @@ void engram_hash(ds41_decoder* d, int token, int64_t (*rows)[DS41_ENGRAM_COLS]) 
   }
 }
 
+void engram_hash(ds41_decoder* d, int token, int64_t (*rows)[DS41_ENGRAM_COLS]) {
+  engram_hash_on(d, d->engram_history, token, rows);
+}
+
+/* The n-gram history entries before position `size` that the next hashes read. */
+void engram_tail(const std::vector<int64_t>& history, size_t size, int64_t* tail) {
+  for (uint32_t i = 0; i + 1 < DS41_ENGRAM_MAX_NGRAM; i++) tail[i] = size > i ? history[size - 1 - i] : kEngramDead;
+}
+
+bool engram_tail_matches(const int64_t* tail, const std::vector<int64_t>& history, size_t size) {
+  int64_t now[DS41_ENGRAM_MAX_NGRAM - 1];
+  engram_tail(history, size, now);
+  return std::equal(now, now + DS41_ENGRAM_MAX_NGRAM - 1, tail);
+}
+
 /* Reads and dequantizes the n * DS41_ENGRAM_COLS table rows of a layer into
  * out; a negative row id (an image position) reads zeros, whose Engram term
  * is exactly zero, as the official masked gate. Reads run on parallel threads: each is a small random read, so
  * throughput comes from queue depth. Touches only immutable engine state, so
  * it can run while the GPU works on earlier layers. */
-bool engram_read(const ds41_decoder* d, const int64_t* rows, uint32_t n, float* out) {
-  const ds41_engram_tables* e = d->engine->engram;
+bool engram_read(const ds41_engine* engine, const int64_t* rows, uint32_t n, float* out) {
+  const ds41_engram_tables* e = engine->engram;
   const ds41_tensor* table = e->table;
   const uint64_t base = table->abs_offset - e->file.shard_offset[0];
   const uint64_t count = (uint64_t)n * DS41_ENGRAM_COLS;
@@ -736,7 +794,7 @@ bool attention(ds41_decoder* d, uint32_t il, uint32_t n, const Joint* joint) {
     const uint32_t k = (uint32_t)wqa->dim[0];
     const uint32_t m = (uint32_t)((wqa->elements + wkv->elements) / k);
     if (ds41_v41_gemv_pair((int)wqa->type, dev(d, wqa), d->qa, DS41_N_LORA_Q, dev(d, wkv), d->kv, kHeadDim, d->xn, k,
-                           gemv_slices(m, k), n))
+                           gemv_slices(wqa->type, m, k), n))
       return false;
   } else if (n > d->decode_rows && dense_f16_pair(wqa, wkv, n)) {
     /* FP16 rows of xn (rounded as the kernel would stage them) in o, idle
@@ -879,7 +937,7 @@ bool attention(ds41_decoder* d, uint32_t il, uint32_t n, const Joint* joint) {
   /* Small batches take all groups in one matvec launch. */
   if (n <= d->decode_rows && gemv_type(wo_a->type)) {
     if (ds41_v41_gemv((int)wo_a->type, wo_a_dev, d->o, d->oa, DS41_N_OUT_GROUP * DS41_N_LORA_O, kGroupDim,
-                      DS41_N_LORA_O, gemv_slices(DS41_N_OUT_GROUP * DS41_N_LORA_O, kGroupDim), n, kQDim,
+                      DS41_N_LORA_O, gemv_slices(wo_a->type, DS41_N_OUT_GROUP * DS41_N_LORA_O, kGroupDim), n, kQDim,
                       DS41_N_OUT_GROUP * DS41_N_LORA_O))
       return false;
     return linear(d, l->attn_output_b, d->oa, d->attn_out, n);
@@ -930,6 +988,11 @@ bool routed_f16_type(int type) {
          type == (int)DS41_TENSOR_IQ2_XXS || type == (int)DS41_TENSOR_IQ2_XS || type == (int)DS41_TENSOR_IQ2_S;
 }
 
+/* Down projections also take IQ3_XXS and Q2_K (the Unsloth Dynamic builds). */
+bool routed_f16_down_type(int type) {
+  return routed_f16_type(type) || type == (int)DS41_TENSOR_IQ3_XXS || type == (int)DS41_TENSOR_Q2_K;
+}
+
 /* ds41_v41_routed_plan's rows, bounds and tiles for batches up to cap tokens. */
 uint64_t routed_plan_ints(uint64_t cap) {
   const uint64_t slots = cap * DS41_N_EXPERT_USED;
@@ -948,6 +1011,10 @@ uint64_t expert_block_bytes(int type) {
     return 74;
   case DS41_TENSOR_IQ2_S:
     return 82;
+  case DS41_TENSOR_Q2_K:
+    return 84;
+  case DS41_TENSOR_IQ3_XXS:
+    return 98;
   default:
     return 0;
   }
@@ -986,7 +1053,7 @@ bool shared_moe(ds41_decoder* d, const ds41_layer_weights* l, uint32_t n, const 
     const uint32_t k = (uint32_t)sg->dim[0];
     const uint32_t m = (uint32_t)(sg->elements / k);
     if (ds41_v41_gemv_swiglu((int)sg->type, dev(d, sg), dev(d, su), d->xn, d->sm, m, k, kSwigluLimit,
-                             gemv_slices(m, k), n))
+                             gemv_slices(sg->type, m, k), n))
       return false;
   } else if (!linear_pair(d, sg, d->sg, su, d->su, d->xn, n) ||
              ds41_v41_swiglu(d->sg, d->su, nullptr, d->sm, n, DS41_N_FF_EXP, kSwigluLimit)) {
@@ -1002,26 +1069,32 @@ bool shared_moe(ds41_decoder* d, const ds41_layer_weights* l, uint32_t n, const 
  * extra matvec hides in the read stall. Single tokens and verification or
  * joint batches predict only when this layer waited on reads: misses
  * cluster in neighbouring layers, and a prediction without a stall to hide
- * it costs more than the read it saves. */
+ * it costs more than the read it saves. Larger batches predict once any
+ * layer of the same evaluation has waited on reads, including the prompt's
+ * decoder replay: their layers then keep missing, and a stale prediction's
+ * extra reads still arrive before they are needed. A model whose experts
+ * stay cached never pays for the extra router pass. */
 /* Router logits of layer il (the narrowed BF16 copy when there is one). */
-bool router_logits(ds41_decoder* d, uint32_t il, uint32_t n) {
+bool router_logits(ds41_decoder* d, uint32_t il, uint32_t n, const float* x = nullptr) {
   const ds41_weights* w = d->engine->weights;
-  if (!w->router_bf16) return linear(d, w->layer[il].ffn_gate_inp, d->xn, d->router, n);
+  if (!x) x = d->xn;
+  if (!w->router_bf16) return linear(d, w->layer[il].ffn_gate_inp, x, d->router, n);
   return linear_raw(DS41_TENSOR_BF16, w->router_bf16 + (uint64_t)il * DS41_N_EXPERT * DS41_N_EMBD, DS41_N_EXPERT,
-                    DS41_N_EMBD, d->xn, d->router, n, d->decode_rows);
+                    DS41_N_EMBD, x, d->router, n, d->decode_rows);
 }
 
-/* Trace mode: route the next two layers on this layer's FFN input. */
-bool trace_predict(ds41_decoder* d, uint32_t il, uint32_t n) {
-  const uint64_t span = (uint64_t)DS41_DECODER_MAX_JOINT * kTraceK;
-  for (uint32_t lead = 1; lead <= 2; ++lead) {
+/* Trace mode: route the next kTraceLeads layers on this layer's FFN input
+ * (x: n rows of it; the whole input when null). */
+bool trace_predict(ds41_decoder* d, uint32_t il, uint32_t n, const float* x = nullptr) {
+  const uint64_t span = (uint64_t)kTraceRows * kTraceK;
+  for (uint32_t lead = 1; lead <= kTraceLeads; ++lead) {
     const uint32_t tl = il + lead;
     if (tl >= DS41_N_LAYER) break;
     const ds41_layer_weights* nl = &d->engine->weights->layer[tl];
     if (!nl->ffn_exp_probs_b) continue;
     int32_t* dev_ids = d->trace_ids + (lead - 1) * span;
-    int32_t* host = d->trace_pinned + ((uint64_t)tl * 2 + (lead - 1)) * span;
-    if (!router_logits(d, tl, n) ||
+    int32_t* host = d->trace_pinned + ((uint64_t)tl * kTraceLeads + (lead - 1)) * span;
+    if (!router_logits(d, tl, n, x) ||
         ds41_v41_route(d->router, f32(d, nl->ffn_exp_probs_b), dev_ids, d->trace_w + (lead - 1) * span,
                        DS41_N_EXPERT, kTraceK, DS41_EXPERT_WEIGHT_SCALE, n) ||
         hipMemcpyAsync(host, dev_ids, (size_t)n * kTraceK * sizeof(int32_t), hipMemcpyDeviceToHost, nullptr) !=
@@ -1032,29 +1105,49 @@ bool trace_predict(ds41_decoder* d, uint32_t il, uint32_t n) {
   return true;
 }
 
-void predict_next_layer(ds41_decoder* d, uint32_t il, uint32_t n, bool misses_now) {
-  if (d->tracing) return;
-  if (!d->engine->expert_store || !d->pred_ok || il + 1 >= DS41_N_LAYER)
-    return;
-  if (n > DS41_DECODER_MAX_JOINT && n < kPrefillPredictTokens)
-    return;
-  if (n <= DS41_DECODER_MAX_JOINT && !misses_now)
-    return;
-  const ds41_layer_weights* nl = &d->engine->weights->layer[il + 1];
+/* Routes layer `target` on xn and records the prediction with the store. */
+void predict_layer(ds41_decoder* d, uint32_t target, uint32_t n) {
+  const ds41_layer_weights* nl = &d->engine->weights->layer[target];
   const uint32_t used = DS41_N_EXPERT_USED;
   const uint64_t rows = (uint64_t)d->capacity * DS41_N_EXPERT_USED;
-  int32_t* ids = d->pred_pinned + (size_t)(il + 1) * rows;
-  if (!router_logits(d, il + 1, n) ||
+  int32_t* ids = d->pred_pinned + (size_t)target * rows;
+  if (!router_logits(d, target, n) ||
       ds41_v41_route(d->router, f32(d, nl->ffn_exp_probs_b), d->pred_ids, d->pred_w,
                      DS41_N_EXPERT, used, DS41_EXPERT_WEIGHT_SCALE, n) ||
       hipMemcpyAsync(ids, d->pred_ids, (size_t)n * used * sizeof(int32_t),
                      hipMemcpyDeviceToHost, nullptr) != hipSuccess ||
-      hipEventRecord(d->pred_events[il + 1], nullptr) != hipSuccess)
+      hipEventRecord(d->pred_events[target], nullptr) != hipSuccess)
     d->pred_ok = false;
   else
-    (void)ds41_expert_store_predict(d->engine->expert_store, il + 1,
-                                    d->pred_events[il + 1], ids, n * used,
+    (void)ds41_expert_store_predict(d->engine->expert_store, target,
+                                    d->pred_events[target], ids, n * used,
                                     n >= kPrefillPredictTokens);
+}
+
+void predict_next_layer(ds41_decoder* d, uint32_t il, uint32_t n, bool misses_now) {
+  if (d->tracing) return;
+  if (!d->engine->expert_store || !d->pred_ok || il + 1 >= d->pass_end)
+    return;
+  d->pass_missed = d->pass_missed || misses_now;
+  if (n < kPrefillPredictTokens && !d->pass_missed)
+    return;
+  if (n <= DS41_DECODER_MAX_JOINT && !misses_now)
+    return;
+  predict_layer(d, il + 1, n);
+}
+
+/* A prompt batch's first layer has no layer before it to predict its
+ * experts: route it on the embedding, normed with its FFN norm, so its
+ * reads run during its attention. xn is free once the streams are copied. */
+bool predict_first_layer(ds41_decoder* d, uint32_t n) {
+  if (d->tracing || !d->engine->expert_store || !d->pred_ok || n < kPrefillPredictTokens)
+    return true;
+  const ds41_layer_weights* l = &d->engine->weights->layer[0];
+  if (!l->ffn_exp_probs_b) return true;
+  if (ds41_v41_rms_norm(d->xn, f32(d, l->ffn_norm), d->xn, n, kDim, DS41_RMS_EPS)) return false;
+  ds41_expert_store_expect(d->engine->expert_store, 0);
+  predict_layer(d, 0, n);
+  return true;
 }
 
 bool moe(ds41_decoder* d, uint32_t il, uint32_t n) {
@@ -1075,7 +1168,11 @@ bool moe(ds41_decoder* d, uint32_t il, uint32_t n) {
                        hi - lo))
       return false;
   }
-  if (d->tracing && n <= DS41_DECODER_MAX_JOINT && !trace_predict(d, il, n)) return false;
+  if (d->tracing && n <= kTraceRows && !trace_predict(d, il, n)) return false;
+  /* The replayed rows of a prompt's last batch are its last trace_tail rows. */
+  if (d->tracing && n > kTraceRows && d->trace_tail && il + 1 == DS41_FIRST_DECODER_LAYER &&
+      !trace_predict(d, il, d->trace_tail, d->xn + (uint64_t)(n - d->trace_tail) * kDim))
+    return false;
   const int gate_type = (int)l->ffn_gate_exps->type;
   const int up_type = (int)l->ffn_up_exps->type;
   const int down_type = (int)l->ffn_down_exps->type;
@@ -1085,12 +1182,13 @@ bool moe(ds41_decoder* d, uint32_t il, uint32_t n) {
   const bool fused_pair = gate_type == up_type && (gate_type == (int)DS41_TENSOR_IQ1_S ||
                                                    gate_type == (int)DS41_TENSOR_IQ1_M ||
                                                    gate_type == (int)DS41_TENSOR_IQ2_XXS ||
-                                                   gate_type == (int)DS41_TENSOR_IQ2_XS);
+                                                   gate_type == (int)DS41_TENSOR_IQ2_XS ||
+                                                   gate_type == (int)DS41_TENSOR_IQ2_S);
   const bool grouped = n > 1 && n <= d->decode_rows && expert_block_bytes(gate_type) &&
                        expert_block_bytes(up_type) && expert_block_bytes(down_type);
   const bool small = n == 1 || grouped;
   const bool f16_gate = !small && gate_type == up_type && routed_f16_type(gate_type);
-  const bool f16_down = !small && routed_f16_type(down_type);
+  const bool f16_down = !small && routed_f16_down_type(down_type);
   /* FP16 copies of the input and of the SwiGLU rows, in the buffers the
    * MMQ path would use for the gate and up rows. The routed FP16 gate/up
    * and the shared expert's dense projections share the input copy. */
@@ -1111,24 +1209,50 @@ bool moe(ds41_decoder* d, uint32_t il, uint32_t n) {
     int gate_type;
     int32_t* plan_hit;
     bool fused;
+    bool small;  // a decode-sized batch keeps the grouped-GEMV split below
+    bool f16;    // the batched FP16 pair path: its kernels take device plans
     const uint16_t* x16;
+    uint16_t* mid16 = nullptr;
+    int down_type = 0;
     bool gate_up_done = false;
     bool shared_done = false;
     ds41_expert_overlap info{};
   };
   StreamWork work{d,         l,          il,        n,         (uint32_t)rows, (uint32_t)used, gate_type,
-                  d->expert_plan_split[0], fused_pair, shared_x16};
+                  d->expert_plan_split[0], fused_pair, small, f16_gate && f16_down, shared_x16,
+                  f16_gate ? reinterpret_cast<uint16_t*>(d->u6) : nullptr, down_type};
   const auto streamed_overlap = [](void* context, const ds41_expert_overlap* info) {
     StreamWork& w = *static_cast<StreamWork*>(context);
     if (!w.shared_done && !shared_moe(w.d, w.layer, w.n, w.x16))
       return false;
     predict_next_layer(w.d, w.il, w.n, info && info->miss_rows > 0);
-    if (!info || !info->hit_ids || info->miss_rows == 0 || info->miss_rows == info->rows || !w.fused)
+    if (!info || !info->hit_ids || info->miss_rows == 0 || info->miss_rows == info->rows || !w.fused ||
+        !(w.f16 || w.small))
       return true;
     w.info = *info;
     w.gate_up_done = true;
     const uint64_t expert_bytes =
         (uint64_t)DS41_N_FF_EXP * kDim / 256 * expert_block_bytes(w.gate_type);
+    if (w.f16) {
+      /* The resident experts' gate+up and down run while the reads stream:
+       * the plan and launches go into the routed plan buffer the batch's own
+       * kernels use, stream-ordered after this callback's work. */
+      int32_t* plan_rows = w.d->routed_plan;
+      int32_t* plan_bounds = plan_rows + w.rows;
+      int32_t* plan_tiles = plan_bounds + DS41_N_EXPERT + 1;
+      const uint32_t n_tiles = w.rows / 64 + DS41_N_EXPERT;
+      const uint64_t down_bytes = (uint64_t)DS41_N_FF_EXP * kDim / 256 * expert_block_bytes(w.down_type);
+      const auto* down_table = static_cast<const void* const*>(info->table[2]);
+      return ds41_v41_routed_plan_device(info->hit_ids, w.rows, DS41_N_EXPERT, plan_rows, plan_bounds,
+                                         plan_tiles) == 0 &&
+             ds41_v41_routed_f16(w.gate_type, info->table[0], info->table[1], expert_bytes, w.x16, w.used,
+                                 plan_rows, plan_bounds, plan_tiles, n_tiles, w.d->route_w, kSwigluLimit, w.mid16,
+                                 1, DS41_N_FF_EXP, kDim, static_cast<const void* const*>(info->table[0]),
+                                 static_cast<const void* const*>(info->table[1])) == 0 &&
+             ds41_v41_routed_f16(w.down_type, info->table[2], nullptr, down_bytes, w.mid16, 1, plan_rows,
+                                 plan_bounds, plan_tiles, n_tiles, nullptr, 0.0f, w.d->down6, 0, kDim,
+                                 DS41_N_FF_EXP, down_table, nullptr) == 0;
+    }
     if (w.n == 1)
       return ds41_v41_gemv_experts_swiglu(w.gate_type, info->table[0], info->table[1], expert_bytes,
                                           info->hit_ids, w.used, w.d->xn, 0, 1, w.d->route_w, kSwigluLimit,
@@ -1155,12 +1279,12 @@ bool moe(ds41_decoder* d, uint32_t il, uint32_t n) {
     if (!ds41_expert_store_prepare(d->engine->expert_store, il, d->route_ids, n, &gate, &up, &down,
                                    streamed_overlap, &work, work.shared_done ? d->routes_ready : nullptr))
       return false;
-    for (uint32_t lead = 1; d->tracing && lead <= 2; ++lead) {
+    for (uint32_t lead = 1; d->tracing && lead <= kTraceLeads; ++lead) {
       uint32_t& rows_pred = d->trace_rows[il][lead - 1];
       if (rows_pred == n)
         ds41_expert_store_trace_prediction(
             d->engine->expert_store, il, lead,
-            d->trace_pinned + ((uint64_t)il * 2 + (lead - 1)) * DS41_DECODER_MAX_JOINT * kTraceK, n, kTraceK);
+            d->trace_pinned + ((uint64_t)il * kTraceLeads + (lead - 1)) * kTraceRows * kTraceK, n, kTraceK);
       rows_pred = 0;
     }
   } else {
@@ -1202,10 +1326,12 @@ bool moe(ds41_decoder* d, uint32_t il, uint32_t n) {
   uint32_t n_tiles = 0;
   if (f16_gate && f16_down) {
     // Both projections consume the device plan; MMQ's host bucket classes
-    // and maximum-row bounds are unused on this path.
+    // and maximum-row bounds are unused on this path.  When the store's read
+    // overlap already ran the resident experts' gate+up and down, both
+    // passes here cover only the rows the reads filled.
     n_tiles = (uint32_t)rows / 64 + DS41_N_EXPERT;
-    if (ds41_v41_routed_plan_device(d->route_ids, (uint32_t)rows, DS41_N_EXPERT, d->routed_plan,
-                                     plan_bounds, plan_tiles))
+    if (ds41_v41_routed_plan_device(work.gate_up_done ? work.info.miss_ids : d->route_ids, (uint32_t)rows,
+                                    DS41_N_EXPERT, d->routed_plan, plan_bounds, plan_tiles))
       return false;
   } else if (!small) {
     std::vector<int32_t> ids((size_t)rows);
@@ -1544,7 +1670,8 @@ std::shared_ptr<SharedActivations> make_activations(ds41_engine* engine, uint32_
          a.expert_plan && a.expert_plan_split[0] && a.expert_plan_split[1];
   }
   for (uint32_t slot = 0; slot < DS41_N_ENGRAM_LAYER && ok; slot++)
-    ok = hipHostMalloc(&a.engram_pinned[slot], cap * kEngramIn * sizeof(float)) == hipSuccess;
+    ok = hipHostMalloc(&a.engram_pinned[slot], cap * kEngramIn * sizeof(float)) == hipSuccess &&
+         hipHostMalloc(&sh->engram_ahead[slot], cap * kEngramIn * sizeof(float)) == hipSuccess;
   ok = ok && hipHostMalloc(&a.embd_pinned, cap * (kDim + kHc) * sizeof(float)) == hipSuccess;
   return ok ? sh : nullptr;
 }
@@ -1626,7 +1753,7 @@ ds41_decoder* ds41_decoder_create(ds41_engine* engine, uint32_t context) {
     if (hipEventCreateWithFlags(&d->routes_ready, hipEventDisableTiming) != hipSuccess)
       d->routes_ready = nullptr;
     if (ok && ds41_expert_store_tracing(engine->expert_store)) {
-      const uint64_t span = 2ull * DS41_DECODER_MAX_JOINT * kTraceK;
+      const uint64_t span = (uint64_t)kTraceLeads * kTraceRows * kTraceK;
       d->trace_ids = alloc<int32_t>(d->allocations, span);
       d->trace_w = alloc<float>(d->allocations, span);
       d->tracing = d->trace_ids && d->trace_w &&
@@ -1644,6 +1771,7 @@ ds41_decoder* ds41_decoder_create(ds41_engine* engine, uint32_t context) {
 
 void ds41_decoder_destroy(ds41_decoder* d) {
   if (!d) return;
+  if (d->shared && d->shared->ahead.owner == d) join_engram_ahead(*d->shared);
   if (d->pred_pinned && d->engine && d->engine->expert_store)
     ds41_expert_store_predict_flush(d->engine->expert_store);
   for (hipEvent_t event : d->pred_events)
@@ -1799,6 +1927,12 @@ int ds41_decoder_adopt(ds41_decoder* d, const int* tokens, uint32_t n) {
   return 0;
 }
 
+int ds41_decoder_set_lookahead(ds41_decoder* d, const int* tokens, uint32_t n) {
+  if (!d || (n && !tokens)) return 1;
+  d->lookahead.assign(tokens, tokens + n);
+  return 0;
+}
+
 int ds41_decoder_reset(ds41_decoder* d) {
   if (!d) return 1;
   for (uint32_t il = 0; il < DS41_N_LAYER; il++) {
@@ -1862,6 +1996,7 @@ int eval_rows(ds41_decoder* d, const int* tokens, uint32_t n, uint32_t keep_from
       d->pos + n > d->context || d->spec_n)
     return 1;
   d->resident_logits = 0;
+  d->pass_missed = false;
   const uint32_t pos0 = d->pos;
   const uint32_t skip = std::clamp(keep_from, pos0, pos0 + n) - pos0;
   const uint32_t kept = n - skip;
@@ -1890,13 +2025,68 @@ int eval_rows(ds41_decoder* d, const int* tokens, uint32_t n, uint32_t keep_from
       memcpy(&engram_rows[((uint64_t)layer * n + t) * DS41_ENGRAM_COLS], rows[layer], sizeof(rows[layer]));
   }
 
-  /* Every Engram layer's rows are read while the GPU runs the layers before it. */
-  std::future<bool> engram_reads[DS41_N_ENGRAM_LAYER];
-  for (uint32_t il = 0; il < DS41_N_LAYER; il++) {
-    const int slot = ds41_layer_engram_slot(il);
-    if (slot < 0) continue;
-    engram_reads[slot] = std::async(std::launch::async, engram_read, d,
-                                    &engram_rows[(uint64_t)slot * n * DS41_ENGRAM_COLS], n, d->engram_pinned[slot]);
+  /* A lookahead read made during the previous batch serves this one when it
+   * covered exactly these tokens after the same history; any other pending
+   * lookahead read is joined, since it writes buffers this batch may use. */
+  SharedActivations& sh = *d->shared;
+  EngramAhead& ahead = sh.ahead;
+  const bool from_ahead = ahead.read.valid() && ahead.owner == d && ahead.pos == pos0 &&
+                          ahead.history == history && engram_tail_matches(ahead.tail, d->engram_history, history) &&
+                          ahead.tokens.size() == n && std::equal(tokens, tokens + n, ahead.tokens.begin()) &&
+                          d->image_runs.empty();
+  const int set = from_ahead ? ahead.set : 0;
+  /* The chain below waits for it, so only the first Engram layer does. */
+  std::future<bool> pending = std::move(ahead.read);
+  const std::vector<int64_t> pending_rows = std::move(ahead.rows);
+  ahead.owner = nullptr;
+  float* engram_src[DS41_N_ENGRAM_LAYER];
+  for (uint32_t slot = 0; slot < DS41_N_ENGRAM_LAYER; slot++)
+    engram_src[slot] = set ? sh.engram_ahead[slot] : sh.views.engram_pinned[slot];
+
+  /* Otherwise every Engram layer's rows are read while the GPU runs the
+   * layers before it, one layer after the other in layer order: the first
+   * Engram layer runs a layer after the batch starts, and the later layer's
+   * rows only slowed it down. Slots are in layer order. The chain is joined
+   * before the promises and rows it writes go out of scope. */
+  std::promise<bool> engram_done[DS41_N_ENGRAM_LAYER];
+  std::shared_future<bool> engram_reads[DS41_N_ENGRAM_LAYER];
+  for (uint32_t slot = 0; slot < DS41_N_ENGRAM_LAYER; slot++) engram_reads[slot] = engram_done[slot].get_future().share();
+  std::future<void> engram_chain = std::async(std::launch::async, [&] {
+    const bool ahead_ok = !pending.valid() || pending.get() || !from_ahead;
+    for (uint32_t slot = 0; slot < DS41_N_ENGRAM_LAYER; slot++)
+      engram_done[slot].set_value(from_ahead ? ahead_ok
+                                             : engram_read(d->engine, &engram_rows[(uint64_t)slot * n * DS41_ENGRAM_COLS],
+                                                           n, engram_src[slot]));
+  });
+  /* The next prompt batch's rows are read into the other buffer set once
+   * this batch's are in, so its first Engram layer does not wait for them. */
+  if (!d->lookahead.empty() && d->images.empty() && d->lookahead.size() <= d->capacity) {
+    const uint32_t m = (uint32_t)d->lookahead.size();
+    std::vector<int64_t> hist = d->engram_history;
+    ahead.rows.assign((uint64_t)DS41_N_ENGRAM_LAYER * m * DS41_ENGRAM_COLS, 0);
+    for (uint32_t t = 0; t < m; t++) {
+      int64_t rows[DS41_N_ENGRAM_LAYER][DS41_ENGRAM_COLS];
+      engram_hash_on(d, hist, d->lookahead[t], rows);
+      for (uint32_t layer = 0; layer < DS41_N_ENGRAM_LAYER; layer++)
+        memcpy(&ahead.rows[((uint64_t)layer * m + t) * DS41_ENGRAM_COLS], rows[layer], sizeof(rows[layer]));
+    }
+    ahead.owner = d;
+    ahead.pos = pos0 + n;
+    ahead.history = d->engram_history.size();
+    engram_tail(d->engram_history, ahead.history, ahead.tail);
+    ahead.tokens = d->lookahead;
+    ahead.set = set ^ 1;
+    std::array<float*, DS41_N_ENGRAM_LAYER> targets;
+    for (uint32_t slot = 0; slot < DS41_N_ENGRAM_LAYER; slot++)
+      targets[slot] = ahead.set ? sh.engram_ahead[slot] : sh.views.engram_pinned[slot];
+    ahead.read = std::async(std::launch::async, [after = engram_reads[DS41_N_ENGRAM_LAYER - 1], engine = d->engine,
+                                                 rows = ahead.rows.data(), m, targets] {
+      after.wait();
+      bool read_ok = true;
+      for (uint32_t slot = 0; slot < DS41_N_ENGRAM_LAYER; slot++)
+        read_ok = engram_read(engine, rows + (uint64_t)slot * m * DS41_ENGRAM_COLS, m, targets[slot]) && read_ok;
+      return read_ok;
+    });
   }
 
   /* Embedding, replicated over the hc residual streams; layer 0 pre-mix is one-hot. */
@@ -1935,6 +2125,9 @@ int eval_rows(ds41_decoder* d, const int* tokens, uint32_t n, uint32_t keep_from
                           hipMemcpyDeviceToDevice, 0) == hipSuccess;
   ok = ok && hipMemcpyAsync(d->pre[0], one_hot, (uint64_t)n * kHc * sizeof(float), hipMemcpyHostToDevice, 0) ==
                  hipSuccess;
+  d->pass_end = kept ? DS41_N_LAYER : DS41_FIRST_DECODER_LAYER;
+  d->trace_tail = skip && kept <= kTraceRows ? kept : 0;
+  ok = ok && predict_first_layer(d, n);
 
   const int prev = 0;
   const uint32_t feature_rows = std::min(kept, DS41_DSPARK_FEATURE_ROWS);
@@ -1949,7 +2142,7 @@ int eval_rows(ds41_decoder* d, const int* tokens, uint32_t n, uint32_t keep_from
       if (!ok || !kept) break;
     }
     const int slot = ds41_layer_engram_slot(il);
-    if (slot >= 0) ok = engram_reads[slot].get() && engram(d, il, d->engram_pinned[slot], n);
+    if (slot >= 0) ok = engram_reads[slot].get() && engram(d, il, engram_src[slot], n);
     if (d->features) {
       for (uint32_t f = 0; f < DS41_DSPARK_TARGET_LAYERS && ok; f++)
         if (il == DS41_DSPARK_TARGET_LAYER[f])
@@ -1967,6 +2160,8 @@ int eval_rows(ds41_decoder* d, const int* tokens, uint32_t n, uint32_t keep_from
     }
   }
   d->window_floor = 0;
+  d->pass_end = DS41_N_LAYER;
+  d->trace_tail = 0;
 
   /* Final mix and norm for the requested rows, then the vocabulary projection in passes. */
   const uint32_t first = rows - logit_rows;
@@ -2086,11 +2281,13 @@ int ds41_decoder_eval_joint(ds41_decoder* const* ds, const int* const* tokens, c
         memcpy(&engram_rows[((uint64_t)layer * total + r + t) * DS41_ENGRAM_COLS], rows[layer], sizeof(rows[layer]));
     }
   }
+  /* A pending prompt lookahead read may write these buffers. */
+  join_engram_ahead(*lead->shared);
   std::future<bool> engram_reads[DS41_N_ENGRAM_LAYER];
   for (uint32_t il = 0; il < DS41_N_LAYER; il++) {
     const int slot = ds41_layer_engram_slot(il);
     if (slot >= 0)
-      engram_reads[slot] = std::async(std::launch::async, engram_read, lead,
+      engram_reads[slot] = std::async(std::launch::async, engram_read, lead->engine,
                                       &engram_rows[(uint64_t)slot * total * DS41_ENGRAM_COLS], total,
                                       lead->engram_pinned[slot]);
   }
@@ -2228,6 +2425,14 @@ bool ds41_decoder_sample(ds41_decoder* d, uint32_t row, const ds41_v41_proposal*
   const float* logits = d->shared->views.logits + (uint64_t)(d->logits_row0 + row) * DS41_N_VOCAB;
   return d->sample_scratch &&
          ds41_v41_sample_row(logits, DS41_N_VOCAB, q, temperature, u, u2, d->sample_scratch, out) == 0;
+}
+
+bool ds41_decoder_softmax_totals(ds41_decoder* d, uint32_t row, float temperature, double* maximum, double* sum) {
+  if (!d || row >= d->resident_logits || d->logits_gen != d->shared->logits_gen) return false;
+  if (!d->sample_scratch) d->sample_scratch = alloc<uint8_t>(d->allocations, DS41_V41_SAMPLE_SCRATCH_BYTES);
+  const float* logits = d->shared->views.logits + (uint64_t)(d->logits_row0 + row) * DS41_N_VOCAB;
+  return d->sample_scratch &&
+         ds41_v41_softmax_totals(logits, DS41_N_VOCAB, temperature, d->sample_scratch, maximum, sum) == 0;
 }
 
 bool ds41_decoder_enable_features(ds41_decoder* d) {

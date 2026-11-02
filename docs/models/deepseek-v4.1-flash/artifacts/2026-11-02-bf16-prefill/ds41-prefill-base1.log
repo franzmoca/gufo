@@ -1,0 +1,26 @@
+2026-11-02 04:26:00 [INFO] [ds41] DeepSeek V4.1 Flash: 5 backbone shard(s), 153.29 GiB device-eligible weights; Engram /mnt/data/models/ds41/unsloth-ud-iq2xxs/UD-IQ2_XXS/DeepSeek-V4.1-Flash-1017-UD-IQ2_XXS-00006-of-00006.gguf (103.00 GiB, 144 B rows, read from disk)
+2026-11-02 04:26:00 [INFO] [ds4] backend initialized on AMD Radeon 8060S Graphics (sm_115)
+2026-11-02 04:26:00 [INFO] [ds4] native MMQ enabled
+2026-11-02 04:26:00 [INFO] [ds41] streaming routed experts: 7.04 GiB dense weights, 121.02 GiB available unified memory
+2026-11-02 04:26:00 [INFO] [ds4] loading model tensors into device cache
+2026-11-02 04:26:01 [INFO] [ds4] ROCm startup model cache prepared 6.89 GiB of tensor spans in 1.138s
+2026-11-02 04:26:01 [INFO] [ds41] expert tails /mnt/data/models/ds41/unsloth-ud-iq2xxs/UD-IQ2_XXS/DeepSeek-V4.1-Flash-1017-UD-IQ2_XXS-00001-of-00006.gguf.expert-tails: 73.01 GiB, 50% of each expert read from the GGUF
+2026-11-02 04:26:15 [INFO] [ds41] expert seed (built-in V4.1 ranking): cached 10397 of 10397 experts (10397 ranked) from 98.68 GiB in 14.15 s
+2026-11-02 04:26:25 [INFO] [ds41] expert cache interval: 95.0% route hits, 2.19 MiB read/token (67.3% prefetched), 1.20 ms host wait/token (0.66 routes, 0.10 reads), 102.11 GiB allocated, 8192 tokens
+2026-11-02 04:26:27 [INFO] [ds41] expert cache interval: 99.1% route hits, 3.27 MiB read/token (66.5% prefetched), 0.96 ms host wait/token (0.79 routes, 0.16 reads), 102.11 GiB allocated, 2048 tokens
+2026-11-02 04:26:29 [INFO] [ds41] expert cache interval: 99.7% route hits, 2.57 MiB read/token (64.7% prefetched), 0.95 ms host wait/token (0.83 routes, 0.11 reads), 102.11 GiB allocated, 2048 tokens
+2026-11-02 04:26:31 [INFO] [ds41] expert cache interval: 99.7% route hits, 2.40 MiB read/token (66.6% prefetched), 0.89 ms host wait/token (0.78 routes, 0.10 reads), 102.11 GiB allocated, 2048 tokens
+[Model Load]: 15.4983 s
+| model                            |       size | backend    |               test |                   t/s |
+| -------------------------------- | ---------- | ---------- | ------------------ | --------------------- |
+| DeepSeek V4.1 Flash              | 256.95 GiB | ROCm (HIP) |     pp2048 @ d8192 |      1060.99 ± 43.03 |
+2026-11-02 04:26:35 [INFO] [ds41] expert cache interval: 99.3% route hits, 20.89 MiB read/token (19.7% prefetched), 53.26 ms host wait/token (49.64 routes, 2.95 reads), 102.11 GiB allocated, 64 tokens
+2026-11-02 04:26:39 [INFO] [ds41] expert cache interval: 99.7% route hits, 8.67 MiB read/token (24.0% prefetched), 47.00 ms host wait/token (44.98 routes, 1.50 reads), 102.11 GiB allocated, 64 tokens
+2026-11-02 04:26:42 [INFO] [ds41] expert cache interval: 99.9% route hits, 3.97 MiB read/token (17.3% prefetched), 46.27 ms host wait/token (44.81 routes, 1.11 reads), 102.11 GiB allocated, 64 tokens
+2026-11-02 04:26:46 [INFO] [ds41] expert cache interval: 99.9% route hits, 1.70 MiB read/token (31.7% prefetched), 45.71 ms host wait/token (44.98 routes, 0.56 reads), 102.11 GiB allocated, 64 tokens
+2026-11-02 04:26:49 [INFO] [ds41] expert cache interval: 100.0% route hits, 0.00 MiB read/token (0.0% prefetched), 44.84 ms host wait/token (44.78 routes, 0.00 reads), 102.11 GiB allocated, 64 tokens
+2026-11-02 04:26:52 [INFO] [ds41] expert cache interval: 100.0% route hits, 0.00 MiB read/token (0.0% prefetched), 44.83 ms host wait/token (44.76 routes, 0.00 reads), 102.11 GiB allocated, 64 tokens
+| DeepSeek V4.1 Flash              | 256.95 GiB | ROCm (HIP) |      tg128 @ d8192 |         18.48 ± 1.27 |
+2026-11-02 04:26:52 [INFO] [ds41] expert cache total: 97.1% route hits, 2.52 MiB read/token, 2.28 ms host wait/token (1.89 routes, 0.13 reads), 102.11 GiB allocated, 23.11 GiB prefetched (2.62 GiB dropped)
+2026-11-02 04:26:52 [INFO] [ds41] expert reads: 85441 direct, 0 buffered
+

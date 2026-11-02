@@ -29,10 +29,12 @@ constexpr std::array<int, 4> kRowParts = {
     DS41_STATE_COMP, DS41_STATE_COMP_SCALE, DS41_STATE_INDEX_K,
     DS41_STATE_INDEX_SCALE};
 struct Metadata {
-  std::uint32_t version{2};
+  std::uint32_t version{3};
   std::uint32_t position{};
   // PromptLookup::State, which the tokens cannot rebuild.
   std::uint32_t lookup_resume{}, lookup_request_start{};
+  // The first position of the decoder-layer rows (ds41_session_decoder_from).
+  std::uint32_t decoder_from{};
 };
 static_assert(std::is_trivially_copyable_v<Metadata>);
 // Positions [start, end) held by the drafter rings.
@@ -556,7 +558,8 @@ cache::Completion ContinuationAdapter::CapturePrivatePiece(
   if (c.descriptor.kind != cache::ComponentKind::kPrivateState ||
       offset > total || bytes.size() > total - offset)
     throw std::invalid_argument("invalid DeepSeek V4.1 private piece");
-  Metadata metadata{.position = static_cast<std::uint32_t>(state.Tokens())};
+  Metadata metadata{.position = static_cast<std::uint32_t>(state.Tokens()),
+                    .decoder_from = ds41_session_decoder_from(state.Native())};
   ds41_session_lookup_state(state.Native(), &metadata.lookup_resume,
                             &metadata.lookup_request_start);
   DrafterRange drafter;
@@ -664,7 +667,8 @@ bool ContinuationAdapter::Validate(
   const auto n = state.expected.front().valid_rows;
   if (state.metadata.version != Metadata{}.version ||
       state.metadata.position != n ||
-      ds41_session_finish_restore(state.Native()) != 0 ||
+      ds41_session_finish_restore(state.Native(),
+                                  state.metadata.decoder_from) != 0 ||
       ds41_session_set_lookup_state(state.Native(),
                                     state.metadata.lookup_resume,
                                     state.metadata.lookup_request_start) != 0)

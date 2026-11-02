@@ -151,7 +151,10 @@ int main(int argc, char** argv) {
       {"iq2xxs_down", 16, 66, 5120, 2304, true},
       {"iq2xs_up", 17, 74, 2304, 5120, false},
       {"iq2xs_down", 17, 74, 5120, 2304, true},
+      {"iq2s_up", 22, 82, 2304, 5120, false},
       {"iq2s_down", 22, 82, 5120, 2304, true},
+      {"iq3xxs_down", 18, 98, 5120, 2304, true},
+      {"q2k_down", 10, 84, 5120, 2304, true},
   };
   constexpr int kExperts = 384;
   constexpr int kRounds = 64;
@@ -174,6 +177,11 @@ int main(int argc, char** argv) {
     int32_t* ids = nullptr;
     void* table = nullptr;
     (void)hipMalloc(&w, host.size());
+    void* w_up = nullptr;  // the fused pass's up matrices
+    if (!e.per_slot) {
+      (void)hipMalloc(&w_up, host.size());
+      (void)hipMemcpy(w_up, host.data(), host.size(), hipMemcpyHostToDevice);
+    }
     (void)hipMalloc(&x, xh.size() * sizeof(float));
     (void)hipMalloc(&y, static_cast<std::size_t>(e.m) * 6 * sizeof(float));
     (void)hipMalloc(&ids, idh.size() * sizeof(int32_t));
@@ -191,6 +199,8 @@ int main(int argc, char** argv) {
                     hipMemcpyHostToDevice);
     // 0 = mmvq, 1 = FP32 GEMV, 2 = FP32 GEMV over the per-expert pointer
     // table (the streamed store's layout); 2 must match 1 bit for bit.
+    // Gate/up shapes add 3 = the fused gate/up SwiGLU pass (this matrix as
+    // both), against two mmvq launches (mode 0 twice).
     auto launch = [&](int r, int mode) {
       if (mode == 0) {
         if (e.per_slot)
@@ -202,16 +212,23 @@ int main(int argc, char** argv) {
       } else if (mode == 1)
         ds41_v41_gemv_experts(e.type, w, per_expert, ids + r * 6, 6, x,
                               e.per_slot ? e.k : 0, 1, y, e.m, e.k);
-      else
+      else if (mode == 2)
         ds41_v41_gemv_experts(e.type, w, per_expert, ids + r * 6, 6, x,
                               e.per_slot ? e.k : 0, 1, y, e.m, e.k,
                               static_cast<const void* const*>(table), 1);
+      else
+        ds41_v41_gemv_experts_swiglu(e.type, w, w_up, per_expert, ids + r * 6,
+                                     6, x, 0, 1, nullptr, 0.0f, y, e.m, e.k);
     };
     std::printf("%-12s %5dx%-5d x6 %5.1f MB", e.name, e.m, e.k,
                 6.0 * per_expert / 1e6);
     std::vector<float> reference;
-    for (int mode = 0; mode < 3; ++mode) {
-      const char* label = mode == 0 ? "mmvq" : mode == 1 ? "fp32" : "table";
+    const int modes = e.per_slot ? 3 : 4;
+    for (int mode = 0; mode < modes; ++mode) {
+      const char* label = mode == 0   ? "mmvq"
+                          : mode == 1 ? "fp32"
+                          : mode == 2 ? "table"
+                                      : "pair";
       hipEvent_t a, b;
       (void)hipEventCreate(&a);
       (void)hipEventCreate(&b);
@@ -225,8 +242,8 @@ int main(int argc, char** argv) {
       float ms = 0;
       (void)hipEventElapsedTime(&ms, a, b);
       const double us = ms * 1000.0 / kRounds;
-      std::printf("  %s %6.1f us %5.1f GB/s", label, us,
-                  6.0 * per_expert / us / 1e3);
+      const double bytes = (mode == 3 ? 12.0 : 6.0) * per_expert;
+      std::printf("  %s %6.1f us %5.1f GB/s", label, us, bytes / us / 1e3);
       (void)hipEventDestroy(a);
       (void)hipEventDestroy(b);
       /* Random blocks can hold NaN scale bits, so compare bit patterns. */
@@ -246,6 +263,8 @@ int main(int argc, char** argv) {
     }
     std::printf("\n");
     (void)hipFree(w);
+    if (w_up)
+      (void)hipFree(w_up);
     (void)hipFree(x);
     (void)hipFree(y);
     (void)hipFree(ids);

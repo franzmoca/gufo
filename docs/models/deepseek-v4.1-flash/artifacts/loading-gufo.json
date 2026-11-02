@@ -16,13 +16,13 @@
       "kernelRelease": "7.2.11-200.fc44.x86_64",
       "memoryTotalBytes": 133616861184,
       "memoryType": "LPDDR5X (Unified)",
-      "rocmVersion": "7.2.3",
+      "rocmVersion": "10.1.0",
       "schemaVersion": "1.0.0"
     },
-    "fingerprintId": "d19fe457f2791c2dec2f2de6cd1c21607a1d51ce20c58e0d686637de1fa0d0a1",
+    "fingerprintId": "bff8ae3f0e7bae9e46a319778d68e9c56b96e0828aaba08ce884dedf8aa82cdc",
     "schemaVersion": "1.0.0"
   },
-  "measuredOn": "2026-10-31",
+  "measuredOn": "2026-11-02",
   "mode": "dspark",
   "model": {
     "id": "DeepSeek-V4.1-Flash-1017",
@@ -30,25 +30,32 @@
   },
   "notes": [
     "file cache reset before each launch with the supplied --drop-caches command",
-    "readiness = HTTP 200 on /ready"
+    "readiness = HTTP 200 on /ready",
+    "rows not measured on 2026-11-02 retain values from 2026-10-31"
   ],
   "referenceName": "reference",
   "rows": {
     "default": {
-      "command": "gufo serve --port 53983 --sessions 1 llm --model DeepSeek-V4.1-Flash-1017-GSQ-RCO-IQ1_M-00001-of-00006.gguf --context 262144 --served-model-name bench --think off --max-pending-per-client 8 --speculative dspark --dspark-model DeepSeek-V4.1-Flash-1017-DSpark-draft-Q2K-Q4K.gguf",
-      "ready_s": 19.691,
+      "command": "gufo serve --port 50719 --sessions 1 llm --model DeepSeek-V4.1-Flash-1017-GSQ-RCO-IQ1_M-00001-of-00006.gguf --context 262144 --served-model-name bench --think off --max-pending-per-client 8 --speculative dspark --dspark-model DeepSeek-V4.1-Flash-1017-DSpark-draft-Q2K-Q4K.gguf",
+      "ready_s": 20.043,
       "ready_s_sd": null,
       "samples": 1
     },
     "iq2xxs": {
-      "command": "gufo serve --port 54081 --sessions 1 llm --model DeepSeek-V4.1-Flash-1017-GSQ-RCO-IQ2_XXS-00001-of-00006.gguf --context 262144 --served-model-name bench --think off --max-pending-per-client 8 --stream-experts --speculative dspark --dspark-model DeepSeek-V4.1-Flash-1017-DSpark-draft-Q2K-Q4K.gguf",
-      "ready_s": 22.465,
+      "command": "gufo serve --port 40045 --sessions 1 llm --model DeepSeek-V4.1-Flash-1017-GSQ-RCO-IQ2_XXS-00001-of-00006.gguf --context 262144 --served-model-name bench --think off --max-pending-per-client 8 --stream-experts --speculative dspark --dspark-model DeepSeek-V4.1-Flash-1017-DSpark-draft-Q2K-Q4K.gguf",
+      "ready_s": 17.329,
       "ready_s_sd": null,
       "samples": 1
     },
     "udiq1m": {
-      "command": "gufo serve --port 49379 --sessions 1 llm --model DeepSeek-V4.1-Flash-1017-UD-IQ1_M-00001-of-00005.gguf --context 262144 --served-model-name bench --think off --max-pending-per-client 8 --stream-experts --speculative dspark --dspark-model DeepSeek-V4.1-Flash-1017-DSpark-draft-Q2K-Q4K.gguf",
-      "ready_s": 22.46,
+      "command": "gufo serve --port 60275 --sessions 1 llm --model DeepSeek-V4.1-Flash-1017-UD-IQ1_M-00001-of-00005.gguf --context 262144 --served-model-name bench --think off --max-pending-per-client 8 --stream-experts --speculative dspark --dspark-model DeepSeek-V4.1-Flash-1017-DSpark-draft-Q2K-Q4K.gguf",
+      "ready_s": 17.33,
+      "ready_s_sd": null,
+      "samples": 1
+    },
+    "udiq2xxs": {
+      "command": "gufo serve --port 46195 --sessions 1 llm --model DeepSeek-V4.1-Flash-1017-UD-IQ2_XXS-00001-of-00006.gguf --context 262144 --served-model-name bench --think off --max-pending-per-client 8 --stream-experts --speculative dspark --dspark-model DeepSeek-V4.1-Flash-1017-DSpark-draft-Q2K-Q4K.gguf",
+      "ready_s": 17.073,
       "ready_s_sd": null,
       "samples": 1
     }
@@ -59,12 +66,12 @@
       "gufo",
       "serve",
       "--port",
-      "49379",
+      "46195",
       "--sessions",
       "1",
       "llm",
       "--model",
-      "DeepSeek-V4.1-Flash-1017-UD-IQ1_M-00001-of-00005.gguf",
+      "DeepSeek-V4.1-Flash-1017-UD-IQ2_XXS-00001-of-00006.gguf",
       "--context",
       "262144",
       "--served-model-name",
@@ -83,7 +90,7 @@
   "source": {
     "buildMode": "nix-release",
     "dirty": true,
-    "revision": "0eb9e89ca9c2a679d6ebd9819cc497e5bf498feb"
+    "revision": "26c7598f33d7b2df239eec3f3173cbba7b79e9c5"
   },
   "table": "loading",
   "target": "gufo"

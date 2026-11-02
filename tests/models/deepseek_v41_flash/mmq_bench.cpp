@@ -6,13 +6,14 @@
  * the caches, so the reads stay DRAM-cold.
  *
  * With --f16 the same passes run through the FP16 matrix-core kernel
- * (IQ1_S, IQ1_M, IQ2_XXS, IQ2_XS). Either path is checked against the
+ * (IQ1_S, IQ1_M, IQ2_XXS, IQ2_XS, IQ2_S). Either path is checked against the
  * FP32-activation expert GEMV on the first slots. --tokens sets the batch
- * (2048 by default).
+ * (2048 by default). --down-type gives the down projection its own type, as
+ * the Unsloth Dynamic builds do (also IQ3_XXS 18 and Q2_K 10, FP16 only).
  *
  *   ds41_mmq_bench [--type 19|29|16|17|22] [--counts FILE] [--line N] [--reps
  * N]
- *                  [--f16 1] [--tokens N]
+ *                  [--f16 1] [--tokens N] [--down-type 18|10|...]
  *   ds41_mmq_bench --type 13|14|8 --dense M,K[,GROUPS] [--tokens N] [--reps N]
  *                  [--x-half 1]
  *
@@ -52,6 +53,10 @@ int BlockBytes(int type) {
       return 74;
     case 22:
       return 82;
+    case 18:
+      return 98;
+    case 10:
+      return 84;
     default:
       return 0;
   }
@@ -74,6 +79,9 @@ void* RandomWeights(int type, std::size_t bytes, std::mt19937& rng) {
                                                            << 12);
         std::memcpy(&pattern[at + 48 + 2 * i], &word, 2);
       }
+    } else if (type == 10) {
+      std::memcpy(&pattern[at + 80], &d, 2);  // Q2_K d and dmin
+      std::memcpy(&pattern[at + 82], &d, 2);
     } else {
       std::memcpy(&pattern[at], &d, 2);
     }
@@ -195,7 +203,7 @@ int DenseBench(int type, int m, int k, int groups, int reps, int kTokens,
 }  // namespace
 
 int main(int argc, char** argv) {
-  int type = 19, line = 0, reps = 5, f16 = 0;
+  int type = 19, line = 0, reps = 5, f16 = 0, down_type = 0;
   int dense_m = 0, dense_k = 0, dense_groups = 1, dense_tokens = 2048;
   bool x_half = false;
   const char* counts_path = nullptr;
@@ -214,14 +222,18 @@ int main(int argc, char** argv) {
       x_half = std::atoi(argv[i + 1]) != 0;
     else if (!std::strcmp(argv[i], "--tokens"))
       dense_tokens = std::atoi(argv[i + 1]);
+    else if (!std::strcmp(argv[i], "--down-type"))
+      down_type = std::atoi(argv[i + 1]);
     else if (!std::strcmp(argv[i], "--dense"))
       std::sscanf(argv[i + 1], "%d,%d,%d", &dense_m, &dense_k, &dense_groups);
   }
   if (dense_m > 0)
     return DenseBench(type, dense_m, dense_k, dense_groups, reps, dense_tokens,
                       x_half);
-  if (!BlockBytes(type)) {
-    std::fprintf(stderr, "unsupported type %d\n", type);
+  if (!down_type)
+    down_type = type;
+  if (!BlockBytes(type) || !BlockBytes(down_type)) {
+    std::fprintf(stderr, "unsupported type %d/%d\n", type, down_type);
     return 1;
   }
   /* With --counts, --tokens N scales the recorded 2048-token line by
@@ -276,7 +288,9 @@ int main(int argc, char** argv) {
       static_cast<std::size_t>(kFf) * kDim / 256 * BlockBytes(type);
   void* gate = RandomWeights(type, expert_bytes * kExperts, rng);
   void* up = RandomWeights(type, expert_bytes * kExperts, rng);
-  void* down = RandomWeights(type, expert_bytes * kExperts, rng);
+  const std::size_t down_bytes =
+      static_cast<std::size_t>(kFf) * kDim / 256 * BlockBytes(down_type);
+  void* down = RandomWeights(down_type, down_bytes * kExperts, rng);
   std::normal_distribution<float> normal;
   std::vector<float> x(static_cast<std::size_t>(tokens) * kDim),
       w(static_cast<std::size_t>(tokens) * kUsed, 0.25f);
@@ -349,11 +363,11 @@ int main(int argc, char** argv) {
                                      kDim, tokens, kExperts, kUsed, 10.0f, 0);
     (void)hipEventRecord(e1, 0);
     if (f16)
-      rc |= ds41_v41_routed_f16(type, down, nullptr, expert_bytes, mid16, 1,
+      rc |= ds41_v41_routed_f16(down_type, down, nullptr, down_bytes, mid16, 1,
                                 drows, dbounds, dtiles, n_tiles, nullptr, 0.0f,
                                 out, 0, kDim, kFf);
     else
-      rc |= ds41_mmq_moe_typed(type, down, mid, dids, out, kDim, kFf,
+      rc |= ds41_mmq_moe_typed(down_type, down, mid, dids, out, kDim, kFf,
                                static_cast<int>(rows), kExperts, 1, 0);
     (void)hipEventRecord(e2, 0);
     (void)hipEventSynchronize(e2);
@@ -377,10 +391,10 @@ int main(int argc, char** argv) {
   const double flops = 2.0 * rows * kFf * kDim;
   const float gu = gu_ms[gu_ms.size() / 2], dn = down_ms[down_ms.size() / 2];
   std::printf(
-      "type %d tokens %d rows %zu max %u classes %d/%d/%d: gate+up %.2f ms "
+      "type %d/%d tokens %d rows %zu max %u classes %d/%d/%d: gate+up %.2f ms "
       "(%.1f TOPS) down %.2f ms (%.1f TOPS)\n",
-      type, tokens, rows, most, class_rows[0], class_rows[1], class_rows[2], gu,
-      2 * flops / gu / 1e9, dn, flops / dn / 1e9);
+      type, down_type, tokens, rows, most, class_rows[0], class_rows[1],
+      class_rows[2], gu, 2 * flops / gu / 1e9, dn, flops / dn / 1e9);
   {
     /* Reference on the first slots: FP32-activation GEMV of each slot. */
     constexpr uint32_t kCheck = 384;
@@ -408,7 +422,7 @@ int main(int argc, char** argv) {
                                    kDim, 1, rg, kFf, kDim);
     rc |= ds41_v41_gemv_experts(type, up, expert_bytes, dids, kCheck, dxr, kDim,
                                 1, ru, kFf, kDim);
-    rc |= ds41_v41_gemv_experts(type, down, expert_bytes, dids, kCheck, mid,
+    rc |= ds41_v41_gemv_experts(down_type, down, down_bytes, dids, kCheck, mid,
                                 kFf, 1, rd, kDim, kFf);
     std::vector<float> hg(kCheck * kFf), hu(kCheck * kFf), hd(kCheck * kDim),
         hm(kCheck * kFf), ho(kCheck * kDim);

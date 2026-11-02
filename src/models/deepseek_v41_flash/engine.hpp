@@ -30,6 +30,7 @@ struct ModelOptions {
   bool stream_experts = false;
   /// Streamed expert cache bytes (0 sizes it from available memory).
   std::uint64_t expert_cache_bytes = 0;
+
   /// Optional DSpark support model. Empty leaves speculative decoding off.
   std::string dspark_model_path;
 };
@@ -96,6 +97,12 @@ public:
   [[nodiscard]] std::uint32_t MaxContext() const noexcept;
   [[nodiscard]] bool HasDspark() const;
   [[nodiscard]] bool ExactPrefill() const;
+  /// Routed experts stream from the SSD through a bounded cache.
+  [[nodiscard]] bool StreamsExperts() const noexcept;
+  /// Re-sizes the streamed expert cache from the memory free now, shrinking it
+  /// or seeding the room left. Call once the sessions exist; pending_bytes is
+  /// memory the caller still allocates later (cache backing that grows).
+  void FitExpertCache(std::uint64_t pending_bytes);
   /// Routes image positions with the MoE gates' image bias, for image
   /// prompts; enable it before creating sessions.
   [[nodiscard]] bool EnableImageRouting(std::string* error_msg = nullptr);
@@ -123,9 +130,9 @@ public:
   // Evaluates the prompt from the longest evaluated prefix. `prompt` is the
   // first part of a prompt ending at `prompt_end` (0: its own end), which
   // bounds the decoder layers' replay to its last tokens; a state synced to
-  // a shorter part only continues to that same end. `images` hold the input
-  // embeddings of the image spans (the positions holding DS41_IMAGE_TOKEN)
-  // that this part evaluates; they need EnableImageRouting.
+  // a shorter part continues the prompts CanContinue accepts. `images` hold
+  // the input embeddings of the image spans (the positions holding
+  // DS41_IMAGE_TOKEN) that this part evaluates; they need EnableImageRouting.
   [[nodiscard]] bool Sync(std::span<const int> prompt,
                           std::string* error_msg = nullptr,
                           std::size_t prompt_end = 0,
@@ -138,6 +145,10 @@ public:
   [[nodiscard]] bool DsparkEnabled() const;
   /// Reset request statistics and draft policy, retaining a restored prefix.
   void BeginRequest();
+  /// Whether the evaluated state continues a prompt of `prompt_end` tokens:
+  /// a state synced to part of a longer prompt lacks the decoder rows that
+  /// a shorter prompt's replay reads (see Sync).
+  [[nodiscard]] bool CanContinue(std::size_t prompt_end) const;
   /// Runs one speculative cycle; a sampler makes it a sampled cycle. A cycle
   /// verifies prompt-lookup copies where the context repeats earlier tokens,
   /// otherwise the drafter's block; without either it is a plain step. Also

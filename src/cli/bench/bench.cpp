@@ -841,6 +841,7 @@ int RunDeepSeekBenchmark(
           runs.push_back(static_cast<double>(prompt_length) / seconds);
           if (options.verbose) {
             std::cerr << "DeepSeek pp depth=" << depth
+                      << " tok/s=" << runs.back()
                       << " payload_bytes=" << session->PayloadBytes() << '\n';
           }
         }

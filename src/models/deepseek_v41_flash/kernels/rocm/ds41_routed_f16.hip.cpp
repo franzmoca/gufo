@@ -1,5 +1,5 @@
-/* Batched routed-expert projections for IQ1_S, IQ1_M, IQ2_XXS, IQ2_XS and IQ2_S weights on
- * the FP16 matrix cores. The activations are rounded to FP16 (11-bit
+/* Batched routed-expert projections for IQ1_S, IQ1_M, IQ2_XXS, IQ2_XS and IQ2_S weights
+ * (and IQ3_XXS and Q2_K down projections) on the FP16 matrix cores. The activations are rounded to FP16 (11-bit
  * mantissa, against the 8-bit block quantization of MMQ's Q8_1 inputs) and
  * each weight decodes to FP16 with its sub-block scale folded in, so the K
  * loop issues no per-block scale arithmetic beside the matrix-core products;
@@ -311,6 +311,87 @@ struct Format<22> {
   }
 };
 
+/* IQ3_XXS (98 bytes): d, 64 codebook bytes (eight per sub-block) and per
+ * sub-block a word of four 7-bit sign indices plus a 4-bit scale: weight =
+ * d (1/2 + s) / 2 * +-magnitude. Group l takes entries 2 l and 2 l + 1 of
+ * its sub-block, four magnitudes each; the LDS codebook holds each entry as
+ * four FP16 magnitudes. */
+template <>
+struct Format<18> {
+  static constexpr int kBytes = 98, kWords = 25;
+  static constexpr bool kAligned = false;
+  static constexpr bool kShareActivations = true;
+  struct Tables {
+    uint2 grid[256];
+    uint2 signs[128];
+  };
+  static __device__ void fill(Tables& t, int tid) {
+    const uint32_t g = iq3xxs_grid[tid];
+    t.grid[tid] = make_uint2(pack_half2(static_cast<float>(g & 0xffu), static_cast<float>((g >> 8) & 0xffu)),
+                             pack_half2(static_cast<float>((g >> 16) & 0xffu), static_cast<float>(g >> 24)));
+    Format<16>::fill_signs(t.signs, tid);
+  }
+  struct Sub {
+    uint32_t q[2], aux;
+    uint32_t scale;  // half2 (s, s)
+  };
+  static __device__ __forceinline__ Sub sub(const Raw<kWords>& b, int ib) {
+    const uint32_t aux = __builtin_amdgcn_alignbyte(b.w[17 + ib], b.w[16 + ib], 2);
+    const float scale = half_bits(b.w[0]) * (0.5f + static_cast<float>(aux >> 28)) * 0.5f;
+    return {{__builtin_amdgcn_alignbyte(b.w[2 * ib + 1], b.w[2 * ib], 2),
+             __builtin_amdgcn_alignbyte(b.w[2 * ib + 2], b.w[2 * ib + 1], 2)},
+            aux,
+            pack_half2(scale, scale)};
+  }
+  static __device__ __forceinline__ void decode(const Sub& s, int l, const Tables& t, uint32_t* out) {
+    const uint32_t q = s.q[l / 2] >> (16 * (l % 2));
+    const uint2 g0 = t.grid[q & 0xffu], g1 = t.grid[(q >> 8) & 0xffu];
+    Format<16>::apply(make_uint4(g0.x, g0.y, g1.x, g1.y), t.signs[(s.aux >> (7 * l)) & 127u], s.scale, out);
+  }
+};
+
+/* Q2_K (84 bytes, word aligned): scales[16], qs[64], d, dmin. Sub-block ib
+ * (half ib / 4 of the block, bit pair ib % 4 of its 32 code bytes) has two
+ * 16-value scale bytes: weight = d (sc & 15) q - dmin (sc >> 4). Group l
+ * reads code bytes 8 l .. 8 l + 7 of its half; each code picks the high
+ * byte of its FP16 value (0, 1, 2, 3) by permute, as the IQ1 decode does,
+ * then one FMA per pair applies the scale and offset. */
+template <>
+struct Format<10> {
+  static constexpr int kBytes = 84, kWords = 21;
+  static constexpr bool kAligned = true;
+  static constexpr bool kShareActivations = false;
+  struct Tables {
+    uint32_t unused;
+  };
+  static __device__ void fill(Tables&, int) {}
+  struct Sub {
+    uint32_t q[8], affine[2];
+  };
+  static __device__ __forceinline__ Sub sub(const Raw<kWords>& b, int ib) {
+    const float d = half_bits(b.w[20]), dmin = half_bits(b.w[20] >> 16);
+    const uint32_t shift = 2 * (ib % 4);
+    Sub s;
+#pragma unroll
+    for (int i = 0; i < 8; ++i) s.q[i] = (b.w[4 + 8 * (ib / 4) + i] >> shift) & 0x03030303u;
+#pragma unroll
+    for (int p = 0; p < 2; ++p) {
+      const uint32_t sc = (b.w[(2 * ib + p) / 4] >> (8 * ((2 * ib + p) % 4))) & 0xffu;
+      s.affine[p] = pack_half2(d * static_cast<float>(sc & 15u), -dmin * static_cast<float>(sc >> 4));
+    }
+    return s;
+  }
+  /* l is a lane-dependent group, so the words are selected, not indexed:
+   * an indexed read moved the code words to scratch memory (+50% time). */
+  static __device__ __forceinline__ void decode(const Sub& s, int l, const Tables&, uint32_t* out) {
+    constexpr uint32_t kHigh = 0x42403c00u;  // FP16 0, 1, 2, 3: high bytes
+    const uint32_t q0 = l == 0 ? s.q[0] : l == 1 ? s.q[2] : l == 2 ? s.q[4] : s.q[6];
+    const uint32_t q1 = l == 0 ? s.q[1] : l == 1 ? s.q[3] : l == 2 ? s.q[5] : s.q[7];
+    const uint2 bytes = make_uint2(__builtin_amdgcn_perm(0u, kHigh, q0), __builtin_amdgcn_perm(0u, kHigh, q1));
+    iq1_decode8(bytes, l < 2 ? s.affine[0] : s.affine[1], out);
+  }
+};
+
 /* Lane L's word from lane L ^ 16, without the destination's old value
  * (fetch-inactive and bound-control set; every lane is active here), so no
  * register is copied for it before each permute. */
@@ -503,7 +584,11 @@ void launch_routed(const uint8_t* w, const uint8_t* w_up, const uint8_t* const* 
                    const uint8_t* const* w_up_table, uint64_t expert_bytes, const uint16_t* x, uint32_t x_div,
                    const int32_t* rows, const int32_t* bounds, const int32_t* tiles, uint32_t n_tiles,
                    const float* route_w, float limit, void* y, int y_half, uint32_t m, uint32_t k) {
-  if (w_up && y_half)
+  /* IQ3_XXS and Q2_K serve down projections only: no pair kernels. */
+  if constexpr (kType == 18 || kType == 10)
+    routed_f16_kernel<kType, false, false><<<dim3((m + 255) / 256, n_tiles), 256>>>(
+        w, nullptr, w_table, w_up_table, expert_bytes, x, x_div, rows, bounds, tiles, nullptr, 0.0f, y, m, k);
+  else if (w_up && y_half)
     routed_f16_kernel<kType, true, true><<<dim3((m + 127) / 128, n_tiles), 256>>>(
         w, w_up, w_table, w_up_table, expert_bytes, x, x_div, rows, bounds, tiles, route_w, limit, y, m, k);
   else if (w_up)
@@ -545,6 +630,17 @@ extern "C" int ds41_v41_routed_f16(int type, const void* w, const void* w_up, ui
     break;
   case 22:
     launch_routed<22>(a, b, ta, tb, expert_bytes, x, x_div, rows, bounds, tiles, n_tiles, route_w, limit, y, y_half,
+                      m, k);
+    break;
+  /* Down projections only (the Unsloth Dynamic builds' IQ3_XXS and Q2_K). */
+  case 18:
+    if (b) return 1;
+    launch_routed<18>(a, b, ta, tb, expert_bytes, x, x_div, rows, bounds, tiles, n_tiles, route_w, limit, y, y_half,
+                      m, k);
+    break;
+  case 10:
+    if (b) return 1;
+    launch_routed<10>(a, b, ta, tb, expert_bytes, x, x_div, rows, bounds, tiles, n_tiles, route_w, limit, y, y_half,
                       m, k);
     break;
   default:

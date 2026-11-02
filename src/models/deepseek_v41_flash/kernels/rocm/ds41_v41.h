@@ -333,6 +333,12 @@ struct ds41_v41_sample_result {
 #define DS41_V41_SAMPLE_SCRATCH_BYTES 4096
 int ds41_v41_sample_row(const float* logits, uint32_t n, const struct ds41_v41_proposal* q, float temperature,
                         double u, double u2, void* scratch, struct ds41_v41_sample_result* out);
+/* The row's largest finite logit and FP64 softmax sum at `temperature`, as
+ * ds41_v41_sample_row computes them (per-span sums added in span order), for
+ * a host sampler that filters the row. *maximum is -inf without a finite
+ * logit. Scratch: DS41_V41_SAMPLE_SCRATCH_BYTES. */
+int ds41_v41_softmax_totals(const float* logits, uint32_t n, float temperature, void* scratch, double* maximum,
+                            double* sum);
 /* DSpark acceptance probability of draft row `row` into out[row]: the head
  * collapse of h (4 streams, mix `pre`) before RMSNorm and that row's Markov
  * W1 input of `rank`, against F32 weights w[dim + rank] and optional bias. */

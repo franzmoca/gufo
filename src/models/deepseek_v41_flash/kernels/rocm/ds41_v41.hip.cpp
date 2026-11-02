@@ -330,6 +330,116 @@ __global__ __launch_bounds__(256) void matmul_bf16_wmma_kernel(const uint16_t* w
   }
 }
 
+/* matmul_bf16_wmma_kernel for a few tokens: kWaves waves of 16 weight rows
+ * share one split of kTokens tokens' activations, so a 384-row router at 20
+ * tokens runs 48 waves instead of 3 blocks. Every output takes the same
+ * products, 32-value K steps, part order and FP32 sums as the wide kernel,
+ * so the results are bit-identical. kSteps K steps share one barrier, and
+ * the next group's weights and activations load into registers during this
+ * group's matrix-core work. */
+constexpr uint32_t kBf16NarrowTokens = 16, kBf16NarrowWaves = 4, kBf16NarrowSteps = 4;
+template <uint32_t kTokens, uint32_t kWaves, uint32_t kSteps>
+__global__ __launch_bounds__(32 * kWaves) void matmul_bf16_wmma_narrow_kernel(const uint16_t* w, const float* x,
+                                                                              float* out, uint32_t rows, uint32_t k,
+                                                                              uint32_t n) {
+  constexpr int kFr = kTokens / 16;
+  constexpr uint32_t kThreadsN = 32 * kWaves, kGroupK = kBf16K * kSteps, kPitch = kGroupK + 8;
+  constexpr uint32_t kXLoads = kTokens * kGroupK / 4 / kThreadsN;  // float4 per thread per group
+  constexpr uint32_t kWLoads = 16 * kWaves * kGroupK / 8 / kThreadsN;        // uint4 per thread per group
+  static_assert(kXLoads * kThreadsN == kTokens * kGroupK / 4 && kWLoads * kThreadsN * 8 == 16 * kWaves * kGroupK);
+  __shared__ uint16_t w_sh[16 * kWaves * kPitch];
+  __shared__ uint16_t x_sh[3][kTokens * kPitch];
+  const uint32_t tid = threadIdx.x, wave = tid / 32, lane = tid % 32;
+  const uint32_t r0 = blockIdx.x * 16 * kWaves, t0 = blockIdx.y * kTokens;
+  using frag_a = rocwmma::fragment<rocwmma::matrix_a, 16, 16, 16, hip_bfloat16, rocwmma::row_major>;
+  using frag_b = rocwmma::fragment<rocwmma::matrix_b, 16, 16, 16, hip_bfloat16, rocwmma::col_major>;
+  using frag_c = rocwmma::fragment<rocwmma::accumulator, 16, 16, 16, float>;
+  /* Group k0 covers K values k0 .. k0 + kGroupK - 1; the caller requires k % kGroupK == 0. */
+  const auto load_w = [&](uint32_t k0, uint4 (&v)[kWLoads]) {
+#pragma unroll
+    for (uint32_t i = 0; i < kWLoads; i++) {
+      const uint32_t q = tid + kThreadsN * i, r = q / (kGroupK / 8), c = (q % (kGroupK / 8)) * 8;
+      v[i] = *reinterpret_cast<const uint4*>(w + (uint64_t)(r0 + r) * k + k0 + c);
+    }
+  };
+  const auto load_x = [&](uint32_t k0, float4 (&v)[kXLoads]) {
+#pragma unroll
+    for (uint32_t i = 0; i < kXLoads; i++) {
+      const uint32_t q = tid + kThreadsN * i, t = q / (kGroupK / 4), c = (q % (kGroupK / 4)) * 4;
+      v[i] = t0 + t < n ? *reinterpret_cast<const float4*>(x + (uint64_t)(t0 + t) * k + k0 + c)
+                        : make_float4(0.0f, 0.0f, 0.0f, 0.0f);
+    }
+  };
+  uint4 wv[kWLoads];
+  float4 xv[kXLoads];
+  load_w(0, wv);
+  load_x(0, xv);
+  float s[kFr][8] = {};
+  for (uint32_t k0 = 0; k0 < k; k0 += kGroupK) {
+#pragma unroll
+    for (uint32_t i = 0; i < kWLoads; i++) {
+      const uint32_t q = tid + kThreadsN * i;
+      *reinterpret_cast<uint4*>(&w_sh[(q / (kGroupK / 8)) * kPitch + (q % (kGroupK / 8)) * 8]) = wv[i];
+    }
+#pragma unroll
+    for (uint32_t i = 0; i < kXLoads; i++) {
+      const uint32_t q = tid + kThreadsN * i, t = q / (kGroupK / 4), c = (q % (kGroupK / 4)) * 4;
+      const float in[4] = {xv[i].x, xv[i].y, xv[i].z, xv[i].w};
+      uint32_t hi[4], mid[4], lo[4];
+#pragma unroll
+      for (int e = 0; e < 4; e++) {
+        hi[e] = bf16_rn_bits(in[e]);
+        const float r1 = in[e] - __uint_as_float(hi[e] << 16);
+        mid[e] = bf16_rn_bits(r1);
+        lo[e] = bf16_rn_bits(r1 - __uint_as_float(mid[e] << 16));
+      }
+      *reinterpret_cast<uint2*>(&x_sh[0][t * kPitch + c]) = make_uint2(hi[0] | hi[1] << 16, hi[2] | hi[3] << 16);
+      *reinterpret_cast<uint2*>(&x_sh[1][t * kPitch + c]) = make_uint2(mid[0] | mid[1] << 16, mid[2] | mid[3] << 16);
+      *reinterpret_cast<uint2*>(&x_sh[2][t * kPitch + c]) = make_uint2(lo[0] | lo[1] << 16, lo[2] | lo[3] << 16);
+    }
+    __syncthreads();
+    if (k0 + kGroupK < k) {
+      load_w(k0 + kGroupK, wv);
+      load_x(k0 + kGroupK, xv);
+    }
+#pragma unroll
+    for (uint32_t step = 0; step < kSteps; step++) {
+      frag_c c[kFr];
+#pragma unroll
+      for (int f = 0; f < kFr; f++) rocwmma::fill_fragment(c[f], 0.0f);
+#pragma unroll
+      for (uint32_t kk = step * kBf16K; kk < (step + 1) * kBf16K; kk += 16) {
+        frag_a a;
+        rocwmma::load_matrix_sync(a, reinterpret_cast<const hip_bfloat16*>(w_sh + wave * 16 * kPitch + kk), kPitch);
+#pragma unroll
+        for (int part = 2; part >= 0; part--) {
+#pragma unroll
+          for (int f = 0; f < kFr; f++) {
+            frag_b b;
+            rocwmma::load_matrix_sync(b, reinterpret_cast<const hip_bfloat16*>(x_sh[part] + 16 * f * kPitch + kk),
+                                      kPitch);
+            rocwmma::mma_sync(c[f], a, b, c[f]);
+          }
+        }
+      }
+#pragma unroll
+      for (uint32_t e = 0; e < 8; e++)
+#pragma unroll
+        for (int f = 0; f < kFr; f++) s[f][e] += c[f].x[e];
+    }
+    __syncthreads();
+  }
+#pragma unroll
+  for (uint32_t e = 0; e < 8; e++) {
+    const uint32_t row = r0 + wave * 16 + 2 * e + lane / 16;
+#pragma unroll
+    for (int f = 0; f < kFr; f++) {
+      const uint32_t t = t0 + 16 * f + lane % 16;
+      if (t < n) out[(uint64_t)t * rows + row] = s[f][e];
+    }
+  }
+}
+
 __global__ void copy_rows_kernel(float* dst, uint64_t dst_stride, const float* src, uint64_t src_stride,
                                  uint32_t cols) {
   const float* s = src + (uint64_t)blockIdx.x * src_stride;
@@ -2686,7 +2796,15 @@ extern "C" int ds41_v41_matmul_bf16(const uint16_t* w, const float* x, float* ou
   if (n >= kBf16Tile / 4 && rows % kBf16Tile == 0 && k % kBf16K == 0 && (uintptr_t)w % 16 == 0 &&
       (uintptr_t)x % 16 == 0) {
     const dim3 tiles(1, (n + kBf16Tile - 1) / kBf16Tile);
-    if (rows % 128 == 0)
+    /* A few tokens fill too few wide blocks to keep the memory busy. */
+    if (n <= kBf16Tile && k % (kBf16K * kBf16NarrowSteps) == 0)
+      matmul_bf16_wmma_narrow_kernel<kBf16NarrowTokens, kBf16NarrowWaves, kBf16NarrowSteps>
+          <<<dim3(rows / (16 * kBf16NarrowWaves), (n + kBf16NarrowTokens - 1) / kBf16NarrowTokens),
+             32 * kBf16NarrowWaves>>>(w, x, out, rows, k, n);
+    else if (rows <= 512 && k % 64 == 0)
+      matmul_bf16_wmma_narrow_kernel<32, 4, 2>
+          <<<dim3(rows / 64, (n + 31) / 32), 128>>>(w, x, out, rows, k, n);
+    else if (rows % 128 == 0)
       matmul_bf16_wmma_kernel<128><<<dim3(rows / 128, tiles.y), 256>>>(w, x, out, rows, k, n);
     else
       matmul_bf16_wmma_kernel<64><<<dim3(rows / 64, tiles.y), 256>>>(w, x, out, rows, k, n);
@@ -2860,6 +2978,31 @@ extern "C" int ds41_v41_sample_row(const float* logits, uint32_t n, const ds41_v
   sample_pick_kernel<<<1, kSampleThreads>>>(logits, n, q, temperature, u, u2, s);
   if (launch_ok("sample row") != 0) return 1;
   return hipMemcpy(out, &s->result, sizeof(*out), hipMemcpyDeviceToHost) == hipSuccess ? 0 : 1;
+}
+
+extern "C" int ds41_v41_softmax_totals(const float* logits, uint32_t n, float temperature, void* scratch,
+                                       double* maximum, double* sum) {
+  if (!logits || !scratch || !maximum || !sum || n == 0 ||
+      (n + kSampleBlocks - 1) / kSampleBlocks > kSampleThreads * kSamplePer || !(temperature > 0.0f))
+    return 1;
+  auto* s = static_cast<SampleScratch*>(scratch);
+  sample_max_kernel<<<kSampleBlocks, kSampleThreads>>>(logits, n, s);
+  sample_sum_kernel<<<kSampleBlocks, kSampleThreads>>>(logits, n, temperature, s);
+  if (launch_ok("softmax totals") != 0) return 1;
+  SampleScratch host;
+  if (hipMemcpy(&host, s, sizeof(host), hipMemcpyDeviceToHost) != hipSuccess) return 1;
+  /* sample_global_max and sample_pick_kernel's total, in the same order. */
+  float best = -INFINITY;
+  int32_t arg = -1;
+  double total = 0.0;
+  for (uint32_t b = 0; b < kSampleBlocks; b++) {
+    const int32_t a = host.arg[b];
+    if (a >= 0 && (arg < 0 || host.max[b] > best || (host.max[b] == best && a < arg))) best = host.max[b], arg = a;
+    total += host.sum[b];
+  }
+  *maximum = arg < 0 ? -INFINITY : (double)best;
+  *sum = total;
+  return 0;
 }
 
 extern "C" int ds41_v41_hc_expand(const float* y, const float* residual, const float* post, const float* comb,

@@ -1818,6 +1818,20 @@ static void ds41_acquire_instance_lock(void) {
   g_ds41_lock_fd = fd;
 }
 
+/* Primes the streamed expert cache from the model's histogram file when one
+ * sits beside it, otherwise from the built-in ranking. */
+static void seed_experts(ds41_engine* e) {
+  const char* histogram = e->expert_histogram;
+  const bool custom = access(histogram, F_OK) == 0;
+  if (custom && !ds41_expert_store_seed(e->expert_store, histogram)) {
+    fprintf(stderr, "ds41: failed to load expert histogram %s; using the built-in ranking\n", histogram);
+    if (!ds41_expert_store_seed_default(e->expert_store))
+      fprintf(stderr, "ds41: failed to warm the expert cache\n");
+  } else if (!custom && !ds41_expert_store_seed_default(e->expert_store)) {
+    fprintf(stderr, "ds41: failed to warm the expert cache\n");
+  }
+}
+
 int ds41_engine_open(ds41_engine** out, const ds41_engine_options* opt) {
   if (out)
     *out = nullptr;
@@ -1978,15 +1992,8 @@ int ds41_engine_open(ds41_engine** out, const ds41_engine_options* opt) {
       const std::string tails = std::string(opt->model_path) + ".expert-tails";
       if (access(tails.c_str(), F_OK) == 0)
         (void)ds41_expert_store_attach_tails(e->expert_store, tails.c_str());
-      const std::string histogram = std::string(opt->model_path) + ".expert-histogram";
-      const bool custom = access(histogram.c_str(), F_OK) == 0;
-      if (custom && !ds41_expert_store_seed(e->expert_store, histogram.c_str())) {
-        fprintf(stderr, "ds41: failed to load expert histogram %s; using the built-in ranking\n", histogram.c_str());
-        if (!ds41_expert_store_seed_default(e->expert_store))
-          fprintf(stderr, "ds41: failed to warm the expert cache\n");
-      } else if (!custom && !ds41_expert_store_seed_default(e->expert_store)) {
-        fprintf(stderr, "ds41: failed to warm the expert cache\n");
-      }
+      e->expert_histogram = strdup((std::string(opt->model_path) + ".expert-histogram").c_str());
+      seed_experts(e);
     }
 
     *out = e;
@@ -2033,6 +2040,20 @@ bool ds41_engine_has_image_bias(const ds41_engine* e) {
     return e && e->image_bias;
 }
 
+/* Free memory the expert cache leaves when it is sized after the sessions:
+ * buffers the first prompt still allocates (~0.8 GiB measured at 1, 2 and 4
+ * sessions), transient prefill peaks (~0.3-0.6 GiB) and margin against swap. */
+static constexpr uint64_t kWarmHeadroom = 2ull << 30;
+
+int ds41_engine_fit_experts(ds41_engine* e, uint64_t pending_bytes) {
+  if (!e || !e->expert_store)
+    return 1;
+  if (!ds41_expert_store_set_reserve(e->expert_store, kWarmHeadroom + pending_bytes))
+    fprintf(stderr, "ds41: unable to fit the expert cache to the memory left after the sessions\n");
+  seed_experts(e);
+  return 0;
+}
+
 bool ds41_engine_has_dspark(const ds41_engine* e) {
   return e && e->dspark && e->dspark->device;
 }
@@ -2055,6 +2076,7 @@ void ds41_engine_close(ds41_engine* e) {
     (void)hipFree(e->weights->router_bf16);
   ds41_expert_store_log(e->expert_store);
   ds41_expert_store_destroy(e->expert_store);
+  free(e->expert_histogram);
   weights_free(e->weights);
   if (e->dspark) {
     ds41_dspark_free(e->dspark);

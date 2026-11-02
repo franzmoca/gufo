@@ -177,6 +177,19 @@ public:
 
   [[nodiscard]] SamplingDistribution Distribution(
       std::span<const float> logits) const;
+  /// A whole row's largest finite logit and FP64 softmax sum at the
+  /// configured temperature, computed elsewhere (a device reduction sums in
+  /// its own order).
+  struct SoftmaxTotals {
+    double maximum;
+    double sum;
+  };
+  /// Whether the next draw over a row of this size computes SoftmaxTotals
+  /// (unbounded top-p over raw logits); only then do the overloads taking
+  /// them skip the two full-row passes.
+  [[nodiscard]] bool UsesSoftmaxTotals(std::size_t vocabulary_size) const;
+  [[nodiscard]] SamplingDistribution Distribution(
+      std::span<const float> logits, const SoftmaxTotals& totals) const;
   /// Compact logits use token_ids for penalties; returned IDs index logits.
   [[nodiscard]] SamplingDistribution Distribution(
       std::span<const float> logits, std::span<const TokenId> token_ids) const;
@@ -191,6 +204,8 @@ public:
   /// preserve this draw along with the RNG; resetting history discards it.
   void DeferSample(TokenId token);
   [[nodiscard]] TokenId Sample(std::span<const float> logits);
+  [[nodiscard]] TokenId Sample(std::span<const float> logits,
+                               const SoftmaxTotals& totals);
   [[nodiscard]] TokenId SampleResidual(
       std::span<const float> target_logits,
       std::span<const TokenId> candidate_ids,
@@ -208,7 +223,12 @@ private:
       std::span<const float> logits) const;
   [[nodiscard]] SamplingDistribution LinearDistribution(
       std::span<const float> logits) const;
-  void PrepareSelected(std::span<const float> logits);
+  [[nodiscard]] SamplingDistribution Distribution(
+      std::span<const float> logits, const SoftmaxTotals* totals) const;
+  [[nodiscard]] TokenId Sample(std::span<const float> logits,
+                               const SoftmaxTotals* totals);
+  void PrepareSelected(std::span<const float> logits,
+                       const SoftmaxTotals* totals = nullptr);
   void FilterSelected(double full_softmax_sum = 0,
                       bool has_full_softmax_sum = false);
   [[nodiscard]] SamplingDistribution SelectedDistribution();

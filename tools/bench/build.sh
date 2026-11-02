@@ -61,6 +61,7 @@ for t in "${targets[@]}"; do
   fi
   if [[ "$src" -ef tools/bench/ds41_expert_gemv_tune.hip ]] ||
      [[ "$src" -ef tools/bench/ds41_dense_gemv_tune.hip ]] ||
+     [[ "$src" -ef tools/bench/ds41_dense_gemv_types.hip ]] ||
      [[ "$src" -ef tools/bench/ds41_indexer_bench.hip ]] ||
      [[ "$src" -ef tools/bench/ds41_bf16_rows.hip ]]; then
     # Match the production prefill/expert arithmetic and scheduling flags.

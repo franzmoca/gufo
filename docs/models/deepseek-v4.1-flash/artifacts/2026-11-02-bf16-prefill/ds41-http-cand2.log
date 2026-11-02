@@ -1,0 +1,52 @@
+2026-11-02 04:35:10 [INFO] [gpu] event=queue_budget kind=llm observed=0 budget=8 expected_max=3 cap=2
+2026-11-02 04:35:10 [INFO] [loader] event=load_started kind=text artifact=/mnt/data/models/ds41/unsloth-ud-iq2xxs/UD-IQ2_XXS/DeepSeek-V4.1-Flash-1017-UD-IQ2_XXS-00001-of-00006.gguf rss_mib=138 host_available_mib=125019
+2026-11-02 04:35:10 [WARN] [loader] DeepSeek V4.1 GGUF chat template differs from the 1017 release (sha256 06cada875e3a04665f9cf47deae9ef32e16ede2c6511205a4031c8b48140d01b); rendering prompts with the built-in deepseek-v4.1-flash-1017-compiled-v1 template
+2026-11-02 04:35:10 [INFO] [ds41] DeepSeek V4.1 Flash: 5 backbone shard(s), 153.29 GiB device-eligible weights; Engram /mnt/data/models/ds41/unsloth-ud-iq2xxs/UD-IQ2_XXS/DeepSeek-V4.1-Flash-1017-UD-IQ2_XXS-00006-of-00006.gguf (103.00 GiB, 144 B rows, read from disk)
+2026-11-02 04:35:10 [INFO] [ds4] backend initialized on AMD Radeon 8060S Graphics (sm_115)
+2026-11-02 04:35:10 [INFO] [ds4] native MMQ enabled
+2026-11-02 04:35:10 [INFO] [ds41] streaming routed experts: 7.04 GiB dense weights, 121.67 GiB available unified memory
+2026-11-02 04:35:10 [INFO] [ds4] loading model tensors into device cache
+2026-11-02 04:35:11 [INFO] [ds4] ROCm startup model cache prepared 6.89 GiB of tensor spans in 1.155s
+2026-11-02 04:35:11 [INFO] [ds41] expert tails /mnt/data/models/ds41/unsloth-ud-iq2xxs/UD-IQ2_XXS/DeepSeek-V4.1-Flash-1017-UD-IQ2_XXS-00001-of-00006.gguf.expert-tails: 73.01 GiB, 50% of each expert read from the GGUF
+2026-11-02 04:35:24 [INFO] [ds41] expert seed (built-in V4.1 ranking): cached 8898 of 8898 experts (8898 ranked) from 84.37 GiB in 12.32 s
+2026-11-02 04:35:24 [INFO] [cache] schema=component-cache-v1 event=backing_prepared committed_bytes=2276130816 long_term_pinned_bytes=0
+2026-11-02 04:35:24 [INFO] [cache] schema=component-cache-v1 event=configured sessions=1 snapshot_entries=128 capacity_bytes=12389003264 staging_capacity_bytes=0 automatic_bytes=12389003264 max_bytes=20483039232 disk_capacity_bytes=0 slot_pinned_bytes=0 ram_cache=on disk_backing_bytes=0
+2026-11-02 04:35:24 [INFO] [loader] event=structured_output_prepared vocabulary_tokens=129280 prepare_ms=30.9 rss_delta_kib=10256 rss_mib=89906 host_available_mib=21421
+2026-11-02 04:35:24 [INFO] [sampling] event=defaults thinking=on temperature=1 top_k=0 top_p=1 min_p=0 min_keep=0 seed=-1 repeat_penalty=1 repeat_last_n=64 frequency_penalty=0 presence_penalty=0
+2026-11-02 04:35:24 [INFO] [loader] event=load_completed kind=text elapsed_ms=14451 monotonic_us=477803449263 model=ds41 sessions=1 context_tokens=65536 speculative=off draft_limit=7 disk_cache=off rss_mib=89888 host_available_mib=21422 gpu_device_used_mib=106138 gpu_device_total_mib=126976
+2026-11-02 04:35:24 [INFO] [server] event=listening monotonic_us=477803449441 address=http://127.0.0.1:8097 auth=off max_connections=16 max_body_bytes=8388608
+2026-11-02 04:35:25 [INFO] [http] request=r2 event=received method=POST path=/v1/chat/completions body_bytes=100195
+2026-11-02 04:35:25 [INFO] [cache] schema=component-cache-v1 event=acquire reuse=none selected_tokens=0 restored_bytes=0
+2026-11-02 04:35:29 [INFO] [cache] schema=component-cache-v1 event=retention action=0 reason=0 tokens=4096 rank=3 unique_bytes_freed=0 records=1 ledger_bytes=2447712478
+2026-11-02 04:35:35 [INFO] [cache] schema=component-cache-v1 event=retention action=0 reason=0 tokens=10240 rank=3 unique_bytes_freed=0 records=2 ledger_bytes=2447824312
+2026-11-02 04:35:41 [INFO] [cache] schema=component-cache-v1 event=retention action=0 reason=0 tokens=16384 rank=3 unique_bytes_freed=0 records=3 ledger_bytes=2447968546
+2026-11-02 04:35:47 [INFO] [cache] schema=component-cache-v1 event=retention action=0 reason=0 tokens=22528 rank=3 unique_bytes_freed=0 records=4 ledger_bytes=2448130588
+2026-11-02 04:35:50 [INFO] [ds41] expert cache interval: 96.0% route hits, 7.85 MiB read/token (77.4% prefetched), 1.02 ms host wait/token (0.76 routes, 0.24 reads), 89.99 GiB allocated, 23951 tokens
+2026-11-02 04:35:50 [INFO] [cache] schema=component-cache-v1 event=retention action=0 reason=0 tokens=23951 rank=3 unique_bytes_freed=0 records=5 ledger_bytes=2448245554
+2026-11-02 04:35:50 [INFO] [cache] schema=component-cache-v1 event=retention action=0 reason=0 tokens=23954 rank=0 unique_bytes_freed=0 records=6 ledger_bytes=2448349172
+2026-11-02 04:35:50 [INFO] [http] request=r2 event=completed method=POST path=/v1/chat/completions status=200 duration_ms=25171.1 outcome=completed prompt_tokens=23954 prefill_tokens=23954 generated_tokens=1 finish=length cache=miss cached_tokens=0 cache_restore_ms=0.0 queue_depth=1 resident_at_admission=1 queue_ms=15.2 shared_prefix_wait_ms=0.0 ttft_ms=25168.8 prefill_tps=952.4 decode_tps=7412.5 batch_width=1 plan=serial-c1 draft_accepted=0 draft_proposed=0 draft_rounds=0 cache_schema=component-cache-v1 cache_reuse=none cache_captures=6 cache_captured_capacity_bytes=96534528 cache_global_ledger_bytes=2448541526 cache_snapshot_bytes=92156832 cache_miss_reason=no_checkpoint common_prefix_tokens=0 nearest_checkpoint_tokens=0 rss_mib=95475 host_available_mib=13715
+2026-11-02 04:35:50 [INFO] [http] request=r3 event=received method=POST path=/v1/chat/completions body_bytes=70238
+2026-11-02 04:35:50 [INFO] [cache] schema=component-cache-v1 event=acquire reuse=none selected_tokens=0 restored_bytes=0
+2026-11-02 04:35:54 [INFO] [cache] schema=component-cache-v1 event=retention action=0 reason=0 tokens=4096 rank=3 unique_bytes_freed=0 records=7 ledger_bytes=2448315850
+2026-11-02 04:35:57 [INFO] [cache] schema=component-cache-v1 event=retention action=0 reason=0 tokens=8192 rank=3 unique_bytes_freed=0 records=8 ledger_bytes=2448400428
+2026-11-02 04:36:01 [INFO] [cache] schema=component-cache-v1 event=retention action=0 reason=0 tokens=12288 rank=3 unique_bytes_freed=0 records=9 ledger_bytes=2448501742
+2026-11-02 04:36:07 [INFO] [cache] schema=component-cache-v1 event=retention action=0 reason=0 tokens=18432 rank=3 unique_bytes_freed=0 records=10 ledger_bytes=2582537096
+2026-11-02 04:36:10 [INFO] [ds41] expert cache interval: 97.6% route hits, 6.18 MiB read/token (79.1% prefetched), 1.00 ms host wait/token (0.79 routes, 0.20 reads), 89.99 GiB allocated, 19927 tokens
+2026-11-02 04:36:10 [INFO] [cache] schema=component-cache-v1 event=retention action=0 reason=0 tokens=19924 rank=3 unique_bytes_freed=0 records=11 ledger_bytes=2582636154
+2026-11-02 04:36:10 [INFO] [cache] schema=component-cache-v1 event=retention action=0 reason=0 tokens=19927 rank=0 unique_bytes_freed=0 records=12 ledger_bytes=2582723312
+2026-11-02 04:36:10 [INFO] [http] request=r3 event=completed method=POST path=/v1/chat/completions status=200 duration_ms=20321.8 outcome=completed prompt_tokens=19927 prefill_tokens=19927 generated_tokens=1 finish=length cache=miss cached_tokens=0 cache_restore_ms=0.0 queue_depth=1 resident_at_admission=1 queue_ms=11.0 shared_prefix_wait_ms=0.0 ttft_ms=20320.0 prefill_tps=981.2 decode_tps=5936.2 batch_width=1 plan=serial-c1 draft_accepted=0 draft_proposed=0 draft_rounds=0 cache_schema=component-cache-v1 cache_reuse=none cache_captures=6 cache_captured_capacity_bytes=91095040 cache_global_ledger_bytes=2582883450 cache_snapshot_bytes=87524748 cache_miss_reason=no_compatible_boundary common_prefix_tokens=5 nearest_checkpoint_tokens=0 rss_mib=95636 host_available_mib=13573
+2026-11-02 04:36:10 [INFO] [server] event=shutdown_requested signal=15
+2026-11-02 04:36:10 [INFO] [cache] schema=component-cache-v1 event=retention action=2 reason=9 tokens=4096 rank=1 unique_bytes_freed=22674 records=11 ledger_bytes=2582760914
+2026-11-02 04:36:10 [INFO] [cache] schema=component-cache-v1 event=retention action=2 reason=9 tokens=10240 rank=1 unique_bytes_freed=47682 records=10 ledger_bytes=2582713232
+2026-11-02 04:36:10 [INFO] [cache] schema=component-cache-v1 event=retention action=2 reason=9 tokens=16384 rank=1 unique_bytes_freed=72882 records=9 ledger_bytes=2582640350
+2026-11-02 04:36:10 [INFO] [cache] schema=component-cache-v1 event=retention action=2 reason=9 tokens=22528 rank=1 unique_bytes_freed=97890 records=8 ledger_bytes=2582542460
+2026-11-02 04:36:10 [INFO] [cache] schema=component-cache-v1 event=retention action=2 reason=9 tokens=23951 rank=3 unique_bytes_freed=103582 records=7 ledger_bytes=2582438878
+2026-11-02 04:36:10 [INFO] [cache] schema=component-cache-v1 event=retention action=2 reason=9 tokens=23954 rank=3 unique_bytes_freed=258662 records=6 ledger_bytes=2582180216
+2026-11-02 04:36:10 [INFO] [cache] schema=component-cache-v1 event=retention action=2 reason=9 tokens=4096 rank=1 unique_bytes_freed=22674 records=5 ledger_bytes=2582157542
+2026-11-02 04:36:10 [INFO] [cache] schema=component-cache-v1 event=retention action=2 reason=9 tokens=8192 rank=1 unique_bytes_freed=39410 records=4 ledger_bytes=2582118132
+2026-11-02 04:36:10 [INFO] [cache] schema=component-cache-v1 event=retention action=2 reason=9 tokens=12288 rank=1 unique_bytes_freed=56146 records=3 ledger_bytes=2582061986
+2026-11-02 04:36:10 [INFO] [cache] schema=component-cache-v1 event=retention action=2 reason=9 tokens=18432 rank=1 unique_bytes_freed=81154 records=2 ledger_bytes=2581980832
+2026-11-02 04:36:10 [INFO] [cache] schema=component-cache-v1 event=retention action=2 reason=9 tokens=19924 rank=3 unique_bytes_freed=87122 records=1 ledger_bytes=2581893710
+2026-11-02 04:36:10 [INFO] [cache] schema=component-cache-v1 event=retention action=2 reason=9 tokens=19927 rank=3 unique_bytes_freed=134726 records=0 ledger_bytes=2581758984
+2026-11-02 04:36:10 [INFO] [ds41] expert cache total: 96.7% route hits, 7.10 MiB read/token, 1.01 ms host wait/token (0.78 routes, 0.22 reads), 89.99 GiB allocated, 237.21 GiB prefetched (12.69 GiB dropped)
+2026-11-02 04:36:10 [INFO] [ds41] expert reads: 262930 direct, 0 buffered

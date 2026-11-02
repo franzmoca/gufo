@@ -1,9 +1,9 @@
 """GGUF dequantization for the DeepSeek V4.1 Flash CPU oracle.
 
-Covers every storage type in the ISTA GSQ-RCO builds and the Engram table:
-F32, F16, BF16, Q8_0 and Q5_K come from ``tools/gufo/gguf.py``; this module adds
-IQ1_S, IQ1_M, IQ2_XXS, IQ2_XS, IQ2_S and IQ4_NL, MXFP4 for the DSpark drafter's experts and
-MXFP8 for unsloth's Engram tables. Codebooks are format constants, read
+Covers every storage type in the ISTA GSQ-RCO and Unsloth Dynamic builds and the
+Engram table: F32, F16, BF16, Q8_0, Q5_K and Q6_K come from ``tools/gufo/gguf.py``;
+this module adds IQ1_S, IQ1_M, IQ2_XXS, IQ2_XS, IQ2_S, IQ3_XXS, Q2_K and IQ4_NL, MXFP4
+for the DSpark drafter's experts and MXFP8 for unsloth's Engram tables. Codebooks are format constants, read
 from the vendored ggml header so the oracle and the kernels agree on the format
 while sharing no decode code.
 """
@@ -29,7 +29,7 @@ IQ1_DELTA = 0.125
 # type -> (elements per block, bytes per block)
 BLOCK = dict(BASE_BLOCK)
 BLOCK.update({19: (256, 50), 29: (256, 56), 16: (256, 66), 17: (256, 74), 22: (256, 82),
-              20: (32, 18), 39: (32, 17), 43: (32, 33)})
+              18: (256, 98), 20: (32, 18), 39: (32, 17), 43: (32, 33)})
 
 
 @lru_cache(None)
@@ -58,6 +58,13 @@ def _byte_grid(name: str) -> np.ndarray:
     packed = _table(name).astype(np.uint64)
     shifts = np.arange(8, dtype=np.uint64) * np.uint64(8)
     return ((packed[:, None] >> shifts) & np.uint64(0xFF)).astype(np.float32)
+
+
+@lru_cache(None)
+def _iq3xxs_grid() -> np.ndarray:
+    """256 x 4 magnitudes, one per byte of the u32 entry."""
+    packed = _table("iq3xxs_grid").astype(np.uint32)
+    return ((packed[:, None] >> (8 * np.arange(4, dtype=np.uint32))) & 0xFF).astype(np.float32)
 
 
 @lru_cache(None)
@@ -147,6 +154,35 @@ def dequant_iq2_s(data: np.ndarray) -> np.ndarray:
     bits = (signs[..., None] >> np.arange(8, dtype=np.uint8)) & 1
     values = _byte_grid("iq2s_grid")[index] * (1.0 - 2.0 * bits.astype(np.float32))
     return (values * scale[..., None]).reshape(-1).astype(np.float32)
+
+
+def dequant_iq3_xxs(data: np.ndarray) -> np.ndarray:
+    """d, 64 grid bytes (eight per 32-value sub-block, four magnitudes each), then a u32 per
+    sub-block with four 7-bit sign indices and a 4-bit scale: d (0.5 + s) / 2."""
+    b = _blocks(data, 98)
+    d = _f16(b[:, 0:2]).astype(np.float64)
+    index = b[:, 2:66].reshape(-1, 8, 4, 2).astype(np.int64)
+    aux = np.ascontiguousarray(b[:, 66:98]).view("<u4").reshape(-1, 8).astype(np.int64)
+    scale = d[:, None] * (0.5 + (aux >> 28)) * 0.5
+    sign_index = (aux[:, :, None] >> (7 * np.arange(4))) & 127
+    grid = _iq3xxs_grid()[index].reshape(-1, 8, 4, 8)
+    values = grid * _sign_table()[sign_index]
+    return (values * scale[:, :, None, None]).reshape(-1).astype(np.float32)
+
+
+def dequant_q2_k(data: np.ndarray) -> np.ndarray:
+    """16 scale/min bytes (one per 16 values), 64 bytes of 2-bit codes, d, dmin. Value 32 h +
+    8 j + ... of half h: code (qs[32 h + i] >> 2 j) & 3 with scale byte 8 h + 2 j + i / 16;
+    weight d (sc & 15) q - dmin (sc >> 4)."""
+    b = _blocks(data, 84)
+    scales = b[:, 0:16].astype(np.int64).reshape(-1, 2, 4, 2)  # [nb, half, j, part]
+    qs = b[:, 16:80].astype(np.int64).reshape(-1, 2, 1, 2, 16)  # [nb, half, -, part, l]
+    d = _f16(b[:, 80:82]).astype(np.float64)
+    dmin = _f16(b[:, 82:84]).astype(np.float64)
+    q = (qs >> (2 * np.arange(4))[None, None, :, None, None]) & 3  # [nb, half, j, part, l]
+    dl = d[:, None, None, None] * (scales & 15)
+    ml = dmin[:, None, None, None] * (scales >> 4)
+    return (dl[..., None] * q - ml[..., None]).reshape(-1).astype(np.float32)
 
 
 def dequant_iq4_nl(data: np.ndarray) -> np.ndarray:
@@ -292,12 +328,42 @@ def torch_dequant_iq2_s(b):
     return (values.double() * scale[..., None]).reshape(-1).float()
 
 
+def torch_dequant_iq3_xxs(b):
+    import torch
+
+    b = b.reshape(-1, 98)
+    d = _t_f16(b[:, 0:2])
+    index = b[:, 2:66].reshape(-1, 8, 4, 2).long()
+    aux = _t_u32(b[:, 66:98].reshape(-1, 8, 4)).reshape(-1, 8)
+    scale = d[:, None] * (0.5 + (aux >> 28).double()) * 0.5
+    sign_index = (aux[:, :, None] >> (7 * torch.arange(4, device=b.device))) & 127
+    grid = _t(_iq3xxs_grid(), b.device)[index].reshape(-1, 8, 4, 8)
+    values = grid * _t(_sign_table(), b.device)[sign_index]
+    return (values.double() * scale[:, :, None, None]).reshape(-1).float()
+
+
+def torch_dequant_q2_k(b):
+    import torch
+
+    b = b.reshape(-1, 84)
+    scales = b[:, 0:16].long().reshape(-1, 2, 4, 2)
+    qs = b[:, 16:80].long().reshape(-1, 2, 1, 2, 16)
+    d = _t_f16(b[:, 80:82])
+    dmin = _t_f16(b[:, 82:84])
+    q = (qs >> (2 * torch.arange(4, device=b.device))[None, None, :, None, None]) & 3
+    dl = d[:, None, None, None] * (scales & 15).double()
+    ml = dmin[:, None, None, None] * (scales >> 4).double()
+    return (dl[..., None] * q.double() - ml[..., None]).reshape(-1).float()
+
+
 TORCH_DEQUANT = {19: torch_dequant_iq1_s, 29: torch_dequant_iq1_m, 16: torch_dequant_iq2_xxs,
-                 17: torch_dequant_iq2_xs, 22: torch_dequant_iq2_s}
+                 17: torch_dequant_iq2_xs, 22: torch_dequant_iq2_s, 18: torch_dequant_iq3_xxs,
+                 10: torch_dequant_q2_k}
 
 DEQUANT = dict(BASE_DEQUANT)
 DEQUANT.update({19: dequant_iq1_s, 29: dequant_iq1_m, 16: dequant_iq2_xxs, 17: dequant_iq2_xs,
-                22: dequant_iq2_s, 20: dequant_iq4_nl, 39: dequant_mxfp4, 43: dequant_mxfp8})
+                22: dequant_iq2_s, 18: dequant_iq3_xxs, 10: dequant_q2_k, 20: dequant_iq4_nl,
+                39: dequant_mxfp4, 43: dequant_mxfp8})
 
 
 def nbytes(ggml_type: int, elements: int) -> int:

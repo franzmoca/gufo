@@ -1,0 +1,202 @@
+{
+  "harness_sha256": "161687a91fbdbcbad911662783dcf8c9a2006a9fd23f8e6528ad091d2a184af0",
+  "build_inputs_sha256": "be97114db5ce58877e3d529c0318864206a21b8284eeeaaffbfb2657264cee6f",
+  "environment": {
+    "host": "franz-m5",
+    "kernel": "7.2.11-200.fc44.x86_64",
+    "kernel_command_line": "BOOT_IMAGE=(hd1,gpt2)/vmlinuz-7.2.11-200.fc44.x86_64 root=UUID=d45b65b1-d8e3-4515-9eb9-de63765ccde0 ro rootflags=subvol=root amd_iommu=off amdgpu.gttsize=126976 ttm.pages_limit=32505856 clearcpuid=514",
+    "GPU_MAX_HW_QUEUES": null,
+    "HSA_ENABLE_SDMA": null,
+    "HSA_ENABLE_INTERRUPT": null,
+    "HSA_USERPTR_FOR_PAGED_MEM": null,
+    "HSA_USE_SVM": null,
+    "HIP_VISIBLE_DEVICES": null,
+    "ROCR_VISIBLE_DEVICES": null,
+    "LD_LIBRARY_PATH": null,
+    "LD_PRELOAD": null
+  },
+  "command": [
+    "build/release/gufo",
+    "serve",
+    "--host",
+    "127.0.0.1",
+    "--port",
+    "49979",
+    "--sessions",
+    "2",
+    "llm",
+    "--model",
+    "/mnt/data/models/ds41/unsloth-ud-iq2xxs/UD-IQ2_XXS/DeepSeek-V4.1-Flash-1017-UD-IQ2_XXS-00001-of-00006.gguf",
+    "--context",
+    "32768",
+    "--think",
+    "off",
+    "--stream-experts",
+    "--speculative",
+    "dspark",
+    "--dspark-model",
+    "/mnt/data/models/ds41/dspark-lucebox-q2k/DeepSeek-V4.1-Flash-1017-DSpark-draft-Q2K-Q4K.gguf",
+    "--served-model-name",
+    "functional-test",
+    "--max-pending-per-client",
+    "4",
+    "--cache-disk",
+    "/tmp/qcmp/func-udiq2/disk",
+    "--cache-disk-bytes",
+    "8589934592",
+    "--cache-disk-staging-bytes",
+    "1073741824"
+  ],
+  "comparison_command": [
+    "serve",
+    "--host",
+    "127.0.0.1",
+    "--port",
+    "<runner-owned>",
+    "--sessions",
+    "2",
+    "llm",
+    "--model",
+    "/mnt/data/models/ds41/unsloth-ud-iq2xxs/UD-IQ2_XXS/DeepSeek-V4.1-Flash-1017-UD-IQ2_XXS-00001-of-00006.gguf",
+    "--context",
+    "32768",
+    "--think",
+    "off",
+    "--stream-experts",
+    "--speculative",
+    "dspark",
+    "--dspark-model",
+    "/mnt/data/models/ds41/dspark-lucebox-q2k/DeepSeek-V4.1-Flash-1017-DSpark-draft-Q2K-Q4K.gguf",
+    "--served-model-name",
+    "functional-test",
+    "--max-pending-per-client",
+    "4",
+    "--cache-disk",
+    "<runner-owned>",
+    "--cache-disk-bytes",
+    "8589934592",
+    "--cache-disk-staging-bytes",
+    "1073741824"
+  ],
+  "binary": "/home/franz/projects/gufo/build/release/gufo",
+  "mode": "baseline",
+  "sampling_preset": "deepseek41",
+  "sampling_overrides": {},
+  "request_timeout": 120,
+  "tier": "full",
+  "vision": false,
+  "speculative": "dspark",
+  "suites": {
+    "conversation": {
+      "status": "failed",
+      "report": "conversation.json",
+      "error": "exit 1; see conversation.log",
+      "traceback": "Traceback (most recent call last):\n  File \"/home/franz/projects/gufo/tests/functional/run.py\", line 392, in run\n    raise RuntimeError(f\"exit {result.returncode}; see {label}.log\")\nRuntimeError: exit 1; see conversation.log\n",
+      "seconds": 0.115
+    },
+    "tools": {
+      "status": "failed",
+      "report": "tools.json",
+      "error": "exit 1; see tools.log",
+      "traceback": "Traceback (most recent call last):\n  File \"/home/franz/projects/gufo/tests/functional/run.py\", line 392, in run\n    raise RuntimeError(f\"exit {result.returncode}; see {label}.log\")\nRuntimeError: exit 1; see tools.log\n",
+      "seconds": 0.064
+    },
+    "long-context": {
+      "status": "failed",
+      "report": "long-context.json",
+      "error": "exit 1; see long-context.log",
+      "traceback": "Traceback (most recent call last):\n  File \"/home/franz/projects/gufo/tests/functional/run.py\", line 392, in run\n    raise RuntimeError(f\"exit {result.returncode}; see {label}.log\")\nRuntimeError: exit 1; see long-context.log\n",
+      "seconds": 0.114
+    },
+    "text-cancel": {
+      "status": "passed",
+      "report": "text-cancel.json",
+      "seconds": 7.323
+    },
+    "thinking-tool-cancel": {
+      "status": "passed",
+      "report": "thinking-tool-cancel.json",
+      "seconds": 7.373
+    },
+    "legacy-tool-cancel": {
+      "status": "passed",
+      "report": "legacy-tool-cancel.json",
+      "seconds": 6.021
+    },
+    "disk-spacing": {
+      "status": "passed",
+      "report": "disk-spacing.json",
+      "seconds": 11.527
+    },
+    "cache-persist": {
+      "status": "passed",
+      "report": "cache-persist.json",
+      "seconds": 6.071
+    },
+    "text-cancel-disk": {
+      "status": "passed",
+      "report": "text-cancel-disk.json",
+      "seconds": 2.39
+    },
+    "thinking-tool-cancel-disk": {
+      "status": "passed",
+      "report": "thinking-tool-cancel-disk.json",
+      "seconds": 1.967
+    },
+    "legacy-tool-cancel-disk": {
+      "status": "passed",
+      "report": "legacy-tool-cancel-disk.json",
+      "seconds": 1.266
+    },
+    "cache-persist-disk": {
+      "status": "passed",
+      "report": "cache-persist-disk.json",
+      "seconds": 3.567
+    },
+    "disk-spacing-disk": {
+      "status": "passed",
+      "report": "disk-spacing-disk.json",
+      "seconds": 3.618
+    }
+  },
+  "through_case": null,
+  "allow_missing_progress": false,
+  "started_ns": 1793567298432104778,
+  "status": "failed",
+  "server_logs": {
+    "conversation": "server.log",
+    "tools": "server.log",
+    "long-context": "server.log",
+    "text-cancel": "server.log",
+    "thinking-tool-cancel": "server.log",
+    "legacy-tool-cancel": "server.log",
+    "disk-spacing": "server.log",
+    "cache-persist": "server.log",
+    "text-cancel-disk": "server-restarted.log",
+    "thinking-tool-cancel-disk": "server-restarted.log",
+    "legacy-tool-cancel-disk": "server-restarted.log",
+    "cache-persist-disk": "server-restarted.log",
+    "disk-spacing-disk": "server-restarted.log"
+  },
+  "expected_input_modalities": null,
+  "startup_ms": 84487.37108701607,
+  "restart_ms": 17287.275244947523,
+  "disk_spacing": {
+    "stored_tokens": [
+      2124,
+      5900
+    ],
+    "min_step_skips": 18,
+    "shared_boundary_tokens": [
+      2691
+    ]
+  },
+  "execution": {
+    "loaded_mode": "dspark",
+    "draft_tokens": 270,
+    "draft_tokens_accepted": 185,
+    "draft_execution_observed": true
+  },
+  "functional_status": "failed",
+  "completed_ns": 1793567453169575935
+}
