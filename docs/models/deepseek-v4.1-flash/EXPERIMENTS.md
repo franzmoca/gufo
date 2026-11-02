@@ -2786,11 +2786,43 @@ Served, fresh server per round, three alternated rounds (ms):
 | 23,954-token document | 24,460 / 24,275 / 24,526 | 24,043 / 24,115 / 24,125 |
 | 19,927-token document, same server | 19,945 / 20,746 / 21,095 | 20,064 / 21,146 / 20,926 |
 
-The fresh document gains 0.2-0.4 s every round; the follow-up is within
-noise (both builds drifted ~2 s slower over the session's runs, drive at
-71-73 °C without throttling). Layer-0 prediction alone (without the
-Engram order) left the follow-up 0.3-1.9% slower in three rounds: its
-reads competed with layer 1's Engram rows. `gufo bench -p 2048 -n 0 -d
-8192` warm repetitions are unchanged (UD-IQ2_XXS 1,169-1,193 against
-1,169-1,190; GSQ IQ2_XXS 1,310-1,317 against 1,312-1,318).
+The follow-up document slows by ~250-320 ms with every fresh server
+run, on either build, so an A-then-B round order biases it against the
+candidate. Fitting run order and build together over the six runs: the
+fresh document gains 345 ± 89 ms (−1.4%), the follow-up 135 ± 286 ms
+(within noise). Layer-0 prediction alone (without the Engram order) fits
+−162 ± 198 and −68 ± 140 ms. `gufo bench -p 2048 -n 0 -d 8192` warm
+repetitions are unchanged (UD-IQ2_XXS 1,169-1,193 against 1,169-1,190;
+GSQ IQ2_XXS 1,310-1,317 against 1,312-1,318).
+
+## E84 — two-wave prefill: the resident experts' down in the read stall too (retained)
+
+E82 ran only the resident experts' gate+up during the reads; the down
+pass waited for the reads and replanned every route. The overlap
+callback now runs the resident down on the same device plan right after
+their gate+up, and after the reads the read rows run gate+up and down on
+the miss plan. The full-route replan is gone. Every slot is still
+written once by the same arithmetic.
+
+Correctness: the 3K and 18.5K (4,096-token batches) batched scores match
+the previous build at every position.
+
+The split down costs no GPU time: over the two served documents the
+2,048-row down kernels take 5,444 ms in 800 launches against 5,611 ms in
+400. Encoder idle after the resident work falls from 963 to 819 ms; what
+remains is ~0.7 ms of host work per layer after the reads (admission
+copies, planning) and 11 of 400 layers whose reads outlast the resident
+work.
+
+Served, fresh server per round, three alternated rounds (ms), E83 then
+E84:
+
+| Request | E83 | E84 |
+| --- | --- | --- |
+| 23,954-token document | 23,606 / 23,960 / 23,766 | 23,409 / 23,550 / 23,702 |
+| 19,927-token document, same server | 18,643 / 19,413 / 19,943 | 19,014 / 19,904 / 20,082 |
+
+Fitted with the run-order drift (see E83): −280 ± 115 ms (−1.2%) on the
+fresh document, +38 ± 162 ms on the follow-up. `gufo bench` warm
+repetitions are unchanged (1,157-1,181 against 1,158-1,189 tok/s).
 
