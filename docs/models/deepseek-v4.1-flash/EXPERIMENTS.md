@@ -2826,3 +2826,61 @@ Fitted with the run-order drift (see E83): −280 ± 115 ms (−1.2%) on the
 fresh document, +38 ± 162 ms on the follow-up. `gufo bench` warm
 repetitions are unchanged (1,157-1,181 against 1,158-1,189 tok/s).
 
+## E85 — Engram lookahead: the next prompt batch's rows during the current one (retained)
+
+After E83, layer 1's Engram projection still waited 40-85 ms in almost
+every 2,048-row batch of long prompts (1.53 s over a 58,028-token prompt,
+2.8%): its 49K random 144-byte row reads start with the batch, and the
+110 GB table does not stay in the page cache. Dropping duplicate rows
+would save at most 16% of them (75% of 2-gram, 86% of 3-gram and 90% of
+4-gram rows are distinct within a batch of the 18.5K scoring document).
+
+`ds41_session_sync` now passes each batch the next batch's tokens
+(`ds41_decoder_set_lookahead`). Once the batch's own rows are read, it
+hashes the next tokens on a copy of the n-gram history and reads their
+rows into a second set of pinned buffers (`SharedActivations`, ~100 MB at
+2,048-row batches). The next batch uses them when its position, tokens,
+history length and last three history entries match; otherwise, and for
+image prompts, it reads as before. The pending read is joined by the
+chain thread, so only the first Engram layer can wait for it, and by the
+joint path, decoder destruction and the shared buffers' destructor.
+
+Correctness: on a 58,028-token prompt, 16 greedy tokens and their top-5
+logprobs are identical to the previous build. The probe does not use the
+session, so its scores are unaffected.
+
+Engram waits over the two served documents fall from 1,213 to 500 ms;
+what remains is each prompt's first batch.
+
+Long runs heat-soak the machine: four back-to-back 58K runs took 63-68 s
+on either build against 52-54 s with a 90 s pause before each run. With
+the pause, ABBA order:
+
+| Request | E84 | E85 |
+| --- | --- | --- |
+| 58,028-token prompt | 53.28 / 53.47 / 53.13 s | 52.12 / 52.10 / 52.29 s (−2.1%) |
+
+Two served documents, ABBA order over four rounds (ms):
+
+| Request | E84 | E85 |
+| --- | --- | --- |
+| 23,954-token document | 23,522 / 23,802 / 23,735 / 24,292 | 23,129 / 23,463 / 23,552 / 24,048 |
+| 19,927-token document | 19,491 / 20,219 / 20,472 / 20,437 | 19,826 / 20,025 / 20,398 / 20,713 |
+
+The fresh document gains 183-393 ms in every round; the follow-up, whose
+rows are partly cached by the first document, is unchanged.
+
+Pi agent sessions (`tests/functional/pi_agent.py`, creation, bugfix and
+edit, five passes in one conversation, server-default sampling) against
+a5b5ea09, before E82-E85, two ABBA rounds with 90 s pauses: all 60 tasks
+pass on both builds. Trajectories differ, so requests are compared by
+prefill size:
+
+| Prefill tokens | a5b5ea09 | E85 |
+| --- | --- | --- |
+| 0-64 | 72 requests, 79 tok/s, mean TTFT 417 ms | 66 requests, 83 tok/s, 368 ms |
+| 64-512 | 35 requests, 219 tok/s, 932 ms | 33 requests, 241 tok/s, 793 ms |
+| 512-2,048 | 3 requests, 556 tok/s | 6 requests, 517 tok/s |
+
+Decode is unchanged (33.9 against 33.5 tok/s).
+

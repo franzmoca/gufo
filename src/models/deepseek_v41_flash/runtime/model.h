@@ -253,6 +253,12 @@ int ds41_decoder_eval(ds41_decoder* decoder, const int* tokens, uint32_t n,
 int ds41_decoder_eval_prompt(ds41_decoder* decoder, const int* tokens,
                              uint32_t n, uint32_t prompt_end, float* logits,
                              uint32_t logit_rows);
+/* Tokens of the prompt batch that follows the next evaluation (n = 0:
+ * none). Once that evaluation's Engram rows are read, it reads theirs, and
+ * the following evaluation uses them when it evaluates exactly these tokens
+ * at the next position after the same history. */
+int ds41_decoder_set_lookahead(ds41_decoder* decoder, const int* tokens,
+                               uint32_t n);
 /* Image spans whose rows replace the token embeddings of the positions
  * they cover in later evaluations, until replaced; the device rows must
  * outlive them. Positions holding DS41_IMAGE_TOKEN outside every span keep

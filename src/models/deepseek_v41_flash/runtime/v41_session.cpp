@@ -246,6 +246,11 @@ int ds41_session_sync(ds41_session* s, const ds41_tokens* prompt, int prompt_end
     ds41_decoder* decoder;
     ~ClearImages() { ds41_decoder_set_images(decoder, nullptr, 0); }
   } clear_images{s->decoder};
+  /* Each batch reads the next batch's Engram rows once its own are in. */
+  struct ClearLookahead {
+    ds41_decoder* decoder;
+    ~ClearLookahead() { ds41_decoder_set_lookahead(decoder, nullptr, 0); }
+  } clear_lookahead{s->decoder};
   const size_t batch = ds41_decoder_batch_capacity(s->decoder);
   const size_t start = s->tokens.size();
   for (size_t i = start; i < n;) {
@@ -254,6 +259,8 @@ int ds41_session_sync(ds41_session* s, const ds41_tokens* prompt, int prompt_end
       return DS41_SESSION_SYNC_INTERRUPTED;
     }
     const uint32_t count = (uint32_t)std::min(batch, n - i);
+    const size_t next = i + count;
+    ds41_decoder_set_lookahead(s->decoder, prompt->v + next, (uint32_t)std::min(batch, n - next));
     if (!eval(s, prompt->v + i, count, error, capacity, replay_end)) return 1;
     i += count;
   }

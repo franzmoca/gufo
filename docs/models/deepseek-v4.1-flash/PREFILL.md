@@ -378,8 +378,9 @@ reads before the projection. Prefetching the rows one layer early would
 hide this. E26 already moved the rows into pinned staging. After E82 the
 first Engram layer waited 50-117 ms per batch on the fresh document; E83
 reads layer 1's rows before layer 14's (1.55 → 1.07 s over two
-documents). What remains is layer 1's own 49K random 144-byte reads,
-issued when the batch starts.
+documents). E85 reads each prompt batch's rows during the batch
+before it (Engram waits 1.21 → 0.50 s over the two documents; −2.1% on a
+58K-token prompt); only a prompt's first batch still waits.
 
 ## Things that look like levers but are not
 
