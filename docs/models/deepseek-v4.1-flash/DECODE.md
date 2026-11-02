@@ -2,88 +2,42 @@
 
 A starting point for decode work on the streamed `UD-IQ2_XXS` build
 (146 GiB of routed experts, ~95-100 GiB expert cache, tails sidecar on a
-second NVMe). It covers autoregressive (AR), sampled and DSpark decode
-through `gufo serve`:
-- the measured per-token and per-cycle budgets;
-- each kernel's position against the gfx1151 read ceiling;
-- how a decode step runs, end to end;
-- what has already been tried;
-- the open levers, ranked by measured size.
+second NVMe): AR, sampled and DSpark decode through `gufo serve`, with the
+measured budgets, each kernel's position against the gfx1151 read ceiling,
+how a step runs, and the levers by measured size. Open work is ranked in
+[BACKLOG.md](BACKLOG.md). Prefill is in [PREFILL.md](PREFILL.md), the
+expert store in [STREAMING.md](STREAMING.md), every `E<n>` in
+[EXPERIMENTS.md](EXPERIMENTS.md).
 
-Measured 2026-11-02 on `feat/ds41-ud-iq2xxs-prefill` at `c9faa470`.
-Scripts and outputs are in [artifacts/2026-11-02-decode](artifacts/2026-11-02-decode/).
-Read [STREAMING.md](STREAMING.md) for the expert store, [PREFILL.md](PREFILL.md)
-for prompt processing, and [EXPERIMENTS.md](EXPERIMENTS.md) for every
-experiment cited as `E<n>`. Follow-ups measured the same day on the same
-workloads are E89-E92: more decode prediction does not pay as the store
-stands, the verification-row expert count closes the grouped-GEMV
-question, the eviction victim lists (retained, with E92's exact pops)
-removed the per-admission scan without changing served speed, and
-Belady's optimum would halve decode misses where past-use eviction rules
-gain 4-8% in replay (E92).
+The profile was measured 2026-11-02 on `feat/ds41-ud-iq2xxs-prefill` at
+`c9faa470` ([artifacts](artifacts/2026-11-02-decode/)); E87-E92 used the
+same workloads afterwards and are folded into the levers. The 2026-10-29
+all-mode traces of the resident `IQ1_M` and streamed `IQ2_XXS` builds are
+in the [trace sweep](artifacts/2026-10-29-trace-sweep/summary.txt).
 
 ## Summary
 
-Decode rates, one fresh server per mode, three requests in order:
-- a 41-token chat prompt;
-- a 3,477-token code prompt;
-- a 23,974-token document.
+One fresh server per mode, three requests in order (a 41-token chat
+prompt, a 3,477-token code prompt, a 23,974-token document), 512 tokens
+each. Unprofiled `decode_tps` at the profiled build, and after E87 (greedy
+width policy) and E88 (top-p totals on the device):
 
-Each request generates 512 tokens. Unprofiled `decode_tps` from the server log:
+| Mode | Chat | Code | After the 24K document | After E87/E88 (chat / code / long) |
+|---|---:|---:|---:|---|
+| AR greedy | 16.5 | 18.7 | 17.2 | unchanged |
+| AR sampled (T 0.7, top-p 0.95) | 16.9 | 18.3 | 17.4 | 17.0-17.1 / 18.4-18.5 / 17.6 (E88) |
+| DSpark greedy | 16.9 | 27.3 | 25.8 | 17.6-18.9 / 28.3-28.7 / 26.4-26.7 (E87) |
+| DSpark sampled (T 0.7, top-p 0.95) | 19.0 | 24.8 | 26.9 | 19.3 / 25.7 / 27.9-28.0 (E88) |
 
-| Mode | Chat (first request) | Code | After the 24K document |
-|---|---:|---:|---:|
-| AR greedy | 16.5 | 18.7 | 17.2 |
-| AR sampled (T 0.7, top-p 0.95) | 16.9 | 18.3 | 17.4 |
-| DSpark greedy | 16.9 | 27.3 | 25.8 |
-| DSpark sampled (T 0.7, top-p 0.95) | 19.0 | 24.8 | 26.9 |
-
-AR means no drafter. The server still verifies prompt-lookup copies in that
-mode, but only a few times per request.
-
-A decoded token reads about 10 GB of weights:
-- 6.3 GB of dense projections, every token;
-- 2.5 GB of routed experts (6 per layer × 40 layers);
-- 1.2 GB of output head, Engram projection, router, mix weights and
-  attention state.
-
-At the measured 240 GB/s read ceiling that is ~42 ms, a **~24 tok/s AR
-ceiling** for this build. Steady AR runs at 53-58 ms per token. The gap of
-11-16 ms per token, largest first:
-
-1. **Expert read stalls (4.2-6.5 ms/token AR, 8-13 ms per DSpark cycle;
-   7-10%).** Steady decode hits 98-99% of routes, which still leaves 30-50
-   MiB of reads per token on the critical path. The first tokens of a fresh
-   server hit 74-78%, and the first 64 after a 24K-token prompt hit 96-97%.
-2. **Kernel bandwidth (~3.9 ms/token on the critical path, ~7%).** The
-   weight-streaming kernels run at 197-236 GB/s. Their bytes would take
-   42.1 ms at 240 GB/s; the profile shows 47.6 ms, including the hc mix,
-   which runs on a side stream.
-3. **Launch gaps (~2.9 ms/token traced, ~975 launches).** These are partly
-   added by the tracer (E60).
-
-DSpark had three problems of its own, all found while writing this
-document. The first two are fixed (E87, E88); the rates above predate the
-fixes.
-
-- **Fixed (E87): the greedy width policy drafted every cycle, then mostly
-  verified only the anchor (bug, lever 1).** The plain-step cost it compares against is
-  never learned in this mode. It stays at its 42.4 ms prior, from resident
-  `IQ1_M`, while a streamed plain cycle costs ~72 ms including the wasted
-  draft.
-  - In the chat profile, 492 of 499 cycles ran the 9.3 ms drafter and then
-    verified one row.
-  - Greedy DSpark ties AR on chat (16.9 against 16.5 tok/s) and trails
-    sampled DSpark (19.0), which uses a different width rule.
-- **Partly fixed (E88): sampled requests with top-p, top-k or min-p sample
-  on the host (lever 4).**
-  The device sampler takes only plain temperature sampling. Every verified
-  row then waits ~0.85 ms on the host for a full-vocabulary distribution:
-  2-5 ms per DSpark cycle, ~0.9 ms per AR token.
-- **Each verification row costs ~12 ms of GPU time plus more read stall
-  (lever 3).** A 6-row cycle takes 155 ms including its draft, against
-  59.5 ms for an AR token, so it must emit more than 2.6 tokens to beat
-  AR.
+AR means no drafter; the server still verifies prompt-lookup copies in that
+mode, a few times per request. A decoded token reads ~10 GB (6.3 GB dense
+projections, 2.5 GB routed experts, 1.2 GB head, Engram, router, mix
+weights and attention state): ~42 ms at the 240 GB/s ceiling, a **~24
+tok/s AR ceiling**. Steady AR runs 53-58 ms per token. The gap, largest
+first: expert read stalls (lever 2), kernel bandwidth (lever 5), launch
+gaps (lever 6). DSpark adds the verification row cost (lever 3) and the
+drafter pass (lever 7); levers 1 and 4 (greedy width policy, top-p host
+sampling) are fixed.
 
 ## Workloads and how they were measured
 
@@ -94,13 +48,12 @@ fixes.
 | Runs | [run.sh](artifacts/2026-11-02-decode/run.sh): a fresh server per mode, once under `rocprofv3 --kernel-trace --memory-copy-trace` and once without |
 | Caches | AR 99.55 GiB, DSpark ~95 GiB (the drafter takes 4.6 GiB); seeded from the built-in ranking |
 
-Profiling costs ~2% here: profiled AR greedy decodes at 16.5/18.2/16.9
-tok/s against 16.5/18.7/17.2 unprofiled. The tracer adds ~4.5 µs to a
-launch after a long kernel (E60), so traced launch gaps overstate the real
-ones. It also shifts the greedy DSpark policy, which reads cycle times: 7
-rounds with drafts on the profiled chat, 52 unprofiled. Every rate in this
-document is a single run. Compare changes against an alternating control,
-because fresh servers differ by a few percent.
+Profiling costs ~2% (profiled AR greedy 16.5/18.2/16.9 against
+16.5/18.7/17.2 tok/s), and the tracer adds ~4.5 µs to a launch after a long
+kernel (E60). It also shifted the pre-E87 greedy DSpark policy (7 rounds
+with drafts on the profiled chat, 52 unprofiled). Profile rates are single
+runs: compare against an alternating control; greedy DSpark chat varies by
+itself (17.6-19.2 tok/s, E87).
 
 **Analysis scripts** (artifacts directory; Python and sqlite3 only):
 
@@ -113,14 +66,12 @@ because fresh servers differ by a few percent.
 | `hostgap.py` | The host gap after each logits download. |
 | `drafter.py` | The drafter pass by kernel. |
 
-**Reading idle gaps:**
-- A gap before an upload of ≥1 MiB, or before an `expert_*` kernel, is a
-  demand read. Reads arrive as pinned-buffer uploads before the miss launch.
-- A gap before a 24,576-byte upload is the Engram rows.
-- A gap right after the logits download is host work: sampling,
-  verification, commit and the next step's setup.
-- In DSpark cycles, gaps up to the drafter's token download count as
-  drafter time.
+**Reading idle gaps:** before an upload of ≥1 MiB or an `expert_*`
+kernel, a demand read; before a 24,576-byte upload, the Engram rows; right
+after the logits download, host work (sampling, verification, commit,
+setup); in DSpark cycles, up to the drafter's token download, drafter time.
+Route traces (`DS41_EXPERT_TRACE`, prediction off) of these workloads feed
+`tools/ds41/prefetch_sim.py` and `tools/ds41/evict_sim.py` (E89, E92).
 
 ## Bytes per decoded token (UD-IQ2_XXS)
 
@@ -148,85 +99,60 @@ experts per layer, which is where verification's per-row cost comes from.
 
 ## How a decode step runs
 
-The server drives every DeepSeek V4.1 decode through the speculative step
-(`DecodeStep` → `ds41_sessions_dspark_step_batch`), with or without a
-drafter: `kPromptLookup` is on for this model. One cycle
-(`runtime/v41_session.cpp`):
+Every DeepSeek V4.1 decode goes through the speculative step (`DecodeStep`
+→ `ds41_sessions_dspark_step_batch`), with or without a drafter
+(`kPromptLookup` is on). One cycle (`runtime/v41_session.cpp`):
 
-1. **prepare**
-   - Draws the anchor if the request has none.
-   - Looks for a prompt-lookup copy.
-   - Otherwise sets the draft width:
-     - greedy with the drafter's confidence head (`c.learned`): always the
-       full width, cut after drafting;
-     - sampled: the full width, cut after drafting to the confident prefix;
-     - neither: `draft_width`, which can skip the drafter.
-2. **draft** (`ds41_dspark_draft_batch`)
-   - Embeds the anchor and the noise rows on the host and uploads them.
-   - Runs three drafter stages.
-   - Runs the target's output head over the drafted rows (Q6_K, 2.5 ms for
-     5 rows).
-   - Runs five sequential Markov selections, each reading the 66 MB FP16 W2,
-     plus the confidence head.
-   - Downloads the tokens. This is the drafter's only host round trip.
-3. **evaluate**
-   - One row: `ds41_decoder_eval`.
-   - Several rows: `ds41_decoder_eval_speculative`, which keeps single-token
-     arithmetic per row.
-   - Several sessions: `ds41_decoder_eval_joint`.
-4. **finish**
-   - Verifies each row: the device argmax for greedy; for sampled, the
-     device sampler or the host sampler.
-   - Commits the accepted prefix: queued device copies of the window and
-     compressor rows.
-   - Injects the drafter's features.
-   - Updates the width policy.
+1. **prepare**: draws the anchor if needed, looks for a prompt-lookup copy,
+   otherwise sets the draft width. Greedy with the confidence head
+   (`c.learned`): full width while the learned saving of a draft
+   (`gain_ms`) exceeds the drafter pass (`draft_ms`), else none, with
+   probes (E87). Sampled: full width. Neither: `draft_width`. Drafted widths
+   are cut after drafting.
+2. **draft** (`ds41_dspark_draft_batch`): embeds and uploads the anchor and
+   noise rows, runs three drafter stages, the target's output head over the
+   drafted rows, five sequential Markov selections (66 MB FP16 W2 each) and
+   the confidence head, then downloads the tokens, its only host round trip.
+3. **evaluate**: `ds41_decoder_eval` (one row),
+   `ds41_decoder_eval_speculative` (several rows, single-token arithmetic
+   per row) or `ds41_decoder_eval_joint` (several sessions).
+4. **finish**: verifies each row (device argmax for greedy; device sampler,
+   or host sampler with device top-p totals, for sampled), commits the
+   accepted prefix as queued device copies, injects the drafter's features,
+   updates the width policy.
 
-**Plain AR steps** take the same path with `m = 1`: `eval` with one row,
-then `draw` on the host. Greedy is the host argmax over the downloaded
-logits row. Sampled uses `device_draw` when the request is plain
-temperature sampling, otherwise the request's host sampler.
+Plain AR steps take the same path with one row, then draw on the host
+(greedy: host argmax over the logits row; sampled: `device_draw` for plain
+temperature, else the host sampler).
 
-**One evaluation** (`eval_rows`, `runtime/v41_decode.cpp`), for one token
-or a verification block:
+**One evaluation** (`eval_rows`, `runtime/v41_decode.cpp`):
 
-1. **Host setup**
-   - Hashes the Engram rows, then starts their reads: `std::async`, plus
-     `engram_read` threads.
-   - Dequantizes the embedding row on the host and uploads it.
-2. **Per layer** (40), on the null stream:
-   - hc mix: the side stream, overlapped with the next projections (E57).
-   - Collapse and norm.
-   - `attn_q_a`+`attn_kv` paired GEMV, q/kv norm, `attn_q_b`, rope.
-   - On compressed layers: the compressor and indexer (BF16 matmuls, scores,
-     top-k).
-   - Attention: split and combine (E65).
-   - `attn_output_a`, `attn_output_b`, hc expand.
-   - hc mix, collapse and norm for the FFN.
-   - BF16 router, route.
-   - **Routes event; shared expert queued** (gate+up paired, down).
-   - **`ds41_expert_store_prepare`**:
-     - the host copies the 6 routes on `routes_stream` and waits;
-     - counts hits and misses, scores, resolves the prefetch job;
-     - uploads changed table rows and the hit/miss route arrays;
-     - runs the read phase. Its overlap callback queues the hit experts'
-       fused gate+up+SwiGLU and, after a miss, the next layer's prediction.
-       The host then waits for the reads.
-   - Routed gate+up over the miss rows, then routed down over all six slots.
-   - hc expand-sum.
-3. **Close**
-   - Final collapse and norm.
-   - Output head (2.3 ms).
-   - Device argmax rows for verification.
-   - Logits row download (517 KB per row).
-   - `hipDeviceSynchronize`.
+1. **Host setup**: hashes the Engram rows and starts their reads
+   (`std::async` plus `engram_read` threads); dequantizes and uploads the
+   embedding row.
+2. **Per layer** (40), on the null stream: hc mix on a side stream (E57);
+   collapse and norm; `attn_q_a`+`attn_kv` paired GEMV, q/kv norm,
+   `attn_q_b`, rope; on compressed layers the compressor and indexer;
+   split attention and combine (E65); `attn_output_a`, `attn_output_b`, hc
+   expand; hc mix, collapse and norm for the FFN; BF16 router, route; routes
+   event and the shared expert queued; then `ds41_expert_store_prepare`
+   (the host copies the 6 routes on `routes_stream` and waits, counts hits
+   and misses, resolves the prefetch job, uploads changed table rows and
+   hit/miss arrays, and runs the read phase, whose overlap callback queues
+   the hit experts' fused gate+up+SwiGLU and, after a miss, the next
+   layer's prediction, then waits for the reads); routed gate+up over the
+   miss rows, routed down over all six slots; hc expand-sum.
+3. **Close**: final collapse and norm, output head (2.3 ms), device argmax
+   rows for verification, logits download (517 KB per row),
+   `hipDeviceSynchronize`.
 
-**The per-layer host round trip is hidden** while all routes hit. The route
-copy and the host's planning overlap the shared expert, 113-177 µs, and
-the routed gate+up starts 2-3 µs after the shared down ends in every traced
-layer. Only misses expose it.
+The per-layer host round trip is hidden while all routes hit: the route
+copy and planning overlap the shared expert (113-177 µs), and the routed
+gate+up starts 2-3 µs after the shared down in every traced layer.
 
 ## Measured budgets
+
+All from the profiled build (before E87/E88).
 
 ### AR greedy, per token (profiled, ms)
 
@@ -253,17 +179,16 @@ code and long requests include a few 16-row lookup verifications.
 
 ### AR sampled
 
-The same per token, plus **~0.9 ms of host time after each logits download**:
-1.29-1.51 ms against 0.43-0.49 ms greedy
-([hostgap.txt](artifacts/2026-11-02-decode/hostgap.txt)). Top-p 0.95 keeps the
-request off the device sampler, so `sampler.Sample` builds the distribution
-over all 129,280 logits on the host while the GPU waits.
+As greedy, plus 1.29-1.51 ms of host time after each logits download
+against 0.43-0.49 ms greedy
+([hostgap.txt](artifacts/2026-11-02-decode/hostgap.txt)): lever 4.
 
 ### DSpark, per cycle by verified rows (profiled)
 
 [rowcost.txt](artifacts/2026-11-02-decode/rowcost.txt). "Pre-verify" covers
 the host work after the previous download plus the drafter pass. Verify is
-the target evaluation.
+the target evaluation. The greedy rows show the pre-E87 policy, which
+picked only 0 or 4-5 drafts.
 
 | Greedy | Cycles | Cycle | Pre-verify | Verify | GPU busy in verify | Routed experts |
 |---:|---:|---:|---:|---:|---:|---:|
@@ -281,16 +206,11 @@ the target evaluation.
 | 5 rows | 64 | 136.7 | 12.2 | 124.5 | 96.9 | 46.4 |
 | 6 rows | 174 | 147.0 | 12.9 | 134.1 | 107.6 | 54.0 |
 
-- **Greedy picks only 0 or 4-5 drafts.** That follows from the policy bug
-  below.
-- **Each row past the first adds:**
-  - ~9 ms of routed expert GEMVs;
-  - ~3 ms of other GPU work: attention, hc, the router;
-  - ~4.5 ms of read stall. Verify idle grows from 11.6 ms at one row to
-    34 ms at six.
-- **Sampled cycles also pay ~0.85 ms of host verification per row**
-  ([hostgap.txt](artifacts/2026-11-02-decode/hostgap.txt): 4.9-5.0 ms
-  after a 6-row download, 0.24-0.71 ms after a 1-row one).
+Each row past the first adds ~9 ms of routed expert GEMVs, ~3 ms of other
+GPU work (attention, hc, router) and ~4.5 ms of read stall (verify idle
+11.6 ms at one row, 34 ms at six). Before E88, sampled cycles also paid
+~0.85 ms of host verification per row (4.9-5.0 ms after a 6-row download,
+0.24-0.71 ms after a 1-row one, [hostgap.txt](artifacts/2026-11-02-decode/hostgap.txt)).
 
 **The drafter pass** ([drafter.txt](artifacts/2026-11-02-decode/drafter.txt)),
 greedy code request, 250 drafting cycles, 9.18 ms from the first kernel to
@@ -345,52 +265,21 @@ bandwidth it takes from them, the critical-path kernels are ~3.9 ms/token
   largest single gaps.
 - The Q8_0 down-shaped GEMVs (shared down, `attn_output_b`) sit at
   209-213 GB/s against 218-220 for the up-shaped ones.
-- The Q6_K `attn_q_b` and `attn_output_a` already reach 231-232.
+- The Q6_K `attn_q_b` and `attn_output_a` reach 231-232 in the model, but
+  not in a DRAM-cold bench (lever 5).
 
 ## Levers, by measured size
 
 ### 1. DSpark greedy width policy (bug; fixed in E87)
 
-**Status:** fixed in E87. Over three alternated runs per build, greedy
-DSpark went from 16.5-16.9 to 17.6-18.9 tok/s on chat, from 26.6-27.4 to
-28.3-28.7 on code, and from 24.7-26.2 to 26.4-26.7 after the 24K
-document. Outputs are unchanged. Chat still varies between runs (17.6-19.2 tok/s),
-because the time a draft saves on chat sits close to the draft's own cost.
-That variance is left open; the analysis below describes the bug as it was.
-
-
-With a drafter that has the confidence head, greedy cycles are `learned`:
-- `prepare` sets `c.tail = limit`, so every cycle runs the drafter
-  (~9.3 ms).
-- `finish_draft` then picks `best_width(confidence)`, which may be 0.
-
-`best_width` compares `1 / cycle_ms[0]` with `expected / cycle_ms[w]`.
-But `finish` updates `cycle_ms[0]` only for `c.plain` cycles, and a learned
-cycle is never `c.plain`. So `cycle_ms[0]` stays at its prior, 42.4 ms,
-measured on resident `IQ1_M` without a draft. The drafting widths learn
-streamed costs, ~130 ms at 5 rows. Measured:
-
-- **A plain learned cycle really costs 72 ms**: a 62.6 ms evaluation plus
-  the 9.3 ms draft it discarded. The policy believes 42.4 ms, so it drafts
-  only when the expected emitted tokens exceed ~3.1 at width 5. The correct
-  bar is ~1.8: 131.8 / 72.0.
-- **On chat, 492 of 499 profiled cycles drafted and verified one row.**
-  Unprofiled, chat verified drafts in 52 of ~424 cycles, and every one of
-  those cycles ran the drafter.
-- **Greedy DSpark chat decodes 16.9 tok/s**, the same as AR (16.5) and below
-  sampled DSpark (19.0). Sampled uses the confident-prefix rule instead.
-
-Fix:
-- Learn `cycle_ms[0]` from every one-row cycle.
-- Account for the draft separately: a draft cost plus a verify cost per
-  width.
-- Decide before drafting whether to draft at all, from the recent
-  confidence and acceptance history, with the probing `draft_width`
-  already uses.
-
-Measure chat, code and long greedy, plus `tests/functional` greedy-equality
-checks; outputs must not change. The policy also runs on resident `IQ1_M`,
-where its prior is roughly right, but the discarded draft is still unpriced.
+The greedy policy ran the drafter (~9.3 ms) every cycle before picking a
+width, and never learned the plain-step cost: it kept its 42.4 ms resident
+prior while a streamed one-row cycle cost 72 ms with the discarded draft,
+so it drafted only above ~3.1 expected tokens at width 5 instead of ~1.8
+(131.8 / 72.0). On the profiled chat 492 of 499 cycles drafted and
+verified one row. E87 learns the plain step and the draft cost and drafts
+only while the measured saving exceeds it (rates in the Summary). Chat
+still varies, because there a draft saves about what it costs.
 
 ### 2. Expert read stalls (4.2-6.5 ms/token AR, 8-13 ms per DSpark cycle)
 
@@ -404,155 +293,95 @@ Route hits per 64-token interval
 | First 64 tokens after the 3.5K / 24K-token prompts | 95.6-97.2% | 82-128 MiB | 7.5-10 ms |
 | Steady | 98.4-99.2% | 21-50 MiB | 2.3-5 ms |
 
-- At 98.5% hits a token still misses ~3.6 experts (~36 MiB), mostly 1-2 per
-  layer in the layers that miss. Each miss is ~10 MiB at ~10 GB/s on two
-  drives, ~1 ms, and only part of it hides behind the hit experts' gate+up.
-- Prediction runs only after a layer missed (STREAMING.md); prefetched
-  shares are 12-50%. **Predicting more does not pay as the store stands**
-  (E89): two layers ahead loses to one layer ahead at the same cap (74.0%
-  vs 79.3% of misses predicted at top-6), and one layer ahead at every
-  layer — worth +2.3-2.8% in `prefetch_sim` — measured 3-7% *slower*
-  served-side: every layer's prepare then pays for resolving a running
-  prefetch job (the stop handshake, the in-flight read remainder and the
-  job bookkeeping, ~0.1 ms/layer, ~4 ms/cycle), which the simulator does
-  not price. Cheap adoption — a hit layer's prepare not stopping a
-  running job — is the prerequisite; open.
-- Open items:
-  - **Cheap prefetch adoption in the store** (E89 above): the per-prepare
-    job resolution cost is what every-layer prediction would pay.
-  - **Decode after long prompts** (item 22): the first 64 tokens after the
-    24K prompt read 2-3× the steady rate.
-  - **More cache memory** (item 30): replays put +3.7 GiB at −28% decode
-    misses.
-  - ~~The eviction scan~~: replaced by per-class victim lists (E91, with
-    E92's exact pops). Served, the scan cost at most ~0.15 ms per
-    admission and decode did not change.
-  - **Eviction choice** (E92): Belady's optimum would remove about half
-    of the decode misses (−4.9 s of 10.2 s modeled stall on this
-    workload); the best past-use rule gains 4-8% in replay and is
-    unconfirmed on the agent session.
-- **A fresh server's start** costs ~24 ms per token for its first 64
-  tokens. The built-in ranking is a calibration trace and does not match
-  chat text. A chat-and-code histogram (`MODEL.gguf.expert-histogram`), or
-  a seed refreshed from served traces, would move that. It matters for
-  benchmarks and short sessions, not for long-running servers.
-- DSpark verification multiplies the exposure: 6 rows read ~4.5 ms more
-  per extra row (lever 3), and the drafter's 4.6 GiB come out of the cache.
+At 98.5% hits a token still misses ~3.6 experts (~36 MiB), 1-2 per missing
+layer, each ~10 MiB or ~1 ms on two drives, only partly hidden behind the
+hit experts' gate+up. Verification multiplies the exposure (lever 3) and
+the drafter's 4.6 GiB come out of the cache. Sampled DSpark's per-token
+host wait is route wait 18.3-18.5 ms, read wait 4.8-5.5 ms and 0.9-1.0 ms
+of everything else, admission included (E92).
+
+- **Prediction** runs only after a missed layer
+  ([STREAMING.md](STREAMING.md#prefetch-from-router-predictions));
+  prefetched shares are 12-50%. Every-layer prediction is +2.3-2.8% in
+  `prefetch_sim` but measured slower from per-prepare job resolution
+  (~0.1 ms per layer); two layers ahead predicts fewer misses (E89).
+  [BACKLOG item 37](BACKLOG.md#37-cheap-prefetch-adoption-then-every-layer-decode-prediction).
+- **Eviction**: victim lists replaced the scan (E91, E92; the scan cost
+  ≤ ~0.15 ms per admission). Belady's optimum would remove about half of
+  the decode misses (−4.87 s of 10.24 s modeled stall), past-use rules
+  gain 3.6-7.5% in replay (E92); the gap needs reading ahead (item 37).
+  [BACKLOG item 31](BACKLOG.md#31-eviction-scoring-and-prompt-admission).
+- **Capacity** ([item 30](BACKLOG.md#30-more-memory-for-the-expert-cache)),
+  **after long prompts** ([item 22](BACKLOG.md#22-decode-misses-after-a-long-prompt)),
+  **fresh-server seed** ([item 39](BACKLOG.md#39-expert-cache-seed-from-served-text)).
 
 ### 3. Verification row cost on the streamed build
 
-Each row past the first costs ~12 ms of GPU time (9 ms of routed experts)
-plus ~4.5 ms of read stall. The 2026-10-27 `--spec-bench` table in
-`BACKLOG.md` shows ~12 ms per row on resident `IQ1_M` too. The GPU part is
-the rows' routed reads and attention; the stall part is specific to
-streaming.
-- **Item 3, rejected rows' expert reads:** charge a row its own miss bytes
-  when choosing the width. Today the policy prices misses only through
-  average cycle times.
-- **Item 13 / 24, cache-aware routing:** changes outputs; opt-in only.
-- **Grouped expert GEMV for 2-6 rows** (`expert_group_kernel`): the count
-  is in (E89): a 6-row verification layer routes 36 rows over 22.6
-  distinct experts, and each row past the first adds 2.7-3.9 new ones, so
-  the per-layer dedup is already at the arithmetic minimum and the ~9 ms
-  routed cost per row is genuinely distinct reads at the same 205-220 GB/s
-  as AR. No kernel redundancy left to remove.
+Each row past the first costs ~12 ms of GPU time plus ~4.5 ms of read
+stall; a 6-row cycle takes 155 ms with its draft against 59.5 ms for an AR
+token, so it must emit more than 2.6 tokens to win. Resident `IQ1_M` also
+pays ~12 ms per row (E18). The routed part is genuinely distinct reads: a
+6-row layer routes 36 rows over 22.6 distinct experts, the dedup minimum,
+at 205-220 GB/s (E89). Open: per-row miss pricing
+([BACKLOG item 3](BACKLOG.md#3-expert-reads-for-rejected-verification-rows));
+output-changing cache-aware routing is opt-in (items 13, 24).
 
-### 4. Host sampling with top-p, top-k or min-p (0.9 ms/token AR, 2-5 ms per DSpark cycle)
+### 4. Host sampling (0.85 ms per verified row; top-p fixed in E88)
 
-**Status:** top-p without top-k is fixed in E88: the device computes the
-row's softmax maximum and sum, and the host sampler skips its two passes
-over the full row. Sampled DSpark is +0.3 to +1.1 tok/s and AR sampled
-+0.1 to +0.2, with identical seeded outputs. Top-k, penalties and
-constraints still take the host path; the analysis below is from before
-the fix.
-
-
-`DsparkSamplerBridge::DeviceTemperature` allows the device sampler
-(`ds41_v41_sample_row`) only for plain temperature sampling. With top-p
-0.95, a common client setting, every row goes to the host:
-- AR: `sampler.Sample` after `CopyLogits`;
-- DSpark: `Verify` → `working_.Distribution`.
-
-Each row builds the full 129,280-entry distribution while the GPU idles:
-- AR sampled: +0.85 ms/token (1.5%);
-- sampled DSpark: +0.85 ms per verified row, 2.5-5 ms per 4-6-row cycle
-  (2-3.5%).
-
-A device top-k/top-p/min-p filter over the downloaded row is a contained
-change, using the same uniforms and the same tie rules as the host sampler.
-That keeps seeded outputs identical. Penalties and constraint masks can
-stay on the host.
+The device sampler (`DsparkSamplerBridge::DeviceTemperature`) takes only
+plain temperature; other requests build the full 129,280-entry
+distribution on the host (`sampler.Sample`, `working_.Distribution`) while
+the GPU idles: ~0.85 ms per AR token (1.5%) and per verified row, 2.5-5 ms
+per 4-6-row cycle. E88 computes the top-p softmax totals on the device
+(min-p allowed; no top-k, penalties or constraints), seeded outputs
+identical. Top-k remains:
+[BACKLOG item 15](BACKLOG.md#15-smaller-items).
 
 ### 5. Kernel bandwidth (~3.9 ms/token on the critical path, ~7%)
 
-See the per-kernel table. The Q8_0 GEMVs (`gemv_kernel<8, …>`) are the
-largest block: 27 layers × (`q_b`, `output_a`, `output_b`, shared) at
-208-220 GB/s, ~2.3 ms per token short of 240. The Q6_K ones reach 231-232
-on the same shapes — **but not cold**: a DRAM-cold sweep over all five
-decode shapes and three formats (`tools/bench/ds41_dense_gemv_types.hip`,
-E90) puts every format at 199-224 GB/s at one token, so there is no
-Q8_0-specific gap to close; the served Q6_K outlier benefits from
-something the cold bench cannot reproduce. From 1 to 8 tokens the rates
-sag 3-20% (per-token FMAs per weight byte). Two production slice choices
-are beatable (shared down and q_a+kv prefer 8 slices at every width,
-+5-14% per call at 6 tokens) but worth only 0.1-0.4% end to end, under
-the E65/E66 bar for a rounding change (E90, not retained).
-- Already measured:
-  - E46: paired IQ1 down rows (retained);
-  - E51: single-slot experts (retained);
-  - wide loads (`BACKLOG.md` item 15);
-  - nontemporal loads in the model (item 33, no gain).
-- Attention partials written back during the dense GEMVs: E65, item 33,
-  ~0.6 ms/token, with changed rounding.
-- Work from `tools/bench/gfx1151_peak.hip` against `ds41_mmq_bench --dense`
-  per shape. Then check in the model, where the expert uploads and the hc
-  mix's side stream contend for the same DRAM.
+The Q8_0 GEMVs are the largest block (27 layers × `q_b`, `output_a`,
+`output_b`, shared at 208-220 GB/s). It is not a format gap: DRAM-cold,
+every format runs 199-224 GB/s at one token, so the served Q6_K 231-232 is
+not reproducible; better slice choices are worth 0.1-0.4%, under the
+rounding bar (E90). Partial writebacks after split attention cost ~0.6 ms
+per token (E65, [item 33](BACKLOG.md#33-attention-partials-written-back-during-the-dense-gemvs));
+routed GEMVs are [item 17](BACKLOG.md#17-single-row-routed-expert-gemv-bandwidth).
+Retained already: E46, E51, E69; nontemporal loads did not help (E59, E65).
 
 ### 6. Launch gaps (~2.9 ms/token traced)
 
-There are ~975 launches per token, about 25 per layer. Traced gaps average
-~3 µs, and after a long GEMV ~6.5-8 µs, of which ~4.5 µs is the tracer
-(E60).
-- Graph replay does not remove them (E44).
-- Fewer launches might: the fusions listed in `BACKLOG.md` items 4 and 18
-  (q rope into `q_b`, route into the router, the window copy).
-- A per-layer persistent kernel is the larger step.
-
-Estimate the untraced share from event timing before starting.
+~975 launches per token, ~25 per layer; traced gaps average ~3 µs, ~6.5-8
+µs after a long GEMV, of which ~4.5 µs is the tracer (E60). Graph replay
+keeps them (E44); only fewer launches help. Estimate the untraced share
+from event timing first:
+[BACKLOG item 4](BACKLOG.md#4-launch-gaps-between-decode-kernels).
 
 ### 7. Drafter pass (9.2 ms per drafting cycle, ~7% of a 5-row cycle)
 
-- **Target head over the drafted rows (2.5 ms).** It reads the 543 MB head
-  once per cycle, at 213 GB/s. A request-vocabulary head (`BACKLOG.md`
-  item 15, E64: +1.1% greedy in replay) would shrink it.
-- **`markov_select` (1.5 ms; item 20).** Five dependent passes over the
-  66 MB W2. Only an exact bound that skips rows would cut it (E47).
-- **Drafter stages (~4.5 ms).** Q4_K GEMVs and Q2_K experts, at bandwidths
-  not yet tabulated. Do that before any drafter kernel work.
+The target head over the drafted rows (2.5 ms, 213 GB/s) and five
+dependent `markov_select` passes (1.5 ms at ~92% of the read ceiling, E47)
+would shrink with a request-vocabulary head (E64: +1.1% greedy in replay);
+the drafter stages (~4.5 ms) have no bandwidth table yet:
+[BACKLOG item 38](BACKLOG.md#38-drafter-pass).
 
 ### 8. Host work per step (0.3-0.45 ms greedy)
 
-Between the logits download and the first kernel:
-- the host argmax over 129,280 floats (greedy AR) or the verification;
-- the Engram hash;
-- an `std::async` chain plus `engram_read` threads, created per evaluation;
-- the embedding dequantization and its uploads.
-
-Under 1% of a token. A persistent Engram reader pool (`BACKLOG.md`
-item 15) and the device argmax for one-row steps would take most of it.
-Low priority.
+Host argmax or verification, the Engram hash, per-evaluation
+`std::async`/`engram_read` threads and the embedding dequant and uploads
+sit between the logits download and the first kernel; under 1% of a token
+([BACKLOG item 19](BACKLOG.md#19-host-work-and-round-trips-per-step)).
 
 ## Things that look like levers but are not
 
-- **The per-layer route round trip.** The shared expert covers it while
-  routes hit. Every traced hit layer starts its routed kernel 2-3 µs after
-  the shared down.
-- **The hc mix's 69 GB/s.** It runs on a side stream beside the
-  projections (E57). Fusing it with the collapse was slower (E49).
-- **GPU clocks during read waits** (`BACKLOG.md` item 32): they stay at
-  2.2-2.85 GHz.
-- **Graph capture** (E44): ~0.13 µs per launch.
-- **Engram row reads in decode:** ~0.1 ms/token of wait.
+- **The per-layer route round trip**: hidden by the shared expert while
+  routes hit.
+- **The hc mix's 69 GB/s**: on a side stream (E57); fusing it with the
+  collapse was slower (E49).
+- **Verification grouped-GEMV redundancy** (E89) and **a Q8_0-specific
+  GEMV gap** (E90): neither exists.
+- **GPU clocks during read waits** (BACKLOG item 32, closed), **graph
+  capture** (E44, ~0.13 µs per launch), **Engram reads in decode**
+  (~0.1 ms/token).
 
 ## Reproducing
 
@@ -573,7 +402,7 @@ python3 $A/rowcost.py prof/ds-greedy       # DSpark cycle cost by rows
 python3 $A/hostgap.py prof/ar-sampled      # host time after each logits download
 python3 $A/drafter.py prof/ds-greedy -2    # drafter pass by kernel
 
-# DSpark per-cycle log (multi-row cycles only)
+# DSpark per-cycle log (multi-row and learned cycles)
 GUFO_DEEPSEEK41_DSPARK_TRACE=1 build/release/gufo serve ...
 ```
 

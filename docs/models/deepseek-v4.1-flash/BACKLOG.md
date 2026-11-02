@@ -1,707 +1,448 @@
 # DeepSeek V4.1 Flash backlog
 
-Open work only. Everything already measured, retained or rejected, is in
-[EXPERIMENTS.md](EXPERIMENTS.md); read the matching entries before retrying
-an item. The streaming design is in [STREAMING.md](STREAMING.md). Impact
-figures are estimates unless stated.
+The single list of what to do next. Items keep their numbers as stable IDs
+(other documents cite "item N"); sections are in rank order. Results are in
+[EXPERIMENTS.md](EXPERIMENTS.md) (`E<n>`; data recorded here first is in
+[its last section](EXPERIMENTS.md#backlog-measurements-without-an-e-number)).
+The streaming design is in [STREAMING.md](STREAMING.md), memory use in
+[README_DEEPSEEK.md](../../../README_DEEPSEEK.md#memory). Gains are
+estimates unless marked measured.
 
 ## Where the time goes
 
-Served streamed `UD-IQ2_XXS` prefill (budget, per-kernel rates, ceilings and
-ranked levers, 2026-11-02): [PREFILL.md](PREFILL.md).
-Served streamed `UD-IQ2_XXS` decode, AR, sampled and DSpark (same form,
-2026-11-02): [DECODE.md](DECODE.md).
+Streamed `UD-IQ2_XXS`, 2026-11-02; detail in [DECODE.md](DECODE.md) and
+[PREFILL.md](PREFILL.md).
 
-**All modes, 2026-10-29** ([trace sweep](artifacts/2026-10-29-trace-sweep/summary.txt);
-measured ceilings 240 GB/s DRAM read, 55.4 TFLOP/s FP16/BF16 WMMA). A
-decoded token reads 7.15 GiB of weights (`IQ1_M`) or 7.4 GiB (`IQ2_XXS`),
-a ~31–32 tok/s ceiling.
+- **Decode.** ~10 GB read per token, ~42 ms at the 240 GB/s ceiling
+  (~24 tok/s); steady AR runs 53-58 ms. The gap: expert read stalls
+  4.2-6.5 ms per AR token (8-13 ms per DSpark cycle), kernel bandwidth
+  ~3.9 ms, launch gaps ~2.9 ms traced. Each verification row past the first
+  adds ~12 ms of GPU time and ~4.5 ms of read stall.
+- **Prefill.** A fresh 19,927-token served document: 20.59 s profiled,
+  19.2 s after E82. GPU time 17.0 s: routed FP16 46%, dense FP16 ~27%,
+  attention 11%, hyper-connections 8%, BF16 5%. Idle: encoder expert reads
+  (819 ms over two documents after E84), the decoder replay's cold experts
+  (0.91 s, drive-bound, E86), Engram rows (first batch only after E85).
 
-| Mode (96-token prompt, 256 tokens) | `IQ1_M` | `IQ2_XXS` streamed | Position |
-| --- | ---: | ---: | --- |
-| pp2048 (tok/s) | 1,393 | 1,208 | 95% GPU busy; WMMA at ~55% of peak |
-| AR greedy / sampled (tok/s) | 24.0 / 24.4 | 22.0 / 22.0 | 39.0 / 40.4 ms of kernels per token against ~31; 2.9 / 5.4 ms idle |
-| DSpark greedy / sampled (tok/s) | 38.1 / 38.5 | 34.4 / 35.1 | Verification at the read ceiling (24–36 distinct experts per layer per step) |
+## Open, ranked
 
-Single-token decode bandwidth: output head 99%, dense Q5_K/Q8_0 GEMVs
-86–97%, routed gate+up 85% (IQ1_S) and 71% (IQ2_XXS layers), routed down
-71–72%, BF16 router 66%. 2.35 of AR's 2.9 ms idle per token are gaps under
-5 µs between ~975 launches.
+Speed items that keep outputs unchanged come first, by expected value;
+items that change rounding come last. Output-changing options and features
+follow in their own sections.
 
-**Streamed `IQ2_XXS` decode** (rocprofv3, warm cache, tg128 after pp512,
-medians per token, 2026-10-27): 50.1 ms per token, 40.3 ms of kernels and
-9.8 ms of GPU idle. Since then the per-layer tables removed most of the
-copies (48.1 ms traced).
+| Rank | # | Item | Expected gain (evidence) | Next step |
+| ---: | ---: | --- | --- | --- |
+| 1 | 30 | More memory for the expert cache | +3.7 GiB: −28% decode and −20% prefill misses in served-trace replays; ~3 GiB of the reserve idle | Let the cache grow into the reserve |
+| 2 | 37 | Cheap prefetch adoption, then every-layer decode prediction | +2.3-2.8% decode simulated once adoption is free (E89); Belady would halve decode misses (E92) | Stop resolving a running job on hit layers |
+| 3 | 31 | Eviction scoring and prompt admission | Decay 3,200 / bonus 8: −3.6% / −7.5% decode misses replayed; served chat 19.9 / 20.2 against 19.4-19.5 tok/s, agent inconclusive (E92) | Fixed-conversation agent replay of `wip/ds41-eviction-score` |
+| 4 | 9 | Stable-boundary prefill pass per chat request | 64.6 ms per chat request (measured pass cost) | Snapshot or skip the N−3 capture |
+| 5 | 4 | Launch gaps between decode kernels | ~2.5 µs dispatch latency before each of ~975 launches, ~2.4 ms/token (E44, E60); fusions 0.2-0.5% each | Event-timed untraced share, then fusions |
+| 6 | 3 | Expert reads for rejected verification rows | Each row past the first adds ~4.5 ms of read stall (DECODE.md); unmeasured | Charge a row its own miss bytes in the width choice |
+| 7 | 6 | Routed FP16 kernel: weight decode | 46% of served prefill GPU time; decode ~4.4 of ~21 ms per layer (E25); low confidence after E81 | E25's ablation on served counts for the UD types |
+| 8 | 7 | Remaining prefill glue | ~25-50 ms per 2K batch at 128K; router at ~5 TFLOP/s | Split-K router; FP16 Engram rows |
+| 9 | 40 | FP16 Q for prefill attention | ~1% of prefill (E53 estimate) | Write Q in FP16 from the `q_b` epilogue |
+| 10 | 22 | Decode misses after a long prompt | First 64 tokens after a 24K prompt read 2-3× the steady rate | Admission variants over the first 64-256 steps |
+| 11 | 39 | Expert cache seed from served text | Fresh server: 74-78% hits and ~24 ms/token of read wait for the first 64 tokens | Histogram from served chat and code traces |
+| 12 | 38 | Drafter pass | 9.18 ms per drafting cycle; request-vocabulary head +1.1% greedy in replay (E64) | Tabulate stage bandwidth; vocabulary head |
+| 13 | 19 | Host work and round trips per step | ~0.7 ms per DSpark step (2026-10-29), 0.43-0.49 ms per AR greedy step | Logits download only when needed; device embedding |
+| 14 | 29 | Zero-copy expert reads | ≤ ~1.5% of kernel time at an 88 GiB cap; first version slower | Slack from `STATX_DIOALIGN`, contiguous stage |
+| 15 | 17 | Single-row routed expert GEMV bandwidth | Routed GEMVs at 205-220 GB/s against 240 | ISA mix and spill check |
+| 16 | 28 | Split-read head share from measured drive speeds | None on matched drives; the slower drive's excess on mismatched ones | Per-drive "landed last" attribution |
+| 17 | 35 | Rank-ordered expert layout | Agent session: ~0.5 s of 214 s (E70) | Replay prompt-heavy sessions |
+| 18 | 5 | Compact selection for `--exact-prefill` rescoring | ~85 ms per masked layer per 2K chunk at 128K, `--exact-prefill` only | Compact WMMA rescoring |
+| 19 | 36 | Decoder rows for short continuations of mid-prompt checkpoints | 1.9 s fallback instead of 0.18 s when hit; no hit in recorded sessions | Keep layer-19 rows per checkpoint |
+| 20 | 15 | Smaller items | Small | See the list |
+| 21 | 33 | Attention partials written back during the dense GEMVs | ~0.6 ms/AR token, ~3 ms per 6-row verification; 10 splits +0.5% AR, not retained under the rounding bar (E65) | Only with an accepted rounding change |
+| 22 | 34 | Multi-token BF16 matmuls in verification | 0.2-0.35 ms per cycle (~0.3-0.4%); not retained under the rounding bar (E66) | Only with an accepted rounding change |
 
-| Part | ms/token |
-| --- | ---: |
-| Dense Q5_K GEMV | 22.2 |
-| Routed expert GEMV | 11.5 |
-| Other kernels (attention, hyper-connections, router, …) | 6.6 |
-| Idle: miss reads between the hit and miss launches | 5.3 |
-| Idle: small blocking copies (now 23 per token, from ~200) | ~3 |
+### 30. More memory for the expert cache
 
-The dense GEMV runs near the measured DRAM ceiling, so verification of
-several rows per weight read (DSpark) is the main decode lever. A streamed
-DSpark tg512 trace splits into routed experts 44% (36% the 8-row
-verification groups, ~36 distinct experts per layer at the single-token
-per-expert cost), dense GEMV 31%, other kernels 11%, idle 10% and the
-drafter 4%.
+The cache gets what unified memory leaves after the dense weights, the
+drafter, a fixed 4 GiB reserve and the store's buffers; more cache cuts
+misses without changing outputs, and is the only lever left for the
+decoder replay's drive-bound stall (E86). Replay data:
+[EXPERIMENTS.md](EXPERIMENTS.md#item-30-expert-cache-memory-replays). Parts:
 
-**Resident `IQ1_M` decode** (2K context, 2026-10-25): 42.4 ms wall, ~2.7 ms of
-it gaps between ~1,000 dependent launches. Dense projections and the output
-head take ~23.9 ms near the 235 GB/s read peak.
+- **Reserve the cache can give back** (~3 GiB idle at 131k): grow into it,
+  drop the lowest-scored chunks when free memory runs low (cached experts
+  are disk copies).
+- **Admitted misses straight into their slot**: take the slot before the
+  read, never evicting an expert the batch routes (replay −0.16% misses);
+  removes one copy and frees the demand stage for the next part. Item 31's
+  admission waits on it.
+- **Compact demand stage** (~3.7 → ~0.6 GiB): prefill layers with more
+  misses run in passes over route subsets (E82/E84 already split resident
+  and read routes), double-buffered.
+- **Prefetch stage** (~1.8 GiB, 192 rows): decode uses 6-12; measure what
+  wide prompt predictions are worth.
 
-**Prefill** (pp2048 at 32K with bounded replay, 2026-10-26): 1,773.84 ms of
-GPU time; routed FP16 606 ms, dense FP16 518, attention 219, mHC 137,
-indexer 83, top-k 45. After E19/E20 (2026-10-27) the indexer scores take
-about a quarter and the top-k a twentieth of that per layer at 128K; native
-pp2048 runs 1,182 tok/s at 32K, 1,155 at 64K and 1,098 at 128K.
+The drafter's size is settled (E62). Gate: outputs at a 24 GiB cap.
 
-**Verification rows** (`--spec-bench`, 1–8 rows, 2026-10-27, ms):
+### 37. Cheap prefetch adoption, then every-layer decode prediction
 
-| Model | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 |
-| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| `IQ2_XXS` streamed | 43.4 | 58.0 | 69.8 | 78.8 | 96.6 | 107.5 | 120.4 | 133.8 |
-| `IQ1_M` resident | 41.1 | 52.8 | 65.5 | 75.7 | 87.0 | 98.3 | 113.5 | 123.6 |
+Decode predicts the next layer only after a layer waited on reads
+([design](STREAMING.md#prefetch-from-router-predictions)). Predicting at
+every layer is +2.3-2.8% in `prefetch_sim` but measured slower (E89),
+because every prepare then resolves a running job (stop handshake, read
+remainder, bookkeeping: ~0.1 ms per layer, ~4 ms per cycle). Two layers
+ahead predicts fewer misses than one (E89). This is also the route toward
+Belady's optimum (−47.9% / −53.5% decode misses, E92), which past-use
+eviction rules cannot approach. Step: let a hit layer's prepare adopt
+finished reads and leave the rest running, measure what remains, then
+re-enable E89's `predict_hot` rule; undrained adoption for short prompt
+passes was within noise (E72). Gate: 3K decode scores bit-identical.
 
-## Open items
+### 31. Eviction scoring and prompt admission
 
-| # | Item | Area | Est. impact | Confidence |
-| ---: | --- | --- | --- | --- |
-| 3 | Expert reads for rejected verification rows | Streamed DSpark | Part of the 36% verification-expert time | Low |
-| 4 | Launch gaps between decode kernels | Decode | ~2.35 ms/token AR (~6%), ~3 ms per DSpark step | Medium |
-| 5 | Compact selection for `--exact-prefill` rescoring | Long context | ~85 ms per masked layer per 2K chunk at 128K, `--exact-prefill` only | Medium |
-| 6 | Routed FP16 kernel: weight decode per slot | Prefill | ~4.4 ms of ~21 per layer | Low |
-| 7 | Remaining prefill glue | Prefill | ~25–50 ms per 2K batch | Medium |
-| 9 | Stable-boundary prefill pass per chat request | Serving | ~65 ms per request | Medium |
-| 10 | Concurrent drafter forwards | Serving decode | ~9 ms per drafting session per step; DSpark 5% under AR at C8 | Medium |
-| 13 | Route bias toward cached experts (changes outputs) | Streamed decode | Opt-in approximation | Low |
-| 14 | Higher-precision Engram tables | Quality | Unmeasured | — |
-| 15 | Smaller items | Various | Small | — |
-| 16 | Multi-user AR decode below the 2026-10-26 card | Serving decode | Distinct-prompt C8 63.0 tok/s against a ~93 tok/s read ceiling | Medium |
-| 17 | Single-row routed expert GEMV bandwidth | Decode | ~1.7 ms/token (~4% AR) | Medium |
-| 18 | Small decode kernels: hyper-connections, router, routing | Decode | ~1–1.5 ms of ~4 ms/token | Medium |
-| 19 | DSpark host round trips | Speculative decode | ~0.7 ms per step | Low |
-| 20 | `markov_select` | Drafter | Part of 1.6 ms per step | Medium |
-| 21 | Two-layer-ahead decode prediction with a usefulness gate | Streamed decode | Small warm; part of the read stall cold and after long prompts | Low |
-| 22 | Decode misses after a long prompt under scan-resistant admission | Streamed decode | Unmeasured | — |
-| 23 | Streamed `IQ2_XS` with cache-aware routing | Quality option | Unmeasured; lower KL than `IQ2_XXS` at a residency cost | Low |
-| 27 | Streamed kernels for the `IQ2_XS` build (IQ3_XXS down, IQ2_S gate/up) | Model support | Prerequisite for item 23 | High |
-| 28 | Split-read head share from measured drive speeds | Streamed reads, two drives | Small on matched drives; up to the slower drive's excess on mismatched ones | Medium |
-| 24 | Selection-only miss penalty, mako's form of item 13 (changes outputs) | Streamed decode, short prefills | Up to the ~5 ms/token of miss-read idle; more cold, after long prompts and in verification | Medium |
-| 25 | Direction projection and steering vectors | Feature | Per-request behavior edits; ~0.1–0.5 ms/token if unfused | Medium |
-| 26 | LoRA adapters (GGUF `adapter.type = lora`) | Feature | Adapter compatibility; rank-1 abliteration adapters reduce to item 25 | Medium |
-| 36 | Decoder rows for short continuations of mid-prompt checkpoints | Serving cache | A fallback prefill from the previous checkpoint (seconds) when a prompt ends within 140 tokens past one; none in recorded sessions | Medium |
+The scan is gone (E91/E92). **Score:** the current rule (decay 1,600,
+bonus 4) sits between recency, which unrelated requests reward, and
+frequency, which long conversations reward; decay 3,200 / bonus 8 is the
+only setting that helps both traces, but the unseeded agent sessions
+diverged, so it is parked on `wip/ds41-eviction-score` until a
+fixed-conversation replay (E92). **Admission:** admitting every expert
+routed twice cut follow-up misses 32% but slowed prefill through
+stage-to-slot copies ([runs](EXPERIMENTS.md#item-31-prompt-admission-served-runs));
+re-measure after item 30's direct-to-slot uploads. More admission evicts
+the replay's experts (E86) and interacts with item 22.
 
-### 3. Expert reads for rejected verification rows
+### 9. Stable-boundary prefill pass per chat request
 
-On streamed DSpark every verification row pays for its own experts, and
-verification batches predict no next-layer experts. The verified prefix
-already weighs the head's per-row acceptance against measured cycle time
-([E18](EXPERIMENTS.md#e18-cost-aware-draft-prefix-retained)), which prices
-misses only on average. Verification batches now predict next-layer
-experts when a layer misses (E31: +3.5–6.7% on a cold cache, neutral warm).
-Open: charge a row the miss bytes of its own routes. Route bias is a separate,
-output-changing item (13).
+The prompt cache captures a checkpoint only at a pass end, so every chat
+request runs a 3-row pass for its stable boundary three tokens before the
+end ([cost](EXPERIMENTS.md#item-9-stable-boundary-pass)); since E73 it no
+longer replays the decoder. The checkpoint serves turns whose rendering
+diverges after the user message (thinking mode, regenerated or edited
+replies). Capture it only when the next turn can need it, or snapshot row
+N−3 inside the final pass (invasive: compressor accumulators, SWA windows,
+bounded replay). Gemma's generation-prompt lookahead is the precedent; the
+policy is shared (`src/cache/retention.cpp`), so other models must hold.
 
 ### 4. Launch gaps between decode kernels
 
-Re-traced 2026-10-29 (IQ1_M, tg32 after pp512): 974 launches and 2.9 ms
-idle per 41 ms token, ~0.2 ms of it at the step start (output head →
-next step's first copy) and ~2.7 ms as 2–3 µs gaps between dependent
-launches. Graph replay keeps those gaps (E44: ~0.13 µs saved per launch,
-~0.3% per token); only fewer launches recover them, through the fusions
-below (~0.2–0.5% each) or by batching the per-session launches of a joint
-step (~2,000 per C8 step, mostly attention).
+The gap is the device's dispatch latency between dependent launches; graph
+replay keeps it (E44), and traced gaps after long GEMVs overstate it by
+~4.5 µs (E60). [Traces](EXPERIMENTS.md#item-4-decode-launch-gaps-2026-10-29-2026-10-31).
+Only fewer launches help:
 
-~1,000 dependent launches per token leave ~2.7 ms idle (resident profile).
-Left to fuse: the q rope after q_b (40 per token; would need a GEMV epilogue
-pairing rows 8 lanes apart), route after the router matvec (40; 7 µs each),
-the window copy (43; cannot run before attention, which reads the slot it
-overwrites). hc mixes read 2 MB of F32 weights in ~14 µs (80 per token)
-regardless of blocks per row. ~90 µs of host work starts each step
-(embedding dequant and two synchronous uploads ~70 µs); a device-side
-embedding lookup removes most of it.
+- fusions: q rope into `q_b` (needs an epilogue pairing rows 8 lanes
+  apart), route into the router matvec, the window copy (cannot precede
+  attention, which reads the slot it overwrites); mix-collapse fusion was
+  slower (E49);
+- batching the per-session launches of a joint step;
+- a persistent per-layer kernel, the larger step.
 
-Streamed UD-IQ1_M (2026-10-31, tg128 after pp2048, after E56/E57): a
-layer takes ~1,046 µs over 22 launches, two open parts:
+### 3. Expert reads for rejected verification rows
 
-- **~7 µs gaps after the 2,048-block GEMVs** (before `rope_tail`, the
-  wo_b GEMV and `hc_expand`) are mostly added by rocprofv3 tracing (E60):
-  traced, a launch after any kernel longer than ~60 µs starts 6.4 µs later
-  (10.7 µs after ~0.75 ms), while event timing without the profiler gives
-  the same ~2 µs launch cost after 8 to 28 MB streaming reads. Subtract
-  ~4.5 µs per such launch from traced idle.
-- **~2.5 µs before every launch**: ~55 µs per layer, ~2.4 ms per token.
-  Graph replay does not remove it (E44); only fewer launches (fusions, or
-  a persistent per-layer kernel) do.
+The distinct-expert count per verification layer is already at its
+minimum (E89), so only fewer or better-chosen rows help. The verified
+prefix prices misses only through average cycle times (E18, E87);
+verification batches already predict after a missed layer (E31). Charge
+each row the miss bytes of its own routes when choosing the width. See
+[DECODE.md lever 3](DECODE.md#3-verification-row-cost-on-the-streamed-build).
 
-### 5. Compact selection for `--exact-prefill` rescoring
+### 6. Routed FP16 kernel: weight decode
 
-Verification already rescores in groups of four rows over layer 20's
-candidate blocks (E1). Prefill rescoring (WMMA) of the masked decoder index
-layers 24, 28, 32 and 36 still scores the full history and masks afterwards,
-but with bounded replay those layers see only the last 140 prompt rows:
-5.6 ms of scores and 0.7 ms of top-k per layer at 128K, ~25 ms once per
-prompt (E34). Compact rescoring pays only under `--exact-prefill`, where the
-same four layers score every 2,048-row chunk (~85 ms each at 128K). The
-encoder index layers 2, 8 and 14 (~40 ms each per 2K batch at 128K) have no
-candidate mask. Keep absolute position tie order, the pinned newest block,
-causal partial blocks and the emitted row order.
-
-### 6. Routed FP16 kernel: weight decode per slot
-
-`kernels/rocm/ds41_routed_f16.hip.cpp`, after E25: IQ1_M gate+up takes about
-21 ms per 2,048-token layer, of which the weight decode and its permutes are
-~4.4 ms and the matrix-core skeleton (block fields, fragment reads,
-products) ~14.7 ms, at 39 of the measured 55 TFLOP/s. A decoded fragment
-feeds at most four 16-slot tiles, on average 2.3. 128-slot tiles cut the
-recorded prefill layers' weight decodes by 19% but ran no faster (E35).
-IQ2_XXS's 16-byte random codebook reads still
-cost ~2 ms; 8-byte state entries would need ~12 more VALU per decode.
-IQ2_S stays on MMQ.
+After E25, IQ1_M gate+up spends ~4.4 of ~21 ms per 2,048-row layer on
+weight decode and ~14.7 ms on the matrix-core skeleton; IQ2_XXS's 16-byte
+codebook reads cost ~2 ms (8-byte entries need ~12 more VALU per decode);
+IQ2_S and IQ2_XS downs run 5-10% slower than IQ2_XXS. Tile, staging and
+fragment variants are closed (E8, E35, E76-E81). Use served route counts
+(`route_occupancy.py`, `ds41_mmq_bench --f16 1 --counts`), not the bench
+prompt. See [PREFILL.md lever 3](PREFILL.md#3-routed-fp16-kernels-78-s-busy-46).
 
 ### 7. Remaining prefill glue
 
-Per 2,048-token chunk at 128K of depth (2026-10-28 profile, 1,342 ms of GPU
-time): the Q8_0 projections still go through MMQ (30 ms) and its Q8_1 pass
-(9.5 ms); the BF16 matmuls take 49 ms (the 384-row router at ~5 TFLOP/s);
-the routed rows' closing expand before Engram layers and replay boundaries
-8 ms; the shared-expert SwiGLU 5 ms and the routed input's FP16 conversion
-4 ms. Each chunk still starts with ~4.5 ms of embedding staging: ~1.2 ms
-of host dequantization on four threads, ~1 ms of pinned upload and ~2 ms of
-copies into the four residual streams (E33). The Engram
-projection (25,600 × 6,144, 17.8 ms per call, two per chunk) still reads
-FP32 rows; FP16 rows from the host reader would save 0.8 ms per call and
-half the upload, and the shared down projection's SwiGLU input 0.04 ms.
+At 128K per 2K chunk: Q8_0 projections still on MMQ plus its Q8_1 pass,
+the BF16 router at ~5 TFLOP/s, closing expands, SwiGLU, FP16 conversion,
+~4.5 ms of embedding staging, FP32 Engram rows (FP16 would save 0.8 ms per
+call) ([profile](EXPERIMENTS.md#item-7-prefill-glue-at-128k-2026-10-28)).
+Router: E75's narrow kernel is not yet reprofiled served; split K with an
+FP32 reduction in the same order keeps the sums bit-identical (E71's
+32-value K steps, part order and per-step FP32 sums must stay).
 
-### 9. Stable-boundary prefill pass on every chat request
+### 40. FP16 Q for prefill attention
 
-The prompt cache captures a checkpoint only at a prefill pass end, and every
-chat request captures its stable boundary three tokens before the prompt
-end: a 2,035-token prompt runs as 2,032 + 3 rows. The 3-row pass costs about
-65 ms (`gufo bench -p 3`: 64.6 ms), the only serving-side prefill overhead
-found. The checkpoint serves turns whose rendering diverges after the user
-message (thinking mode, regenerated or edited replies). Capture it only when
-the next turn can need it, or snapshot row N−3 from inside the final pass
-(compressor accumulators, SWA windows and bounded replay make this
-invasive). Gemma's generation-prompt lookahead is the local precedent. The
-policy is shared (`src/cache/retention.cpp`), so other models' reuse must
-hold. Since E73 the stable step no longer runs a decoder replay of its
-own (on streamed builds that replay cost ~0.9 s); the 3-row pass remains.
+Prefill attention reads FP32 Q (0.2-0.5 ms per call); FP16 Q from the
+`q_b` epilogue, with rope and rounding moved there, would save about half
+(E53, not attempted). Attention grows with depth: check
+`ds41_attention_test --bench` at 16K and 32K first, and keep the attention
+input's rounding identical.
 
-### 10. Batch-level draft width
+### 22. Decode misses after a long prompt
 
-Concurrent DSpark sessions share one drafter pass (E42) and one 16-row
-verification (E27), but with different prompts per user DSpark still
-trails AR at C4 (53.6 against 55.5 tok/s) and C8 (59.3 against 63.0).
-E27's v3, a batch plan that narrows or skips drafting when the joint step
-does not pay, is the next lever.
+Once the cache is full a large prefill admits only its final 16 rows and
+its frequent experts, and the next decode tokens pay for it
+([DECODE.md lever 2](DECODE.md#2-expert-read-stalls-42-65-mstoken-ar-8-13-ms-per-dspark-cycle)).
+mako found leaving prefill out of eviction scores raised steady decode
+misses 20% ([external](EXPERIMENTS.md#items-13-22-26-external-measurements-and-reference-data)).
+Measure hits and tok/s over the first 64-256 steps after 4K and 16K
+prompts: current rule, admit every prompt expert, a looser threshold
+(shared with item 31).
 
-### 13. Route bias toward cached experts (quality-affecting, optional)
+### 39. Expert cache seed from served text
 
-Xolotl multiplies streamed experts' router logits by ~0.5 for 13.7 →
-30.3 tok/s on a 4090 at ~1 point of top-1 agreement; ×0.25 keeps 85%
-agreement. This changes outputs: opt-in only, with its own quality gates.
+The built-in ranking is a calibration trace and does not match chat text.
+The store already loads a `MODEL.gguf.expert-histogram` sidecar
+([STREAMING.md](STREAMING.md#expert-cache)); build one from served chat and
+code route traces and measure the first 64 tokens of the DECODE.md chat
+request. Matters for benchmarks and short sessions only.
 
-### 14. Higher-precision Engram tables
+### 38. Drafter pass
 
-In progress: [EVAL.md](EVAL.md). The MXFP8 table loads and matches IQ4_NL
-on `IQ1_M`; `IQ2_XXS` task results and speed are open.
+Per drafting cycle (DECODE.md lever 7): target head over the drafted rows
+2.54 ms, `markov_select` 1.48 ms at ~92% of the read ceiling (E47), stage
+GEMVs ~1.9 ms and drafter experts ~1.5 ms, with no bandwidth table yet. A
+request-vocabulary head (as Qwen's `draft_vocab.hpp`, with a fallback to
+the full vocabulary after misses; the verifier keeps it) gains +1.1% only
+with the specials and a request table; the id prefix alone loses (E64). It
+needs gathered head and Markov W2 rows, index mapping for argmax, Markov
+and sampled candidates, and per-session tables in batched drafting.
 
-Measure speed and quality of Engram tables above IQ4_NL (144 B rows).
-[unsloth](https://huggingface.co/unsloth/DeepSeek-V4.1-Flash-1017-GGUF)
-`engram/` offers Q5_K (125.89 GiB), Q6_K (150.21 GiB) and MXFP8
-(188.83 GiB) in its own split format (`*.gguf_file`, `set_split.py`); BF16
-tables (512 B rows, ~366 GiB) would come from the official checkpoint.
-Quality: teacher-forced perplexity and agreement against the oracle at 3K
-and 18.5K tokens. Speed: prefill and decode at the card depths plus Engram
-read and wait times, since rows grow up to 3.6× (E28 measured the current reads at under 1% of warm streamed prefill).
+### 19. Host work and round trips per step
+
+DSpark: verification argmax is on the device (E50); the remaining gaps sit
+around the logits copies after the output head
+([trace](EXPERIMENTS.md#item-19-dspark-host-round-trips-2026-10-29));
+download full rows only when sampling needs them. AR: the host argmax, the
+Engram hash, per-evaluation `std::async`/`engram_read` threads and the
+embedding dequant and uploads follow each download (DECODE.md lever 8).
+Device argmax for one-row steps, a device embedding lookup and a
+persistent Engram reader pool would take most of it.
+
+### 29. Zero-copy expert reads
+
+The SSD can DMA straight into managed memory, which kernels read at full
+speed; a first version (tag `ds41-zero-copy-wip`, reverted) read every
+projection in place and got slower, because a page of slack per projection
+cost cache capacity and per-expert reads lost merging
+([data](EXPERIMENTS.md#item-29-zero-copy-expert-reads-first-version)).
+To pay: slack sized from `STATX_DIOALIGN` (512 B on XFS) and a page only
+where needed (btrfs, 4 KiB sectors); stage rows contiguous in file order;
+or in place only into the stage. Measure at 64 GiB and on ~150 GB builds.
+
+### 17. Single-row routed expert GEMV bandwidth
+
+The routed GEMVs read 205-220 GB/s against 197-236 for the dense ones
+([DECODE.md](DECODE.md#per-kernel-position-ar-single-token)); IQ1 downs
+keep a fixed per-launch floor, while a plain read of the same experts
+streams at 230-238 GB/s
+([resident data](EXPERIMENTS.md#item-17-resident-single-row-routed-gemvs-2026-10-29)). More tiles,
+deeper unrolls and LDS group sums were slower (E46, E59, E60). Check the
+VALU share with `tools/prof/isa_mix.py`, and whether `expert_group_kernel`
+variants still spill (80-540 bytes per lane before E37).
+
+### 28. Split-read head share from measured drive speeds
+
+Each read is split at the share packed into the tails file (`--head`,
+default 0.5; 0.50-0.60 measured the same on matched drives, E61). On
+unequal drives a miss finishes at the slower one's pace: pack a wider tail
+(e.g. 0.3), time cold reads per drive at load and split at the measured
+ratio. First add a per-drive "landed last, by how much" count, which
+ds4-argodrive used to tune decode and prefill splits separately
+([external](EXPERIMENTS.md#item-28-ds4-argodrive-split-reads-external)).
+
+### 35. Rank-ordered expert layout
+
+Per-expert contiguity is worth ~1%, long runs +36% (E30); in a served agent
+session decode misses are single experts and prompt misses form runs for at
+most 15% of their bytes (E70). Replay prompt-heavy sessions (long
+documents, many fresh prompts) against a usage-rank order per layer before
+converting any file; a second copy or a rank-ordered tails file is an
+acceptable disk cost.
+
+### 5. Compact selection for `--exact-prefill` rescoring
+
+With bounded replay the masked decoder index layers (24, 28, 32, 36) see
+only 140 rows, ~25 ms per 128K prompt (E34); under `--exact-prefill` they
+score every chunk. Verification already rescores compactly (E1). Keep
+absolute position tie order, the pinned newest block, causal partial
+blocks and the emitted row order.
+
+### 36. Decoder rows for short continuations of mid-prompt checkpoints
+
+Grid checkpoints hold no decoder rows near their end (E73), so a prompt
+ending within 140 tokens past one falls back to the previous checkpoint
+([data](EXPERIMENTS.md#item-36-fallback-for-short-continuations-of-mid-prompt-checkpoints)).
+Keep the layer-19 output of the 140 rows before each checkpoint as a
+component and run only the decoder layers on restore, without storing
+layer 20's compressed rows or advancing its pool again. Check bit for bit
+against an uncached prompt.
 
 ### 15. Smaller items
 
-- **Routed-expert GEMV, wide loads.** The retuned decode kernels reach
-  162–205 GB/s; IQ1 down projections stay at ~165 GB/s with a fixed
-  per-launch floor (85–96 µs across 13.8–22.7 MB). A plain read of the same
-  six experts streams at 230–238 GB/s.
-- **Draft vocabulary.** A request-vocabulary draft head, as Qwen uses
-  (`draft_vocab.hpp`), with request tokens and a fallback to the full
-  vocabulary after recent misses; the verifier keeps the full vocabulary.
-  Greedy replay ([E64](EXPERIMENTS.md#e64--dspark-cycles-cut-to-zero-drafts-measured-not-pursued)):
-  a 65,536-id prefix plus the specials and a request table +1.1%
-  (49,152: +0.6%, 98,304: +0.7%); the prefix alone loses (-2.6% at
-  65,536), since the specials sit above id 128,000 and high-id tokens
-  repeat within a request. The table needs gathered (or per-session
-  compacted) head and Markov W2 rows, index mapping for argmax, Markov and
-  sampled candidates, and per-session tables in batched drafting.
-- **Tokenizer merges.** E3 memoizes pieces per span; the merge loop still
-  rescans adjacent pairs (`bpe_rank`/`bpe_emit_piece`). Qwen's heap merge
-  with token-ID pairs is the local precedent.
-- **Engram worker setup.** `engram_read` starts its workers per evaluation;
-  test a persistent pool if setup becomes visible.
+- **Device top-k sampling.** After E88, top-k, penalties and constraints
+  still build the full distribution on the host (~0.85 ms per row); a
+  device top-k filter with the host's uniforms and tie rules keeps seeded
+  outputs identical.
+- **Tokenizer merges** rescan adjacent pairs (`bpe_rank`); Qwen's heap
+  merge is the precedent. **`gufo diagnose`** lacks streaming statistics.
 - **Encoder SWA replay on a frontier miss.** Approximate; needs its own
   cache and quality contract.
-- **`gufo diagnose`** does not report the streaming statistics.
-- **Decode expert GEMV spills.** Several `expert_group_kernel` variants
-  use 256 VGPRs and still spill 80–540 bytes per lane to scratch; check
-  whether fewer columns per lane or `ext_vector_type` arrays remove them.
-- **Streamed sessions at the native context.** `--stream-experts -j 8` at
-  the default 1M context sometimes fails at startup ("decoder allocation
-  failed", also on `feat/ds41`): the expert seed's 4 GiB reserve plus a
-  sixteenth covers one session, and eight 1M sessions need about 8.6 GiB
-  after it. The seed could reserve per session; `-c 4096` (the card's
-  multi-user context) starts reliably.
+- **Streamed `-j 8` at the native 1M context** sometimes fails at startup
+  ("decoder allocation failed"): the seed reserves 4 GiB plus a sixteenth,
+  eight 1M sessions need ~8.6 GiB; reserve per session (item 30). `-c 4096`
+  starts reliably.
+
+### 33. Attention partials written back during the dense GEMVs
+
+Split attention writes 2.64 MB of partials per row and layer; their
+writeback slows the following `attn_output_b` (135-193 GB/s in the model
+against 198-216 alone, E65). FP16 partials or a merge without the buffer
+could reach ~1.5% AR and ~3% at 6 rows, also with changed rounding.
+Item 34 (E66) has the same constraint: retain only with reassociation-free
+kernels for both AR and verification.
+
+
+## Quality-affecting and opt-in options
+
+These change outputs and stay opt-in, gated by teacher-forced KL and top-1
+against the oracle plus perplexity at 3K and 18.5K
+([QUALITY.md](QUALITY.md)). External data:
+[EXPERIMENTS.md](EXPERIMENTS.md#items-13-22-26-external-measurements-and-reference-data).
+
+| # | Item | Expected gain (evidence) | Next step |
+| ---: | --- | --- | --- |
+| 24 | Selection-only miss penalty | Up to the ~5 ms/token of miss-read idle warm; more cold, after long prompts and in verification (mako) | Residency bitmap in the router top-k |
+| 13 | Route bias toward cached experts | Xolotl: 13.7 → 30.3 tok/s on a 4090 at ~1 point of top-1; scales logits, so it changes mixing weights too | Same gates and runs as item 24 |
+| 23 | Streamed `IQ2_XS` with cache-aware routing | Lower KL than `IQ2_XXS`; slower at ~3/4 of experts cached | Item 27 first |
+| 14 | Higher-precision Engram tables | MXFP8: no measurable quality gain ([EVAL.md](EVAL.md)) | Speed comparison, then close |
+
+### 24. Selection-only miss penalty
+
+mako's `--miss-penalty F` subtracts F from the selection score of each
+non-resident expert while the mixing weights keep the unpenalized scores,
+so it only swaps near-ties (F 0.1-0.2 kept perplexity within noise there).
+Here it goes into the router's top-k with a per-layer residency bitmap.
+Outputs then depend on cache contents: not bit-identical across cache
+sizes or sessions, and a replayed prefix may route differently. Measure
+cold, at reduced `--expert-cache-bytes`, after long prompts, on short
+continuations and in verification (item 3).
+
+### 23. Streamed `IQ2_XS` with cache-aware routing
+
+ISTA's `IQ2_XS` is closer to the reference than `IQ2_XXS` in mako's
+measurements, but here the cache would hold about three quarters of its
+expert bytes on a slower SSD. Measure whether item 13 or 24 makes it a
+usable higher-quality streamed option once item 27 runs it.
+
+### 14. Higher-precision Engram tables
+
+MXFP8 matches IQ4_NL on 18.5K perplexity, MMLU-Pro, HumanEval+ and MBPP+
+on `IQ1_M` and `IQ2_XXS` ([EVAL.md](EVAL.md)); Q5_K/Q6_K are untested.
+Record the speed comparison (rows grow up to 3.6×; E28 put today's reads
+under 1% of warm streamed prefill) and close.
+
+## Features, model support and multi-user serving
+
+| # | Item | Value (evidence) | Next step |
+| ---: | --- | --- | --- |
+| 16 | Multi-user AR decode | Distinct-prompt `IQ1_M` C8 63.0 tok/s against a ~93 tok/s read ceiling | Card refresh with distinct prompts, then a C8 trace |
+| 10 | Batch-level draft width | DSpark trails AR with distinct prompts at C4 (53.6 against 55.5) and C8 (59.3 against 63.0) | Re-measure E27's batch plan after E42 |
+| 27 | Streamed kernels for the `IQ2_XS` build | Prerequisite for item 23 | IQ3_XXS down, IQ2_S gate/up paths |
+| 25 | Direction projection and steering vectors | Per-request behavior edits; ~0.1-0.5 ms/token if unfused | Fused site kernel or epilogue |
+| 26 | LoRA adapters (GGUF `adapter.type = lora`) | Adapter compatibility; rank-1 abliteration adapters reduce to item 25 | Low-rank GEMV/GEMM epilogues |
 
 ### 16. Multi-user AR decode below the card
 
 The card's multi-user tables give every user the same prompt, which keeps
-sessions in lockstep and lets a joint pass share experts (E27); with
-distinct prompts (2026-10-29, after E41) IQ1_M AR decodes C1 / C4 / C8 at
-24.5 / 55.5 / 63.0 tok/s. A C8 step (8 rows, ~42 distinct experts per
-layer) took ~115 ms of kernels and ~10 ms of host time against ~86 ms of
-reads before E38; the grouped expert GEMV now reads at ~190-210 GB/s for
-IQ1_S and IQ2_XXS gate+up and ~175-200 GB/s for the down projections
-(standalone), IQ1_M's down at ~180. Refresh the card's multi-user tables
-with distinct prompts.
+sessions in lockstep and shares experts (E27). With distinct prompts IQ1_M
+AR decodes C1 / C4 / C8 at 24.5 / 55.5 / 63.0 tok/s (2026-10-29); a C8
+step routes ~42 distinct experts per layer (E37), and E37/E38/E40/E58
+raised the grouped and multi-token GEMVs since
+([data](EXPERIMENTS.md#item-16-distinct-prompt-c8-step-2026-10-29)).
+Refresh the card with distinct prompts, then trace a C8 step.
 
-### 17. Single-row routed expert GEMV bandwidth
+### 10. Batch-level draft width
 
-`expert_gemv_kernel` at one token (2026-10-29 trace, `IQ1_M` resident):
-gate+up 27.6 MB in 135.8 µs (203 GB/s, IQ1_S), down 13.8 MB in 80.6 µs
-(171 GB/s) and 15.5 MB in 89.0 µs (IQ1_M, 174 GB/s); the IQ2_XXS layers'
-gate+up 31 MB in 180.8 µs (171 GB/s). The dense Q5_K GEMVs reach 206–238
-GB/s. Each launch covers six experts of 2,304 (gate+up) or 5,120 (down)
-rows; check the decode's VALU share (IQ1 and IQ2 codebook decode) against
-the loads with `tools/prof/isa_mix.py` before changing the layout. Paired IQ1
-down rows (E46) and single-slot IQ1 verification experts on this kernel (E51)
-are retained; more tiles per block were slower.
-
-### 18. Small decode kernels
-
-Per AR token: hyper-connections 1.78 ms (`hc_mix_small` 80 launches of
-14 µs over 160 MB of FP32 mixing weights, ~0.67 ms at the read ceiling),
-the BF16 router 1.0 ms (3.93 MB per layer in 24.9 µs, 158 GB/s), attention
-~1 ms, routing and norms ~0.6 ms. Fusing launches also shortens item 4.
-Fusing the mix with the shifted collapse was slower in the model (E49).
-The mix is ~3 µs above a plain 2 MB read (E55); it now overlaps its
-half's projections on a side stream (E57, +0.6%), which hides only its
-latency since those projections are bandwidth-bound.
-
-### 19. DSpark host round trips
-
-Verification argmax now runs on the device (E50). The 2026-10-29 trace of
-greedy DSpark C1 (`IQ1_M`) leaves ~0.7 ms of gaps over 20 µs per ~89 ms step,
-mostly around the logits copies after the output head (`copyBuffer` →
-`copyBufferRectAligned`, ~0.28 ms) and the following copies; downloading full
-logit rows only when sampling needs them would remove most of it.
-
-### 20. `markov_select`
-
-`markov_select_kernel<1u>` takes 301 µs per call, 5.3 calls and 1.6 ms per
-step, more than the drafter's attention (0.66 ms), at ~92% of the read
-ceiling for its 66 MB FP16 W2. An exact norm bound would still score most
-rows (E47).
-
-### 21. Two-layer-ahead decode prediction with a usefulness gate
-
-Streamed decode predicts one layer ahead and only after a layer waited on
-reads ([design](STREAMING.md#prefetch-from-router-predictions); +0.8% at
-82–83% hits). On Maya-S, mako found layer l+1's router on layer l's FFN
-input catches 34% of misses at top 4 and layer l+2's 30%, but
-one-ahead reads often had not finished (0.4–1.5 s of waits over 200 steps,
-~0.1 s two ahead). Its default reads the top 4 non-resident experts two
-layers ahead and stops predicting while under 35% of recent reads ahead were
-routed (one layer in 16 keeps measuring): +3.5% on a story, −0.3% instead of
-−2.7% after a 16K code prompt. Read time per expert is ~2–3× theirs here
-(~4.9 GB/s against 12–16 GB/s), which favors the longer lead. Measure where
-misses remain: cold cache, reduced cap, after long prompts, and with items
-13 and 24.
-
-### 22. Decode misses after a long prompt under scan-resistant admission
-
-Once the cache is full, a large prefill admits only its final 16 rows and
-its frequent experts. mako found the opposite trade-off on its decayed
-counts: leaving prefill out of the eviction scores raised steady decode
-misses by 20% (19–21 against 15–17 per step), because a prompt's experts
-are the ones its decode uses. Measure route hits and tok/s over the first
-64–256 decode steps after 4K and 16K prompts with the current rule against
-admitting every prompt expert, and against a looser frequency threshold.
-
-### 23. Streamed `IQ2_XS` with cache-aware routing
-
-ISTA's `IQ2_XS` backbone (~155 GB) is closer to the reference than
-`IQ2_XXS` in mako's measurements (top-1 92.5% / KL 0.068 against 91% /
-0.103 on Maya-S logits; prose / code perplexity 1.873 / 2.903 against
-1.935 / 3.025) and, with item 24 at 0.1, decoded 34.0 against 33.1 tok/s
-there. Here the ~104 GiB cache would hold about three quarters of its
-expert bytes, against 83% of `IQ2_XXS`'s experts (12,688 seeded), on a
-slower SSD, so expect it slower; measure whether item 13 or 24 makes it a
-usable higher-quality streamed option. It does not run streamed yet: item 27.
-
-### 24. Selection-only miss penalty (quality-affecting, optional)
-
-[mako](https://github.com/jhanssen/mako/blob/8567de3/src/kernels/moe_route.h)
-(`--miss-penalty F`, Apple Silicon) subtracts a constant from the selection
-score (sqrt(softplus) plus the router bias) of each expert the cache lacks.
-The mixing weights stay the unpenalized scores, so the penalty only breaks
-near-ties: a missing expert is replaced only by a resident one within F of
-it. It applies to decode and to prefill groups under 512 tokens, such as
-short chat turns (16–32 tokens after 8K of context missed ~30 experts per
-token against ~10 in steady decode). On Maya-S, 1,300 positions against the
-reference logits:
-
-| F | Misses/step | Top-1 | KL | Step |
-| ---: | ---: | ---: | ---: | ---: |
-| 0 | 13.4 | 98.2% | 0.0056 | 44.4 ms |
-| 0.05 | 8.6 | 98.2% | 0.0067 | 40.2 ms |
-| 0.1 | 6.6 | 98.0% | 0.0088 | 37.9 ms |
-| 0.2 | 4.4 | 97.5% | 0.0100 | 35.4 ms |
-| 0.5 | 2.1 | 96.5% | 0.0185 | 33.4 ms |
-
-Prose and code perplexity stayed within noise up to 0.2, and on ISTA
-`IQ2_XS` 0.1 halved the misses (9.5 → 4.8 per step, 31.4 → 34.0 tok/s).
-With its read-ahead (item 21) the gains add up: 24.6 → 29.1 tok/s. Unlike
-Xolotl's logit scaling (item 13), it leaves the mixing weights alone and
-swaps only near-ties; test both on the same quality gates and speed runs.
-
-At ~99.3% warm route hits (~1.7 misses per token) the gain is bounded by
-the ~5 ms/token of miss-read idle; measure it cold, at reduced
-`--expert-cache-bytes`, for the first steps after a long prompt, for short
-continuation prefills and in DSpark verification, where every row pays for
-its own experts (item 3). The penalty goes into the router's top-k with the
-cache's residency as a device bitmap per layer. Outputs then depend on the
-cache contents: no longer bit-identical across cache sizes, not
-reproducible across sessions, and a replayed prefix may route differently
-from its first pass. Opt-in only; gate both with teacher-forced KL and top-1
-against the oracle plus perplexity at 3K and 18.5K tokens.
-
-### 25. Direction projection and steering vectors
-
-Remove (or add) per-layer directions from what a sublayer writes into the
-hyper-connection streams, at run time, with the weights unchanged. mako's
-`--ablate FILE` (`src/mtl/ablation.hpp`, format `MAKOABL1`: n_embd,
-n_layer, n_site, k, 16-byte site names, then F32 vectors
-`[layer][site][k][n_embd]`) applies `x -= scale (x · v) v` per direction to
-each row of the attention output (`attn_out`) and of the shared expert's
-output (`shexp_out`) before `hc_post`; the routed experts are added after
-the projection and keep the direction. The published DeepSeek file
-(`skafte/mako-ablations`, `refusal.abl`) holds two directions per layer at
-both sites: 40 × 2 × 2 × 5,120 F32 = 3.28 MB.
-
-Projection is linear, so projecting a sublayer's output equals projecting
-each of its writers (attention, shared expert, every routed expert); the
-site choice decides which writers keep the direction. Plan:
-
-- One fused kernel per site (dot, then axpy over 5,120 floats per row, k
-  directions), or better an epilogue of the existing attention-output and
-  MoE-combine launches, so decode adds no launches (item 4: ~2–3 µs each,
-  ~80 sites per token).
-- Sites: attention output, shared-expert output, and the full FFN output
-  (shared plus routed), so both mako's files and full-writer projections
-  load.
-- Additive steering (`x += α v`, llama.cpp's control vectors) on the same
-  sites.
-- `gufo serve` option for the file and a global scale; per-request scale
-  only once the prompt cache keys on it (projected prefixes produce
-  different KV and snapshots).
-- Gates: outputs bit-identical with no file or zero vectors; teacher-forced
-  KL and perplexity at 3K and 18.5K tokens with a file; DSpark acceptance
-  (the drafter reads the target's hidden states).
-
-### 26. LoRA adapters
-
-`BoldingBuilds/DeepSeek-V4.1-Flash-1017-Abliteration-LoRA-GGUF` is a
-standard llama.cpp LoRA (`general.type = adapter`, `adapter.lora.alpha =
-1`) for the same purpose built another way: one direction r taken at
-layer 22 and removed from every residual writer of every layer as
-`W' = W − r (rᵀ W)`, written as a rank-1 pair per matrix with `lora_b = r`
-and `lora_a = Wᵀ r`. Its 240 F32 tensors (459 MB):
-
-| Tensor | Shapes per layer | Bytes |
-| --- | --- | ---: |
-| `ffn_down_exps` | a 2,304 × 1 × 384, b 1 × 5,120 × 384 | 456.1 MB |
-| `attn_output_b` | a 8,192 × 1, b 1 × 5,120 | 2.1 MB |
-| `ffn_down_shexp` | a 2,304 × 1, b 1 × 5,120 | 1.2 MB |
-
-It is ~140× mako's file although it carries less: one direction instead of
-160 per-layer vectors. The LoRA form must express the edit per weight
-matrix, so it stores `Wᵀ r` for each of the 15,360 routed down projections
-(a product of the weights the engine already has) and repeats the same r
-as `lora_b` 15,440 times (~316 MB). `lora_a` was computed from Maya-S's
-dequantized weights, so on another quant it only approximately removes r;
-a runtime projection is exact for any quant. It reports 98.3% → 4.2%
-harmful-prompt refusals and HumanEval 95.1% → 95.7% on Maya-S.
-
-Plan:
-
-- Load GGUF LoRA adapters for the dense and shared-expert matrices as
-  low-rank epilogues of their GEMVs and GEMMs (`y += scale · B (A x)`).
-- Routed experts: per-expert A and B indexed by the route, resident even
-  while experts stream (~29 KB per expert at rank 1); grouped expert
-  kernels gain a rank-r tail.
-- Detect rank-1 adapters whose `lora_b` is one vector r on every writer of
-  a layer and `lora_a ≈ Wᵀ r`, and load them as item 25's full-writer
-  projection instead: exact on our quants, no 456 MB, no extra reads.
-- Gates as item 25; adapters change the outputs, so the prompt cache must
-  key on the adapter set and scales.
-
-Both items apply beyond DeepSeek V4.1; place shared loaders and kernels so
-other models can adopt them.
+Concurrent sessions share one drafter pass (E42) and one 16-row
+verification (E27). E27's v3 batch plan (narrow or skip drafting when the
+joint step does not pay) tied on distinct prompts while every session ran
+its own drafter forward; E42 removed most of that cost, so re-measure it.
+Handing joint rows to the most confident drafts lost (E43).
 
 ### 27. Streamed kernels for the `IQ2_XS` build
 
-The ISTA `IQ2_XS` backbone (4 shards, ~145 GiB) only runs with
-`--stream-experts`. Its [allocation](https://huggingface.co/ISTA-DASLab/DeepSeek-V4.1-Flash-1017-GSQ-RCO-GGUF/blob/main/tensor-allocation/DeepSeek-V4.1-Flash-1017-GSQ-RCO-IQ2_XS.rco-allocation.txt)
-uses the dense types, IQ2_XXS and IQ2_XS experts and IQ2_S down projections
-already exercised by the `IQ1_M` and `IQ2_XXS` builds, plus two expert
-placements no streamed path handles (traced in `runtime/v41_decode.cpp`, not
-run):
-
-- **IQ3_XXS down projection (`blk.23.ffn_down_exps`).** The loader accepts
-  it and the resident MMQ/MMVQ kernels have it, but the table-indexed expert
-  GEMV does not (`expert_block_bytes` returns 0) and there is no FP16 tile,
-  so single-token, verification and prefill rows of layer 23 all fail when
-  streamed. Add IQ3_XXS traits (98-byte blocks, `mmq/ggml-common.h`) to
-  `kernels/rocm/ds41_expert_gemv.hip.cpp`, at least the per-slot down
-  variant.
-- **IQ2_S gate/up (layers 17, 25, 30).** The expert GEMV kernels take IQ2_S
-  (fused SwiGLU and grouped), so verification batches work, but
-  `fused_pair` leaves IQ2_S out and the streamed single-token miss path
-  then fails; adding it there should suffice. Streamed prefill fails at "no
-  table-indexed kernel for this shape" because `routed_f16_type` excludes
-  IQ2_S: add an IQ2_S FP16 tile or the per-row expert GEMV fallback the
-  IQ2_S down projections use.
-
+Two expert placements of the ISTA `IQ2_XS` build have no streamed path: the
+IQ3_XXS down in layer 23 (no table-indexed expert GEMV or FP16 tile; E67's
+IQ3_XXS work for `UD-IQ2_XXS` may be reusable) and IQ2_S gate/up in
+layers 17, 25 and 30 (`fused_pair` and `routed_f16_type` exclude it)
+([survey](EXPERIMENTS.md#item-27-iq2_xs-streamed-path-survey-code-trace-not-run)).
 Check each against the resident MMQ/MMVQ outputs (`ds41.mmq_typed`,
-`ds41_gemv_bench`) and keep the existing builds' outputs bit-identical.
+`ds41_gemv_bench`); existing builds stay bit-identical.
 
-### 28. Split-read head share from measured drive speeds
+### 25. Direction projection and steering vectors
 
-With an expert tails file ([split reads](STREAMING.md#split-reads-across-two-drives)),
-every projection read is split at the share chosen when the file is packed
-(`--head`, default 0.5). On the 990 PRO and KIOXIA pair, which read 5.3-5.9
-and 5.15 GB/s, shares of 0.50-0.60 measured the same, so the default
-stands. A pair with unequal drives finishes each miss at the slower one's
-pace. Pack a wider tail (for example 0.3, so the head can range from 0.3 to
-1.0), time a few cold reads per drive at load, and split each read at the
-measured ratio; only the share up to the packed cut can move to the second
-drive. Measure on a mismatched pair or with the second drive under load.
+Remove (or add, as llama.cpp control vectors) per-layer directions from
+what a sublayer writes into the hyper-connection streams, weights
+unchanged; load mako's `MAKOABL1` files (attention and shared-expert
+sites) plus a full-FFN site. Implement as an epilogue of the
+attention-output and MoE-combine launches so decode adds no launches
+(item 4). Per-request scale only once the prompt cache keys on it. Gates:
+bit-identical with no file; KL and perplexity with one; DSpark acceptance.
 
-[ds4-argodrive](https://github.com/argonautlabsai/ds4-argodrive) (Metal)
-splits reads across up to three drives holding complete model replicas,
-in 256 KiB blocks by per-drive weight, and found two useful refinements:
-decode and prefill want different splits (10:6:6 against 10:5:5 there: the
-lower-latency internal drive landed last on two thirds of decode reads at
-the prefill split), and a per-drive count of how often it landed last and
-by how much tells which way to move a split. Add that attribution first;
-it shows whether a different share would pay before any repacking. Tails
-generalise to more drives as one tails file per extra drive, each holding
-its slice of every expert, at a fraction of a full replica's size.
+### 26. LoRA adapters
 
-### 29. Zero-copy expert reads
+Load GGUF LoRA adapters as low-rank epilogues (`y += scale · B (A x)`) of
+the dense and shared-expert GEMVs/GEMMs, and for routed experts as
+per-expert A and B indexed by the route (~29 KB per expert at rank 1,
+resident while experts stream). Detect rank-1 adapters with one `lora_b`
+vector per layer and `lora_a ≈ Wᵀ r` (the published abliteration adapter,
+459 MB) and load them as item 25's exact projection instead. The prompt
+cache must key on adapters and scales. Place loaders and kernels so other
+models can adopt items 25 and 26.
 
-A miss is read into a pinned buffer, uploaded to the demand stage and,
-when admitted, copied into its cache slot. On gfx1151 the SSD can write
-straight into managed memory, which kernels read at the full 240 GB/s
-(`tools/bench/ds41_zero_copy.hip`: O_DIRECT into managed memory 6.46 GB/s,
-GPU checksums correct). Kernel bandwidth lost per GB/s of expert reads fell
-from 3.0% with the copy chain to 1.2% with the DMA alone.
+## Tried and closed
 
-A first version (tag `ds41-zero-copy-wip`, reverted after it) read every projection in place: slots and stage rows got
-a page of slack before and after each projection, a miss took its slot
-before its reads (never evicting an expert the batch routes), and the
-tails packer now cuts at 4 KiB multiples, since btrfs needs page-aligned
-buffers and silently turns a misaligned direct read into a buffered one
-through the page cache. Outputs matched on IQ2_XXS (also capped at
-24 GiB), UD-IQ1_M and IQ1_M, and every read landed in place, but the
-served workloads at an 88 GiB cap (two alternating rounds) got slower:
+Kernel micro-variants are listed per kernel in
+[PREFILL.md lever 3](PREFILL.md#3-routed-fp16-kernels-78-s-busy-46) and
+[DECODE.md lever 5](DECODE.md#5-kernel-bandwidth-39-mstoken-on-the-critical-path-7).
 
-| 88 GiB cap | Misses/row | Read wait | Decode |
-|---|---|---|---|
-| With tails | +2-4% | -2 to -13% | chat/agent -2 to -4%, document noise |
-| Without tails | +1 to +14% | about equal | -3 to -7% |
+| Item | What was tried | Outcome | Ref |
+| --- | --- | --- | --- |
+| 21. Two-layer-ahead decode prediction | Lead 2 and every-layer lead 1 | Lead 2 predicts fewer misses (74.0% against 79.3%); every-layer lead 1 slower on the 3K probe (+7.1%) and in `--spec-bench`. Continues as item 37 | E89, E60 |
+| 32. GPU idle during read waits | Clock sensors across streamed DSpark decode | No clock drops during waits | [data](EXPERIMENTS.md#item-32-gpu-clocks-during-read-waits) |
+| 18. Small decode kernels | hc mix variants, fusions, multi-token mixes; router loads | Mix hidden on a side stream (E57), fusions and multi-token mixes no gain (E49, E55, E63); router at 211 GB/s. Fusions left in item 4 | E40, E49, E55, E57, E59, E63 |
+| 20. `markov_select` | Exact pruning bound | Still scores 99.2% of rows; at ~92% of the read ceiling. Item 38 remains | E47 |
+| 11. Engram reads under a full cache | Skipping every read (upper bound) | +0.8% warm | E28 |
+| 12. Expert-contiguous repack | Read benchmark on real spans | ~1% | E30, E70 |
+| Graph replay | Dependent launch chains | ~0.13 µs per launch | E44 |
+| Dense decode GEMV slices, formats, nontemporal loads | DRAM-cold sweep; loads in the model | No Q8_0 gap; slices worth 0.1-0.4%, under the rounding bar; nontemporal no gain | E59, E65, E69, E90 |
+| Verification grouped-GEMV redundancy | Distinct experts per layer | At the arithmetic minimum | E89 |
+| Decoder replay read-ahead and protection | Simulated policies | Read-ahead recovers 14-15% (drive-bound); protection costs ~4 GiB of prompt reads per GiB | E86 |
+| Layer-major prefill | `wip/ds41-layer-major-prefill` | Reads −32%, GPU +4-6 s, known race; shelved | [data](EXPERIMENTS.md#layer-major-prefill-shelved) |
+| Routed FP16 tiles, stages, sign masks, grid packing, scheduler | 32/128-slot, cross-expert, wave64, 32/128-value stages | None faster; tile direction closed by arithmetic | E8, E35, E76-E81 |
+| Dense FP16 prefill tiles and loads; BF16 64-row tiles | Fragment prefetch, LDS fragments, paired loads, rotated copies; wide BF16 tiles | Exhausted; in-situ `q_b` gap is contention; BF16 tiles slower | E52, E53, E74 |
+| Prefill attention fixed costs | Ablations | Nothing cheap; FP16 Q is item 40 | E53 |
+| 4,096-token prefill batches as default | Native pp | +2-3%, memory cost; option | E16 |
+| Short prompt passes: earlier prediction, undrained adoption | Served follow-ups | Within noise | E72 |
+| Joint rows by confidence, draft trimming (E27 v2), pre-draft gates | Concurrent and single DSpark | C8 −1.1%; within noise; real gates lose | E27, E43, E64 |
+| DSpark drafter size and quantization | Smaller and larger drafters | Current drafter kept | E62 |
+| Prefill prediction lead time | Two or three layers ahead | One ahead already lands early enough | PREFILL.md |
+| Dense rescoring on the bounded replay | Indexer bench | ~25 ms per 128K prompt; item 5 for `--exact-prefill` | E34 |
 
-The slack takes ~30 KiB per expert, 0.4% of the cache, which replays of
-the 88 GiB trace turn into 1.45% more misses; taking slots before the
-reads changes misses by -0.16%. Without tails, per-expert reads also lose
-the old merging of consecutive experts into 32 MiB reads. The copy savings
-are small next to either: at 88 GiB decode moves ~0.8 GB/s of experts, so
-less contention is worth at most ~1.5% of kernel time.
+## Done
 
-To make it pay:
+Retained work that closed or changed an item or lever; everything else is
+in EXPERIMENTS.md.
 
-- Size slack from each file's direct-I/O alignment (statx
-  `STATX_DIOALIGN`; 512 bytes on XFS with 512-byte sectors) instead of a
-  page everywhere, and keep the page only where a file needs it (btrfs,
-  4 KiB-sector drives).
-- Keep demand stage rows contiguous in file order, so non-admitted misses
-  still merge into large reads; only slots need slack.
-- Or read in place only into the stage and keep the slot copy, which costs
-  no cache capacity.
-- Measure where reads dominate: smaller caches (64 GiB: ~27 MiB/token) and
-  the larger ~150 GB builds, where per-byte cost decides whether decode
-  prefetch can pay (the replayed prefetch policies all land within ±1%
-  with today's per-byte cost).
-
-### 30. More memory for the expert cache
-
-The cache gets what is left of unified memory after the dense weights
-(5.3 GiB for `IQ2_XXS`), the DSpark drafter (4.6 GiB), a fixed 4 GiB
-reserve and the store's own buffers. Replays of the served traces put
-+1.8 GiB at -14% decode and -10% prefill misses, and +3.7 GiB at -28% and
--20% (uncapped, ~99.5 GiB cache; -20% and -17% at an 88 GiB cap). None of
-these changes outputs; the gain applies when memory, not
-`--expert-cache-bytes`, sizes the cache.
-
-- **Prefetch stage (~1.8 GiB).** 192 rows, allocated once decode
-  prediction starts. Decode jobs use 6-12 rows; the rows exist for
-  prompt-scale (wide) predictions of ~70 experts. Measure what wide jobs
-  are worth; without them 32 rows would do.
-- **Admitted misses straight into their slot.** Today a miss the cache
-  admits goes pinned buffer -> demand stage -> slot. Uploading it into its
-  slot directly needs the slot taken before the read, never evicting an
-  expert the batch routes (built for #29; replay: -0.16% misses). Decode
-  then rarely touches the demand stage, and one GPU copy goes away.
-- **Reserve the cache can give back.** The fixed 4 GiB reserve covers
-  scratch and session state at 1M context; serving at 131k with one
-  session, free memory never fell below 3.36 GiB, so ~3 GiB sat idle. Let
-  the cache grow into it and free its lowest-scored chunks when free
-  memory runs low (cached experts are disk copies, always safe to drop),
-  rather than sizing the reserve from the configuration and risking
-  running out of memory under loads that were not measured.
-- **Compact demand stage (~3.7 GiB today).** One row per expert id per
-  projection, sized for a prefill that misses a whole layer. With the item
-  above it only holds experts the cache does not keep; a stage of ~64 rows
-  (~0.6 GiB) serves any decode batch, and a prefill layer with more
-  non-cached misses runs in passes. That needs the prefill kernels to run
-  over a subset of routes, as the decode hit/miss split already does, and
-  double buffering so a pass's reads overlap the previous pass's kernels.
-  The same capability gives a two-wave prefill (compute the cached
-  experts while the misses are read), which ds4-argodrive measured at
-  +1.1% prefill on top of its read-ahead.
-- **DSpark drafter size (separate spike).** A smaller drafter frees cache
-  memory but lowers acceptance; a larger, more accurate one might pay for
-  its memory through acceptance. Measure both directions.
-
-Check each with outputs at a 24 GiB cap (constant evictions) and the
-served workloads; the cold first prompt of a long document is where
-passes could cost prefill.
-
-### 31. Per-layer eviction ranking and prompt admission
-
-**The per-eviction scan is gone (E91, E92):** each size class keeps its
-32 lowest-scoring occupied slots as a victim list, rebuilt by one scan
-when it runs dry or ages past 512 prepares; pops skip slots freed,
-reoccupied or used since the build (E92), so victims match the full scan
-except for decay drift. Served decode and prefill are unchanged by it:
-the scan cost at most ~0.15 ms per admission in serving, near the ~48 µs
-first estimated.
-
-The eviction score itself was replayed against LRU, reuse-interval
-prediction and Belady's optimum (E92, `tools/ds41/evict_sim.py`): Belady
-would halve decode misses, the best past-use rule (decay 3,200, bonus 8)
-gains 4-8% in replay, and served it was +3% on chat and inconclusive on
-the agent. It waits on `wip/ds41-eviction-score` for a fixed-conversation
-agent replay.
-
-Prompt admission waits on it. Letting a prefill batch admit every expert
-it routes at least twice (instead of its final rows and experts routed at
-least max(4, n/32) times) cut misses on the 18k-token document's
-follow-ups by 32% in two served rounds at 88 GiB, but prefill got slower:
-797 -> 774 tok/s with tails, 700 -> 673 without; agent prefill -7%
-without tails, agent misses +16-25%. Fewer bytes were read while read
-wait rose, so the cost is in admitting: one stage-to-slot copy per
-admitted expert. Re-measure after
-#30's direct-to-slot uploads; the trace replay
-(`tools/ds41/prefetch_sim.py`) predicted -16-19% prefill stall at full,
-88 GiB and no-tails caches and about even at 64 GiB.
-
-### 32. GPU idle during read waits
-
-ds4-argodrive found the Apple GPU dropping into low-power states while
-the CPU waited for expert reads, so the kernels after each wait ran
-slower; a tiny kernel on a second queue during the wait gained 3-4%
-decode. Read the gfx1151 clock and power sensors (without changing clock
-settings) across a streamed decode to see whether waits of 2-4 ms per
-token drop clocks here before trying the same. Measured on streamed
-`IQ2_XXS` DSpark decode: the shader clock stayed at 2.24-2.85 GHz (mostly
-~2.82) and the memory clock at 1,000 MHz throughout, with no drops during
-read waits, so nothing to recover here.
-
-### 33. Attention partials written back during the dense GEMVs
-
-Split decode attention leaves (max, sum, out[512]) per head and split:
-20 x 64 x 516 floats, 2.64 MB per row and layer, read once by the combine
-kernel. The dirty lines are written back to DRAM while the next GEMVs
-stream their weights, so the `attn_output_b` GEMV runs at 135-193 GB/s in
-the model against 198-216 GB/s alone
-([E65](EXPERIMENTS.md#e65--attention-partials-written-back-during-the-dense-gemvs-measured)).
-The cost is ~0.6 ms per AR token and ~3 ms per 6-row verification. 10
-splits measured +0.5% AR and ~1% per verification cycle with changed
-rounding; FP16 partials or a merge without the partial buffer could reach
-~1.5% AR and ~3% at 6 rows, also with changed rounding. Non-temporal
-weight loads in the dense GEMV alone did not help in the model.
-
-### 34. Multi-token BF16 matmuls in verification
-
-The BF16 indexer `q_b` and compressor read their weights once per token
-during verification. A wave over two rows and up to eight tokens reads
-them once: ~0.2-0.35 ms per cycle (~0.3-0.4%), but with `-ffast-math` its
-sums round differently from the one-token kernel used by AR
-([E66](EXPERIMENTS.md#e66--multi-token-bf16-matmuls-for-verification-measured-not-retained)).
-Retain only together with an accepted rounding change in this path, e.g.
-both kernels with reassociation disabled so verification and AR keep the
-same bits.
-
-### 36. Decoder rows for short continuations of mid-prompt checkpoints
-
-Server prefill steps end at cache checkpoints; the decoder layers (20-39)
-replay only the last 140 rows of the whole prompt, so a mid-prompt grid
-checkpoint holds no decoder rows near its end. Its metadata records where
-its decoder rows start, and a restore accepts it only for prompts whose
-replay starts there or later (at least 140 tokens past a checkpoint without
-them). A prompt ending within 140 tokens past one falls back to the
-previous checkpoint and prefills from there: 1.9 s instead of 0.18 s for a
-10,261-token prompt past the 10,240 checkpoint on resident `IQ1_M`, more
-when streamed. The prompt-end checkpoint and live reply frontiers keep
-their decoder rows; in the recorded agent (52 requests) and document Q&A
-(12) sessions all 50 short resumes continued a live reply frontier, so none
-would fall back.
-
-To serve them without the fallback, keep the layer-19 output (hc stream and
-FFN pre-mix) of the 140 rows before each grid checkpoint (~11.5 MB) as a
-checkpoint component, and on such a restore run only the decoder layers over
-the rows from the new prompt's replay start to the checkpoint. That run must
-not store layer 20's compressed rows or advance its compressor pool again:
-the checkpoint already holds them. Check the result against an uncached
-prompt bit for bit, as the current restores are.
-
-## Memory
-
-Resident weights take 112.27 GiB GTT. A session at the native 1M context
-adds 0.9 GiB of FP4 state; the batch scratch (1.4 GiB at 1M, 256 MiB of it
-indexer scores) is shared by all sessions, and a 2048-token prefill peaks
-0.3 GiB higher. Further reductions need smaller prefill batches, which cost
-speed (EXPERIMENTS.md).
-
-### 35. Rank-ordered expert layout, measured on replayed workloads
-
-E30 rejected repacking from a synthetic read benchmark (real `IQ2_XXS`
-expert spans, fixed batches of 6 or 64 experts per layer): contiguity per
-expert was worth ~1%, while one long run per layer read 36% faster. It
-never replayed the misses of real prompts, chats or agent sessions. Larger
-builds change that: streamed `UD-IQ2_XXS` keeps 102 of 146 GiB cached and a
-warm pp2048 still reads 5.4 GiB (~570 experts, mostly the rarely routed
-ones a usage-ordered file would place together). Replay recorded route
-traces against a layout ordered by usage rank per layer (on one drive, on
-the tails drive, or a full copy on both) and measure the runs of missed
-neighbours, over-read included, before converting any file. Trading disk
-space for speed is acceptable here: a second full copy or a rank-ordered
-tails file is an option users may take.
-
-First replay (E70, served coding agent on `UD-IQ2_XXS`): decode and
-verification misses are single experts (0% of their bytes in runs of four
-or more under any order), prompt misses at most 15%, ~0.5 s of a 214 s
-session. Still to replay: prompt-heavy sessions (long documents, many
-fresh prompts), where prompt batches carry most of the misses.
+| Item | Result | Ref |
+| --- | --- | --- |
+| Greedy DSpark width policy (DECODE.md lever 1) | Chat 16.5-16.9 → 17.6-18.9, code 26.6-27.4 → 28.3-28.7, long 24.7-26.2 → 26.4-26.7 tok/s | E87 |
+| Top-p softmax totals on the device (DECODE.md lever 4) | Sampled DSpark +0.3 to +1.1 tok/s, AR sampled +0.1 to +0.2 | E88 |
+| Eviction victim lists, exact pops (item 31) | Scan removed; served speed unchanged (scan ≤ ~0.15 ms per admission) | E91, E92 |
+| Two-wave prefill, gate+up then down | pp2048 1,109 → 1,160 tok/s; served −1.7 s / −1.2 s, then −1.2% | E82, E84 |
+| Layer-0 prediction, Engram rows in layer order | Encoder read idle 1.53 → 0.96 s over two documents | E83 |
+| Engram lookahead | Engram waits 1.21 → 0.50 s; −2.1% on a 58K prompt | E85 |
+| One decoder replay per served prompt | −2.4 to −2.7 s per fresh 14-24K-token document | E73 |
+| Next-layer prediction for mid-size prefill batches | +3.5% warm pp2048, +11-15% first pp512 | E68 |
+| Narrow and grouped BF16 tiles | pp20-pp64 +6-7%; router 1.27 → 1.16 ms per call | E71, E75 |
+| Expert reads split across two drives | tg +7.6%, pp512 +16% | E61 |
+| 3 (part). Prediction for verification batches | +3.5-6.7% cold, neutral warm | E31 |
+| 10 (part). One drafter pass, one joint verification | DSpark C4 +4.3%, C8 +7.3% (E42) | E27, E42 |
+| 1, 2. 6-column GEMVs; fused SwiGLU and Q8_0 pairs in the split GEMV | 5-6-row verification +0.5-0.8%; joint 16-row pass 177.7 → 174.4 ms | E29, E36 |
+| 7 (part), 8. Pinned embedding staging; batched 7-8-token prompts | ~6.0 → ~4.5 ms per batch; pp8 121.8 → ~99 ms | E32, E33 |
+| Decode GEMV and launch work | `q_b` four slices, hc side stream, shared expert during the route read, global expert loads, router loads | E54-E59, E69 |
+| Routed decode experts | Paired IQ1 downs, single-slot IQ1 experts, IQ3_XXS/Q2_K downs, IQ2_S fused gate/up | E46, E51, E67 |
+| Verification argmax on the device | Host scans behind ~680 µs of idle per step removed | E50 |
+| Routed FP16 staging and LDS lookups | IQ2_XXS gate+up 24.5 → 20.4 ms (bench) | E25 |
+| Cost-aware draft prefix | Streamed greedy +3.76% | E18 |

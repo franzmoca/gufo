@@ -2,42 +2,25 @@
 
 A starting point for prefill work on the streamed `UD-IQ2_XXS` build
 (146 GiB of routed experts, ~95 GiB expert cache, tails sidecar on a second
-NVMe). It records the measured budget, each kernel's position against the
-gfx1151 ceilings, what has already been tried, and the open levers ranked by
-measured size. Measured 2026-11-02 on `feat/ds41-ud-iq2xxs` at `984ad880`.
-Profile tables are in [artifacts/2026-11-02-prefill](artifacts/2026-11-02-prefill/).
-After E82 (two-wave prefill) the same two served documents take 24.5/19.2 s
-(from 26.3/20.2) and pp2048 at 8K depth reaches 1,160 tok/s; the encoder
-read-stall column below has shrunk accordingly, the kernels are unchanged.
+NVMe): the measured budget, each kernel's position against the gfx1151
+ceilings, and the levers by measured size. Open work is ranked in
+[BACKLOG.md](BACKLOG.md). Decode is in [DECODE.md](DECODE.md), the expert
+store in [STREAMING.md](STREAMING.md), every `E<n>` in
+[EXPERIMENTS.md](EXPERIMENTS.md).
 
-Decode has its own analysis in [DECODE.md](DECODE.md). Read
-[STREAMING.md](STREAMING.md) for the expert store and
-[EXPERIMENTS.md](EXPERIMENTS.md) for every experiment cited as `E<n>`.
+The profile was measured 2026-11-02 on `feat/ds41-ud-iq2xxs` at `984ad880`
+([artifacts](artifacts/2026-11-02-prefill/)). E82-E85 since changed the
+read stalls and Engram waits (levers 1, 8); the kernels are unchanged.
 
 ## Summary
 
-A fresh 19,927-token document prompt served over HTTP takes 20.59 s
-(968 tok/s) at `984ad880`, 19.2 s after E82. `gufo bench` pp2048 at 8K
-depth reports 1,100-1,160 tok/s for the same build (1,160-1,162 after
-E82). The served number is the one users see. The gap to the
-bench:
-
-1. **Expert read stalls in the encoder batches (2.1 s, 10%).** About 10.5 ms
-   per layer of 2,048 rows, even with wide next-layer prediction.
-2. **The decoder replay waits on cold experts (0.9 s, 4.4%).** The prompt's
-   last 140 rows run layers 20-39 once, and each of those layers waits
-   45 ms for its experts, against 7.3 ms in the bench.
-3. **Real text routes to more experts than the bench prompt.** The routed
-   FP16 kernels take 24-26 ms per 2,048-row gate+up on the document, against
-   17.8-18.5 ms on the bench prompt (22.5-23.9 against 31.4-32.7 TFLOP/s).
-
-On the GPU itself (17.0 s), routed experts take 46% of busy time, the dense
-FP16 projections ~27%, attention 11%, the hyper-connection state passes 8%
-and the BF16 matmuls (mainly the router) 5%.
-
-Until E73 every cache checkpoint of the prompt also ran a decoder replay:
-five replays instead of one, 24.06 s for this prompt. Fixing that saved
-2.4-2.7 s per fresh 14-24K-token document.
+A fresh 19,927-token document served over HTTP took 20.59 s (968 tok/s)
+in the profile and 19.2 s after E82; `gufo bench` pp2048 at 8K depth gave
+1,100-1,160 tok/s, 1,160-1,162 after E82. The served gap to the bench has
+three causes, each a lever below: encoder expert read stalls (lever 1),
+the decoder replay's cold experts (lever 2), and real text spreading its
+routes over more experts: 24-26 ms per 2,048-row routed gate+up against
+17.8-18.5 ms on the bench prompt (lever 3).
 
 ## Workloads and how they were measured
 
@@ -46,21 +29,18 @@ five replays instead of one, 24.06 s for this prompt. Fixing that saved
 | Bench | `gufo bench -m MODEL --stream-experts -p 2048 -n 0 -d 8192 -r 3` | 1,098.6 ± 50.1 tok/s profiled; 1,150-1,160 unprofiled |
 | Served document | `gufo serve ... llm --model MODEL --context 65536 --stream-experts --speculative dspark --dspark-model DRAFT --sessions 1`, then two fresh documents with `max_tokens: 1` ([two_docs.py](artifacts/2026-11-02-prefill/two_docs.py)); the second is analysed | 23,954 tokens in 26.54 s, then 19,927 tokens in 20.60 s |
 
-The documents are long Gufo sources: the HTTP server documentation,
-`expert_store.cpp` and the KV cache documentation, 14-24K tokens each. Any
-real document of that size works. Do not judge routed kernels on the bench
-prompt alone (see "Bench against served").
-
-Profiles: `nix develop -c rocprofv3 --kernel-trace --memory-copy-trace
---output-format rocpd -d DIR -o t -- <command>`, then
-`tools/prof/prof.py show DIR/t_results.db --passes 1000 --pass N --stages
-ds41`. The kernel trace adds no measurable time here (828 tok/s profiled and
-unprofiled before E73). Attribute idle time by the kernel that follows each
-gap: a gap before `routed_counts_kernel` is the expert store's prepare
-(route copy, plan, reads), and a gap before the Q6_K `dense_f16_kernel`
-with 100 row blocks is the Engram projection waiting on its row reads. The
-routed kernel's grid tells the batch apart: `grid_y` 576 for 2,048 rows,
-523 for the last encoder batch, 396 for the 140-row decoder replay.
+The documents are long Gufo sources (HTTP server and KV cache
+documentation, `expert_store.cpp`), 14-24K tokens each; any real document
+of that size works. Profile with `rocprofv3 --kernel-trace
+--memory-copy-trace --output-format rocpd` and `tools/prof/prof.py show
+... --stages ds41` (commands under "Reproducing"); the trace adds no
+measurable time. Attribute each idle gap to the kernel after it: before
+`routed_counts_kernel` it is the expert store's prepare, before the Q6_K
+`dense_f16_kernel` with 100 row blocks the Engram row reads. The routed
+kernel's `grid_y` tells batches apart: 576 for 2,048 rows, 523 for the
+last encoder batch, 396 for the 140-row replay. Served runs drift (~250-320
+ms per fresh-server run on the follow-up), so alternate builds and fit run
+order with the build (E83).
 
 ## Model shape (UD-IQ2_XXS)
 
@@ -86,12 +66,11 @@ routed kernel's grid tells the batch apart: `grid_y` 576 for 2,048 rows,
   compressor KV (5,120 → 512) and the indexer `q_b` (1,280 → 4,096).
 - Engram: a 25,600 × 6,144 Q6_K projection on two layers, rows read from
   disk.
-- **Bounded replay** (`DS41_DECODER_REPLAY_ROWS`, `model.h`): a prompt runs
-  encoder layers 0-19 over every row, and decoder layers 20-39 over only its
-  last 140 rows. Layer 20 still compresses every position. The server passes
-  the whole prompt's length to every prefill step
-  (`TextRunnerState::prefill_prompt_end`), so steps that end at cache
-  checkpoints skip the decoder layers (E73).
+- **Bounded replay** (`DS41_DECODER_REPLAY_ROWS`, `model.h`): encoder layers
+  0-19 run every row, decoder layers 20-39 only the prompt's last 140 rows;
+  layer 20 still compresses every position. The server passes the whole
+  prompt's length to every step (`TextRunnerState::prefill_prompt_end`),
+  so steps ending at cache checkpoints skip the decoder layers (E73).
 
 ## Ceilings
 
@@ -102,6 +81,8 @@ routed kernel's grid tells the batch apart: `grid_y` 576 for 2,048 rows,
 | Expert reads from two NVMe drives | ~10.4 GB/s (0.38 ms + 0.10 ms/MiB fitted) | `tools/ds41/prefetch_sim.py` read-cost fit on the served traces |
 
 ## Served budget: one 19,927-token fresh prompt
+
+Profiled at `984ad880`, before E82-E85.
 
 | Part | Time | Share |
 |---|---:|---:|
@@ -124,21 +105,15 @@ GPU busy by stage (`prof.py --stages ds41`):
 | Indexer scores and top-k | 187 | 1.1 |
 | FP16 conversion, Engram, routing, SwiGLU, copies, rope, norms | ~400 | 2.4 |
 
-### The decoder replay
-
-Captures for this request (server log): 4,096, 8,192, 12,288, 18,432
-(grid checkpoints), 19,924 (stable boundary) and 19,927 (prompt end). Each
-capture ends a prefill step. Only the rows from 19,787 on run layers 20-39:
-137 of them at the end of the stable step, the last 3 in the final
-decode-size step. The grid checkpoints hold no decoder rows; a restore uses
-one only for prompts at least 140 tokens past it (E73, `BACKLOG.md`
-item 36).
-
-The replay costs ~0.3 s of GPU work and 0.91 s of read stall: 45.4 ms per
-layer, against 10.5 ms per 2,048-row encoder layer. Its 840 routes per layer
-land on decoder-layer experts, which the prompt's encoder batches never
-touch or prefetch; the stall says most of them miss. Before E73 the earlier
-replays had warmed them: the five replays averaged 29.5 ms per layer.
+**The decoder replay.** Captures for this request: 4,096, 8,192, 12,288,
+18,432 (grid checkpoints), 19,924 (stable boundary), 19,927 (prompt end),
+each ending a prefill step. Only rows from 19,787 on run layers 20-39: 137
+at the end of the stable step, 3 in the final step. The grid checkpoints
+hold no decoder rows (E73, [BACKLOG item 36](BACKLOG.md#36-decoder-rows-for-short-continuations-of-mid-prompt-checkpoints)).
+The replay costs ~0.3 s of GPU work and 0.91 s of read stall (45.4 ms per
+layer): its 840 routes per layer land on decoder-layer experts the encoder
+batches never touch. Before E73 the earlier replays at each checkpoint had
+warmed them: the five replays then averaged 29.5 ms per layer.
 
 ### Bench against served
 
@@ -152,11 +127,8 @@ replays had warmed them: the five replays averaged 29.5 ms per layer.
 | Expert prepare stall per replay layer | 7.3 ms (repeated prompt, warm decoder experts) | 45.4 ms |
 
 Served ranges are two profiles of the same request (`c8220c2b` and
-`984ad880`; the kernels are unchanged between them). Both prompts run 12,288
-routes per layer; the difference is in how they spread over experts:
-recorded served routes reproduce the served kernel times in
-`ds41_mmq_bench`, and a served batch fills its 64-slot tiles only 46% (see
-lever 3).
+`984ad880`, same kernels). Both prompts run 12,288 routes per layer; the
+difference is how they spread over experts (lever 3).
 
 ## Per-kernel position (served document)
 
@@ -201,73 +173,52 @@ three (hi/mid/lo splits of the FP32 activations).
 
 The encoder batches take ~16.7 s of GPU time, 0.84 ms/token: 1,190 tok/s
 if every read stall were gone. The bench reaches 1,100-1,160 tok/s because
-its routed kernels run faster (see "Bench against served") and its decoder
-experts are warm.
+its routed kernels run faster and its decoder experts are warm.
 
 ## Levers, by measured size
 
 ### 1. Expert read stalls in encoder batches (2.1 s, ~10%)
 
-About 10.5 ms per 2,048-row layer, with wide next-layer prediction already
-on (E68).
-- **Layer-0 prediction (E83, retained):** each batch's first layer, with
-  no earlier layer to predict it, waited 15-73 ms; routing it on the
-  normed embedding before its attention and dropping encoder batches'
-  layer-20 predictions cut the encoder read idle from 1.53 to 0.96 s over
-  two documents.
-- **Two-wave layers (E82, retained):** the overlap callback now runs the
-  routed FP16 gate+up over the resident experts while the misses stream,
-  and the read rows complete it after the prepare. −1.7 s on a fresh
-  23,954-token document, −1.2 s on the 19,927-token follow-up, pp2048
-  1,109 → 1,160 tok/s, bit-identical scores.
-- **More cache memory** (`BACKLOG.md` item 30): served-trace replays put
-  +3.7 GiB at −17% prefill stall and +6 GiB at −26%; available headroom
-  was 5.7 GiB in the traced session.
-- **Prompt admission rule** (`BACKLOG.md` item 31): admitting every expert
-  routed twice cut follow-up misses 32%, but slowed prefill through
-  admission copies.
-- **Layer-major prefill** (`wip/ds41-layer-major-prefill`, shelved):
-  - Reads fell 32%, but GPU time rose 4-6 s.
-  - It has a known race: reusing adopted job rows across a layer's batches.
-  - Reconsider only with a simpler design.
+~10.5 ms per 2,048-row layer in the profile, with wide prediction on
+(E68). Since then two-wave layers run the resident experts' gate+up and
+down during the reads (E82, E84: pp2048 1,109 → 1,160 tok/s, served −1.7 /
+−1.2 s, then −1.2%), and layer-0 prediction cut encoder read idle 1.53 →
+0.96 s over two documents (E83). After E84, 819 ms remain over the two
+documents: ~0.7 ms of host work per layer after the reads and 11 of 400
+layers whose reads outlast the resident work. See BACKLOG items
+[30](BACKLOG.md#30-more-memory-for-the-expert-cache) and
+[31](BACKLOG.md#31-eviction-scoring-and-prompt-admission).
 
 ### 2. Cold experts in the decoder replay (0.91 s, 4.4%)
 
-Each of the 20 replay layers waits 45.4 ms. The next-layer prediction runs
-for these 140-row batches (E68) but hides little: the 840 routes of a layer
-spread over most of its 384 experts, and the misses are many small reads.
-The pre-E73 trace of the served session (`doc2-trace3`) answers the "check
-first" question: the final replay demands 9.3 GiB (the whole stall), and of
-the simulator's misses 5.1 GiB were experts cached earlier in the session
-and evicted — mostly by this prompt's own encoder admissions — while
-2.9 GiB were never resident this session. Splitting replay demand this way
-survives in the trace; no prediction records exist for 140-row prepares
-(the lead tracing capped at 64 rows), so recall at that size is unmeasured.
-- **Protect decoder-layer experts during long prompts:** simulated as
-  never evicting across the encoder/decoder layer groups, it trades the
-  replay's misses for 2.4x more encoder misses (final prompt: replay
-  35.5 → 24.7 GiB, encoder 29.5 → 55.4 GiB) — a regression on bytes, and
-  encoder reads hide behind prediction while replay reads do not, but not
-  enough to fund the trade. A finer rule (protect only experts a replay or
-  decode touched recently) is unexplored.
-- **Read the replay layers' experts early: rejected by simulation (E86).**
-  Layer 19's predictions hold 54-83% of the replay's misses with 90-424%
-  extra reads, and reading them from the end of layer 19 recovers only
-  14-15% of the stall: a replay's ~8.5 GiB is bound by the drives, which
-  the prompt's encoder reads already keep ~70% busy. Protecting decoder
-  experts trades ~4 GiB of prompt reads per GiB saved. What remains is
-  bandwidth: more cache memory (item 30) or fewer bytes per expert.
+45.4 ms per replay layer (~42 ms after E85); the 840 routes spread over
+most of the 384 experts as many small misses. Before E73, 5.1 GiB of a
+replay's 9.3 GiB of simulated misses were experts evicted earlier in the
+session, mostly by the prompt's encoder admissions, and 2.9 GiB never
+resident. Read-ahead from layer 19 recovers only 14-15%, because a replay's
+~8.5 GiB is bound by drives the encoder reads already keep ~70% busy, and
+protecting decoder experts costs ~4 GiB of prompt reads per GiB (E86).
+What remains is capacity:
+[BACKLOG item 30](BACKLOG.md#30-more-memory-for-the-expert-cache).
 
 ### 3. Routed FP16 kernels (7.8 s busy, 46%)
 
 `kernels/rocm/ds41_routed_f16.hip.cpp`, `routed_f16_kernel<type, pair,
-half_out>`. Structure:
-- 64-slot tiles per expert, planned on the GPU (E7).
-- 8 waves.
-- Weights are the B operand, decoded to FP16 with scales folded in.
-- Activations are double-buffered in LDS.
+half_out>`: 64-slot tiles per expert planned on the GPU (E7), 8 waves,
+weights as the B operand decoded to FP16 with scales folded in,
+activations double-buffered in LDS. E25's ablation of a 2,048-token IQ1_M
+gate+up (21.8 ms): 14.7 ms skeleton (block fields, fragment reads,
+products, ~39 TFLOP/s), +1.0 ms weight loads, +1.7 ms activation staging
+(+4.9 for IQ2_XXS), +4.4 ms weight decode with its permutes.
 
-Already measured:
+**Use served routes.** `tools/ds41/route_occupancy.py` turns a route trace
+into `--counts` lines; `ds41_mmq_bench --f16 1 --type 16 --down-type 22
+--counts FILE --line 10` reproduces the served times (IQ2_XXS gate+up
+23.2 ms, IQ2_S down 12.9 ms). Over the session's 520 prompt batches a
+batch fills 419 64-slot tiles with 46% of slots holding a route (E74).
+Fuller tiles are closed by arithmetic: the live 16-slot group count does
+not change with tile width, and cross-expert groups would raise decode work
+2.26× and re-read weights (E81).
 
 | Change | Result | Ref |
 |---|---|---|
@@ -282,124 +233,66 @@ Already measured:
 | IQ2_S sign masks by bit spreading instead of the LDS table | Flat to +4% on the down | E78 |
 | `iterative-ilp` scheduler for the routed kernels | Flat (23.07 / 12.89 against 23.18 / 12.91 ms) | E79 |
 | IQ2_S grid table as packed bytes in LDS (16 → 8 KiB), converted at decode | Down +7% (13.82-13.87 against 12.87-12.91 ms) | E80 |
+| Activation-fragment sharing off for the downs | IQ2_S down 12.91 → 13.25 ms, IQ2_XS 12.07 → 12.35 | E81 |
+| Cross-expert groups; wave64 | Ruled out by arithmetic and by the builtin signature | E81 |
 
-E25's ablation of a 2,048-token layer (IQ1_M gate+up, 21.8 ms):
-- 14.7 ms skeleton: block fields, fragment reads, products, at ~39 TFLOP/s.
-- +1.0 ms weight loads.
-- +1.7 ms activation staging with two barriers per stage (+4.9 for IQ2_XXS).
-- +4.4 ms weight decode with its permutes.
-
-The bench-against-served gap comes from the routes themselves.
-`tools/ds41/route_occupancy.py` turns a route trace into `--counts` lines
-for `ds41_mmq_bench`; on a 2,048-row batch recorded from the served
-document, the microbenchmark reproduces the served times (IQ2_XXS gate+up
-23.2 ms, IQ2_S down 12.9 ms; `ds41_mmq_bench --f16 1 --type 16
---down-type 22 --counts FILE --line 10`). Over the served session's 520
-prompt batches, a batch fills 419 64-slot tiles on average, with 46% of
-their slots holding a route: more than half of each tile's products are
-padding. Use these recorded counts, not the bench prompt, for routed
-kernel work.
-
-Untried:
-- **Fuller tiles: closed by arithmetic (E81).** The live 16-slot group
-  count is invariant between 64- and 32-slot tiles (per-expert
-  `ceil(count/16)`), so smaller tiles cannot cut WMMA work (E8's null
-  result, explained); the recorded 2,048-row batches hold 493,128 groups
-  against 399,360 ideal (23.5% padding). Cutting the rest needs
-  cross-expert groups, which share no decoded weight fragment: decode work
-  rises 2.26x and each group re-reads its expert's weights (~+2.5 GiB DRAM
-  per gate+up call). A wave64 rewrite doubles per-lane operand redundancy
-  by the builtin signature. No further tile-direction work is planned.
-- **IQ2_S and IQ2_XS downs** run 5-10% slower than IQ2_XXS down per call;
-  E78/E80/E81 exhausted the sign-mask, table-packing and fragment-sharing
-  variants. What remains is the decode itself.
-- **The 140-row replay calls** run at 4-7 TFLOP/s (0.25 s per prompt). With
-  840 routes over 384 experts most tiles hold 1-4 routes, so each call reads
-  nearly every routed expert's weights once (an estimate; count the live
-  tiles to confirm), which makes it a weight-read kernel. Small now that a
-  prompt runs one replay.
+What remains is the per-type weight decode (IQ2_S and IQ2_XS downs run
+5-10% slower than IQ2_XXS) and the 140-row replay calls at 4-7 TFLOP/s
+(0.25 s per prompt; most tiles hold 1-4 routes, likely weight-read bound,
+unconfirmed): [BACKLOG item 6](BACKLOG.md#6-routed-fp16-kernel-weight-decode).
 
 ### 4. Dense FP16 projections (~3.8 s, ~18%)
 
-`kernels/rocm/ds41_dense_f16.hip.cpp`. `attn_q_b` (27.8 TFLOP/s) and
-`attn_output_a` (28.7) are the weakest:
-- E23: the grouped `attn_output_a` input is re-read by each 256-row block,
-  and dropping the activation loads took it from 5.50 to 3.96 ms.
-- `attn_q_b` measures 5.61 ms (30.6 TFLOP/s) in `ds41_mmq_bench --dense`
-  today — the 4.19 ms quoted earlier was stale — against 6.19 ms in the
-  served profile. Rotating four independent weight copies changes nothing
-  (5.60 vs 5.62 ms; the kernel's own 268 MB of output traffic flushes the
-  MALL every call, `tools/bench/ds41_qb_rotate.hip`), so the in-situ gap is
-  contention with the expert streaming and outlier layers (E68's 41 ms
-  layer 7), not a warm-bench artifact or a kernel deficiency. E52/E53's
-  audit exhausted the tile and load knobs.
-
-Already measured:
-- E52: Q6_K occupancy, Q8_0 path, paired launches.
-- E53: rejected fragment prefetch, LDS fragments, paired loads.
-- E23: FP16 inputs.
-
-Tools: `ds41_mmq_bench --dense [--x-half 1]` and
+`kernels/rocm/ds41_dense_f16.hip.cpp`; `attn_q_b` (27.8 TFLOP/s) and
+`attn_output_a` (28.7) are the weakest. `attn_q_b` takes 5.61 ms in
+`ds41_mmq_bench --dense` against 6.19 ms served; four rotated weight copies
+change nothing (5.60 vs 5.62 ms, `tools/bench/ds41_qb_rotate.hip`), so the
+gap is contention with expert streaming and outlier layers (E68's 41 ms
+layer 7). E23, E52 and E53 exhausted the tile and load knobs; no open
+item. Tools: `ds41_mmq_bench --dense [--x-half 1]`,
 `tools/bench/ds41_dense_f16_tune.hip`.
 
 ### 5. BF16 router (0.57 s, ~2.8%, before E75)
 
-In the profile above, `matmul_bf16_wmma_kernel<128>` on 384 rows launches
-only 3 × 32 = 96 workgroups for 2,048 tokens and reaches 5.1 TFLOP/s per
-pass of the matrix (15 across its three terms). It runs twice per encoder
-layer: routing, plus the wide next-layer prediction.
-- E75 moved the router and compressor (≤ 512 rows) to E71's narrow kernel
-  with 32-token tiles above 64 tokens: 1.27 → 1.16 ms and 1.64 → 1.43 ms
-  per call in a warm microbenchmark, bit-identical. About 0.05 s per 20K
-  prompt; reprofile the served document to see the per-call time there.
-- 64-row tiles of the wide kernel were slower for all three shapes (E74).
-- Still open: split K with an FP32 reduction in the same order, which
-  keeps the sums bit-identical (E71: the 32-value K steps, the part order
-  and the FP32 sums per step must stay).
+`matmul_bf16_wmma_kernel<128>` on 384 rows launches only 96 workgroups for
+2,048 tokens (5.1 TFLOP/s per pass), twice per encoder layer (routing and
+prediction). E75's narrow kernel takes 1.27 → 1.16 ms per call warm, about
+0.05 s per 20K prompt, not yet reprofiled served; 64-row wide tiles were
+slower (E74). Split K: [BACKLOG item 7](BACKLOG.md#7-remaining-prefill-glue).
 
 ### 6. Attention (1.64 s, ~8%)
 
 `attention_f16_kernel`, 9.1 ms per encoder layer per 2,048 rows on the
-document (8.8 ms at 8-14K in the bench); it grows with depth.
-- E21: staging, retained.
-- E53: fixed costs, rejected.
-- E19 / E20: indexer.
-
-Check `ds41_attention_test --bench` at 16K and 32K before working on it.
+document (8.8 ms at 8-14K in the bench), growing with depth. E21 staging is
+retained, E53 found no fixed cost, E19/E20 sped up the indexer. FP16 Q:
+[BACKLOG item 40](BACKLOG.md#40-fp16-q-for-prefill-attention).
 
 ### 7. Hyper-connection state passes (1.09 s, ~5%)
 
-`hc_state_pass_kernel`, one read of the 4 × 5,120 FP32 state per token.
-E22 fused the FFN's closing expand into it, and it is near the DRAM limit.
-The only lever left is fewer passes or a smaller state type, which changes
-numerics.
+`hc_state_pass_kernel` reads the 4 × 5,120 FP32 state once per token, with
+the FFN's closing expand fused in (E22), near the DRAM limit. Only fewer
+passes or a smaller state type, which changes numerics, remain; no open
+item.
 
-### 8. Engram row reads (0.37 s, ~1.8%)
+### 8. Engram row reads (0.37 s, ~1.8%, before E83/E85)
 
-Two Engram layers per 2,048-row batch wait ~20 ms each for host row
-reads before the projection. Prefetching the rows one layer early would
-hide this. E26 already moved the rows into pinned staging. After E82 the
-first Engram layer waited 50-117 ms per batch on the fresh document; E83
-reads layer 1's rows before layer 14's (1.55 → 1.07 s over two
-documents). E85 reads each prompt batch's rows during the batch
-before it (Engram waits 1.21 → 0.50 s over the two documents; −2.1% on a
-58K-token prompt); only a prompt's first batch still waits.
+The two Engram layers per batch waited for host row reads (pinned staging
+since E26). E83 reads layer 1's rows before layer 14's (1.55 → 1.07 s over
+two documents); E85 reads each batch's rows during the previous batch
+(1.21 → 0.50 s; −2.1% on a 58K-token prompt). Only a prompt's first batch
+still waits.
 
 ## Things that look like levers but are not
 
-- **Decoder replays at cache checkpoints:** fixed in E73 (one replay per
-  prompt, −2.4 to −2.7 s per fresh 14-24K-token document).
-- **Prediction lead time** for short passes: one-ahead predictions already
-  land 7.7 ms before the target layer, more than its 3.2 ms of reads. Two or
-  three layers ahead catch fewer misses (see `prefetch_sim.py` recall and
-  the 2026-11-02 trace).
-- **Undrained prefetch adoption and always-on prediction** for short passes
-  (E72): within noise.
-- **Expert repacking on disk** (E30; E70 replay): runs of missed neighbours
-  are rare in agent sessions. Prompt-heavy sessions are still unreplayed
-  (`BACKLOG.md` item 35).
-- **GPU clocks during read waits** (`BACKLOG.md` item 32): they stay at
-  2.2-2.85 GHz.
+- **Decoder replays at cache checkpoints:** fixed in E73.
+- **Prediction lead time** for short passes: one-ahead predictions land
+  7.7 ms before the layer, more than its 3.2 ms of reads; two or three
+  ahead catch fewer misses (`prefetch_sim.py`).
+- **Undrained adoption and always-on prediction** for short passes (E72).
+- **Decoder-replay read-ahead and protection** (E86, lever 2).
+- **Expert repacking on disk** (E30, E70;
+  [BACKLOG item 35](BACKLOG.md#35-rank-ordered-expert-layout)).
+- **GPU clocks during read waits** (BACKLOG item 32, closed).
 
 ## Reproducing
 
@@ -413,9 +306,9 @@ nix develop -c rocprofv3 --kernel-trace --output-format rocpd -d prof -o t -- \
   build/release/gufo bench -m $M --stream-experts -p 2048 -n 0 -d 8192 -r 3
 python3 tools/prof/prof.py show prof/t_results.db --passes 200 --stages ds41
 
-# Served profile: start the server under rocprofv3, send two fresh
-# documents (artifacts/2026-11-02-prefill/two_docs.py), stop the server,
-# then take the second request's pass:
+# Served profile: start the server under rocprofv3 (add --memory-copy-trace),
+# send two fresh documents (artifacts/2026-11-02-prefill/two_docs.py), stop
+# the server, then take the second request's pass:
 python3 tools/prof/prof.py show prof/t_results.db --passes 1000 --pass 1 --stages ds41 --gaps 15
 
 # Route traces for replays (prediction is off while tracing)
