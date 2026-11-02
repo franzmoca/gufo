@@ -2476,3 +2476,29 @@ rounds of three repetitions each:
 | pp2048 | 1162.0 / 1156.7 tok/s | 1161.6 / 1156.7 tok/s |
 
 pp16, the first test after warmup, varies by ±25 tok/s in both builds.
+
+## E72 — short prompt passes: earlier prediction and undrained adoption (measured, not retained)
+
+A served follow-up turn on streamed `UD-IQ2_XXS` is one 15-20 row prompt
+pass; at 24K context its time to first token is 340-500 ms, of which a
+warm pp20 pass is ~210 ms.
+
+**Predicting from the first layer.** Batches of 17-64 rows predicted the
+next layer only after a layer of the same pass missed (E68). Predicting
+from every layer did not change the long-document Q&A follow-ups (two
+alternated rounds, all answers passing, time to first token per follow-up
+within ±40 ms; summed 5.97 / 6.44 s before, 6.09 / 6.64 s after): about 3%
+of a follow-up's ~4,800 routes miss, spread over all 40 layers, so the
+first or second layer already opens the gate.
+
+**GPU idle in pp20 passes.** A warm pp20 pass at depth 8192 left the GPU
+idle ~32 ms in gaps of 50 µs-1 ms before each layer's routed experts. The
+host spends them in the store, not in HIP calls: per pass ~15 ms waiting
+on demand reads and 14-21 ms in `Resolve`, which drains the adopted
+prediction's in-flight reads before planning. Adopting without draining
+(the phase's final wait still covers those reads) moved the time into the
+read wait (27 ms per pass) and saved 2-10 ms of a 209-219 ms pass; the
+overlapped work at 20 rows (shared expert, next-layer router) is ~1 ms,
+too little to hide reads behind. pp20/pp64/pp2048 benches were within
+noise. The remaining idle is SSD reads, which only fewer or earlier reads
+reduce.
