@@ -5,6 +5,7 @@
 #include <hip/hip_runtime_api.h>
 
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <cmath>
 #include <cstdint>
@@ -12,11 +13,15 @@
 #include <cstdlib>
 #include <cstring>
 #include <fstream>
+#include <optional>
 #include <string>
+#include <string_view>
 #include <thread>
 #include <vector>
 
+#include "src/core/direction_adapter.hpp"
 #include "src/models/deepseek_v41_flash/runtime/model.h"
+#include "src/models/deepseek_v41_flash/runtime/model_data_internal.h"
 #include "src/models/deepseek_v41_flash/runtime/v41_dspark.h"
 
 namespace {
@@ -758,6 +763,8 @@ int main(int argc, char** argv) {
   bool exact_prefill = false;
   bool stream_experts = false;
   uint64_t expert_cache_bytes = 0;
+  const char* adapter = nullptr;
+  float adapter_scale = 1.0f;
   for (int i = 1; i < argc; ++i) {
     if (std::strcmp(argv[i], "--tokenize") == 0 && i + 1 < argc) {
       tokenize = argv[++i];
@@ -814,6 +821,10 @@ int main(int argc, char** argv) {
     } else if (std::strcmp(argv[i], "--expert-cache-bytes") == 0 &&
                i + 1 < argc) {
       expert_cache_bytes = std::strtoull(argv[++i], nullptr, 10);
+    } else if (std::strcmp(argv[i], "--adapter") == 0 && i + 1 < argc) {
+      adapter = argv[++i];
+    } else if (std::strcmp(argv[i], "--adapter-scale") == 0 && i + 1 < argc) {
+      adapter_scale = std::strtof(argv[++i], nullptr);
     } else if (std::strcmp(argv[i], "--rendered") == 0) {
       rendered = true;
     } else if (std::strcmp(argv[i], "--upload") == 0) {
@@ -833,6 +844,7 @@ int main(int argc, char** argv) {
         "[--score] [--batch] [--context N] [--prefill-batch N] "
         "[--out DIR]] [--replay-check ROWS] [--exact-prefill] "
         "[--stream-experts [--expert-cache-bytes N]] "
+        "[--adapter FILE [--adapter-scale F]] "
         "[--spec-check CYCLES [--spec-width W] | --spec-bench N | "
         "--joint-check SESSIONS [--joint-cycles N] [--joint-rows N] | "
         "--dspark FILE "
@@ -852,6 +864,30 @@ int main(int argc, char** argv) {
   options.stream_experts = stream_experts;
   options.expert_cache_bytes = expert_cache_bytes;
   options.dspark_model_path = dspark;
+  std::optional<gufo::core::DirectionAdapter> directions;
+  std::vector<ds41_direction_set> sets;
+  if (adapter) {
+    static constexpr std::array<std::string_view, DS41_N_DIRECTION_SITES>
+        kSites = {DS41_DIRECTION_SITES[0], DS41_DIRECTION_SITES[1],
+                  DS41_DIRECTION_SITES[2]};
+    std::string error;
+    directions = gufo::core::LoadDirectionAdapter(adapter,
+                                                  {.architecture = "deepseek41",
+                                                   .width = DS41_N_EMBD,
+                                                   .layers = DS41_N_LAYER,
+                                                   .sites = kSites},
+                                                  &error);
+    if (!directions) {
+      std::fprintf(stderr, "%s\n", error.c_str());
+      return 1;
+    }
+    for (const auto& set : directions->sets)
+      sets.push_back({set.layer, set.site, set.count, set.vectors.data()});
+    options.directions = sets.data();
+    options.n_directions = (uint32_t)sets.size();
+    options.direction_scale = directions->scale * adapter_scale;
+    options.direction_add = directions->mode == gufo::core::DirectionMode::kAdd;
+  }
   if (ds41_engine_open(&engine, &options) != 0)
     return 1;
   const double seconds =

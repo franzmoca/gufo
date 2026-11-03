@@ -4,7 +4,9 @@
 #include <cstddef>
 #include <cstdint>
 
+#include "../kernels/rocm/ds41_v41.h"
 #include "model.h"
+#include "model_data_internal.h"
 
 struct ds41_dspark_model;
 struct ds41_engram_tables;
@@ -36,6 +38,10 @@ struct ds41_engine {
   uint32_t prefill_batch;  // most tokens per prefill batch
   bool exact_prefill;      // no decoder SWA bounded replay
   float* image_bias;       // device [layer][expert], or NULL without vision
+  /* Direction adapter edits per layer: [0] the attention output, [1] the
+   * FFN output (shared expert, then the whole sum). k = 0 when none. */
+  ds41_v41_steer steer[DS41_N_LAYER][2];
+  float* steer_vectors;  // device, owns every steer[][] vector
 };
 
 bool ds41_model_string_array_begin(const ds41_model* model, const char* key,

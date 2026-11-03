@@ -33,6 +33,11 @@ struct ModelOptions {
 
   /// Optional DSpark support model. Empty leaves speculative decoding off.
   std::string dspark_model_path;
+
+  /// Optional direction adapter (src/core/direction_adapter.hpp) and the
+  /// factor on its own scale. Empty leaves the engine bit-identical.
+  std::string adapter_path;
+  float adapter_scale = 1.0f;
 };
 
 class ContinuationAdapter;
@@ -106,12 +111,19 @@ public:
   /// Routes image positions with the MoE gates' image bias, for image
   /// prompts; enable it before creating sessions.
   [[nodiscard]] bool EnableImageRouting(std::string* error_msg = nullptr);
+  /// The loaded adapter for cache identities: "none", or its kind, file
+  /// digest, mode and effective scale.
+  [[nodiscard]] const std::string& AdapterIdentity() const noexcept {
+    return adapter_identity_;
+  }
 
 private:
-  Model(ds41_engine* engine, ModelOptions options);
+  Model(ds41_engine* engine, ModelOptions options,
+        std::string adapter_identity);
 
   ds41_engine* engine_ = nullptr;
   ModelOptions options_;
+  std::string adapter_identity_;
 
   friend class Session;
 };

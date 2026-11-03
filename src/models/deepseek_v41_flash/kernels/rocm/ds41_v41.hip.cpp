@@ -9,8 +9,10 @@
 #include <rocwmma/rocwmma.hpp>
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstdio>
+#include <utility>
 
 namespace {
 
@@ -1279,6 +1281,181 @@ __global__ void hc_expand_kernel(const float* y, const float* residual, const fl
     float acc = post[t * hc + b] * y[t * dim + i];
     for (uint32_t a = 0; a < hc; a++) acc += ct[a * hc + b] * rt[(uint64_t)a * dim + i];
     ot[(uint64_t)b * dim + i] = acc;
+  }
+}
+
+/* Direction adapter edits: one block per token, each thread holding
+ * kSteerPer channels of the row (i = threadIdx.x + e * kSteerThreads). */
+constexpr uint32_t kSteerThreads = 1024, kSteerPer = 8;
+
+__device__ float steer_block_sum(float a, float* red) {
+  for (int o = 16; o > 0; o >>= 1) a += __shfl_xor(a, o, 32);
+  __syncthreads();  // the previous sum's readers are done with red
+  if (threadIdx.x % 32 == 0) red[threadIdx.x / 32] = a;
+  __syncthreads();
+  float sum = 0.0f;
+  for (uint32_t w = 0; w < blockDim.x / 32; w++) sum += red[w];
+  return sum;
+}
+
+/* Applies k vectors to y; mirror, when set, takes the same changes. */
+__device__ void steer_apply(float (&y)[kSteerPer], float (*mirror)[kSteerPer], const float* v, uint32_t k,
+                            float scale, int add, uint32_t dim, float* red) {
+  for (uint32_t j = 0; j < k; j++) {
+    const float* vj = v + (uint64_t)j * dim;
+    float d = scale;
+    if (!add) {
+      float dot = 0.0f;
+#pragma unroll
+      for (uint32_t e = 0; e < kSteerPer; e++) {
+        const uint32_t i = threadIdx.x + e * kSteerThreads;
+        if (i < dim) dot += y[e] * vj[i];
+      }
+      d = -scale * steer_block_sum(dot, red);
+    }
+#pragma unroll
+    for (uint32_t e = 0; e < kSteerPer; e++) {
+      const uint32_t i = threadIdx.x + e * kSteerThreads;
+      if (i >= dim) continue;
+      const float delta = d * vj[i];
+      y[e] += delta;
+      if (mirror) (*mirror)[e] += delta;
+    }
+  }
+}
+
+/* Fused expand over kThreads-channel slices of each token (the layout of
+ * hc_expand_sum_kernel): every block reduces the whole row's dots, so each
+ * block derives the same edit coefficients without another launch. The
+ * per-vector edits in turn follow from the raw dots and the vectors' Gram
+ * terms (precomputed): for vectors u_j in order, c_j = scale (y . u_j -
+ * sum_{i<j} c_i u_i . u_j) and y -= sum_j c_j u_j; the whole-sum vectors see
+ * the shared expert's edits through the cross terms. */
+constexpr uint32_t kSteerMaxK = DS41_V41_STEER_MAX_K;
+/* 1024 channels per block: every block re-reads the whole row for its dots,
+ * so fewer, wider blocks win (n = 1, one whole-FFN vector: 16.3 us at 256
+ * threads, 10.3 at 512, 7.7 at 1024; the plain expand sum takes 3.8 us). */
+constexpr uint32_t kSteerExpandThreads = 1024;
+
+template <uint32_t KE, uint32_t KT>
+__global__ __launch_bounds__(kSteerExpandThreads) void hc_expand_steer_kernel(const float* x, const float* extra,
+                                                                              uint32_t rows,
+                                                                   const float* residual, const float* post,
+                                                                   const float* comb, float* out, uint32_t hc,
+                                                                   uint32_t dim, ds41_v41_steer s) {
+  constexpr uint32_t D = KE + KT > 0 ? KE + KT : 1;
+  const uint64_t t = blockIdx.y;
+  float ce[KE > 0 ? KE : 1] = {}, ct[KT > 0 ? KT : 1] = {};
+  if (!s.add) {
+    __shared__ float part[D][kSteerExpandThreads / 32];
+    __shared__ float dots[D];
+    float acc[D] = {};
+    for (uint32_t i = threadIdx.x; i < dim; i += blockDim.x) {
+      const float y = extra ? extra[t * dim + i] : 0.0f;
+#pragma unroll
+      for (uint32_t j = 0; j < KE; j++) acc[j] += y * s.extra_v[(uint64_t)j * dim + i];
+      if constexpr (KT > 0) {
+        float z = y;
+        for (uint32_t r = 0; r < rows; r++) z += x[(t * rows + r) * dim + i];
+#pragma unroll
+        for (uint32_t j = 0; j < KT; j++) acc[KE + j] += z * s.total_v[(uint64_t)j * dim + i];
+      }
+    }
+    const uint32_t lane = threadIdx.x % 32, warp = threadIdx.x / 32;
+#pragma unroll
+    for (uint32_t v = 0; v < KE + KT; v++) {
+      float a = acc[v];
+      for (int o = 16; o > 0; o >>= 1) a += __shfl_xor(a, o, 32);
+      if (lane == 0) part[v][warp] = a;
+    }
+    __syncthreads();
+    if (threadIdx.x < KE + KT) {
+      float sum = 0.0f;
+      for (uint32_t w = 0; w < blockDim.x / 32; w++) sum += part[threadIdx.x][w];
+      dots[threadIdx.x] = sum;
+    }
+    __syncthreads();
+    const auto gram = [&](uint32_t which, uint32_t j, uint32_t a) {
+      return s.gram[(which * kSteerMaxK + j) * kSteerMaxK + a];
+    };
+#pragma unroll
+    for (uint32_t j = 0; j < KE; j++) {
+      float d = dots[j];
+      for (uint32_t a = 0; a < j; a++) d -= ce[a] * gram(0, j, a);
+      ce[j] = s.scale * d;
+    }
+#pragma unroll
+    for (uint32_t j = 0; j < KT; j++) {
+      float d = dots[KE + j];
+      for (uint32_t a = 0; a < KE; a++) d -= ce[a] * gram(2, j, a);
+      for (uint32_t a = 0; a < j; a++) d -= ct[a] * gram(1, j, a);
+      ct[j] = s.scale * d;
+    }
+  } else {
+#pragma unroll
+    for (uint32_t j = 0; j < KE; j++) ce[j] = -s.scale;
+#pragma unroll
+    for (uint32_t j = 0; j < KT; j++) ct[j] = -s.scale;
+  }
+  const uint32_t i = blockIdx.x * blockDim.x + threadIdx.x;
+  if (i >= dim) return;
+  float y = extra ? extra[t * dim + i] : 0.0f;
+#pragma unroll
+  for (uint32_t j = 0; j < KE; j++) y -= ce[j] * s.extra_v[(uint64_t)j * dim + i];
+  for (uint32_t r = 0; r < rows; r++) y += x[(t * rows + r) * dim + i];
+#pragma unroll
+  for (uint32_t j = 0; j < KT; j++) y -= ct[j] * s.total_v[(uint64_t)j * dim + i];
+  const float* rt = residual + t * hc * dim;
+  const float* cb = comb + t * hc * hc;
+  float* ot = out + t * hc * dim;
+  for (uint32_t b = 0; b < hc; b++) {
+    float acc = post[t * hc + b] * y;
+    for (uint32_t a = 0; a < hc; a++) acc += cb[a * hc + b] * rt[(uint64_t)a * dim + i];
+    ot[(uint64_t)b * dim + i] = acc;
+  }
+}
+
+using SteerKernel = void (*)(const float*, const float*, uint32_t, const float*, const float*, const float*, float*,
+                             uint32_t, uint32_t, ds41_v41_steer);
+
+template <uint32_t KE, uint32_t... KT>
+constexpr std::array<SteerKernel, sizeof...(KT)> steer_kernel_row(std::integer_sequence<uint32_t, KT...>) {
+  return {hc_expand_steer_kernel<KE, KT>...};
+}
+
+template <uint32_t... KE>
+constexpr std::array<std::array<SteerKernel, kSteerMaxK + 1>, sizeof...(KE)> steer_kernel_table(
+    std::integer_sequence<uint32_t, KE...>) {
+  return {steer_kernel_row<KE>(std::make_integer_sequence<uint32_t, kSteerMaxK + 1>{})...};
+}
+
+/* [extra_k][total_k] */
+const auto kSteerKernels = steer_kernel_table(std::make_integer_sequence<uint32_t, kSteerMaxK + 1>{});
+
+__global__ __launch_bounds__(kSteerThreads) void steer_rows_kernel(float* y, const float* x, uint32_t rows,
+                                                                   uint32_t dim, ds41_v41_steer s) {
+  __shared__ float red[kSteerThreads / 32];
+  const uint64_t t = blockIdx.x;
+  float own[kSteerPer], sum[kSteerPer];
+#pragma unroll
+  for (uint32_t e = 0; e < kSteerPer; e++) {
+    const uint32_t i = threadIdx.x + e * kSteerThreads;
+    own[e] = i < dim ? y[t * dim + i] : 0.0f;
+  }
+  if (s.extra_k) steer_apply(own, nullptr, s.extra_v, s.extra_k, s.scale, s.add, dim, red);
+  if (s.total_k) {
+#pragma unroll
+    for (uint32_t e = 0; e < kSteerPer; e++) {
+      const uint32_t i = threadIdx.x + e * kSteerThreads;
+      sum[e] = own[e];
+      for (uint32_t r = 0; r < rows && i < dim; r++) sum[e] += x[(t * rows + r) * dim + i];
+    }
+    steer_apply(sum, &own, s.total_v, s.total_k, s.scale, s.add, dim, red);
+  }
+#pragma unroll
+  for (uint32_t e = 0; e < kSteerPer; e++) {
+    const uint32_t i = threadIdx.x + e * kSteerThreads;
+    if (i < dim) y[t * dim + i] = own[e];
   }
 }
 
@@ -3016,6 +3193,43 @@ extern "C" int ds41_v41_hc_expand_sum(const float* x, const float* extra, uint32
                                       uint32_t n) {
   hc_expand_sum_kernel<<<dim3(blocks_for(dim), n), kThreads>>>(x, extra, rows, residual, post, comb, out, hc, dim);
   return launch_ok("hc expand sum");
+}
+
+extern "C" int ds41_v41_hc_expand_steer(const float* x, const float* extra, uint32_t rows, const float* residual,
+                                        const float* post, const float* comb, float* out, uint32_t hc, uint32_t dim,
+                                        uint32_t n, const ds41_v41_steer* s) {
+  if (!s || s->extra_k > kSteerMaxK || s->total_k > kSteerMaxK || (!s->add && !s->gram) || (rows && !x)) return 1;
+  if (n == 0) return 0;
+  kSteerKernels[s->extra_k][s->total_k]<<<dim3(blocks_for(dim, kSteerExpandThreads), n), kSteerExpandThreads>>>(
+      x, extra, rows, residual, post, comb, out, hc, dim, *s);
+  return launch_ok("hc expand steer");
+}
+
+extern "C" void ds41_v41_steer_gram(const float* extra_v, uint32_t extra_k, const float* total_v, uint32_t total_k,
+                                    uint32_t dim, float* gram) {
+  const auto dot = [dim](const float* a, const float* b) {
+    double sum = 0.0;
+    for (uint32_t i = 0; i < dim; i++) sum += (double)a[i] * b[i];
+    return (float)sum;
+  };
+  for (uint32_t i = 0; i < DS41_V41_STEER_GRAM; i++) gram[i] = 0.0f;
+  for (uint32_t j = 0; j < kSteerMaxK; j++)
+    for (uint32_t a = 0; a < kSteerMaxK; a++) {
+      float* g = gram + j * kSteerMaxK + a;
+      if (j < extra_k && a < extra_k) g[0] = dot(extra_v + (uint64_t)a * dim, extra_v + (uint64_t)j * dim);
+      if (j < total_k && a < total_k)
+        g[kSteerMaxK * kSteerMaxK] = dot(total_v + (uint64_t)a * dim, total_v + (uint64_t)j * dim);
+      if (j < total_k && a < extra_k)
+        g[2 * kSteerMaxK * kSteerMaxK] = dot(extra_v + (uint64_t)a * dim, total_v + (uint64_t)j * dim);
+    }
+}
+
+extern "C" int ds41_v41_steer_rows(float* y, const float* x, uint32_t rows, uint32_t dim, uint32_t n,
+                                   const ds41_v41_steer* s) {
+  if (!s || !y || dim > kSteerThreads * kSteerPer || (rows && !x)) return 1;
+  if (n == 0) return 0;
+  steer_rows_kernel<<<n, kSteerThreads>>>(y, x, rows, dim, *s);
+  return launch_ok("steer rows");
 }
 
 extern "C" int ds41_v41_compress_pool(const float* kv, const float* score, float* state_kv, float* state_score,

@@ -372,7 +372,7 @@ template<class Ds>
 std::vector<std::uint8_t> DeepSeekCompatibilityIdentity(
     std::string_view artifact_fingerprint, std::string_view support_fingerprint,
     std::uint32_t max_context, std::uint32_t max_draft_tokens,
-    std::string_view prefill_policy) {
+    std::string_view prefill_policy, std::string_view adapters) {
   if (!IsSha256Hex(artifact_fingerprint)) {
     throw std::invalid_argument(
         "DeepSeek disk cache requires an artifact fingerprint");
@@ -394,7 +394,7 @@ std::vector<std::uint8_t> DeepSeekCompatibilityIdentity(
            << "context_tokens=" << max_context << '\n'
            << "position_policy=absolute-v1\n"
            << "rope_window_policy=" << Ds::kRopeWindowPolicy << '\n'
-           << "adapters=none\n";
+           << "adapters=" << adapters << '\n';
   // Exact and bounded-replay prefills leave different decoder windows.
   if (!prefill_policy.empty())
     identity << "prefill_policy=" << prefill_policy << '\n';
@@ -1862,7 +1862,7 @@ public:
           .compatibility_identity = DeepSeekCompatibilityIdentity<Ds>(
               artifact_fingerprint,
               use_dspark_ ? support_fingerprint : std::string{}, max_context_,
-              max_draft_tokens_, PrefillPolicy()),
+              max_draft_tokens_, PrefillPolicy(), AdapterPolicy()),
           .payload_version = Ds::kPayloadVersion,
       };
       component_identity_ = persistence_->compatibility_identity;
@@ -1884,6 +1884,11 @@ public:
   }
 
   // V4.1's prompt evaluation: exact, or decoder SWA bounded replay.
+  [[nodiscard]] std::string_view AdapterPolicy() const {
+    if constexpr (requires { model_->AdapterIdentity(); })
+      return model_->AdapterIdentity();
+    return "none";
+  }
   [[nodiscard]] std::string_view PrefillPolicy() const {
     if constexpr (requires { model_->ExactPrefill(); })
       return model_->ExactPrefill() ? "exact" : "decoder-swa-replay-140";
@@ -3627,7 +3632,9 @@ bool InferenceBackend::load(const std::string& model_path, std::string* error,
             .stream_experts = deepseek_stream_experts_,
             .expert_cache_bytes = deepseek_expert_cache_bytes_,
             .dspark_model_path =
-                dspark ? speculative_config.draft_model_path : std::string{}},
+                dspark ? speculative_config.draft_model_path : std::string{},
+            .adapter_path = deepseek_adapter_path_,
+            .adapter_scale = deepseek_adapter_scale_},
         &load_error);
     if (model == nullptr) {
       SetError(error, "Failed to create DeepSeek V4.1 model: " + load_error);

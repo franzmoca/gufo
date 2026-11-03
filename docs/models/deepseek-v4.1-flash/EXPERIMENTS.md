@@ -127,6 +127,7 @@ Measurements first recorded in the backlog, without an E-number, are in
 | [E90](#e90--dense-gemv-slice-sweep-over-the-decode-shapes-measured-not-retained) | decode kernels | measured | Dense GEMV slice sweep: no format gap; two beatable splits worth ~0.06 ms per AR token, not worth a rounding change. |
 | [E91](#e91--eviction-victim-lists-retained-pop-check-corrected-in-e92) | expert cache | retained, corrected by E92 | Eviction victim lists: 3K probe 58.85 → 56.15 ms/token; the served gains did not reproduce (E92). |
 | [E92](#e92--exact-victim-list-pops-eviction-scoring-against-the-offline-optimum-retained-scoring-change-not-retained) | expert cache | retained; scoring change not retained | Exact victim-list pops restore baseline reads (63.1–64.4 MiB per token); Belady's optimum halves decode misses; decay 3,200/bonus 8 inconclusive, not retained. |
+| [E94](#e94--direction-adapters-retained) | features | retained | Direction adapters (`--adapter`): mako files and rank-1 LoRAs as exact projections; bit-identical without one; 3K perplexity within ±0.002 nats, KL 0.012-0.015; decode −0.5 to −0.9%. |
 
 ## Milestones
 
@@ -3351,6 +3352,74 @@ Gates and results:
 - Both builds swap in bursts late in long single-session runs (~20M pages
   out around the 11th-15th fresh 50-64K prompt, the server's own swap
   9-20 MB); not investigated here.
+
+## E94 — direction adapters (retained)
+
+BACKLOG items 25 and 26 (rank-1 path). `--adapter FILE` loads a direction
+adapter (GGUF, `adapter.type = direction`, loader in
+`src/core/direction_adapter.cpp`) and edits each layer's attention output,
+shared-expert output or whole FFN output before its hc expand: project mode
+`x -= scale (x . v) v` per vector in turn (mako's semantics), add mode
+`x += scale v`. `tools/adapters/direction_adapter.py` converts mako's
+`MAKOABL1` files unchanged and rank-1 abliteration LoRAs to their one
+direction at `attn_out` and `ffn_out`.
+
+Inputs, `~/models/ds41-steering`:
+
+| File | Content | Converted |
+| --- | --- | --- |
+| `skafte/mako-ablations` `refusal.abl` (3.3 MB) | 2 orthogonal directions per layer, norms 0.72-1.39; `attn_out` layers 0-31, `shexp_out` 10-39 | 62 sets, 2.5 MB |
+| `BoldingBuilds/...-Abliteration-rank1-L22.gguf` (459 MB) | one unit r (layer 22) as every `lora_b`, `lora_a = -rᵀW` of Maya-S | 80 sets, 1.6 MB |
+| `...-rank1-allmean-L22.gguf` | the same with the all-token mean direction | 80 sets, 1.6 MB |
+
+The LoRA's r and mako's layer-22 directions have |cos| 0.62 and 0.08. On
+`IQ1_M`, layer 22's `lora_a` against `-rᵀW`: cos 0.9993, relative difference
+3.8% (the LoRA applies its stored halves only approximately on this build;
+the projection is exact).
+
+Kernels: decode rows (fewer than 16 tokens) use one fused launch in place of
+`hc_expand`/`hc_expand_sum`, templated on the vector counts (at most 4 per
+site), with the Gram terms of the in-turn edits precomputed at load; every
+1,024-channel block reduces the row's dots, so no launch is added. Batched
+rows edit `attn_out` and `sd` in place before the state pass (the whole-FFN
+edit goes into `sd` from the dots over `sd` plus the six routed rows).
+`ds41.steer` checks both forms against a double-precision reference (30
+cases, ≤ 2.3e-7 relative). Per launch at one token: plain expand 3.2 µs,
+attention edit (k = 2) 5.4 µs; plain expand sum 3.8 µs, shared-expert edit
+(k = 2) 5.8 µs, whole-FFN edit (k = 1) 7.7 µs. One 1,024-thread block per
+token first ran 12.7 and 17.3 µs (decode −2.7%); 256- and 512-thread blocks
+ran the whole-FFN edit in 16.3 and 10.3 µs.
+
+Gates, ISTA `IQ1_M` resident, `gpu-test` probe, 3,000 positions of
+`docs/KV-CACHE.md` (as of 2026-10-31) in 2,048-token batches plus 64 greedy
+steps:
+
+- No adapter: all 3,064 logit rows byte-identical to the build before.
+- Against no adapter (standard error over 100-token blocks):
+
+| Adapter | Perplexity | ΔNLL | KL mean | KL p99 | KL max | Top-1 agreement |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| none | 6.873 | | | | | |
+| mako `refusal.abl` | 6.862 | −0.0017 ± 0.0038 | 0.0148 | 0.086 | 3.37 | 94.3% |
+| LoRA L22 as projection | 6.875 | +0.0003 ± 0.0024 | 0.0119 | 0.073 | 2.06 | 95.1% |
+| LoRA all-mean L22 | 6.882 | +0.0013 ± 0.0031 | 0.0130 | 0.074 | 2.73 | 94.6% |
+
+- Decode path against batched path on 512 positions, the same adapter on
+  both: KL mean 0.0157 (none), 0.0143 (mako), 0.0176 (LoRA); agreement
+  95.3%, 96.3%, 95.3%.
+- Greedy DSpark output equals AR output for each adapter
+  (`gufo bench` output hashes).
+
+Speed, `gufo bench` pp2048/tg128 AR, three runs each in balanced order
+(tok/s): none 1,402 / 25.15, mako 1,390 / 25.02 (−0.8% / −0.5%), LoRA
+direction 1,367 / 24.93 (−2.5% / −0.9%). The LoRA's prefill cost is the
+in-place whole-FFN edit re-reading the routed rows; folding it into the
+state pass would remove it. DSpark tg128 (one request; each adapter
+changes the text, so acceptance is not on the same tokens): none 39.6-40.3
+tok/s, 74-75 of 85-86 drafts accepted in 36-37 steps; mako 34.9-36.8,
+70-72 of 94-99 in 36-37; LoRA 31.4-31.8, 60-61 of 80 in 59-60 steps.
+
+Refusal rates were not measured here.
 
 ## Backlog measurements without an E-number
 

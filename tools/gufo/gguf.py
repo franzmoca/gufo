@@ -340,3 +340,43 @@ def tensor_bytes(state, t):
         ne *= d
     nblk = ne // bs
     return nblk * ts
+
+
+def write_gguf(path, metadata, tensors, alignment=32):
+    """Writes a GGUF v3 file of F32 tensors.
+
+    metadata: (key, value) pairs; str, bool, int (uint32) and float (float32).
+    tensors: (name, array) pairs; arrays are stored as F32 with the
+    outermost dimension first (numpy order), so ne is the reversed shape.
+    """
+    def string(s):
+        b = s.encode("utf-8")
+        return struct.pack("<Q", len(b)) + b
+
+    def value(v):
+        if isinstance(v, bool):
+            return struct.pack("<IB", 7, v)
+        if isinstance(v, str):
+            return struct.pack("<I", 8) + string(v)
+        if isinstance(v, int):
+            return struct.pack("<II", 4, v)
+        if isinstance(v, float):
+            return struct.pack("<If", 6, v)
+        raise TypeError(f"unsupported metadata value {v!r}")
+
+    arrays = [(name, np.ascontiguousarray(a, dtype="<f4")) for name, a in tensors]
+    head = bytearray(b"GGUF" + struct.pack("<IQQ", 3, len(arrays), len(metadata)))
+    for key, v in metadata:
+        head += string(key) + value(v)
+    offset = 0
+    for name, a in arrays:
+        head += string(name) + struct.pack("<I", a.ndim)
+        head += b"".join(struct.pack("<Q", d) for d in reversed(a.shape))
+        head += struct.pack("<IQ", 0, offset)
+        offset += (a.nbytes + alignment - 1) // alignment * alignment
+    head += bytes(-len(head) % alignment)
+    with Path(path).open("wb") as out:
+        out.write(head)
+        for _, a in arrays:
+            out.write(a.tobytes())
+            out.write(bytes(-a.nbytes % alignment))

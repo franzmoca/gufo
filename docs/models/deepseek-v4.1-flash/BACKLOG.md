@@ -347,8 +347,7 @@ under 1% of warm streamed prefill) and close.
 | 16 | Multi-user AR decode | Distinct-prompt `IQ1_M` C8 63.0 tok/s against a ~93 tok/s read ceiling | Card refresh with distinct prompts, then a C8 trace |
 | 10 | Batch-level draft width | DSpark trails AR with distinct prompts at C4 (53.6 against 55.5) and C8 (59.3 against 63.0) | Re-measure E27's batch plan after E42 |
 | 27 | Streamed kernels for the `IQ2_XS` build | Prerequisite for item 23 | IQ3_XXS down, IQ2_S gate/up paths |
-| 25 | Direction projection and steering vectors | Per-request behavior edits; ~0.1-0.5 ms/token if unfused | Fused site kernel or epilogue |
-| 26 | LoRA adapters (GGUF `adapter.type = lora`) | Adapter compatibility; rank-1 abliteration adapters reduce to item 25 | Low-rank GEMV/GEMM epilogues |
+| 26 | LoRA adapters (GGUF `adapter.type = lora`) | Adapter compatibility; rank-1 abliteration adapters already load as directions (E94) | Low-rank GEMV/GEMM epilogues |
 
 ### 16. Multi-user AR decode below the card
 
@@ -378,26 +377,23 @@ layers 17, 25 and 30 (`fused_pair` and `routed_f16_type` exclude it)
 Check each against the resident MMQ/MMVQ outputs (`ds41.mmq_typed`,
 `ds41_gemv_bench`); existing builds stay bit-identical.
 
-### 25. Direction projection and steering vectors
-
-Remove (or add, as llama.cpp control vectors) per-layer directions from
-what a sublayer writes into the hyper-connection streams, weights
-unchanged; load mako's `MAKOABL1` files (attention and shared-expert
-sites) plus a full-FFN site. Implement as an epilogue of the
-attention-output and MoE-combine launches so decode adds no launches
-(item 4). Per-request scale only once the prompt cache keys on it. Gates:
-bit-identical with no file; KL and perplexity with one; DSpark acceptance.
-
 ### 26. LoRA adapters
 
 Load GGUF LoRA adapters as low-rank epilogues (`y += scale · B (A x)`) of
 the dense and shared-expert GEMVs/GEMMs, and for routed experts as
 per-expert A and B indexed by the route (~29 KB per expert at rank 1,
-resident while experts stream). Detect rank-1 adapters with one `lora_b`
-vector per layer and `lora_a ≈ Wᵀ r` (the published abliteration adapter,
-459 MB) and load them as item 25's exact projection instead. The prompt
-cache must key on adapters and scales. Place loaders and kernels so other
-models can adopt items 25 and 26.
+resident while experts stream). Rank-1 abliteration adapters (one `lora_b`
+direction everywhere) already convert to direction adapters that remove it
+exactly (`tools/adapters/direction_adapter.py from-lora`, E94); loading
+such a LoRA as low-rank epilogues instead would compare the stored halves
+(3.8% off `-rᵀW` on `IQ1_M`) against the exact projection. The prompt cache
+must key on adapters and scales (`adapters=` in the disk identity, as
+`--adapter` does). Keep the loader in `src/core/` beside the direction
+adapter's.
+
+Direction adapter follow-ups: per-request scale (the cache would key on
+it), and the batched whole-FFN edit folded into `hc_state_pass` (LoRA
+direction prefill −2.5%, E94).
 
 ## Tried and closed
 
@@ -435,6 +431,7 @@ in EXPERIMENTS.md.
 
 | Item | Result | Ref |
 | --- | --- | --- |
+| Direction adapters (item 25): `--adapter`, mako files and rank-1 LoRAs | Bit-identical without one; 3K perplexity ±0.002 nats, KL 0.012-0.015; decode −0.5 to −0.9% | E94 |
 | Greedy DSpark width policy (DECODE.md lever 1) | Chat 16.5-16.9 → 17.6-18.9, code 26.6-27.4 → 28.3-28.7, long 24.7-26.2 → 26.4-26.7 tok/s | E87 |
 | Top-p softmax totals on the device (DECODE.md lever 4) | Sampled DSpark +0.3 to +1.1 tok/s, AR sampled +0.1 to +0.2 | E88 |
 | Eviction victim lists, exact pops (item 31) | Scan removed; served speed unchanged (scan ≤ ~0.15 ms per admission) | E91, E92 |

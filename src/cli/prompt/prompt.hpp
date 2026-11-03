@@ -43,6 +43,9 @@ struct PromptOptions {
   /// DeepSeek V4.1 Flash routed expert streaming and its cache bytes.
   bool stream_experts{false};
   std::size_t expert_cache_bytes{0};
+  /// DeepSeek V4.1 Flash direction adapter and the factor on its scale.
+  std::string adapter_path;
+  float adapter_scale{1.0f};
   // DeepSeek V4 Flash DSpark support model. DSpark is DS4's own drafter and
   // is unrelated to the Qwen DFlash paths above.
   std::string dspark_model_path;

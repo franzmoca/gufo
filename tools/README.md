@@ -19,9 +19,10 @@ benchmark/tuning executables; Python tools run from this source tree.
 | `ci/` | Repository, dependency, and documentation checks |
 | `llama_parity/` | Regenerates the llama.cpp tool-grammar verdicts `json_constraint_test` replays |
 | `gufo/` | Shared Python helpers and model-specific reference implementations |
+| `adapters/` | Converts mako `MAKOABL1` files and rank-1 abliteration LoRAs to direction adapters (`--adapter`) |
 
 `gufo/gguf.py` reads metadata and decodes existing GGUF tensors for independent
-Qwen reference tests. `gufo/safetensors.py` validates source snapshots used by
+Qwen reference tests, and writes F32 GGUFs for the adapter converter. `gufo/safetensors.py` validates source snapshots used by
 MiniMax's manifest and quality tooling. Both support model verification.
 
 See [performance commands](../docs/PERFORMANCE.md),

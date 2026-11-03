@@ -106,6 +106,15 @@ void RegisterBenchOptions(ArgParser& parser, BenchOptions& opt,
                    "expert cache bytes (default: 0 = available memory minus "
                    "4 GiB)",
                    "Model", &opt.expert_cache_bytes);
+  parser.AddOption("", "--adapter", "FILE",
+                   "DeepSeek V4.1 Flash: direction adapter GGUF that removes "
+                   "or adds per-layer directions in sublayer outputs, "
+                   "weights unchanged",
+                   "Model", &opt.adapter_path);
+  parser.AddOption("", "--adapter-scale", "F",
+                   "DeepSeek V4.1 Flash with --adapter: factor on the "
+                   "adapter's scale (default: 1)",
+                   "Model", &opt.adapter_scale);
 
   parser.AddCustomOption(
       "-p", "--n-prompt", "n,n,...",
@@ -402,12 +411,11 @@ bool IsDeepSeekV4Flash(const core::GgufReader& reader) {
 /// Model options; the prefill batch, exact prefill and expert streaming apply
 /// to DeepSeek V4.1 Flash only.
 template<typename Ds>
-typename Ds::ModelOptions DeepSeekModelOptions(std::uint32_t max_context,
-                                               std::string dspark_model_path,
-                                               std::uint32_t prefill_batch,
-                                               bool exact_prefill,
-                                               bool stream_experts,
-                                               std::size_t expert_cache_bytes) {
+typename Ds::ModelOptions DeepSeekModelOptions(
+    std::uint32_t max_context, std::string dspark_model_path,
+    std::uint32_t prefill_batch, bool exact_prefill, bool stream_experts,
+    std::size_t expert_cache_bytes, std::string adapter_path,
+    float adapter_scale) {
   typename Ds::ModelOptions options{
       .max_context = max_context,
       .dspark_model_path = std::move(dspark_model_path),
@@ -417,6 +425,10 @@ typename Ds::ModelOptions DeepSeekModelOptions(std::uint32_t max_context,
     options.exact_prefill = exact_prefill;
     options.stream_experts = stream_experts;
     options.expert_cache_bytes = expert_cache_bytes;
+  }
+  if constexpr (requires { options.adapter_path; }) {
+    options.adapter_path = std::move(adapter_path);
+    options.adapter_scale = adapter_scale;
   }
   return options;
 }
@@ -513,7 +525,8 @@ int RunDeepSeekBenchmark(
                           static_cast<std::uint32_t>(required_context),
                           dspark ? options.dspark_model_path : "",
                           options.prefill_batch, options.exact_prefill,
-                          options.stream_experts, options.expert_cache_bytes),
+                          options.stream_experts, options.expert_cache_bytes,
+                          options.adapter_path, options.adapter_scale),
                       &error);
   if (model == nullptr) {
     std::cerr << "Error creating " << Ds::kName << " model: " << error << '\n';

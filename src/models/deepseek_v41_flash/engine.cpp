@@ -2,11 +2,18 @@
 
 #include <algorithm>
 #include <array>
+#include <cmath>
+#include <cstdio>
 #include <cstdlib>
 #include <limits>
+#include <optional>
 #include <stdexcept>
+#include <string_view>
 #include <utility>
+#include <vector>
 
+#include "src/core/direction_adapter.hpp"
+#include "src/core/gguf_identity.hpp"
 #include "src/models/deepseek_v41_flash/runtime/model_data_internal.h"
 
 namespace gufo::models::deepseek_v41_flash {
@@ -31,8 +38,11 @@ std::vector<int> TakeTokens(ds41_tokens* tokens) {
 
 }  // namespace
 
-Model::Model(ds41_engine* engine, ModelOptions options)
-    : engine_(engine), options_(options) {}
+Model::Model(ds41_engine* engine, ModelOptions options,
+             std::string adapter_identity)
+    : engine_(engine),
+      options_(std::move(options)),
+      adapter_identity_(std::move(adapter_identity)) {}
 
 Model::~Model() {
   if (engine_ != nullptr) {
@@ -71,7 +81,49 @@ std::shared_ptr<Model> Model::Load(const std::string& model_path,
     return nullptr;
   }
 
+  if (!std::isfinite(options.adapter_scale)) {
+    AssignError(error_msg, "--adapter-scale must be finite");
+    return nullptr;
+  }
+  std::optional<core::DirectionAdapter> adapter;
+  std::vector<ds41_direction_set> directions;
+  std::string adapter_identity = "none";
+  if (!options.adapter_path.empty()) {
+    static constexpr std::array<std::string_view, DS41_N_DIRECTION_SITES>
+        kSites = {DS41_DIRECTION_SITES[0], DS41_DIRECTION_SITES[1],
+                  DS41_DIRECTION_SITES[2]};
+    std::string adapter_error;
+    adapter = core::LoadDirectionAdapter(options.adapter_path,
+                                         {.architecture = "deepseek41",
+                                          .width = DS41_N_EMBD,
+                                          .layers = DS41_N_LAYER,
+                                          .sites = kSites},
+                                         &adapter_error);
+    if (!adapter) {
+      AssignError(error_msg, adapter_error);
+      return nullptr;
+    }
+    for (const auto& set : adapter->sets)
+      directions.push_back({.layer = set.layer,
+                            .site = set.site,
+                            .count = set.count,
+                            .vectors = set.vectors.data()});
+    char scale[32];
+    std::snprintf(scale, sizeof(scale), "%.9g",
+                  adapter->scale * options.adapter_scale);
+    adapter_identity = "direction:" + std::string(core::kGgufIdentityScheme) +
+                       ':' + adapter->identity +
+                       ":mode=" + std::string(core::ToString(adapter->mode)) +
+                       ":scale=" + scale;
+  }
+
   ds41_engine_options engine_options{};
+  engine_options.directions = directions.data();
+  engine_options.n_directions = static_cast<std::uint32_t>(directions.size());
+  engine_options.direction_scale =
+      adapter ? adapter->scale * options.adapter_scale : 0.0f;
+  engine_options.direction_add =
+      adapter && adapter->mode == core::DirectionMode::kAdd;
   engine_options.model_path = model_path.c_str();
   engine_options.prefill_batch = options.prefill_batch;
   engine_options.exact_prefill = options.exact_prefill;
@@ -87,7 +139,8 @@ std::shared_ptr<Model> Model::Load(const std::string& model_path,
     return nullptr;
   }
 
-  return std::shared_ptr<Model>(new Model(engine, options));
+  return std::shared_ptr<Model>(
+      new Model(engine, options, std::move(adapter_identity)));
 }
 
 std::unique_ptr<Session> Model::CreateSession(core::SessionMode mode,

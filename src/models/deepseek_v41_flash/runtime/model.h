@@ -16,6 +16,19 @@ struct ds41_session;
 
 using ds41_session_cancel_fn = bool (*)(void* user_data);
 
+/* Direction adapter sites (src/core/direction_adapter.hpp): the attention
+ * output, the shared expert's output and the whole FFN output (shared plus
+ * routed experts), each before its hc expand into the residual streams. */
+inline constexpr const char* DS41_DIRECTION_SITES[] = {"attn_out", "shexp_out", "ffn_out"};
+enum : uint32_t { DS41_SITE_ATTN_OUT, DS41_SITE_SHEXP_OUT, DS41_SITE_FFN_OUT, DS41_N_DIRECTION_SITES };
+
+struct ds41_direction_set {
+  uint32_t layer;
+  uint32_t site;  // DS41_SITE_*
+  uint32_t count;
+  const float* vectors;  // [count][DS41_N_EMBD], copied at open
+};
+
 struct ds41_engine_options {
   const char* model_path;
   /* Optional DSpark support model. NULL leaves speculative decoding off and
@@ -38,6 +51,13 @@ struct ds41_engine_options {
   /* Streamed expert cache bytes; 0 sizes it from available memory. Requires
    * stream_experts. */
   uint64_t expert_cache_bytes;
+  /* Direction adapter sets, at most one per (layer, site); none leaves the
+   * engine bit-identical. Project mode removes each vector's component,
+   * x -= scale (x . v) v in turn; add mode adds scale v. */
+  const ds41_direction_set* directions;
+  uint32_t n_directions;
+  float direction_scale;
+  bool direction_add;
 };
 
 inline constexpr uint32_t DS41_MIN_PREFILL_BATCH = 16;

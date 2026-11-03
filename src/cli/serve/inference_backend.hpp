@@ -91,6 +91,11 @@ public:
     deepseek_stream_experts_ = enabled;
     deepseek_expert_cache_bytes_ = cache_bytes;
   }
+  /// DeepSeek V4.1 Flash --adapter and --adapter-scale for the next load.
+  void set_deepseek_adapter(std::string path, float scale) {
+    deepseek_adapter_path_ = std::move(path);
+    deepseek_adapter_scale_ = scale;
+  }
   void set_deepseek_prefill_batch(std::uint32_t tokens) {
     deepseek_prefill_batch_ = tokens;
   }
@@ -238,6 +243,8 @@ private:
   bool deepseek_exact_prefill_ = false;
   bool deepseek_stream_experts_ = false;
   std::uint64_t deepseek_expert_cache_bytes_ = 0;
+  std::string deepseek_adapter_path_;
+  float deepseek_adapter_scale_ = 1.0f;
 };
 
 }  // namespace gufo::server

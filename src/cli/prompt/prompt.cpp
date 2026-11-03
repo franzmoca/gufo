@@ -114,6 +114,15 @@ static void RegisterTextOptions(ArgParser& parser, PromptOptions& opt,
                    "expert cache bytes (default: 0 = available memory minus "
                    "4 GiB)",
                    "Model", &opt.expert_cache_bytes);
+  parser.AddOption("", "--adapter", "FILE",
+                   "DeepSeek V4.1 Flash: direction adapter GGUF that removes "
+                   "or adds per-layer directions in sublayer outputs, "
+                   "weights unchanged",
+                   "Model", &opt.adapter_path);
+  parser.AddOption("", "--adapter-scale", "F",
+                   "DeepSeek V4.1 Flash with --adapter: factor on the "
+                   "adapter's scale (default: 1)",
+                   "Model", &opt.adapter_scale);
   RegisterImageOptions(parser, opt);
 
   // Prompt & Formatting
@@ -424,6 +433,14 @@ std::shared_ptr<typename Ds::Model> LoadDeepSeekModel(
     model_options.exact_prefill = opt.exact_prefill;
     model_options.stream_experts = opt.stream_experts;
     model_options.expert_cache_bytes = opt.expert_cache_bytes;
+  }
+  if constexpr (requires { model_options.adapter_path; }) {
+    model_options.adapter_path = opt.adapter_path;
+    model_options.adapter_scale = opt.adapter_scale;
+  } else if (!opt.adapter_path.empty()) {
+    std::cerr << "--adapter supports DeepSeek V4.1 Flash only\n";
+    PrintModelLoadTime(load_start, false);
+    return nullptr;
   }
   std::string error;
   auto model = Ds::Model::Load(opt.model_path, model_options, &error);

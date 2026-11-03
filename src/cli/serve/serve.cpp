@@ -604,6 +604,8 @@ void PrintServeHelp(std::string_view program_name,
     bool exact_prefill = false;
     bool stream_experts = false;
     std::size_t expert_cache_bytes = 0;
+    std::string adapter_path;
+    float adapter_scale = 1.0f;
     std::string dspark_model_path;
     std::string mtp_model_path;
     std::string vision_model_path;
@@ -665,6 +667,18 @@ void PrintServeHelp(std::string_view program_name,
         "bytes; smaller leaves more memory free and reads more from the SSD "
         "(default: 0 = available memory minus 4 GiB)",
         "Model", &expert_cache_bytes);
+    parser.AddOption(
+        "", "--adapter", "FILE",
+        "DeepSeek V4.1 Flash: direction adapter GGUF that removes or adds "
+        "per-layer directions in sublayer outputs, weights unchanged "
+        "(tools/adapters/direction_adapter.py converts mako .abl files and "
+        "rank-1 abliteration LoRAs)",
+        "Model", &adapter_path);
+    parser.AddOption(
+        "", "--adapter-scale", "F",
+        "DeepSeek V4.1 Flash with --adapter: factor on the adapter's scale "
+        "(default: 1)",
+        "Model", &adapter_scale);
     parser.AddOption("", "--served-model-name", "ID",
                      "Model identifier exposed by the OpenAI API (repeatable; "
                      "the first is primary)",
@@ -1245,6 +1259,8 @@ int RunServe(std::span<const char* const> args) {
     bool exact_prefill = false;
     bool stream_experts = false;
     std::size_t expert_cache_bytes = 0;
+    std::string adapter_path;
+    float adapter_scale = 1.0f;
     std::string dspark_model_path;
     std::string mtp_model_path;
     std::string vision_model_path;
@@ -1306,6 +1322,18 @@ int RunServe(std::span<const char* const> args) {
         "bytes; smaller leaves more memory free and reads more from the SSD "
         "(default: 0 = available memory minus 4 GiB)",
         "Model", &expert_cache_bytes);
+    llm_parser.AddOption(
+        "", "--adapter", "FILE",
+        "DeepSeek V4.1 Flash: direction adapter GGUF that removes or adds "
+        "per-layer directions in sublayer outputs, weights unchanged "
+        "(tools/adapters/direction_adapter.py converts mako .abl files and "
+        "rank-1 abliteration LoRAs)",
+        "Model", &adapter_path);
+    llm_parser.AddOption(
+        "", "--adapter-scale", "F",
+        "DeepSeek V4.1 Flash with --adapter: factor on the adapter's scale "
+        "(default: 1)",
+        "Model", &adapter_scale);
     llm_parser.AddCustomOption(
         "", "--served-model-name", "ID",
         "Model identifier exposed by the OpenAI API (repeatable; the first "
@@ -1567,6 +1595,7 @@ int RunServe(std::span<const char* const> args) {
     backend->set_deepseek_prefill_batch(prefill_batch);
     backend->set_deepseek_exact_prefill(exact_prefill);
     backend->set_deepseek_expert_streaming(stream_experts, expert_cache_bytes);
+    backend->set_deepseek_adapter(adapter_path, adapter_scale);
     const bool load_ok = backend->load(
         model, &err, max_context, session_count,
         server::TextPrefillPolicy{

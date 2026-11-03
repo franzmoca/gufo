@@ -1472,6 +1472,13 @@ bool moe(ds41_decoder* d, uint32_t il, uint32_t n) {
   return d->engine->expert_store || shared_moe(d, l, n, shared_x16);
 }
 
+/* Layer il's direction adapter edits, [0] the attention output and [1] the
+ * FFN output, or NULL when the layer has none. */
+const ds41_v41_steer* steer(const ds41_decoder* d, uint32_t il, int site) {
+  const ds41_v41_steer* s = &d->engine->steer[il][site];
+  return s->extra_k || s->total_k ? s : nullptr;
+}
+
 /* Tokens from which block() fuses the batched state passes. */
 constexpr uint32_t kStatePassTokens = 16;
 
@@ -1485,6 +1492,8 @@ bool block(ds41_decoder* d, uint32_t il, int prev, int next, uint32_t n, const J
   const float eps = DS41_RMS_EPS;
   const bool entered = mixed && *mixed;
   if (mixed) *mixed = false;
+  const ds41_v41_steer* steer_attn = steer(d, il, 0);
+  const ds41_v41_steer* steer_ffn = steer(d, il, 1);
   /* Batches read each state once for its mixes and collapse (the FFN's
    * after the attention expand); the collapse uses the pre-mix that was
    * known before the mix. */
@@ -1499,9 +1508,11 @@ bool block(ds41_decoder* d, uint32_t il, int prev, int next, uint32_t n, const J
                                             kDim, eps, n) == 0) ||
         !sinkhorn(l->hc_attn_scale, l->hc_attn_base, d->pre[next], d->post, d->comb) ||
         !attention(d, il, n, joint) ||
+        (steer_attn && ds41_v41_steer_rows(d->attn_out, nullptr, 0, kDim, n, steer_attn)) ||
         ds41_v41_hc_state_pass(d->attn_out, nullptr, 0, d->post, d->comb, d->h, d->h2, d->pre[next],
                                f32(d, l->ffn_norm), d->xn, f32(d, l->hc_ffn_fn), d->mixes, kHc, kDim, eps, n) ||
-        !sinkhorn(l->hc_ffn_scale, l->hc_ffn_base, d->pre[prev], d->ffn_post, d->ffn_comb) || !moe(d, il, n))
+        !sinkhorn(l->hc_ffn_scale, l->hc_ffn_base, d->pre[prev], d->ffn_post, d->ffn_comb) || !moe(d, il, n) ||
+        (steer_ffn && ds41_v41_steer_rows(d->sd, d->down6, DS41_N_EXPERT_USED, kDim, n, steer_ffn)))
       return false;
     if (!then)
       return ds41_v41_hc_expand_sum(d->down6, d->sd, DS41_N_EXPERT_USED, d->h2, d->ffn_post, d->ffn_comb, d->h, kHc,
@@ -1519,13 +1530,19 @@ bool block(ds41_decoder* d, uint32_t il, int prev, int next, uint32_t n, const J
   if (!hc_mix(d, l->hc_attn_fn, l->hc_attn_scale, l->hc_attn_base, d->h, d->pre[next], d->post, d->comb, n) ||
       ds41_v41_hc_collapse_norm(d->h, d->pre[prev], f32(d, l->attn_norm), d->xn, kHc, kDim, eps, n) ||
       !attention(d, il, n, joint) || !join_mix(d, n) ||
-      ds41_v41_hc_expand(d->attn_out, d->h, d->post, d->comb, d->h2, kHc, kDim, n))
+      (steer_attn ? ds41_v41_hc_expand_steer(nullptr, d->attn_out, 0, d->h, d->post, d->comb, d->h2, kHc, kDim, n,
+                                             steer_attn)
+                  : ds41_v41_hc_expand(d->attn_out, d->h, d->post, d->comb, d->h2, kHc, kDim, n)))
     return false;
   /* The FFN uses this layer's attention pre-mix; its own pre-mix feeds the next attention. */
   if (!hc_mix(d, l->hc_ffn_fn, l->hc_ffn_scale, l->hc_ffn_base, d->h2, d->pre[prev], d->ffn_post, d->ffn_comb, n) ||
       ds41_v41_hc_collapse_norm(d->h2, d->pre[next], f32(d, l->ffn_norm), d->xn, kHc, kDim, eps, n) ||
-      !moe(d, il, n) || !join_mix(d, n) ||
-      ds41_v41_hc_expand_sum(d->down6, d->sd, DS41_N_EXPERT_USED, d->h2, d->ffn_post, d->ffn_comb, d->h, kHc, kDim,
+      !moe(d, il, n) || !join_mix(d, n))
+    return false;
+  if (steer_ffn)
+    return ds41_v41_hc_expand_steer(d->down6, d->sd, DS41_N_EXPERT_USED, d->h2, d->ffn_post, d->ffn_comb, d->h, kHc,
+                                    kDim, n, steer_ffn) == 0;
+  if (ds41_v41_hc_expand_sum(d->down6, d->sd, DS41_N_EXPERT_USED, d->h2, d->ffn_post, d->ffn_comb, d->h, kHc, kDim,
                              n))
     return false;
   return true;

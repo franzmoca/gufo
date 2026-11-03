@@ -331,6 +331,40 @@ single-user, concurrent, loading and memory tables for `IQ1_M` resident and
 for `IQ2_XXS`, `UD-IQ1_M` and `UD-IQ2_XXS` streamed. `UD-IQ2_XXS` against
 `UD-IQ1_M` on the same build is in [QUALITY.md](docs/models/deepseek-v4.1-flash/QUALITY.md#streamed-ud-iq2_xxs).
 
+## Direction adapters
+
+`--adapter FILE` loads a direction adapter, a small GGUF of per-layer
+vectors that the engine removes from (or adds to) what a sublayer writes
+into the residual streams. The model weights stay unchanged. The sites are
+`attn_out` (attention output), `shexp_out` (shared expert output) and
+`ffn_out` (shared plus routed experts). In the default project mode each
+output row loses `scale (x . v) v` for each vector `v` in turn; the
+vectors' norms carry the strength, and `--adapter-scale F` multiplies the
+file's own scale. `gufo serve llm`, `gufo prompt` and `gufo bench` accept
+both options; the disk prompt cache keys on the file's digest, mode and
+scale. The format is specified in
+[`src/core/direction_adapter.hpp`](src/core/direction_adapter.hpp).
+
+`tools/adapters/direction_adapter.py` converts the published refusal
+files:
+
+```sh
+# mako's per-layer directions (2 per layer, attention and shared expert)
+python3 tools/adapters/direction_adapter.py from-abl refusal.abl mako-refusal.gguf --arch deepseek41
+# a rank-1 abliteration LoRA: its one direction, removed exactly from the
+# attention and whole-FFN outputs of every layer (1.6 MB instead of 459 MB)
+nix develop -c python3 tools/adapters/direction_adapter.py from-lora \
+  DeepSeek-V4.1-Flash-1017-Abliteration-rank1-L22.gguf lora-l22.gguf \
+  --model ds41/DeepSeek-V4.1-Flash-1017-GSQ-RCO-IQ1_M-00001-of-00006.gguf
+```
+
+The LoRA stores `lora_a = -rᵀW` computed from another quantization; as a
+projection the direction is removed exactly on any build (`--model` checks
+the LoRA's sign against that build: on `IQ1_M` its `lora_a` differs from
+`-rᵀW` by 3.8%). Without an adapter the engine is bit-identical. On
+`IQ1_M` the adapters cost 0.5-0.9% decode and 0.8-2.5% prefill
+([E94](docs/models/deepseek-v4.1-flash/EXPERIMENTS.md#e94--direction-adapters-retained)).
+
 ## Model notes
 
 V4.1 Flash against the V4 Flash engine it was forked from:
