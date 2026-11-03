@@ -662,17 +662,99 @@ __global__ __launch_bounds__(256) void hc_mixes_rows_kernel(const float* fn, con
  * then the mixes of s (as hc_mixes_rows_kernel) and the collapse
  * weight * RMSNorm(sum_c pre_c s_c) come from the same registers, so the
  * state is read once. */
-template <bool kExpand>
+__device__ inline float dot4(float4 a, float4 b) { return a.x * b.x + a.y * b.y + a.z * b.z + a.w * b.w; }
+__device__ inline void axpy4(float4& y, float a, float4 x) { y.x += a * x.x, y.y += a * x.y, y.z += a * x.z, y.w += a * x.w; }
+
+template <bool kExpand, bool kSteer = false>
 __global__ __launch_bounds__(1024) void hc_state_pass_kernel(const float* y, const float* x, uint32_t rows,
                                                              const float* post, const float* comb,
                                                              const float* h, float* h_out, const float* pre,
                                                              const float* norm_w, float* xn, const float* fn,
-                                                             float* mixes, uint32_t dim, uint32_t tokens, float eps) {
+                                                             float* mixes, uint32_t dim, uint32_t tokens, float eps,
+                                                             ds41_v41_steer s = {}) {
   constexpr uint32_t T = kMixTokens, HC = 4, MIX = 24, G = 2;
   constexpr uint32_t V = T * (MIX + 2);  // per token: the mix dots, the state and the collapse sums of squares
   const uint32_t t0 = blockIdx.x * T, groups = dim / 4, n = HC * dim;
   float4 st[T][G][HC], col[T][G];
   float acc[2 * T] = {};  // the state and the collapse sums of squares
+  /* Direction adapter edits of the expanded sum (as hc_expand_steer_kernel):
+   * the dots first, then the edit coefficients per token from them and the
+   * precomputed Gram terms; the load below subtracts c . vectors. */
+  constexpr uint32_t K = DS41_V41_STEER_MAX_K, KS = kSteer ? K : 1;
+  float ce[T][KS] = {}, ct[T][KS] = {};
+  if constexpr (kSteer) {
+    __shared__ float steer_part[T * 2 * K][32];
+    const uint32_t ke = s.extra_k, kt = s.total_k;
+    if (!s.add) {
+      float d[T][2 * K] = {};
+#pragma unroll
+      for (uint32_t t = 0; t < T; t++) {
+        if (t0 + t >= tokens) continue;
+        const uint64_t tok = t0 + t;
+#pragma unroll
+        for (uint32_t g = 0; g < G; g++) {
+          const uint32_t q = threadIdx.x + g * blockDim.x;
+          const float4 yv = reinterpret_cast<const float4*>(y + tok * dim)[q];
+#pragma unroll
+          for (uint32_t j = 0; j < K; j++)
+            if (j < ke) d[t][j] += dot4(yv, reinterpret_cast<const float4*>(s.extra_v + (uint64_t)j * dim)[q]);
+          if (kt) {
+            float4 zv = yv;
+            for (uint32_t r = 0; r < rows; r++)
+              axpy4(zv, 1.0f, reinterpret_cast<const float4*>(x + (tok * rows + r) * dim)[q]);
+#pragma unroll
+            for (uint32_t j = 0; j < K; j++)
+              if (j < kt)
+                d[t][K + j] += dot4(zv, reinterpret_cast<const float4*>(s.total_v + (uint64_t)j * dim)[q]);
+          }
+        }
+      }
+      const uint32_t lane = threadIdx.x % 32, warp = threadIdx.x / 32;
+#pragma unroll
+      for (uint32_t t = 0; t < T; t++)
+#pragma unroll
+        for (uint32_t j = 0; j < 2 * K; j++) {
+          if (!(j < K ? j < ke : j - K < kt)) continue;
+          float a = d[t][j];
+          for (int o = 16; o > 0; o >>= 1) a += __shfl_xor(a, o, 32);
+          if (lane == 0) steer_part[t * 2 * K + j][warp] = a;
+        }
+      __syncthreads();
+      const auto gram = [&](uint32_t which, uint32_t j, uint32_t a) { return s.gram[(which * K + j) * K + a]; };
+      const auto total = [&](uint32_t v) {
+        float sum = 0.0f;
+        for (uint32_t w = 0; w < blockDim.x / 32; w++) sum += steer_part[v][w];
+        return sum;
+      };
+#pragma unroll
+      for (uint32_t t = 0; t < T; t++) {
+        if (t0 + t >= tokens) continue;
+#pragma unroll
+        for (uint32_t j = 0; j < K; j++) {
+          if (j >= ke) continue;
+          float dj = total(t * 2 * K + j);
+          for (uint32_t a = 0; a < j; a++) dj -= ce[t][a] * gram(0, j, a);
+          ce[t][j] = s.scale * dj;
+        }
+#pragma unroll
+        for (uint32_t j = 0; j < K; j++) {
+          if (j >= kt) continue;
+          float dj = total(t * 2 * K + K + j);
+          for (uint32_t a = 0; a < ke; a++) dj -= ce[t][a] * gram(2, j, a);
+          for (uint32_t a = 0; a < j; a++) dj -= ct[t][a] * gram(1, j, a);
+          ct[t][j] = s.scale * dj;
+        }
+      }
+    } else {
+#pragma unroll
+      for (uint32_t t = 0; t < T; t++)
+#pragma unroll
+        for (uint32_t j = 0; j < K; j++) {
+          if (j < ke) ce[t][j] = -s.scale;
+          if (j < kt) ct[t][j] = -s.scale;
+        }
+    }
+  }
 #pragma unroll
   for (uint32_t t = 0; t < T; t++) {
     const bool live = t0 + t < tokens;
@@ -686,6 +768,15 @@ __global__ __launch_bounds__(1024) void hc_state_pass_kernel(const float* y, con
         for (uint32_t r = 0; r < rows; r++) {
           const float4 xv = reinterpret_cast<const float4*>(x + (tok * rows + r) * dim)[q];
           yv.x += xv.x, yv.y += xv.y, yv.z += xv.z, yv.w += xv.w;
+        }
+        if constexpr (kSteer) {
+#pragma unroll
+          for (uint32_t j = 0; j < K; j++) {
+            if (j < s.extra_k)
+              axpy4(yv, -ce[t][j], reinterpret_cast<const float4*>(s.extra_v + (uint64_t)j * dim)[q]);
+            if (j < s.total_k)
+              axpy4(yv, -ct[t][j], reinterpret_cast<const float4*>(s.total_v + (uint64_t)j * dim)[q]);
+          }
         }
         float4 hv[HC];
 #pragma unroll
@@ -3127,6 +3218,23 @@ extern "C" int ds41_v41_hc_state_pass(const float* y, const float* x, uint32_t r
     hc_state_pass_kernel<false>
         <<<grid, dim / 8>>>(y, x, 0, post, comb, h, h_out, pre, norm_w, xn, fn, mixes, dim, n, eps);
   return launch_ok("hc state pass");
+}
+
+extern "C" int ds41_v41_hc_state_pass_steer(const float* y, const float* x, uint32_t rows, const float* post,
+                                           const float* comb, const float* h, float* h_out, const float* pre,
+                                           const float* norm_w, float* xn, const float* fn, float* mixes,
+                                           uint32_t hc, uint32_t dim, float eps, uint32_t n,
+                                           const ds41_v41_steer* s) {
+  if (!s)
+    return ds41_v41_hc_state_pass(y, x, rows, post, comb, h, h_out, pre, norm_w, xn, fn, mixes, hc, dim, eps, n);
+  if (hc != 4 || dim % 256 != 0 || dim / 8 > 1024 || !y || (rows && !x) || s->extra_k > DS41_V41_STEER_MAX_K ||
+      s->total_k > DS41_V41_STEER_MAX_K || (!s->add && !s->gram))
+    return 1;
+  if (n == 0) return 0;
+  const dim3 grid((n + kMixTokens - 1) / kMixTokens);
+  hc_state_pass_kernel<true, true>
+      <<<grid, dim / 8>>>(y, x, rows, post, comb, h, h_out, pre, norm_w, xn, fn, mixes, dim, n, eps, *s);
+  return launch_ok("hc state pass steer");
 }
 
 extern "C" int ds41_v41_hc_collapse_norm(const float* h, const float* pre, const float* weight, float* out,

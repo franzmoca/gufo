@@ -241,6 +241,12 @@ void ds41_v41_steer_gram(const float* extra_v, uint32_t extra_k, const float* to
 int ds41_v41_hc_expand_steer(const float* x, const float* extra, uint32_t rows, const float* residual,
                              const float* post, const float* comb, float* out, uint32_t hc, uint32_t dim, uint32_t n,
                              const ds41_v41_steer* s);
+/* ds41_v41_hc_state_pass (with y) whose expanded sum takes the edits of s;
+ * s NULL is the plain pass. */
+int ds41_v41_hc_state_pass_steer(const float* y, const float* x, uint32_t rows, const float* post, const float* comb,
+                                 const float* h, float* h_out, const float* pre, const float* norm_w, float* xn,
+                                 const float* fn, float* mixes, uint32_t hc, uint32_t dim, float eps, uint32_t n,
+                                 const ds41_v41_steer* s);
 /* The same edits in place: y[t] (the extra) takes every change, so a later
  * ds41_v41_hc_expand_sum(x, y, rows, ...) or state pass sees the edited sum. */
 int ds41_v41_steer_rows(float* y, const float* x, uint32_t rows, uint32_t dim, uint32_t n, const ds41_v41_steer* s);

@@ -142,6 +142,84 @@ bool Case(uint32_t n, uint32_t rows, uint32_t extra_k, uint32_t total_k,
   return pass;
 }
 
+double RelErrF(const std::vector<float>& got, const std::vector<float>& want) {
+  double err = 0.0, ref = 0.0;
+  for (std::size_t i = 0; i < want.size(); ++i) {
+    err = std::max(err, (double)std::fabs(got[i] - want[i]));
+    ref = std::max(ref, (double)std::fabs(want[i]));
+  }
+  return ref > 0.0 ? err / ref : err;
+}
+
+/* The batched state pass with the edits against the in-place edits followed
+ * by the plain state pass: the expanded state, mixes and collapse. */
+bool StatePassCase(uint32_t n, uint32_t rows, uint32_t extra_k,
+                   uint32_t total_k, bool add, std::mt19937& rng) {
+  constexpr uint32_t kMix = 24;
+  const float eps = 1e-6f, scale = add ? 0.75f : 1.3f;
+  const std::size_t state = (std::size_t)n * kHc * kDim;
+  const float a = 1.7f / std::sqrt((float)kDim);
+  const auto h_ev = Random((std::size_t)(extra_k + 1) * kDim, -a, a, rng);
+  const auto h_tv = Random((std::size_t)(total_k + 1) * kDim, -a, a, rng);
+  std::vector<float> h_gram(DS41_V41_STEER_GRAM);
+  ds41_v41_steer_gram(h_ev.data(), extra_k, h_tv.data(), total_k, kDim,
+                      h_gram.data());
+  const auto h_y = Random((std::size_t)n * kDim, -2.0f, 2.0f, rng);
+  auto* h = Device(Random(state, -2.0f, 2.0f, rng));
+  auto* y = Device(h_y);
+  auto* y_edit = Device(h_y);
+  auto* x =
+      Device(Random((std::size_t)n * (rows + 1) * kDim, -2.0f, 2.0f, rng));
+  auto* post = Device(Random((std::size_t)n * kHc, 0.0f, 2.0f, rng));
+  auto* comb = Device(Random((std::size_t)n * kHc * kHc, 0.0f, 1.0f, rng));
+  auto* pre = Device(Random((std::size_t)n * kHc, 0.0f, 1.0f, rng));
+  auto* norm_w = Device(Random(kDim, 0.5f, 1.5f, rng));
+  auto* fn = Device(Random((std::size_t)kMix * kHc * kDim, -0.05f, 0.05f, rng));
+  auto* ev = Device(h_ev);
+  auto* tv = Device(h_tv);
+  auto* gram = Device(h_gram);
+  float* bufs[6];
+  const std::size_t sizes[6] = {state,
+                                state,
+                                (std::size_t)n * kMix,
+                                (std::size_t)n * kMix,
+                                (std::size_t)n * kDim,
+                                (std::size_t)n * kDim};
+  for (int i = 0; i < 6; ++i)
+    bufs[i] = Device(std::vector<float>(sizes[i]));
+  const ds41_v41_steer s{ev, extra_k, tv, total_k, scale, add ? 1 : 0, gram};
+  float* xr = rows ? x : nullptr;
+  const bool ok = ds41_v41_steer_rows(y_edit, xr, rows, kDim, n, &s) == 0 &&
+                  ds41_v41_hc_state_pass(y_edit, xr, rows, post, comb, h,
+                                         bufs[0], pre, norm_w, bufs[4], fn,
+                                         bufs[2], kHc, kDim, eps, n) == 0 &&
+                  ds41_v41_hc_state_pass_steer(
+                      y, xr, rows, post, comb, h, bufs[1], pre, norm_w, bufs[5],
+                      fn, bufs[3], kHc, kDim, eps, n, &s) == 0 &&
+                  hipDeviceSynchronize() == hipSuccess;
+  bool pass = ok;
+  if (ok) {
+    const double e_h = RelErrF(Host(bufs[1], state), Host(bufs[0], state));
+    const double e_mix =
+        RelErrF(Host(bufs[3], sizes[2]), Host(bufs[2], sizes[2]));
+    const double e_xn =
+        RelErrF(Host(bufs[5], sizes[4]), Host(bufs[4], sizes[4]));
+    pass = e_h < 2e-6 && e_mix < 1e-5 && e_xn < 1e-5;
+    std::printf(
+        "state pass steer n=%u rows=%u extra_k=%u total_k=%u %s: "
+        "state %.2e mixes %.2e xn %.2e %s\n",
+        n, rows, extra_k, total_k, add ? "add" : "project", e_h, e_mix, e_xn,
+        pass ? "ok" : "FAIL");
+  } else {
+    std::printf("state pass steer n=%u: launch failed\n", n);
+  }
+  for (float* p : {h, y, y_edit, x, post, comb, pre, norm_w, fn, ev, tv, gram})
+    (void)hipFree(p);
+  for (float* p : bufs)
+    (void)hipFree(p);
+  return pass;
+}
+
 /* Microseconds per launch for one decode token: the plain expands against
  * the fused forms at the attention (k = 2) and FFN (shared k = 2, whole
  * k = 1) sites. */
@@ -224,5 +302,12 @@ int main(int argc, char** argv) {
       ok = Case(n, 6, 4, 4, add, rng) && ok;  // the most vectors per site
     }
   }
+  for (uint32_t n : {16u, 37u})
+    for (bool add : {false, true}) {
+      ok = StatePassCase(n, 0, 0, 2, add, rng) && ok;
+      ok = StatePassCase(n, 6, 2, 0, add, rng) && ok;
+      ok = StatePassCase(n, 6, 0, 1, add, rng) && ok;
+      ok = StatePassCase(n, 6, 4, 4, add, rng) && ok;
+    }
   return ok ? 0 : 1;
 }

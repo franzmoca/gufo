@@ -1508,19 +1508,19 @@ bool block(ds41_decoder* d, uint32_t il, int prev, int next, uint32_t n, const J
                                             kDim, eps, n) == 0) ||
         !sinkhorn(l->hc_attn_scale, l->hc_attn_base, d->pre[next], d->post, d->comb) ||
         !attention(d, il, n, joint) ||
-        (steer_attn && ds41_v41_steer_rows(d->attn_out, nullptr, 0, kDim, n, steer_attn)) ||
-        ds41_v41_hc_state_pass(d->attn_out, nullptr, 0, d->post, d->comb, d->h, d->h2, d->pre[next],
-                               f32(d, l->ffn_norm), d->xn, f32(d, l->hc_ffn_fn), d->mixes, kHc, kDim, eps, n) ||
-        !sinkhorn(l->hc_ffn_scale, l->hc_ffn_base, d->pre[prev], d->ffn_post, d->ffn_comb) || !moe(d, il, n) ||
-        (steer_ffn && ds41_v41_steer_rows(d->sd, d->down6, DS41_N_EXPERT_USED, kDim, n, steer_ffn)))
+        ds41_v41_hc_state_pass_steer(d->attn_out, nullptr, 0, d->post, d->comb, d->h, d->h2, d->pre[next],
+                                     f32(d, l->ffn_norm), d->xn, f32(d, l->hc_ffn_fn), d->mixes, kHc, kDim, eps, n,
+                                     steer_attn) ||
+        !sinkhorn(l->hc_ffn_scale, l->hc_ffn_base, d->pre[prev], d->ffn_post, d->ffn_comb) || !moe(d, il, n))
       return false;
     if (!then)
-      return ds41_v41_hc_expand_sum(d->down6, d->sd, DS41_N_EXPERT_USED, d->h2, d->ffn_post, d->ffn_comb, d->h, kHc,
+      return (!steer_ffn || ds41_v41_steer_rows(d->sd, d->down6, DS41_N_EXPERT_USED, kDim, n, steer_ffn) == 0) &&
+             ds41_v41_hc_expand_sum(d->down6, d->sd, DS41_N_EXPERT_USED, d->h2, d->ffn_post, d->ffn_comb, d->h, kHc,
                                     kDim, n) == 0;
     /* The next layer's attention collapse uses this FFN's pre-mix. */
-    if (ds41_v41_hc_state_pass(d->sd, d->down6, DS41_N_EXPERT_USED, d->ffn_post, d->ffn_comb, d->h2, d->h,
-                               d->pre[prev], f32(d, then->attn_norm), d->xn, f32(d, then->hc_attn_fn), d->mixes, kHc,
-                               kDim, eps, n))
+    if (ds41_v41_hc_state_pass_steer(d->sd, d->down6, DS41_N_EXPERT_USED, d->ffn_post, d->ffn_comb, d->h2, d->h,
+                                     d->pre[prev], f32(d, then->attn_norm), d->xn, f32(d, then->hc_attn_fn), d->mixes,
+                                     kHc, kDim, eps, n, steer_ffn))
       return false;
     *mixed = true;
     return true;
