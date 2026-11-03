@@ -127,6 +127,8 @@ Measurements first recorded in the backlog, without an E-number, are in
 | [E90](#e90--dense-gemv-slice-sweep-over-the-decode-shapes-measured-not-retained) | decode kernels | measured | Dense GEMV slice sweep: no format gap; two beatable splits worth ~0.06 ms per AR token, not worth a rounding change. |
 | [E91](#e91--eviction-victim-lists-retained-pop-check-corrected-in-e92) | expert cache | retained, corrected by E92 | Eviction victim lists: 3K probe 58.85 → 56.15 ms/token; the served gains did not reproduce (E92). |
 | [E92](#e92--exact-victim-list-pops-eviction-scoring-against-the-offline-optimum-retained-scoring-change-not-retained) | expert cache | retained; scoring change not retained | Exact victim-list pops restore baseline reads (63.1–64.4 MiB per token); Belady's optimum halves decode misses; decay 3,200/bonus 8 inconclusive, not retained. |
+| [E94](#e94--single-token-expert-gemv-limits-on-the-gsq-rco-coder-iq1_m-direct-byte-converts-retained) | decode kernels | retained (IQ1_M byte converts); rest rejected | IQ1_M expert GEMV gate+up 163 → 160 µs, down 89 → 86.5 µs, bit-identical; LDS activations, shared gate/up activations, U=2/4/5 and the true16 flag gave nothing. |
+| [E95](#e95--128-slot-routed-fp16-tiles-on-the-gsq-rco-coder-rejected) | prefill kernels | rejected | 128-slot routed FP16 tiles on the Coder's routing (64% tile fill): IQ1_M gate+up 19.2 → 18.5 ms, down unchanged; IQ2_XXS gate+up +8%, down +23% (VGPR spills). |
 
 ## Milestones
 
@@ -3351,6 +3353,63 @@ Gates and results:
 - Both builds swap in bursts late in long single-session runs (~20M pages
   out around the 11th-15th fresh 50-64K prompt, the server's own swap
   9-20 MB); not investigated here.
+
+## E94 — single-token expert GEMV limits on the GSQ-RCO Coder; IQ1_M direct byte converts (retained)
+
+The Coder (192 experts, gate/up IQ1_M x16, IQ2_XXS x17, IQ2_XS x7; down IQ1_M
+x28, IQ2_XXS x8, IQ2_XS x4) spends 10.5 of 40.1 ms of GPU time per AR token
+in `expert_gemv_kernel` (rocprofv3, 128 single-token steps): IQ1_M down 180
+GB/s, IQ1_M gate+up 192, IQ2 formats 204-208. The dense GEMVs run at ~235
+GB/s. A standalone harness calling the production entry points on six of
+192 rotating DRAM-cold experts reproduces the kernel figures (IQ1_M gate+up
+163 µs / 190 GB/s, down 89 µs / 174 GB/s) and compares outputs bit for bit.
+
+Counters (IQ1_M and IQ2_XXS): `MemUnitBusy` 90-94%, `TA_BUSY_avr` ~91% of
+the kernel's cycles, ~23 M VALU instructions per IQ1_M gate+up launch
+(~99 µs of issue at the device's VALU rate). A read-only kernel with the
+production IQ1_M gate+up addressing (three 2-8-byte loads per lane per
+block, four rows per wave) takes 146 µs; fully coalesced 16-byte reads of
+the same bytes with the same grid take 140 µs (221 GB/s). The loads cost
+~6 µs over coalesced, and the decode arithmetic that does not overlap them
+~17 µs.
+
+| Variant (all bit-identical unless noted) | IQ1_M gate+up / down µs (base 163 / 89) | Decision |
+| --- | --- | --- |
+| `-real-true16` off for this file | 163 / 89, every format unchanged | rejected |
+| IQ1_M gate/up sharing register activations (`AccR`, as IQ1_S) | 162-163 / 89 | rejected |
+| Activations staged in LDS at a 36-float sub-block stride (no bank conflicts) | 169 / 88.5; IQ2_XXS down 94 → 101, IQ1_S gate+up 137 → 144 | rejected: activations are not the limiter |
+| IQ1_M U=2 / U=4 / U=5 blocks in flight | 161 / 90; U=4-5 185 / 100 and outputs change | rejected |
+| IQ1 nibble bytes converted by `v_cvt_f32_ubyte1-3` (inline asm) instead of `v_bfe_u32` + `v_cvt_f32_ubyte0` | IQ1_M 160 / 86.5; IQ1_S 137 → 139.5 | retained for IQ1_M only |
+
+The retained change removes ~50 of ~430 VALU instructions per IQ1_M gate+up
+loop iteration. Decode-path 3K scores are byte-identical (columns 1-4) and
+`--spec-check 16` keeps all verification rows bit-identical; `ds41.mmq_typed`
+and `ds41.expert_store` pass. Expected gain ~0.1 ms per Coder token (~0.3%):
+`gufo bench` tg128 24.57 ± 0.10 against 24.53 ± 0.07, within noise. Closing
+the whole gap to coalesced reads (221 GB/s on every format) would save
+~1.1 ms per token (~2.7%).
+
+## E95 — 128-slot routed FP16 tiles on the GSQ-RCO Coder (rejected)
+
+E35 rejected 128-slot tiles on the full model, whose 64-slot tiles are 47%
+full. The Coder routes the same 12,288 pp2048 rows over 192 experts, so
+64-slot tiles are 64% full: 128-slot tiles (or 128 only above 64 rows) cut
+tiles per layer 302 → ~219 and weight decodes by ~28%.
+
+`ds41_mmq_bench --f16 1` on Coder counts from the 3K oracle routes (first
+2048 positions; layers 0/5/10/15), 128-slot variant with eight 16-slot
+accumulator tiles and two staged quarters per thread:
+
+| Format | 64-slot gate+up / down ms | 128-slot gate+up / down ms |
+| --- | --- | --- |
+| IQ1_M | 19.0-19.3 / 9.6-9.7 | 18.4-18.7 / 9.6-9.8 |
+| IQ2_XXS | 19.3-19.5 / 9.6-9.7 | 20.7-21.5 / 11.8-12.2 |
+
+The 128-slot kernels sit at 246-256 VGPRs with 42-46 KiB LDS; IQ2_XXS and
+IQ2_XS spill 16 VGPRs. Even IQ1_M, without spills, gains only 3.5% on
+gate+up from 28% fewer decodes: the kernel is bound by WMMA issue and
+activation LDS reads, not decode. IQ1_M gate+up alone is ~16% of Coder
+prefill (~0.5% end to end), not worth a second tile plan per layer.
 
 ## Backlog measurements without an E-number
 

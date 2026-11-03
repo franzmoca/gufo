@@ -640,3 +640,52 @@ double precision. Two-document HTTP AR repeats produce identical single-token
 outputs. This does not replace the 3K teacher scores or DSpark qualification,
 which were not repeated for E75. See [E75](EXPERIMENTS.md#e75--grouped-bf16-routercompressor-prefill-retained)
 for timing scope and limits.
+
+## Expert-pruned GSQ-RCO Coder
+
+ISTA-DASLab's
+[GSQ-RCO Coder](https://huggingface.co/ISTA-DASLab/DeepSeek-V4.1-Flash-1017-GSQ-RCO-Coder-GGUF)
+is the `IQ2_XXS` build with 192 of 384 routed experts kept in every layer,
+chosen for code, agentic tool use, long context and vision. Its GGUF sets
+`deepseek41.expert_count` to 192 and holds the kept experts, router rows and
+both routing biases (`exp_probs_b`, `exp_probs_b_vl`) in the same order;
+every other tensor equals `IQ2_XXS`. The engine now takes the expert count
+from the GGUF (6 to 384, the same in every layer) for the router, the
+routing and the routed tile plans. The 72.1 GB backbone runs resident
+(66.7 GiB of device weights). `--stream-experts` refuses it: the streamed
+store and its built-in cache ranking index the full 384 experts.
+
+Teacher-forced scores on the 3K text against the oracle run on the same
+file (`tools/ds41/reference.py`, CPU):
+
+| Positions | Path | Perplexity | Target top-1 | Argmax agreement | Mean \|ΔNLL\| | Mean ΔNLL ± s.e. |
+|---|---|---:|---:|---:|---:|---:|
+| 2,999 | oracle | 6.444 | 57.0% | — | — | — |
+| 2,999 | decode | 6.432 | 57.2% | 96.2% | 0.076 | −0.0019 ± 0.0020 |
+| 2,999 | batched | 6.437 | 57.0% | 96.4% | 0.081 | −0.0010 ± 0.0026 |
+
+On this general text the full `IQ1_M` scores 6.31 and `UD-IQ2_XXS` 5.82:
+pruning trades general ability for the calibrated domains, as the model
+card states. Speculative verification rows (`--spec-check 16`) and joint
+verification of four sessions (`--joint-check 4`) are bit-identical to
+single-token decode, and greedy DSpark output equals plain decoding (128 of
+128 tokens). Image input works with the release's
+`mmproj-DeepSeek-V4.1-Flash-1017-BF16.gguf`.
+
+Functional suites (DSpark, 32K context): discovery, conversation,
+tool-agent, long-context and cache pass. `tools` fails one `auto-tools`
+case: given an untyped `record` schema and the prompt "Call record exactly
+once with the JSON object {"value":"alpha"}", the model passes the whole
+object as a string, `{"value": "{\"value\":\"alpha\"}"}`. The server
+returns the parameter verbatim, as the official encoder does; the full
+`IQ1_M` passes the case.
+
+`gufo bench` on the same build (three repetitions):
+
+| Build | pp2048 (tok/s) | tg128 (tok/s) |
+|---|---:|---:|
+| Coder, resident | 1,430 ± 3 | 24.53 ± 0.07 |
+| `IQ1_M`, resident | 1,297 ± 69 | 24.79 ± 0.11 |
+
+Served at the native 1M context with one session and the Q2_K/Q4_K
+drafter, 45.1 GiB of host memory stays available (1.75 GiB with `IQ1_M`).

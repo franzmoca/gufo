@@ -4,7 +4,9 @@ Gufo runs **DeepSeek-V4.1-Flash-1017**, a 763B-parameter mixture-of-experts
 model with a native 1M-token context, on a single AMD Strix Halo with 128 GB
 of unified memory. The `IQ1_M` backbone stays resident in GPU memory; the
 larger `IQ2_XXS` backbone and Unsloth's `UD-IQ1_M` and `UD-IQ2_XXS` can
-stream their routed experts from SSD. Engram lookup tables are read from the SSD in every
+stream their routed experts from SSD. ISTA-DASLab's expert-pruned `Coder`
+build (192 of 384 experts, 72.1 GB) runs resident with about 45 GiB to
+spare. Engram lookup tables are read from the SSD in every
 configuration.
 
 > [!WARNING]
@@ -21,7 +23,8 @@ configuration.
   resident in GTT, or the experimental `IQ2_XXS` build with streamed experts.
   Unsloth's Dynamic `UD-IQ1_M` and `UD-IQ2_XXS` run with streamed experts; `UD-IQ1_S` uses
   only weight types Gufo supports but has not been tested
-  ([Unsloth Dynamic quants](#unsloth-dynamic-quants)).
+  ([Unsloth Dynamic quants](#unsloth-dynamic-quants)). The expert-pruned
+  GSQ-RCO `Coder` runs resident ([expert-pruned Coder](#expert-pruned-coder)).
 - **Engram tables:** the shared `IQ4_NL` file, read from disk. Unsloth's
   Engram shard holds the same tables.
 - **DSpark speculative decoding** with a separate drafter, plus prompt lookup:
@@ -112,6 +115,7 @@ hf download Lucebox/DeepSeek-V4.1-Flash-1017-ROCMFP-GGUF \
 | Source | File | Notes |
 | --- | --- | --- |
 | [ISTA-DASLab GSQ-RCO](https://huggingface.co/ISTA-DASLab/DeepSeek-V4.1-Flash-1017-GSQ-RCO-GGUF) | `*-IQ1_M-0000{1..5}-of-00006.gguf` or `*-IQ2_XXS-0000{1..5}-of-00006.gguf`, `DeepSeek-V4.1-Flash-Engram-IQ4_NL.gguf` (linked as shard 6) | `IQ1_M` fits resident; `IQ2_XXS` (138 GB) needs `--stream-experts`. |
+| [ISTA-DASLab GSQ-RCO Coder](https://huggingface.co/ISTA-DASLab/DeepSeek-V4.1-Flash-1017-GSQ-RCO-Coder-GGUF) | `IQ2_XXS/*-Coder-IQ2_XXS-0000{1..5}-of-00006.gguf`, the same Engram file (linked as shard 6) | Expert-pruned for code and agents; 72.1 GB, resident. See [expert-pruned Coder](#expert-pruned-coder). |
 | [Lucebox](https://huggingface.co/Lucebox/DeepSeek-V4.1-Flash-1017-ROCMFP-GGUF) | `DeepSeek-V4.1-Flash-1017-DSpark-draft-Q2K-Q4K.gguf` | **Recommended drafter**: 4.59 GiB resident. |
 | [unsloth](https://huggingface.co/unsloth/DeepSeek-V4.1-Flash-1017-GGUF) | `UD-IQ1_M/*-0000{1..4}-of-00005.gguf`, Engram as shard 5 | `UD-IQ1_M` (140 GB) and `UD-IQ2_XXS` (165 GB) need `--stream-experts`; `UD-IQ1_S` (122 GB) is untested. See [Unsloth Dynamic quants](#unsloth-dynamic-quants). |
 | [unsloth](https://huggingface.co/unsloth/DeepSeek-V4.1-Flash-1017-GGUF) | `dspark-DeepSeek-V4.1-Flash-1017-Q8_0.gguf` | Supported: 7.42 GiB resident, about 2.6 GiB less host memory left, similar speed and acceptance. |
@@ -238,6 +242,34 @@ Its backbone is 1.6 GiB larger than `IQ1_M`, which leaves too little memory
 to run it resident with the native context and the DSpark drafter;
 start it with `--stream-experts`.
 
+### Expert-pruned Coder
+
+ISTA-DASLab's
+[GSQ-RCO Coder](https://huggingface.co/ISTA-DASLab/DeepSeek-V4.1-Flash-1017-GSQ-RCO-Coder-GGUF)
+keeps 192 of the 384 routed experts in each layer, chosen for code, agentic
+tool use, long context and vision, with the `IQ2_XXS` build's quantization.
+Its 72.1 GB backbone runs resident (66.7 GiB of device weights). At the
+native context with DSpark, about 45 GiB of host memory stays free for the
+prompt cache, more sessions or other work. It prefills about 10% faster than
+`IQ1_M` and decodes at the same speed. On general text it scores below the
+full builds (perplexity 6.44 against 6.31 for `IQ1_M` on the same 3K tokens;
+[quality](docs/models/deepseek-v4.1-flash/QUALITY.md#expert-pruned-gsq-rco-coder)).
+
+```sh
+hf download ISTA-DASLab/DeepSeek-V4.1-Flash-1017-GSQ-RCO-Coder-GGUF \
+  --include "IQ2_XXS/*" "mmproj-*" --local-dir ds41-coder
+ln -s /path/to/ds41/DeepSeek-V4.1-Flash-Engram-IQ4_NL.gguf \
+  ds41-coder/IQ2_XXS/DeepSeek-V4.1-Flash-1017-GSQ-RCO-Coder-IQ2_XXS-00006-of-00006.gguf
+./result/bin/gufo serve llm \
+  -m ds41-coder/IQ2_XXS/DeepSeek-V4.1-Flash-1017-GSQ-RCO-Coder-IQ2_XXS-00001-of-00006.gguf \
+  --speculative dspark \
+  --dspark-model ds41/DeepSeek-V4.1-Flash-1017-DSpark-draft-Q2K-Q4K.gguf
+```
+
+The Engram file is the one of the unpruned builds; add `"*Engram*"` to the
+download if you do not have it. The DSpark drafters and the vision projector
+work unchanged. `--stream-experts` is not supported for pruned builds.
+
 Streaming is never chosen automatically: without `--stream-experts`, a model
 that does not fit the available memory fails to load and states what it
 needs. `--expert-cache-bytes N` bounds the streamed expert cache (default:
@@ -337,7 +369,7 @@ V4.1 Flash against the V4 Flash engine it was forked from:
 
 | Area | V4 Flash | V4.1 Flash |
 |---|---|---|
-| Shape | 43 layers, 4096 hidden, 256 experts, ffn 2048, q_lora 1024, 64 indexer heads | 40 layers (+3 DSpark layers not in the ISTA builds), 5120 hidden, 384 experts top-6 + 1 shared, ffn 2304, q_lora 1280, 32 indexer heads, RMS eps 1e-20 |
+| Shape | 43 layers, 4096 hidden, 256 experts, ffn 2048, q_lora 1024, 64 indexer heads | 40 layers (+3 DSpark layers not in the ISTA builds), 5120 hidden, 384 experts (192 in the pruned Coder) top-6 + 1 shared, ffn 2304, q_lora 1280, 32 indexer heads, RMS eps 1e-20 |
 | Routing | 3 hash layers | none; sqrtsoftplus + bias top-6, normalized, ×1.5 |
 | Layout | uniform | YoCo: layers 0-19 encoder, 20-39 decoder |
 | Compression | ratio 4 (overlapping) / 128 | ratio 0 = SWA only (0-1); 2 = softmax-gated pool (2-19); 1 = RMSNorm(wkv(x)) (20-39). RoPE base 160000 + YaRN on ratio >= 1 |

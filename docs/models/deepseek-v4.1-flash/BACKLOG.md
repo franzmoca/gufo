@@ -349,6 +349,7 @@ under 1% of warm streamed prefill) and close.
 | 27 | Streamed kernels for the `IQ2_XS` build | Prerequisite for item 23 | IQ3_XXS down, IQ2_S gate/up paths |
 | 25 | Direction projection and steering vectors | Per-request behavior edits; ~0.1-0.5 ms/token if unfused | Fused site kernel or epilogue |
 | 26 | LoRA adapters (GGUF `adapter.type = lora`) | Adapter compatibility; rank-1 abliteration adapters reduce to item 25 | Low-rank GEMV/GEMM epilogues |
+| 41 | Streamed expert-pruned builds | Run the GSQ-RCO Coder (192 experts) in less memory; it fits resident with ~45 GiB free | Runtime expert count in the expert store |
 
 ### 16. Multi-user AR decode below the card
 
@@ -454,3 +455,14 @@ in EXPERIMENTS.md.
 | Verification argmax on the device | Host scans behind ~680 µs of idle per step removed | E50 |
 | Routed FP16 staging and LDS lookups | IQ2_XXS gate+up 24.5 → 20.4 ms (bench) | E25 |
 | Cost-aware draft prefix | Streamed greedy +3.76% | E18 |
+
+### 41. Streamed expert-pruned builds
+
+The GSQ-RCO Coder keeps 192 of 384 experts per layer and runs resident;
+`--stream-experts` refuses it because the expert store indexes the full 384
+experts ([QUALITY.md](QUALITY.md#expert-pruned-gsq-rco-coder)). Streaming it
+needs the store's arrays and loops on the runtime count, the built-in seed
+ranking mapped through the release's `kept-experts.json` (or a histogram),
+the expert-tails header and `pack_expert_tails.py` on the same count, and a
+streamed-against-resident identity check. Its 7,680 experts take 61.5 GiB,
+so a 30 GiB cache would hold the hot set.
