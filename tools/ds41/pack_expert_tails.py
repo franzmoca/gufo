@@ -39,7 +39,7 @@ from gufo.gguf import parse_gguf  # noqa: E402
 
 BLOCK_BYTES = {16: 66, 17: 74, 18: 98, 19: 50, 20: 18 * 8, 21: 110, 22: 82, 23: 136, 29: 56,
                10: 84, 11: 110, 12: 144, 13: 176, 14: 210}
-N_EXPERT = 384
+MAX_EXPERT = 384
 N_LAYER = 40
 ALIGN = 4096
 HEADER = 8192
@@ -59,8 +59,8 @@ def shards(first: Path) -> list[Path]:
 
 
 def expert_spans(paths: list[Path]):
-    """{layer: [(shard, offset of expert 0, expert bytes)] for gate, up, down}."""
-    spans = {}
+    """{layer: [(shard, offset of expert 0, expert bytes)] for gate, up, down}, and the experts per layer."""
+    spans, counts = {}, set()
     for index, path in enumerate(paths):
         gguf = parse_gguf(path)
         for tensor in gguf["tensors"]:
@@ -68,14 +68,17 @@ def expert_spans(paths: list[Path]):
             if not match:
                 continue
             experts, rows, cols = tensor["shape"]
-            if experts != N_EXPERT or cols % 256 or tensor["type"] not in BLOCK_BYTES:
+            counts.add(experts)
+            if not 0 < experts <= MAX_EXPERT or cols % 256 or tensor["type"] not in BLOCK_BYTES:
                 raise SystemExit(f"unsupported expert tensor {tensor['name']} ({tensor['type_name']})")
             per_expert = rows * cols // 256 * BLOCK_BYTES[tensor["type"]]
             spans.setdefault(int(match[1]), [None] * 3)[PROJ.index(match[2])] = (
                 index, gguf["data_offset"] + tensor["offset"], per_expert)
     if not spans or any(None in v for v in spans.values()):
         raise SystemExit("every MoE layer needs gate, up and down expert tensors")
-    return spans
+    if len(counts) != 1:
+        raise SystemExit("every expert tensor needs the same expert count")
+    return spans, counts.pop()
 
 
 def pad(n: int) -> int:
@@ -117,7 +120,7 @@ def main() -> int:
     if not 0.0 < args.head < 1.0:
         parser.error("--head must be between 0 and 1")
     paths = shards(args.model)
-    spans = expert_spans(paths)
+    spans, n_expert = expert_spans(paths)
     layers = sorted(spans)
     if layers != list(range(N_LAYER)):
         raise SystemExit(f"expected expert layers 0-{N_LAYER - 1}")
@@ -136,11 +139,11 @@ def main() -> int:
             table[layer, p] = (size, cut, pad(size - cut), base, shard)
             record += pad(size - cut)
         first_record[layer], record_bytes[layer] = offset, record
-        offset += record * N_EXPERT
+        offset += record * n_expert
     total = offset
 
     header = bytearray(HEADER)
-    struct.pack_into("<8sIIII", header, 0, MAGIC, VERSION, N_LAYER, N_EXPERT, round(args.head * 1e6))
+    struct.pack_into("<8sIIII", header, 0, MAGIC, VERSION, N_LAYER, n_expert, round(args.head * 1e6))
     pos = 24
     struct.pack_into("<I", header, pos, len(paths))
     pos += 4
@@ -176,10 +179,10 @@ def main() -> int:
             for p in range(3):
                 size, cut, tail, base, shard = table[layer, p]
                 piece = sum(table[layer, q][2] for q in range(p))
-                for e in range(N_EXPERT):
+                for e in range(n_expert):
                     data = read_direct(src[shard], buf, base + e * size + cut, size - cut)
                     os.pwrite(out, data, first_record[layer] + e * record_bytes[layer] + piece)
-                    if e in (0, N_EXPERT - 1):
+                    if e in (0, n_expert - 1):
                         digest.update(data)
                     data.release()
                     done += size - cut

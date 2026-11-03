@@ -25,7 +25,7 @@ inline constexpr uint32_t DS41_N_LORA_Q = 1280;
 inline constexpr uint32_t DS41_N_LORA_O = 1024;
 /* Routed experts per layer of the full model. Expert-pruned builds keep
  * fewer (ds41_weights::n_expert, from the GGUF); buffers are sized for this
- * many, and the streamed expert store needs the full count. */
+ * many. */
 inline constexpr uint32_t DS41_MAX_EXPERT = 384;
 inline constexpr uint32_t DS41_N_EXPERT_USED = 6;
 inline constexpr uint32_t DS41_N_EXPERT_SHARED = 1;

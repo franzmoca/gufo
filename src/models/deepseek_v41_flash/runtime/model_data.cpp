@@ -1909,8 +1909,6 @@ int ds41_engine_open(ds41_engine** out, const ds41_engine_options* opt) {
       e->dspark = new ds41_dspark_model();
       dspark_open(e->dspark, opt->dspark_model_path);
     }
-    if (opt->stream_experts && e->weights->n_expert != DS41_MAX_EXPERT)
-      ds41_die("--stream-experts needs all routed experts; run expert-pruned builds resident");
     if (opt->validate_only) {
       *out = e;
       return 0;

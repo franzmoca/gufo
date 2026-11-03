@@ -94,6 +94,29 @@ constexpr bool valid_default_rank() {
 }
 static_assert(valid_default_rank());
 
+/* An expert-pruned build: its routed experts are original experts kept[l *
+ * experts + j] of the full model, recognized by a fingerprint of its routing
+ * biases since the GGUF does not carry the mapping. */
+struct PrunedBuild {
+  uint64_t fingerprint;
+  uint32_t experts;
+  std::array<uint16_t, DS41_N_LAYER * DS41_MAX_EXPERT> kept;
+};
+#include "pruned_gsq_rco_coder.inc"
+constexpr const PrunedBuild* kPrunedBuilds[] = {&kGsqRcoCoder};
+constexpr bool valid_pruned(const PrunedBuild& b) {
+  if (!b.experts || b.experts >= DS41_MAX_EXPERT)
+    return false;
+  for (uint32_t l = 0; l < DS41_N_LAYER; ++l)
+    for (uint32_t j = 0; j < b.experts; ++j) {
+      const uint32_t e = b.kept[l * b.experts + j];
+      if (e >= DS41_MAX_EXPERT || (j && e <= b.kept[l * b.experts + j - 1]))
+        return false;
+    }
+  return true;
+}
+static_assert(valid_pruned(kGsqRcoCoder));
+
 struct Entry {
   /* Atomic: the prefetch submission thread reads the target layer's slots
    * while the evaluation thread promotes or evicts entries. */
@@ -573,6 +596,11 @@ uint64_t ds41_expert_available_memory() {
 }
 
 struct ds41_expert_store {
+  uint32_t n_expert = DS41_MAX_EXPERT;  // routed experts per layer in the GGUF
+  /* For a known expert-pruned build, its kept original experts (seeding maps
+   * the built-in ranking through them); null for the full model or an
+   * unknown pruned build. */
+  const PrunedBuild* pruned = nullptr;
   std::array<std::array<Source, 3>, DS41_N_LAYER> source{};
   std::array<std::array<Entry, DS41_MAX_EXPERT>, DS41_N_LAYER> entries{};
   /* The demand stage (whole-layer, rows indexed by expert id) and the
@@ -925,13 +953,26 @@ struct ds41_expert_store {
 ds41_expert_store* ds41_expert_store_create(const ds41_model* model,
                                             const ds41_weights* weights,
                                             uint64_t cache_limit_bytes) {
-  if (!model || !weights || model->n_shards > DS41_MAX_SHARDS)
+  if (!model || !weights || model->n_shards > DS41_MAX_SHARDS ||
+      weights->n_expert < DS41_N_EXPERT_USED || weights->n_expert > DS41_MAX_EXPERT)
     return nullptr;
   auto owner =
       std::unique_ptr<ds41_expert_store>(new (std::nothrow) ds41_expert_store);
   auto* store = owner.get();
   if (!store)
     return nullptr;
+  store->n_expert = weights->n_expert;
+  if (store->n_expert < DS41_MAX_EXPERT) {
+    uint64_t h = 0xcbf29ce484222325ull;  // FNV-1a 64 over the routing biases
+    for (uint32_t l = 0; l < DS41_N_LAYER; ++l) {
+      const ds41_tensor* t = weights->layer[l].ffn_exp_probs_b;
+      for (uint64_t i = 0; i < t->bytes; ++i)
+        h = (h ^ model->map[t->abs_offset + i]) * 0x100000001b3ull;
+    }
+    for (const PrunedBuild* b : kPrunedBuilds)
+      if (b->fingerprint == h && b->experts == store->n_expert)
+        store->pruned = b;
+  }
   for (uint32_t s = 0; s < model->n_shards; ++s) {
     char path[64];
     std::snprintf(path, sizeof(path), "/proc/self/fd/%d", model->shard_fd[s]);
@@ -945,11 +986,11 @@ ds41_expert_store* ds41_expert_store_create(const ds41_model* model,
     uint64_t combined = 0;
     for (uint32_t p = 0; p < 3; ++p) {
       const ds41_tensor* t = tensors[p];
-      if (!t || !t->bytes || t->bytes % DS41_MAX_EXPERT) {
+      if (!t || !t->bytes || t->bytes % store->n_expert) {
         return nullptr;
       }
       Source& src = store->source[layer][p];
-      src.bytes = t->bytes / DS41_MAX_EXPERT;
+      src.bytes = t->bytes / store->n_expert;
       max_bytes[p] = std::max(max_bytes[p], src.bytes);
       combined += src.bytes;
       for (uint32_t s = 0; s < model->n_shards; ++s) {
@@ -993,7 +1034,7 @@ ds41_expert_store* ds41_expert_store_create(const ds41_model* model,
                        kReadBytes + 2 * kDirectAlign) == hipSuccess;
   for (uint32_t p = 0; p < 3 && ok; ++p)
     ok =
-        hipMalloc(&store->stage[0][p], max_bytes[p] * DS41_MAX_EXPERT) == hipSuccess;
+        hipMalloc(&store->stage[0][p], max_bytes[p] * store->n_expert) == hipSuccess;
   /* The second stage set (prefetch) is allocated lazily, after the startup
    * seed has taken its memory, so it never shrinks the resident set. */
   for (uint32_t p = 0; p < 3 && ok; ++p)
@@ -1077,7 +1118,7 @@ bool ds41_expert_store_attach_tails(ds41_expert_store* store, const char* path) 
   bool ok = read_all(fd, header.data(), header.size(), 0);
   const uint8_t* h = header.data();
   if (!ok || std::memcmp(h, kTailMagic, sizeof(kTailMagic)) != 0 || read_le<uint32_t>(h + 8) != kTailVersion ||
-      read_le<uint32_t>(h + 12) != DS41_N_LAYER || read_le<uint32_t>(h + 16) != DS41_MAX_EXPERT) {
+      read_le<uint32_t>(h + 12) != DS41_N_LAYER || read_le<uint32_t>(h + 16) != store->n_expert) {
     (void)close(fd);
     return fail("not a tails file for this model layout");
   }
@@ -1121,7 +1162,7 @@ bool ds41_expert_store_attach_tails(ds41_expert_store* store, const char* path) 
     ok = piece == record && first % kDirectAlign == 0 && record % kDirectAlign == 0;
   }
   struct stat st{};
-  const uint64_t end = tail[DS41_N_LAYER - 1][0].first + (uint64_t)DS41_MAX_EXPERT * tail[DS41_N_LAYER - 1][0].stride;
+  const uint64_t end = tail[DS41_N_LAYER - 1][0].first + (uint64_t)store->n_expert * tail[DS41_N_LAYER - 1][0].stride;
   if (ok && (fstat(fd, &st) != 0 || (uint64_t)st.st_size < end))
     ok = false;
   if (!ok) {
@@ -1130,8 +1171,8 @@ bool ds41_expert_store_attach_tails(ds41_expert_store* store, const char* path) 
   }
   /* Spot check: the tails of a few experts equal the GGUF bytes. */
   std::vector<uint8_t> a, b;
-  for (const auto [l, e] : {std::pair<uint32_t, uint32_t>{0, 0}, {DS41_N_LAYER / 2, DS41_MAX_EXPERT / 2},
-                            {DS41_N_LAYER - 1, DS41_MAX_EXPERT - 1}})
+  for (const auto [l, e] : {std::pair<uint32_t, uint32_t>{0, 0}, {DS41_N_LAYER / 2, store->n_expert / 2},
+                            {DS41_N_LAYER - 1, store->n_expert - 1}})
     for (uint32_t p = 0; p < 3 && ok; ++p) {
       const Source& src = store->source[l][p];
       const TailSource& t = tail[l][p];
@@ -1183,7 +1224,7 @@ bool seed_ranked(ds41_expert_store* store, std::vector<SeedItem> ranked,
   std::array<std::array<bool, DS41_MAX_EXPERT>, DS41_N_LAYER> ranked_set{};
   for (const SeedItem& item : ranked)
     ranked_set[item.layer][item.expert] = true;
-  for (uint32_t e = 0; e < DS41_MAX_EXPERT; ++e)
+  for (uint32_t e = 0; e < store->n_expert; ++e)
     for (uint32_t l = 0; l < DS41_N_LAYER; ++l)
       if (!ranked_set[l][e])
         ranked.push_back({l, e, 0});
@@ -1272,14 +1313,29 @@ bool seed_ranked(ds41_expert_store* store, std::vector<SeedItem> ranked,
 bool ds41_expert_store_seed_default(ds41_expert_store* store) {
   if (!store)
     return false;
+  /* A pruned build takes the ranking's kept experts in the same order,
+   * renumbered; an unknown pruned build seeds without a ranking. */
   std::vector<SeedItem> ranked;
-  ranked.reserve(kDefaultExpertRank.size());
-  for (size_t i = 0; i < kDefaultExpertRank.size(); ++i) {
-    const uint32_t index = kDefaultExpertRank[i];
-    ranked.push_back({index / DS41_MAX_EXPERT, index % DS41_MAX_EXPERT,
-                      static_cast<uint64_t>(kDefaultExpertRank.size() - i)});
+  if (store->n_expert == DS41_MAX_EXPERT || store->pruned) {
+    constexpr uint16_t kDropped = 0xffff;
+    std::array<std::array<uint16_t, DS41_MAX_EXPERT>, DS41_N_LAYER> own;
+    for (uint32_t l = 0; l < DS41_N_LAYER; ++l) {
+      own[l].fill(kDropped);
+      for (uint32_t j = 0; j < store->n_expert; ++j)
+        own[l][store->pruned ? store->pruned->kept[l * store->n_expert + j] : j] = static_cast<uint16_t>(j);
+    }
+    ranked.reserve(kDefaultExpertRank.size());
+    for (size_t i = 0; i < kDefaultExpertRank.size(); ++i) {
+      const uint32_t layer = kDefaultExpertRank[i] / DS41_MAX_EXPERT;
+      const uint16_t expert = own[layer][kDefaultExpertRank[i] % DS41_MAX_EXPERT];
+      if (expert != kDropped)
+        ranked.push_back({layer, expert, static_cast<uint64_t>(kDefaultExpertRank.size() - i)});
+    }
   }
-  return seed_ranked(store, std::move(ranked), "built-in V4.1 ranking");
+  const char* source = !store->pruned ? (ranked.empty() ? "no ranking for this expert-pruned build"
+                                                        : "built-in V4.1 ranking")
+                                      : "built-in V4.1 ranking of the kept experts";
+  return seed_ranked(store, std::move(ranked), source);
 }
 
 bool ds41_expert_store_seed(ds41_expert_store* store, const char* path) {
@@ -1299,7 +1355,7 @@ bool ds41_expert_store_seed(ds41_expert_store* store, const char* path) {
     std::istringstream row(line);
     if (!(row >> layer >> expert >> count) || (row >> extra))
       return false;
-    if (layer >= DS41_N_LAYER || expert >= DS41_MAX_EXPERT || !count ||
+    if (layer >= DS41_N_LAYER || expert >= store->n_expert || !count ||
         seen[layer][expert])
       return false;
     seen[layer][expert] = true;
@@ -1498,7 +1554,7 @@ void trace_snapshot(ds41_expert_store* store) {
   trace_put(f, 'S');
   trace_put(f, uint32_t{1});  // version
   trace_put(f, uint32_t{DS41_N_LAYER});
-  trace_put(f, uint32_t{DS41_MAX_EXPERT});
+  trace_put(f, store->n_expert);
   trace_put(f, uint32_t{DS41_N_EXPERT_USED});
   trace_put(f, store->tick);
   trace_put(f, store->cache_limit);
@@ -1519,7 +1575,7 @@ void trace_snapshot(ds41_expert_store* store) {
     trace_put(f, slot.expert);
   }
   for (uint32_t l = 0; l < DS41_N_LAYER; ++l)
-    for (uint32_t e = 0; e < DS41_MAX_EXPERT; ++e) {
+    for (uint32_t e = 0; e < store->n_expert; ++e) {
       trace_put(f, store->entries[l][e].score);
       trace_put(f, store->entries[l][e].last);
     }
@@ -1598,7 +1654,7 @@ bool ds41_expert_store_prepare(ds41_expert_store* store, uint32_t layer,
      * kernels zero that row, as on the resident path. */
     if (id == -1)
       continue;
-    if (id < 0 || id >= static_cast<int32_t>(DS41_MAX_EXPERT)) {
+    if (id < 0 || id >= static_cast<int32_t>(store->n_expert)) {
       fprintf(stderr, "ds41: invalid routed expert %d\n", id);
       return false;
     }
@@ -1660,7 +1716,7 @@ bool ds41_expert_store_prepare(ds41_expert_store* store, uint32_t layer,
     device_table[p] = store->table[p] + uint64_t{layer} * DS41_MAX_EXPERT;
   }
   std::array<bool, 3> changed{};
-  for (uint32_t e = 0; e < DS41_MAX_EXPERT; ++e) {
+  for (uint32_t e = 0; e < store->n_expert; ++e) {
     const uint32_t slot_id = store->entries[layer][e].slot;
     const uint8_t* base =
         slot_id != kNoSlot ? store->slots[slot_id].data : nullptr;
@@ -1680,7 +1736,7 @@ bool ds41_expert_store_prepare(ds41_expert_store* store, uint32_t layer,
   for (uint32_t p = 0; p < 3; ++p)
     if (changed[p] &&
         hipMemcpyAsync(device_table[p], mirror[p],
-                       DS41_MAX_EXPERT * sizeof(uint8_t*),
+                       store->n_expert * sizeof(uint8_t*),
                        hipMemcpyHostToDevice, nullptr) != hipSuccess)
       return false;
   /* The hit and miss rows keep their route positions, each array holding -1
@@ -1845,7 +1901,7 @@ bool ds41_expert_store_prefetch(ds41_expert_store* store, uint32_t layer,
   std::array<bool, DS41_MAX_EXPERT> want{};
   for (uint32_t i = 0; i < count; ++i) {
     const int32_t e = experts[i];
-    if (e < 0 || e >= static_cast<int32_t>(DS41_MAX_EXPERT))
+    if (e < 0 || e >= static_cast<int32_t>(store->n_expert))
       return false;
     want[e] = store->entries[layer][e].slot == kNoSlot;
   }

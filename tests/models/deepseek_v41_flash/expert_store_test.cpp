@@ -33,10 +33,15 @@ struct Fixture {
   ds41_model model{};
   ds41_weights weights{};
   std::array<std::array<ds41_tensor, 3>, DS41_N_LAYER> tensors{};
+  std::array<ds41_tensor, DS41_N_LAYER> biases{};
+  std::vector<uint8_t> bias_bytes;  // the routing biases the store fingerprints
   std::array<int, 2> fds{-1, -1};
   bool ok = true;
 
-  explicit Fixture(bool mixed = false) {
+  explicit Fixture(bool mixed = false, uint32_t experts = DS41_MAX_EXPERT) {
+    weights.n_expert = experts;
+    bias_bytes.assign(uint64_t{DS41_N_LAYER} * experts * sizeof(float), 1);
+    model.map = bias_bytes.data();
     for (int& fd : fds) {
       char path[] = "/tmp/gufo-ds41-experts-XXXXXX";
       fd = mkstemp(path);
@@ -60,13 +65,16 @@ struct Fixture {
       w.ffn_gate_exps = &tensors[layer][0];
       w.ffn_up_exps = &tensors[layer][1];
       w.ffn_down_exps = &tensors[layer][2];
+      w.ffn_exp_probs_b = &biases[layer];
+      biases[layer].abs_offset = uint64_t{layer} * experts * sizeof(float);
+      biases[layer].bytes = experts * sizeof(float);
       for (uint32_t p = 0; p < 3 && ok; ++p) {
         auto& tensor = tensors[layer][p];
         tensor.abs_offset = model.shard_offset[shard] + offsets[shard];
         const uint64_t size = Size(mixed, layer, p);
-        tensor.bytes = size * DS41_MAX_EXPERT;
+        tensor.bytes = size * experts;
         std::vector<uint8_t> bytes(tensor.bytes);
-        for (uint32_t e = 0; e < DS41_MAX_EXPERT; ++e)
+        for (uint32_t e = 0; e < experts; ++e)
           for (uint64_t i = 0; i < size; ++i)
             bytes[e * size + i] = Byte(layer, p, e, i);
         ok = pwrite(fds[shard], bytes.data(), bytes.size(),
@@ -460,6 +468,26 @@ int main() {
     resized = ds41_expert_store_get_stats(store);
     check(resized.hits == sized.hits && resized.cache_bytes == 7 * 1280,
           "large expert streams instead of taking a small slot");
+    ds41_expert_store_destroy(store);
+  }
+  // An expert-pruned build reads its own expert spans, rejects ids past its
+  // count, and seeds without a ranking when its kept experts are unknown.
+  {
+    Fixture pruned(false, 192);
+    check(pruned.ok, "pruned fixture");
+    store = ds41_expert_store_create(&pruned.model, &pruned.weights, 4 * kSlot);
+    check(store && ds41_expert_store_seed_default(store), "pruned seed");
+    check(run(0, {0, 0, 0, 0, 0, 0}), "pruned seeded stage bytes");
+    check(ds41_expert_store_get_stats(store).hits == 6,
+          "pruned seed interleaves layers");
+    check(run(39, {191, 100, 191, 100, 191, 100}),
+          "pruned last expert stage bytes");
+    const std::vector<int32_t> past{192, 0, 0, 0, 0, 0};
+    (void)hipMemcpy(routes, past.data(), past.size() * sizeof(int32_t),
+                    hipMemcpyHostToDevice);
+    check(!ds41_expert_store_prepare(store, 2, routes, 1, &stage[0], &stage[1],
+                                     &stage[2]),
+          "pruned rejects experts past its count");
     ds41_expert_store_destroy(store);
   }
   (void)hipFree(routes);
