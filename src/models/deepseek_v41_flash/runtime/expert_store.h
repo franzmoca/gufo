@@ -39,7 +39,7 @@ struct ds41_expert_overlap {
   const int32_t* hit_ids;   // device rows; null unless the batch both hits and
                             // misses within the buffer
   const int32_t* miss_ids;  // as hit_ids
-  const void* table[3];     // device [DS41_N_EXPERT] weight bases
+  const void* table[3];     // device [DS41_MAX_EXPERT] weight bases
 };
 
 /* The model and its shard descriptors outlive the store. cache_limit_bytes

@@ -64,9 +64,9 @@ struct Fixture {
         auto& tensor = tensors[layer][p];
         tensor.abs_offset = model.shard_offset[shard] + offsets[shard];
         const uint64_t size = Size(mixed, layer, p);
-        tensor.bytes = size * DS41_N_EXPERT;
+        tensor.bytes = size * DS41_MAX_EXPERT;
         std::vector<uint8_t> bytes(tensor.bytes);
-        for (uint32_t e = 0; e < DS41_N_EXPERT; ++e)
+        for (uint32_t e = 0; e < DS41_MAX_EXPERT; ++e)
           for (uint64_t i = 0; i < size; ++i)
             bytes[e * size + i] = Byte(layer, p, e, i);
         ok = pwrite(fds[shard], bytes.data(), bytes.size(),
@@ -90,7 +90,7 @@ bool CheckStage(uint32_t layer, const std::vector<int32_t>& ids,
                 const std::array<const void*, 3>& table, bool mixed = false) {
   for (uint32_t p = 0; p < 3; ++p) {
     const auto* const* entries = static_cast<const uint8_t* const*>(table[p]);
-    std::vector<const uint8_t*> rows(DS41_N_EXPERT);
+    std::vector<const uint8_t*> rows(DS41_MAX_EXPERT);
     if (hipMemcpy(rows.data(), entries, rows.size() * sizeof(rows[0]),
                   hipMemcpyDeviceToHost) != hipSuccess)
       return false;
@@ -299,17 +299,17 @@ int main() {
   // batch-scale prepare adopts without rereading; a small batch drops it.
   store = ds41_expert_store_create(&f.model, &f.weights, 4 * kSlot);
   {
-    std::vector<int32_t> all(DS41_N_EXPERT);
-    for (uint32_t e = 0; e < DS41_N_EXPERT; ++e)
+    std::vector<int32_t> all(DS41_MAX_EXPERT);
+    for (uint32_t e = 0; e < DS41_MAX_EXPERT; ++e)
       all[e] = static_cast<int32_t>(e);
     std::vector<int32_t> scan(1024 * 6);
     for (uint32_t i = 0; i < scan.size(); ++i)
       scan[i] = static_cast<int32_t>(i % 8);
     check(store && run(0, scan), "wide source layer stage bytes");
-    check(
-        ds41_expert_store_prefetch(store, 1, all.data(), DS41_N_EXPERT, true) &&
-            idle(store),
-        "wide prefetch submits and drains");
+    check(ds41_expert_store_prefetch(store, 1, all.data(), DS41_MAX_EXPERT,
+                                     true) &&
+              idle(store),
+          "wide prefetch submits and drains");
     stats = ds41_expert_store_get_stats(store);
     const uint64_t demand_only = stats.bytes_read;
     constexpr uint32_t kHalf = 96;  // one parity half of the compact stage
@@ -319,10 +319,10 @@ int main() {
               stats.prefetch_bytes == kHalf * kSlot,
           "batch-scale prepare adopts the truncated wide prefetch");
     check(run(2, scan), "wide drop source layer stage bytes");
-    check(
-        ds41_expert_store_prefetch(store, 3, all.data(), DS41_N_EXPERT, true) &&
-            idle(store),
-        "second wide prefetch submits and drains");
+    check(ds41_expert_store_prefetch(store, 3, all.data(), DS41_MAX_EXPERT,
+                                     true) &&
+              idle(store),
+          "second wide prefetch submits and drains");
     stats = ds41_expert_store_get_stats(store);
     const uint64_t reswept = stats.bytes_read;
     const std::vector<int32_t> one{40, 40, 40, 40, 40, 40};
@@ -410,8 +410,8 @@ int main() {
     Fixture m(true);
     check(m.ok, "mixed-size fixture");
     store = ds41_expert_store_create(&m.model, &m.weights, 4 * kSlot);
-    std::vector<int32_t> all(DS41_N_EXPERT);
-    for (uint32_t e = 0; e < DS41_N_EXPERT; ++e)
+    std::vector<int32_t> all(DS41_MAX_EXPERT);
+    for (uint32_t e = 0; e < DS41_MAX_EXPERT; ++e)
       all[e] = static_cast<int32_t>(e);
     std::vector<int32_t> adopted(1024 * 6);
     for (uint32_t i = 0; i < adopted.size(); ++i)
@@ -424,16 +424,16 @@ int main() {
                                        &stage[0], &stage[1], &stage[2]);
     };
     check(store && prepare(1, adopted), "mixed source layer");
-    check(
-        ds41_expert_store_prefetch(store, 2, all.data(), DS41_N_EXPERT, true) &&
-            idle(store),
-        "mixed wide prefetch of the larger layer");
+    check(ds41_expert_store_prefetch(store, 2, all.data(), DS41_MAX_EXPERT,
+                                     true) &&
+              idle(store),
+          "mixed wide prefetch of the larger layer");
     check(prepare(2, adopted) && CheckStage(2, adopted, stage, true),
           "mixed wide adoption stage bytes");
-    check(
-        ds41_expert_store_prefetch(store, 3, all.data(), DS41_N_EXPERT, true) &&
-            idle(store),
-        "mixed wide prefetch of the smaller next layer");
+    check(ds41_expert_store_prefetch(store, 3, all.data(), DS41_MAX_EXPERT,
+                                     true) &&
+              idle(store),
+          "mixed wide prefetch of the smaller next layer");
     check(CheckStage(2, adopted, stage, true),
           "next layer's prefetch keeps the adopted rows");
     ds41_expert_store_destroy(store);

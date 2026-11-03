@@ -786,7 +786,9 @@ static bool tensor_device_resident(const ds41_tensor* t, const ds41_weights* wei
   return true;
 }
 
-constexpr uint64_t kRouterElements = (uint64_t)DS41_N_EMBD * DS41_N_EXPERT;
+static uint64_t router_elements(const ds41_weights* w) {
+  return (uint64_t)DS41_N_EMBD * w->n_expert;
+}
 
 /* Narrows F32 routers to BF16 on the device when that is exact, so they run
  * the BF16 router kernels at half the bytes. Leaves router_bf16 NULL (the
@@ -794,11 +796,12 @@ constexpr uint64_t kRouterElements = (uint64_t)DS41_N_EMBD * DS41_N_EXPERT;
 static bool narrow_f32_routers(ds41_weights* w, const ds41_model* m) {
   for (uint32_t il = 0; il < DS41_N_LAYER; il++)
     if (w->layer[il].ffn_gate_inp->type != DS41_TENSOR_F32) return true;
-  std::vector<uint16_t> narrow((uint64_t)DS41_N_LAYER * kRouterElements);
+  const uint64_t elements = router_elements(w);
+  std::vector<uint16_t> narrow((uint64_t)DS41_N_LAYER * elements);
   for (uint32_t il = 0; il < DS41_N_LAYER; il++) {
     const uint8_t* src = m->map + w->layer[il].ffn_gate_inp->abs_offset;
-    uint16_t* dst = narrow.data() + (uint64_t)il * kRouterElements;
-    for (uint64_t i = 0; i < kRouterElements; i++) {
+    uint16_t* dst = narrow.data() + (uint64_t)il * elements;
+    for (uint64_t i = 0; i < elements; i++) {
       uint32_t bits;
       memcpy(&bits, src + 4 * i, 4);
       if (bits & 0xffffu) return true;
@@ -1070,8 +1073,8 @@ static void tensor_expect_dense(const ds41_tensor* t, uint32_t ndim,
 }
 
 static void tensor_expect_routed_expert(const ds41_tensor* t, uint64_t d0,
-                                        uint64_t d1) {
-  tensor_expect_dims(t, 3, d0, d1, DS41_N_EXPERT);
+                                        uint64_t d1, uint64_t experts) {
+  tensor_expect_dims(t, 3, d0, d1, experts);
   if (!tensor_is_routed_expert_type(t->type))
     tensor_reject(t, "has an unsupported routed expert type");
 }
@@ -1145,15 +1148,15 @@ static void weights_validate_layout(const ds41_weights* w) {
     tensor_expect(l->hc_ffn_base, DS41_TENSOR_F32, 1, hc_mix_dim);
     tensor_expect(l->ffn_norm, DS41_TENSOR_F32, 1, DS41_N_EMBD);
     /* The router is BF16 in the ISTA builds and F32 in Unsloth's. */
-    tensor_expect_dims(l->ffn_gate_inp, 2, DS41_N_EMBD, DS41_N_EXPERT, 0);
+    tensor_expect_dims(l->ffn_gate_inp, 2, DS41_N_EMBD, w->n_expert, 0);
     if (l->ffn_gate_inp->type != DS41_TENSOR_BF16 &&
         l->ffn_gate_inp->type != DS41_TENSOR_F32)
       tensor_reject(l->ffn_gate_inp, "has an unsupported router type");
-    tensor_expect(l->ffn_exp_probs_b, DS41_TENSOR_F32, 1, DS41_N_EXPERT);
-    tensor_expect(l->ffn_exp_probs_b_vl, DS41_TENSOR_F32, 1, DS41_N_EXPERT);
-    tensor_expect_routed_expert(l->ffn_gate_exps, DS41_N_EMBD, DS41_N_FF_EXP);
-    tensor_expect_routed_expert(l->ffn_up_exps, DS41_N_EMBD, DS41_N_FF_EXP);
-    tensor_expect_routed_expert(l->ffn_down_exps, DS41_N_FF_EXP, DS41_N_EMBD);
+    tensor_expect(l->ffn_exp_probs_b, DS41_TENSOR_F32, 1, w->n_expert);
+    tensor_expect(l->ffn_exp_probs_b_vl, DS41_TENSOR_F32, 1, w->n_expert);
+    tensor_expect_routed_expert(l->ffn_gate_exps, DS41_N_EMBD, DS41_N_FF_EXP, w->n_expert);
+    tensor_expect_routed_expert(l->ffn_up_exps, DS41_N_EMBD, DS41_N_FF_EXP, w->n_expert);
+    tensor_expect_routed_expert(l->ffn_down_exps, DS41_N_FF_EXP, DS41_N_EMBD, w->n_expert);
     if (l->ffn_gate_exps->type != l->ffn_up_exps->type) {
       fprintf(stderr,
               "ds41: routed gate/up experts use different quant types in layer "
@@ -1290,7 +1293,6 @@ static void config_validate_model(const ds41_model* m) {
       {"deepseek41.attention.output_lora_rank", DS41_N_LORA_O},
       {"deepseek41.attention.output_group_count", DS41_N_OUT_GROUP},
       {"deepseek41.attention.sliding_window", DS41_N_SWA},
-      {"deepseek41.expert_count", DS41_N_EXPERT},
       {"deepseek41.expert_used_count", DS41_N_EXPERT_USED},
       {"deepseek41.expert_feed_forward_length", DS41_N_FF_EXP},
       {"deepseek41.expert_shared_count", DS41_N_EXPERT_SHARED},
@@ -1316,6 +1318,13 @@ static void config_validate_model(const ds41_model* m) {
   };
   for (const U32Key& k : kU32)
     config_expect_u32(k.key, required_u32(m, k.key), k.want);
+  /* Expert-pruned builds keep the same number of experts in every layer. */
+  const uint32_t experts = required_u32(m, "deepseek41.expert_count");
+  if (experts < DS41_N_EXPERT_USED || experts > DS41_MAX_EXPERT) {
+    fprintf(stderr, "ds41: expert_count %u is outside %u..%u\n", experts,
+            DS41_N_EXPERT_USED, DS41_MAX_EXPERT);
+    throw std::runtime_error("incompatible or invalid DeepSeek V4.1 artifact");
+  }
   uint32_t groups = 0;
   model_get_u32(m, "deepseek41.expert_group_count", &groups);
   config_expect_u32("expert_group_count", groups, 0);
@@ -1441,6 +1450,7 @@ static void engram_constants_load(ds41_weights* w, const ds41_model* m) {
 /* Bind tensor names once into the fixed V4.1 layer layout. */
 static void weights_bind(ds41_weights* w, const ds41_model* m) {
   memset(w, 0, sizeof(*w));
+  w->n_expert = required_u32(m, "deepseek41.expert_count");
   w->token_embd = required_tensor(m, "token_embd.weight");
   w->output_norm = required_tensor(m, "output_norm.weight");
   w->output = required_tensor(m, "output.weight");
@@ -1899,6 +1909,8 @@ int ds41_engine_open(ds41_engine** out, const ds41_engine_options* opt) {
       e->dspark = new ds41_dspark_model();
       dspark_open(e->dspark, opt->dspark_model_path);
     }
+    if (opt->stream_experts && e->weights->n_expert != DS41_MAX_EXPERT)
+      ds41_die("--stream-experts needs all routed experts; run expert-pruned builds resident");
     if (opt->validate_only) {
       *out = e;
       return 0;
@@ -1925,7 +1937,7 @@ int ds41_engine_open(ds41_engine** out, const ds41_engine_options* opt) {
     const uint64_t available = ds41_expert_available_memory();
     const uint64_t resident =
         model_resident_bytes(e->model, e->weights, streaming) +
-        (e->weights->router_bf16 ? (uint64_t)DS41_N_LAYER * kRouterElements * sizeof(uint16_t) : 0);
+        (e->weights->router_bf16 ? (uint64_t)DS41_N_LAYER * router_elements(e->weights) * sizeof(uint16_t) : 0);
     const uint64_t needed = resident + dspark_resident_bytes(e->dspark) + (2ull << 30);
     if (!streaming && available != 0 && needed > available) {
       char drafter[48] = "";
@@ -2016,11 +2028,12 @@ int ds41_engine_enable_image_routing(ds41_engine* e) {
         return 1;
     if (e->image_bias)
         return 0;
-    std::vector<float> bias((uint64_t)DS41_N_LAYER * DS41_N_EXPERT);
+    const uint32_t experts = e->weights->n_expert;
+    std::vector<float> bias((uint64_t)DS41_N_LAYER * experts);
     for (uint32_t il = 0; il < DS41_N_LAYER; il++)
-        memcpy(bias.data() + (uint64_t)il * DS41_N_EXPERT,
+        memcpy(bias.data() + (uint64_t)il * experts,
                e->model->map + e->weights->layer[il].ffn_exp_probs_b_vl->abs_offset,
-               DS41_N_EXPERT * sizeof(float));
+               experts * sizeof(float));
     for (float value : bias)
         if (!std::isfinite(value))
             return 1;

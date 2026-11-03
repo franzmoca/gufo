@@ -23,7 +23,10 @@ inline constexpr uint32_t DS41_N_ROT = 64;
 inline constexpr uint32_t DS41_N_OUT_GROUP = 8;
 inline constexpr uint32_t DS41_N_LORA_Q = 1280;
 inline constexpr uint32_t DS41_N_LORA_O = 1024;
-inline constexpr uint32_t DS41_N_EXPERT = 384;
+/* Routed experts per layer of the full model. Expert-pruned builds keep
+ * fewer (ds41_weights::n_expert, from the GGUF); buffers are sized for this
+ * many, and the streamed expert store needs the full count. */
+inline constexpr uint32_t DS41_MAX_EXPERT = 384;
 inline constexpr uint32_t DS41_N_EXPERT_USED = 6;
 inline constexpr uint32_t DS41_N_EXPERT_SHARED = 1;
 inline constexpr uint32_t DS41_N_FF_EXP = 2304;
@@ -165,6 +168,9 @@ struct ds41_weights {
   ds41_tensor* output_norm;
   ds41_tensor* output;
   ds41_layer_weights layer[DS41_MAX_LAYER];
+  /* Routed experts per layer: DS41_MAX_EXPERT, or fewer in an expert-pruned
+   * build. Every router, bias and expert tensor holds this many. */
+  uint32_t n_expert;
   /* Device [layer][expert][embd]: F32 routers whose values are all BF16
    * (Unsloth stores the BF16 router widened) narrowed back, or NULL. The
    * F32 tensors then stay on the host. */

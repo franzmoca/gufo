@@ -733,7 +733,7 @@ bool store_compressed(ds41_decoder* d, uint32_t il, uint32_t r0, uint32_t rows, 
 }
 
 /* The views of a with every per-row buffer advanced by r rows. */
-Activations rows_view(const Activations& a, uint64_t mask_words, uint64_t r) {
+Activations rows_view(const Activations& a, uint64_t mask_words, uint32_t experts, uint64_t r) {
   const uint64_t hd = (uint64_t)kHc * kDim;
   const uint64_t routed = (uint64_t)DS41_N_EXPERT_USED * DS41_N_FF_EXP;
   Activations v = a;
@@ -752,7 +752,7 @@ Activations rows_view(const Activations& a, uint64_t mask_words, uint64_t r) {
   v.topk += r * DS41_N_INDEXER_TOP_K;
   v.oa += r * DS41_N_OUT_GROUP * DS41_N_LORA_O;
   v.rope += r * kRot;
-  v.router += r * DS41_N_EXPERT;
+  v.router += r * experts;
   v.route_w += r * DS41_N_EXPERT_USED;
   v.route_ids += r * DS41_N_EXPERT_USED;
   for (float** p : {&v.g6, &v.u6, &v.mid6}) *p += r * routed;
@@ -993,10 +993,13 @@ bool routed_f16_down_type(int type) {
   return routed_f16_type(type) || type == (int)DS41_TENSOR_IQ3_XXS || type == (int)DS41_TENSOR_Q2_K;
 }
 
+/* Routed experts per layer of the loaded build. */
+uint32_t n_expert(const ds41_decoder* d) { return d->engine->weights->n_expert; }
+
 /* ds41_v41_routed_plan's rows, bounds and tiles for batches up to cap tokens. */
 uint64_t routed_plan_ints(uint64_t cap) {
   const uint64_t slots = cap * DS41_N_EXPERT_USED;
-  return slots + (DS41_N_EXPERT + 1) + (slots / 64 + DS41_N_EXPERT);
+  return slots + (DS41_MAX_EXPERT + 1) + (slots / 64 + DS41_MAX_EXPERT);
 }
 
 uint64_t expert_block_bytes(int type) {
@@ -1079,7 +1082,7 @@ bool router_logits(ds41_decoder* d, uint32_t il, uint32_t n, const float* x = nu
   const ds41_weights* w = d->engine->weights;
   if (!x) x = d->xn;
   if (!w->router_bf16) return linear(d, w->layer[il].ffn_gate_inp, x, d->router, n);
-  return linear_raw(DS41_TENSOR_BF16, w->router_bf16 + (uint64_t)il * DS41_N_EXPERT * DS41_N_EMBD, DS41_N_EXPERT,
+  return linear_raw(DS41_TENSOR_BF16, w->router_bf16 + (uint64_t)il * n_expert(d) * DS41_N_EMBD, n_expert(d),
                     DS41_N_EMBD, x, d->router, n, d->decode_rows);
 }
 
@@ -1096,7 +1099,7 @@ bool trace_predict(ds41_decoder* d, uint32_t il, uint32_t n, const float* x = nu
     int32_t* host = d->trace_pinned + ((uint64_t)tl * kTraceLeads + (lead - 1)) * span;
     if (!router_logits(d, tl, n, x) ||
         ds41_v41_route(d->router, f32(d, nl->ffn_exp_probs_b), dev_ids, d->trace_w + (lead - 1) * span,
-                       DS41_N_EXPERT, kTraceK, DS41_EXPERT_WEIGHT_SCALE, n) ||
+                       n_expert(d), kTraceK, DS41_EXPERT_WEIGHT_SCALE, n) ||
         hipMemcpyAsync(host, dev_ids, (size_t)n * kTraceK * sizeof(int32_t), hipMemcpyDeviceToHost, nullptr) !=
             hipSuccess)
       return false;
@@ -1113,7 +1116,7 @@ void predict_layer(ds41_decoder* d, uint32_t target, uint32_t n) {
   int32_t* ids = d->pred_pinned + (size_t)target * rows;
   if (!router_logits(d, target, n) ||
       ds41_v41_route(d->router, f32(d, nl->ffn_exp_probs_b), d->pred_ids, d->pred_w,
-                     DS41_N_EXPERT, used, DS41_EXPERT_WEIGHT_SCALE, n) ||
+                     n_expert(d), used, DS41_EXPERT_WEIGHT_SCALE, n) ||
       hipMemcpyAsync(ids, d->pred_ids, (size_t)n * used * sizeof(int32_t),
                      hipMemcpyDeviceToHost, nullptr) != hipSuccess ||
       hipEventRecord(d->pred_events[target], nullptr) != hipSuccess)
@@ -1154,7 +1157,7 @@ bool moe(ds41_decoder* d, uint32_t il, uint32_t n) {
   const ds41_layer_weights* l = &d->engine->weights->layer[il];
   const int used = (int)DS41_N_EXPERT_USED;
   if (!router_logits(d, il, n) ||
-      ds41_v41_route(d->router, f32(d, l->ffn_exp_probs_b), d->route_ids, d->route_w, DS41_N_EXPERT, used,
+      ds41_v41_route(d->router, f32(d, l->ffn_exp_probs_b), d->route_ids, d->route_w, n_expert(d), used,
                      DS41_EXPERT_WEIGHT_SCALE, n))
     return false;
   /* Image positions select with the image bias (the gate's bias_vl). */
@@ -1163,8 +1166,8 @@ bool moe(ds41_decoder* d, uint32_t il, uint32_t n) {
     const uint32_t lo = std::max(first, d->pos), hi = std::min(end, d->pos + n);
     if (lo >= hi) continue;
     const uint64_t r = lo - d->pos;
-    if (ds41_v41_route(d->router + r * DS41_N_EXPERT, d->engine->image_bias + (uint64_t)il * DS41_N_EXPERT,
-                       d->route_ids + r * used, d->route_w + r * used, DS41_N_EXPERT, used, DS41_EXPERT_WEIGHT_SCALE,
+    if (ds41_v41_route(d->router + r * n_expert(d), d->engine->image_bias + (uint64_t)il * n_expert(d),
+                       d->route_ids + r * used, d->route_w + r * used, n_expert(d), used, DS41_EXPERT_WEIGHT_SCALE,
                        hi - lo))
       return false;
   }
@@ -1239,11 +1242,11 @@ bool moe(ds41_decoder* d, uint32_t il, uint32_t n) {
        * kernels use, stream-ordered after this callback's work. */
       int32_t* plan_rows = w.d->routed_plan;
       int32_t* plan_bounds = plan_rows + w.rows;
-      int32_t* plan_tiles = plan_bounds + DS41_N_EXPERT + 1;
-      const uint32_t n_tiles = w.rows / 64 + DS41_N_EXPERT;
+      int32_t* plan_tiles = plan_bounds + n_expert(w.d) + 1;
+      const uint32_t n_tiles = w.rows / 64 + n_expert(w.d);
       const uint64_t down_bytes = (uint64_t)DS41_N_FF_EXP * kDim / 256 * expert_block_bytes(w.down_type);
       const auto* down_table = static_cast<const void* const*>(info->table[2]);
-      return ds41_v41_routed_plan_device(info->hit_ids, w.rows, DS41_N_EXPERT, plan_rows, plan_bounds,
+      return ds41_v41_routed_plan_device(info->hit_ids, w.rows, n_expert(w.d), plan_rows, plan_bounds,
                                          plan_tiles) == 0 &&
              ds41_v41_routed_f16(w.gate_type, info->table[0], info->table[1], expert_bytes, w.x16, w.used,
                                  plan_rows, plan_bounds, plan_tiles, n_tiles, w.d->route_w, kSwigluLimit, w.mid16,
@@ -1322,32 +1325,32 @@ bool moe(ds41_decoder* d, uint32_t il, uint32_t n) {
   };
   const int32_t* plan_rows = d->routed_plan;
   int32_t* plan_bounds = d->routed_plan + rows;
-  int32_t* plan_tiles = plan_bounds + DS41_N_EXPERT + 1;
+  int32_t* plan_tiles = plan_bounds + n_expert(d) + 1;
   uint32_t n_tiles = 0;
   if (f16_gate && f16_down) {
     // Both projections consume the device plan; MMQ's host bucket classes
     // and maximum-row bounds are unused on this path.  When the store's read
     // overlap already ran the resident experts' gate+up and down, both
     // passes here cover only the rows the reads filled.
-    n_tiles = (uint32_t)rows / 64 + DS41_N_EXPERT;
+    n_tiles = (uint32_t)rows / 64 + n_expert(d);
     if (ds41_v41_routed_plan_device(work.gate_up_done ? work.info.miss_ids : d->route_ids, (uint32_t)rows,
-                                    DS41_N_EXPERT, d->routed_plan, plan_bounds, plan_tiles))
+                                    n_expert(d), d->routed_plan, plan_bounds, plan_tiles))
       return false;
   } else if (!small) {
     std::vector<int32_t> ids((size_t)rows);
-    std::vector<unsigned int> counts(DS41_N_EXPERT, 0u);
+    std::vector<unsigned int> counts(n_expert(d), 0u);
     if (hipMemcpy(ids.data(), d->route_ids, ids.size() * sizeof(int32_t), hipMemcpyDeviceToHost) != hipSuccess)
       return false;
     unsigned int most = 0;
     for (const int32_t e : ids)
-      if (e >= 0 && e < (int32_t)DS41_N_EXPERT) most = std::max(most, ++counts[(size_t)e]);
+      if (e >= 0 && e < (int32_t)n_expert(d)) most = std::max(most, ++counts[(size_t)e]);
     ds41_mmq_set_routed_max_expert_rows((int)most);
-    ds41_mmq_set_routed_tile_cols(ds41_mmq_routed_tile_cols_for_counts(counts.data(), DS41_N_EXPERT));
+    ds41_mmq_set_routed_tile_cols(ds41_mmq_routed_tile_cols_for_counts(counts.data(), n_expert(d)));
     /* Each expert's tiles take the width that suits its bucket (16 to 64 columns). */
-    uint8_t classes[DS41_N_EXPERT];
+    uint8_t classes[DS41_MAX_EXPERT];
     int widths[3], class_rows[3];
     const int n_classes =
-        ds41_mmq_routed_classes_for_counts(counts.data(), DS41_N_EXPERT, classes, widths, class_rows);
+        ds41_mmq_routed_classes_for_counts(counts.data(), n_expert(d), classes, widths, class_rows);
     if (n_classes > 0) {
       if (hipMemcpy(d->expert_class, classes, sizeof(classes), hipMemcpyHostToDevice) != hipSuccess) return false;
       ds41_mmq_set_routed_classes(d->expert_class, n_classes, widths, class_rows);
@@ -1355,9 +1358,9 @@ bool moe(ds41_decoder* d, uint32_t il, uint32_t n) {
     if (f16_gate || f16_down) {
       std::vector<int32_t> plan(routed_plan_ints(n));
       int32_t* bounds = plan.data() + rows;
-      n_tiles = ds41_v41_routed_plan(ids.data(), (uint32_t)rows, DS41_N_EXPERT, plan.data(), bounds,
-                                     bounds + DS41_N_EXPERT + 1);
-      const size_t used_ints = (size_t)rows + DS41_N_EXPERT + 1 + n_tiles;
+      n_tiles = ds41_v41_routed_plan(ids.data(), (uint32_t)rows, n_expert(d), plan.data(), bounds,
+                                     bounds + n_expert(d) + 1);
+      const size_t used_ints = (size_t)rows + n_expert(d) + 1 + n_tiles;
       if (n_tiles == 0 || hipMemcpy(d->routed_plan, plan.data(), used_ints * sizeof(int32_t),
                                     hipMemcpyHostToDevice) != hipSuccess)
         return false;
@@ -1404,13 +1407,13 @@ bool moe(ds41_decoder* d, uint32_t il, uint32_t n) {
                      gate_table))
       status = streamed ? 1
                        : ds41_mmq_moe_vec_typed(gate_type, gate, d->xn, d->route_ids, d->g6, DS41_N_FF_EXP, kDim,
-                                                (int)n, DS41_N_EXPERT, used, 0);
+                                                (int)n, n_expert(d), used, 0);
     if (status) return false;
     if (!expert_gemv(up_type, up, d->route_ids, rows, d->xn, false, d->u6, DS41_N_FF_EXP, kDim, &status,
                      up_table))
       status = streamed ? 1
                         : ds41_mmq_moe_vec_typed(up_type, up, d->xn, d->route_ids, d->u6, DS41_N_FF_EXP, kDim,
-                                                 (int)n, DS41_N_EXPERT, used, 0);
+                                                 (int)n, n_expert(d), used, 0);
     if (status) return false;
   } else if (f16_gate) {
     const uint64_t expert_bytes = (uint64_t)DS41_N_FF_EXP * kDim / 256 * expert_block_bytes(gate_type);
@@ -1421,13 +1424,13 @@ bool moe(ds41_decoder* d, uint32_t il, uint32_t n) {
   } else if (!streamed && gate_type == up_type) {
     /* Batches quantize the input once and store SwiGLU from the up pass. */
     if (ds41_mmq_moe_swiglu_typed(gate_type, gate, up, d->xn, d->route_ids, d->route_w, d->g6, d->mid6,
-                                  DS41_N_FF_EXP, kDim, (int)n, DS41_N_EXPERT, used, kSwigluLimit, 0))
+                                  DS41_N_FF_EXP, kDim, (int)n, n_expert(d), used, kSwigluLimit, 0))
       return false;
   } else if (streamed) {
     return false;  // no table-indexed kernel for this shape
   } else if (ds41_mmq_moe_typed(gate_type, gate, d->xn, d->route_ids, d->g6, DS41_N_FF_EXP, kDim, (int)n,
-                                DS41_N_EXPERT, used, 0) ||
-             ds41_mmq_moe_typed(up_type, up, d->xn, d->route_ids, d->u6, DS41_N_FF_EXP, kDim, (int)n, DS41_N_EXPERT,
+                                n_expert(d), used, 0) ||
+             ds41_mmq_moe_typed(up_type, up, d->xn, d->route_ids, d->u6, DS41_N_FF_EXP, kDim, (int)n, n_expert(d),
                                 used, 0)) {
     return false;
   }
@@ -1448,7 +1451,7 @@ bool moe(ds41_decoder* d, uint32_t il, uint32_t n) {
                      down_table))
       status = streamed ? 1
                         : ds41_mmq_moe_vec_typed(down_type, down, d->mid6, d->route_ids, d->down6, kDim,
-                                                 DS41_N_FF_EXP, rows, DS41_N_EXPERT, 1, 0);
+                                                 DS41_N_FF_EXP, rows, n_expert(d), 1, 0);
     if (status) return false;
   } else if (f16_down) {
     const uint64_t expert_bytes = (uint64_t)DS41_N_FF_EXP * kDim / 256 * expert_block_bytes(down_type);
@@ -1457,7 +1460,7 @@ bool moe(ds41_decoder* d, uint32_t il, uint32_t n) {
                             nullptr))
       return false;
   } else if (!streamed && ds41_mmq_moe_typed(down_type, down, d->mid6, d->route_ids, d->down6, kDim, DS41_N_FF_EXP,
-                                             rows, DS41_N_EXPERT, 1, 0)) {
+                                             rows, n_expert(d), 1, 0)) {
     return false;
   } else if (streamed) {
     /* No FP16 tile kernel for this type: each row through the
@@ -1592,7 +1595,7 @@ std::shared_ptr<SharedActivations> make_activations(ds41_engine* engine, uint32_
         {&a.oa, cap * DS41_N_OUT_GROUP * DS41_N_LORA_O, kAttention},
         {&a.attn_out, cap * kDim, kAttention},
         {&a.rope, cap * kRot, kAttention},
-        {&a.router, cap * DS41_N_EXPERT, kFfn},
+        {&a.router, cap * DS41_MAX_EXPERT, kFfn},
         {&a.route_w, cap * DS41_N_EXPERT_USED, kFfn},
         {&a.g6, cap * routed, kFfn},
         {&a.u6, cap * routed, kFfn},
@@ -1661,7 +1664,7 @@ std::shared_ptr<SharedActivations> make_activations(ds41_engine* engine, uint32_
     a.topk = alloc<uint32_t>(sh->device, cap * DS41_N_INDEXER_TOP_K);
     a.block_select = alloc<uint32_t>(sh->device, (uint64_t)a.score_rows * DS41_CANDIDATE_TOPK_BLOCKS);
     a.route_ids = alloc<int32_t>(sh->device, cap * DS41_N_EXPERT_USED);
-    a.expert_class = alloc<uint8_t>(sh->device, DS41_N_EXPERT);
+    a.expert_class = alloc<uint8_t>(sh->device, DS41_MAX_EXPERT);
     a.routed_plan = alloc<int32_t>(sh->device, routed_plan_ints(cap));
     a.expert_plan = alloc<int32_t>(sh->device, DS41_V41_EXPERT_PLAN_INTS(DS41_V41_EXPERT_PLAN_SLOTS));
     a.expert_plan_split[0] = alloc<int32_t>(sh->device, DS41_V41_EXPERT_PLAN_INTS(DS41_V41_EXPERT_PLAN_SLOTS));
@@ -2317,7 +2320,7 @@ int ds41_decoder_eval_joint(ds41_decoder* const* ds, const int* const* tokens, c
   /* Each session's views start at its rows; every one takes the decode paths. */
   for (uint32_t i = 0; i < count; i++) {
     ds41_decoder* d = ds[i];
-    static_cast<Activations&>(*d) = rows_view(d->shared->views, d->mask_words, first[i]);
+    static_cast<Activations&>(*d) = rows_view(d->shared->views, d->mask_words, n_expert(d), first[i]);
     d->decode_rows = DS41_DECODER_MAX_JOINT;
     d->spec_pos0 = d->pos;
     d->spec_eval = true;

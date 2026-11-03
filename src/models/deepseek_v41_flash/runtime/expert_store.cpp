@@ -69,7 +69,7 @@ constexpr uint32_t kSplitRows = DS41_MAX_PREFILL_BATCH * DS41_N_EXPERT_USED;
  * a whole prompt's experts. */
 constexpr uint32_t kSweepTokens = 1024;
 
-constexpr uint32_t kSeedPerLayer = DS41_N_EXPERT;
+constexpr uint32_t kSeedPerLayer = DS41_MAX_EXPERT;
 constexpr uint32_t kNoSlot = std::numeric_limits<uint32_t>::max();
 /* Eviction candidates kept per size class: the kVictims lowest decayed
  * scores of the slots an expert of that class could take, rebuilt by one
@@ -78,13 +78,13 @@ constexpr uint32_t kNoSlot = std::numeric_limits<uint32_t>::max();
  * no invalidation and the order among untouched slots is the scan's. */
 constexpr size_t kVictims = 32;
 constexpr uint64_t kVictimsTicks = 512;
-constexpr uint64_t kTableEntries = uint64_t{DS41_N_LAYER} * DS41_N_EXPERT;
+constexpr uint64_t kTableEntries = uint64_t{DS41_N_LAYER} * DS41_MAX_EXPERT;
 constexpr uint32_t kNoLayer = std::numeric_limits<uint32_t>::max();
-constexpr std::array<uint16_t, DS41_N_LAYER * DS41_N_EXPERT> kDefaultExpertRank = {
+constexpr std::array<uint16_t, DS41_N_LAYER * DS41_MAX_EXPERT> kDefaultExpertRank = {
 #include "expert_rank.inc"
 };
 constexpr bool valid_default_rank() {
-  std::array<bool, DS41_N_LAYER * DS41_N_EXPERT> seen{};
+  std::array<bool, DS41_N_LAYER * DS41_MAX_EXPERT> seen{};
   for (uint32_t index : kDefaultExpertRank) {
     if (index >= seen.size() || seen[index])
       return false;
@@ -156,9 +156,9 @@ void PredictWork(ds41_expert_store* store);
  * waiting for a wrong prediction would cost the phase its whole read. */
 struct PrefetchJob {
   std::vector<ReadTask> tasks;
-  std::array<uint32_t, DS41_N_EXPERT> task_begin{};  // first task per expert
-  std::array<uint32_t, DS41_N_EXPERT> task_count{};  // tasks per expert
-  std::array<uint32_t, DS41_N_EXPERT> row_of{};  // compact stage row per expert
+  std::array<uint32_t, DS41_MAX_EXPERT> task_begin{};  // first task per expert
+  std::array<uint32_t, DS41_MAX_EXPERT> task_count{};  // tasks per expert
+  std::array<uint32_t, DS41_MAX_EXPERT> row_of{};  // compact stage row per expert
   std::vector<uint32_t> experts;  // experts the completed job stages
   std::atomic<uint64_t> bytes{0};
   std::atomic<bool> failed{false};
@@ -574,7 +574,7 @@ uint64_t ds41_expert_available_memory() {
 
 struct ds41_expert_store {
   std::array<std::array<Source, 3>, DS41_N_LAYER> source{};
-  std::array<std::array<Entry, DS41_N_EXPERT>, DS41_N_LAYER> entries{};
+  std::array<std::array<Entry, DS41_MAX_EXPERT>, DS41_N_LAYER> entries{};
   /* The demand stage (whole-layer, rows indexed by expert id) and the
    * compact prefetch stage (two parity halves of job-relative rows).
    * Demand reads are ordered behind the previous layer's compute by the
@@ -777,7 +777,7 @@ struct ds41_expert_store {
    * admission copies, so they are never victims. (A miss admitted earlier
    * in the same batch may be: its table entry is the stage row.) */
   uint32_t acquire(uint32_t layer, uint32_t expert, bool allow_evict,
-                   const std::array<bool, DS41_N_EXPERT>& hits) {
+                   const std::array<bool, DS41_MAX_EXPERT>& hits) {
     const uint32_t own = layer_class[layer];
     if (free_slots[own].empty() && grow_failure[own] != tick && !grow(own))
       grow_failure[own] = tick;
@@ -945,11 +945,11 @@ ds41_expert_store* ds41_expert_store_create(const ds41_model* model,
     uint64_t combined = 0;
     for (uint32_t p = 0; p < 3; ++p) {
       const ds41_tensor* t = tensors[p];
-      if (!t || !t->bytes || t->bytes % DS41_N_EXPERT) {
+      if (!t || !t->bytes || t->bytes % DS41_MAX_EXPERT) {
         return nullptr;
       }
       Source& src = store->source[layer][p];
-      src.bytes = t->bytes / DS41_N_EXPERT;
+      src.bytes = t->bytes / DS41_MAX_EXPERT;
       max_bytes[p] = std::max(max_bytes[p], src.bytes);
       combined += src.bytes;
       for (uint32_t s = 0; s < model->n_shards; ++s) {
@@ -993,7 +993,7 @@ ds41_expert_store* ds41_expert_store_create(const ds41_model* model,
                        kReadBytes + 2 * kDirectAlign) == hipSuccess;
   for (uint32_t p = 0; p < 3 && ok; ++p)
     ok =
-        hipMalloc(&store->stage[0][p], max_bytes[p] * DS41_N_EXPERT) == hipSuccess;
+        hipMalloc(&store->stage[0][p], max_bytes[p] * DS41_MAX_EXPERT) == hipSuccess;
   /* The second stage set (prefetch) is allocated lazily, after the startup
    * seed has taken its memory, so it never shrinks the resident set. */
   for (uint32_t p = 0; p < 3 && ok; ++p)
@@ -1077,7 +1077,7 @@ bool ds41_expert_store_attach_tails(ds41_expert_store* store, const char* path) 
   bool ok = read_all(fd, header.data(), header.size(), 0);
   const uint8_t* h = header.data();
   if (!ok || std::memcmp(h, kTailMagic, sizeof(kTailMagic)) != 0 || read_le<uint32_t>(h + 8) != kTailVersion ||
-      read_le<uint32_t>(h + 12) != DS41_N_LAYER || read_le<uint32_t>(h + 16) != DS41_N_EXPERT) {
+      read_le<uint32_t>(h + 12) != DS41_N_LAYER || read_le<uint32_t>(h + 16) != DS41_MAX_EXPERT) {
     (void)close(fd);
     return fail("not a tails file for this model layout");
   }
@@ -1121,7 +1121,7 @@ bool ds41_expert_store_attach_tails(ds41_expert_store* store, const char* path) 
     ok = piece == record && first % kDirectAlign == 0 && record % kDirectAlign == 0;
   }
   struct stat st{};
-  const uint64_t end = tail[DS41_N_LAYER - 1][0].first + (uint64_t)DS41_N_EXPERT * tail[DS41_N_LAYER - 1][0].stride;
+  const uint64_t end = tail[DS41_N_LAYER - 1][0].first + (uint64_t)DS41_MAX_EXPERT * tail[DS41_N_LAYER - 1][0].stride;
   if (ok && (fstat(fd, &st) != 0 || (uint64_t)st.st_size < end))
     ok = false;
   if (!ok) {
@@ -1130,8 +1130,8 @@ bool ds41_expert_store_attach_tails(ds41_expert_store* store, const char* path) 
   }
   /* Spot check: the tails of a few experts equal the GGUF bytes. */
   std::vector<uint8_t> a, b;
-  for (const auto [l, e] : {std::pair<uint32_t, uint32_t>{0, 0}, {DS41_N_LAYER / 2, DS41_N_EXPERT / 2},
-                            {DS41_N_LAYER - 1, DS41_N_EXPERT - 1}})
+  for (const auto [l, e] : {std::pair<uint32_t, uint32_t>{0, 0}, {DS41_N_LAYER / 2, DS41_MAX_EXPERT / 2},
+                            {DS41_N_LAYER - 1, DS41_MAX_EXPERT - 1}})
     for (uint32_t p = 0; p < 3 && ok; ++p) {
       const Source& src = store->source[l][p];
       const TailSource& t = tail[l][p];
@@ -1180,10 +1180,10 @@ bool seed_ranked(ds41_expert_store* store, std::vector<SeedItem> ranked,
    * a cache larger than the traced set does not start part empty. The
    * built-in ranking orders all of them. */
   const size_t ranked_count = ranked.size();
-  std::array<std::array<bool, DS41_N_EXPERT>, DS41_N_LAYER> ranked_set{};
+  std::array<std::array<bool, DS41_MAX_EXPERT>, DS41_N_LAYER> ranked_set{};
   for (const SeedItem& item : ranked)
     ranked_set[item.layer][item.expert] = true;
-  for (uint32_t e = 0; e < DS41_N_EXPERT; ++e)
+  for (uint32_t e = 0; e < DS41_MAX_EXPERT; ++e)
     for (uint32_t l = 0; l < DS41_N_LAYER; ++l)
       if (!ranked_set[l][e])
         ranked.push_back({l, e, 0});
@@ -1214,7 +1214,7 @@ bool seed_ranked(ds41_expert_store* store, std::vector<SeedItem> ranked,
     return false;
   const auto begin = std::chrono::steady_clock::now();
   const ds41_expert_store_stats previous = store->stats;
-  std::array<std::array<bool, DS41_N_EXPERT>, DS41_N_LAYER> selected{};
+  std::array<std::array<bool, DS41_MAX_EXPERT>, DS41_N_LAYER> selected{};
   std::array<std::vector<SeedItem>, DS41_N_LAYER> by_layer;
   for (size_t i = 0; i < target; ++i)
     by_layer[ranked[i].layer].push_back(ranked[i]);
@@ -1252,7 +1252,7 @@ bool seed_ranked(ds41_expert_store* store, std::vector<SeedItem> ranked,
   if (ok) {
     uint32_t resident = 0;
     for (uint32_t l = 0; l < DS41_N_LAYER; ++l)
-      for (uint32_t e = 0; e < DS41_N_EXPERT; ++e)
+      for (uint32_t e = 0; e < DS41_MAX_EXPERT; ++e)
         resident += selected[l][e] && store->entries[l][e].slot != kNoSlot;
     const double seconds =
         std::chrono::duration<double>(std::chrono::steady_clock::now() - begin)
@@ -1276,7 +1276,7 @@ bool ds41_expert_store_seed_default(ds41_expert_store* store) {
   ranked.reserve(kDefaultExpertRank.size());
   for (size_t i = 0; i < kDefaultExpertRank.size(); ++i) {
     const uint32_t index = kDefaultExpertRank[i];
-    ranked.push_back({index / DS41_N_EXPERT, index % DS41_N_EXPERT,
+    ranked.push_back({index / DS41_MAX_EXPERT, index % DS41_MAX_EXPERT,
                       static_cast<uint64_t>(kDefaultExpertRank.size() - i)});
   }
   return seed_ranked(store, std::move(ranked), "built-in V4.1 ranking");
@@ -1289,7 +1289,7 @@ bool ds41_expert_store_seed(ds41_expert_store* store, const char* path) {
   std::string magic;
   if (!std::getline(in, magic) || magic != "DS41_EXPERT_HISTOGRAM_V1")
     return false;
-  std::array<std::array<bool, DS41_N_EXPERT>, DS41_N_LAYER> seen{};
+  std::array<std::array<bool, DS41_MAX_EXPERT>, DS41_N_LAYER> seen{};
   std::vector<SeedItem> ranked;
   std::string line;
   while (std::getline(in, line)) {
@@ -1299,7 +1299,7 @@ bool ds41_expert_store_seed(ds41_expert_store* store, const char* path) {
     std::istringstream row(line);
     if (!(row >> layer >> expert >> count) || (row >> extra))
       return false;
-    if (layer >= DS41_N_LAYER || expert >= DS41_N_EXPERT || !count ||
+    if (layer >= DS41_N_LAYER || expert >= DS41_MAX_EXPERT || !count ||
         seen[layer][expert])
       return false;
     seen[layer][expert] = true;
@@ -1343,7 +1343,7 @@ void append_projection(const ds41_expert_store* store, uint32_t layer, uint32_t 
  * of one projection into chunks of at most kReadBytes and ordering chunks by
  * shard and offset for sequential access. */
 std::vector<ReadTask> build_read_tasks(const ds41_expert_store* store, uint32_t layer,
-                                       const std::array<bool, DS41_N_EXPERT>& wanted) {
+                                       const std::array<bool, DS41_MAX_EXPERT>& wanted) {
   const auto& src = store->source[layer];
   std::array<uint32_t, 3> order{0, 1, 2};
   std::sort(order.begin(), order.end(), [&](uint32_t a, uint32_t b) {
@@ -1353,18 +1353,18 @@ std::vector<ReadTask> build_read_tasks(const ds41_expert_store* store, uint32_t 
   std::vector<ReadTask> tasks;
   if (store->tail_fd >= 0) {
     for (uint32_t p : order)
-      for (uint32_t e = 0; e < DS41_N_EXPERT; ++e)
+      for (uint32_t e = 0; e < DS41_MAX_EXPERT; ++e)
         if (wanted[e]) append_projection(store, layer, p, e, store->stage[0][p] + (uint64_t)e * src[p].bytes, tasks);
     return tasks;
   }
   for (uint32_t p : order) {
-    for (uint32_t e = 0; e < DS41_N_EXPERT;) {
+    for (uint32_t e = 0; e < DS41_MAX_EXPERT;) {
       if (!wanted[e]) {
         ++e;
         continue;
       }
       const uint32_t first = e++;
-      while (e < DS41_N_EXPERT && wanted[e])
+      while (e < DS41_MAX_EXPERT && wanted[e])
         ++e;
       uint64_t offset = src[p].offset + (uint64_t)first * src[p].bytes;
       uint64_t left = (e - first) * src[p].bytes;
@@ -1421,7 +1421,7 @@ void append_expert_tasks(const ds41_expert_store* store, uint32_t layer, uint32_
 
 std::shared_ptr<PrefetchJob> build_prefetch_job(
     const ds41_expert_store* store, uint32_t layer,
-    const std::array<bool, DS41_N_EXPERT>& wanted, bool wide) {
+    const std::array<bool, DS41_MAX_EXPERT>& wanted, bool wide) {
   if (!store->stage_pairs)
     return nullptr;
   auto job = std::make_shared<PrefetchJob>();
@@ -1433,7 +1433,7 @@ std::shared_ptr<PrefetchJob> build_prefetch_job(
   constexpr uint32_t kHalf = kPrefetchStageRows / 2;
   const uint32_t base = (layer & 1) * kHalf;
   uint32_t used = 0;
-  for (uint32_t e = 0; e < DS41_N_EXPERT && used < kHalf; ++e) {
+  for (uint32_t e = 0; e < DS41_MAX_EXPERT && used < kHalf; ++e) {
     if (!wanted[e])
       continue;
     job->row_of[e] = base + used++;
@@ -1498,7 +1498,7 @@ void trace_snapshot(ds41_expert_store* store) {
   trace_put(f, 'S');
   trace_put(f, uint32_t{1});  // version
   trace_put(f, uint32_t{DS41_N_LAYER});
-  trace_put(f, uint32_t{DS41_N_EXPERT});
+  trace_put(f, uint32_t{DS41_MAX_EXPERT});
   trace_put(f, uint32_t{DS41_N_EXPERT_USED});
   trace_put(f, store->tick);
   trace_put(f, store->cache_limit);
@@ -1519,7 +1519,7 @@ void trace_snapshot(ds41_expert_store* store) {
     trace_put(f, slot.expert);
   }
   for (uint32_t l = 0; l < DS41_N_LAYER; ++l)
-    for (uint32_t e = 0; e < DS41_N_EXPERT; ++e) {
+    for (uint32_t e = 0; e < DS41_MAX_EXPERT; ++e) {
       trace_put(f, store->entries[l][e].score);
       trace_put(f, store->entries[l][e].last);
     }
@@ -1591,14 +1591,14 @@ bool ds41_expert_store_prepare(ds41_expert_store* store, uint32_t layer,
                                      std::chrono::steady_clock::now() - start)
                                      .count();
   const uint64_t trace_routes = trace ? trace_now() : 0;
-  std::array<uint32_t, DS41_N_EXPERT> counts{}, recent{};
+  std::array<uint32_t, DS41_MAX_EXPERT> counts{}, recent{};
   for (size_t i = 0; i < ids.size(); ++i) {
     const int32_t id = ids[i];
     /* The router drops a slot (-1) when its scores are not finite; the
      * kernels zero that row, as on the resident path. */
     if (id == -1)
       continue;
-    if (id < 0 || id >= static_cast<int32_t>(DS41_N_EXPERT)) {
+    if (id < 0 || id >= static_cast<int32_t>(DS41_MAX_EXPERT)) {
       fprintf(stderr, "ds41: invalid routed expert %d\n", id);
       return false;
     }
@@ -1609,8 +1609,8 @@ bool ds41_expert_store_prepare(ds41_expert_store* store, uint32_t layer,
   ++store->tick;
   if (layer == 0)
     store->stats.tokens += n_tokens;
-  std::array<bool, DS41_N_EXPERT> missing{}, admit{}, hits{};
-  for (uint32_t e = 0; e < DS41_N_EXPERT; ++e) {
+  std::array<bool, DS41_MAX_EXPERT> missing{}, admit{}, hits{};
+  for (uint32_t e = 0; e < DS41_MAX_EXPERT; ++e) {
     if (!counts[e])
       continue;
     Entry& entry = store->entries[layer][e];
@@ -1630,7 +1630,7 @@ bool ds41_expert_store_prepare(ds41_expert_store* store, uint32_t layer,
   /* Resolve the background job before planning the phase: the table and the
    * demand reads both need its compact row assignment. */
   uint32_t misses = 0;
-  for (uint32_t e = 0; e < DS41_N_EXPERT; ++e)
+  for (uint32_t e = 0; e < DS41_MAX_EXPERT; ++e)
     misses += missing[e] ? 1u : 0u;
   /* From here predictions may target only the next layer, whose parity
    * half no running kernel reads; after the last layer the next
@@ -1656,11 +1656,11 @@ bool ds41_expert_store_prepare(ds41_expert_store* store, uint32_t layer,
   std::array<const uint8_t**, 3> mirror{};
   std::array<const uint8_t**, 3> device_table{};
   for (uint32_t p = 0; p < 3; ++p) {
-    mirror[p] = store->table_host[p] + uint64_t{layer} * DS41_N_EXPERT;
-    device_table[p] = store->table[p] + uint64_t{layer} * DS41_N_EXPERT;
+    mirror[p] = store->table_host[p] + uint64_t{layer} * DS41_MAX_EXPERT;
+    device_table[p] = store->table[p] + uint64_t{layer} * DS41_MAX_EXPERT;
   }
   std::array<bool, 3> changed{};
-  for (uint32_t e = 0; e < DS41_N_EXPERT; ++e) {
+  for (uint32_t e = 0; e < DS41_MAX_EXPERT; ++e) {
     const uint32_t slot_id = store->entries[layer][e].slot;
     const uint8_t* base =
         slot_id != kNoSlot ? store->slots[slot_id].data : nullptr;
@@ -1680,7 +1680,7 @@ bool ds41_expert_store_prepare(ds41_expert_store* store, uint32_t layer,
   for (uint32_t p = 0; p < 3; ++p)
     if (changed[p] &&
         hipMemcpyAsync(device_table[p], mirror[p],
-                       DS41_N_EXPERT * sizeof(uint8_t*),
+                       DS41_MAX_EXPERT * sizeof(uint8_t*),
                        hipMemcpyHostToDevice, nullptr) != hipSuccess)
       return false;
   /* The hit and miss rows keep their route positions, each array holding -1
@@ -1718,8 +1718,8 @@ bool ds41_expert_store_prepare(ds41_expert_store* store, uint32_t layer,
   if (phase) {
     // Demand reads of the misses no adopted job row covers; the job's
     // un-run tasks for the experts this batch routes join them.
-    std::array<bool, DS41_N_EXPERT> want{};
-    for (uint32_t e = 0; e < DS41_N_EXPERT; ++e)
+    std::array<bool, DS41_MAX_EXPERT> want{};
+    for (uint32_t e = 0; e < DS41_MAX_EXPERT; ++e)
       want[e] = missing[e] && !(adopted && adopted->task_count[e]);
     std::vector<ReadTask> tasks = build_read_tasks(store, layer, want);
     uint64_t demand_bytes = 0;
@@ -1755,7 +1755,7 @@ bool ds41_expert_store_prepare(ds41_expert_store* store, uint32_t layer,
   } else if (overlap && !overlap(overlap_context, &info)) {
     return false;
   }
-  for (uint32_t e = 0; e < DS41_N_EXPERT; ++e) {
+  for (uint32_t e = 0; e < DS41_MAX_EXPERT; ++e) {
     if (!missing[e])
       continue;
     // Fill unused capacity during a scan. Once full, only promoted prefill
@@ -1842,10 +1842,10 @@ bool ds41_expert_store_prefetch(ds41_expert_store* store, uint32_t layer,
   // the first job also allocates the prefetch stage.
   if (layer != store->pf_expected.load(std::memory_order_acquire))
     return false;
-  std::array<bool, DS41_N_EXPERT> want{};
+  std::array<bool, DS41_MAX_EXPERT> want{};
   for (uint32_t i = 0; i < count; ++i) {
     const int32_t e = experts[i];
-    if (e < 0 || e >= static_cast<int32_t>(DS41_N_EXPERT))
+    if (e < 0 || e >= static_cast<int32_t>(DS41_MAX_EXPERT))
       return false;
     want[e] = store->entries[layer][e].slot == kNoSlot;
   }
