@@ -46,8 +46,36 @@ __device__ __forceinline__ const uint8_t* table_row(const uint8_t* const* table,
 /* An expert id the ungrouped kernel skips: a grouped launch computes the slot. */
 constexpr int32_t kSkipSlot = INT32_MIN;
 
+/* Byte n of v as a float in one v_cvt_f32_ubyte<n> (exact). Written as a
+ * shift and mask, the compiler folds the IQ1 nibble mask into a bit-field
+ * extract and converts byte 0: two instructions per weight. */
+template <int n>
+__device__ __forceinline__ float UByte(uint32_t v) {
+  float r;
+  if constexpr (n == 0)
+    asm("v_cvt_f32_ubyte0 %0, %1" : "=v"(r) : "v"(v));
+  else if constexpr (n == 1)
+    asm("v_cvt_f32_ubyte1 %0, %1" : "=v"(r) : "v"(v));
+  else if constexpr (n == 2)
+    asm("v_cvt_f32_ubyte2 %0, %1" : "=v"(r) : "v"(v));
+  else
+    asm("v_cvt_f32_ubyte3 %0, %1" : "=v"(r) : "v"(v));
+  return r;
+}
+
+/* Byte n of v as a float: the direct conversion (kDirect, IQ1_M: about 2%
+ * faster) or the compiler's extract (IQ1_S, where the direct form measured
+ * 1.5% slower). Both are exact. */
+template <bool kDirect, int n>
+__device__ __forceinline__ float ByteF(uint32_t v) {
+  if constexpr (kDirect) return UByte<n>(v);
+  if constexpr (n == 3) return static_cast<float>(v >> 24);
+  return static_cast<float>((v >> (8 * n)) & 0xFF);
+}
+
 /* sum_i (n_i + c) x_i over one 8-value IQ1 grid group: the nibbles move to
  * bytes (elements 0-3 low, 4-7 high) so each converts in one instruction. */
+template <bool kDirect = false>
 __device__ __forceinline__ float Iq1Dot(uint32_t grid, float c, const float* x) {
   /* Fixed order under -ffast-math: every kernel inlining this computes the
    * same sums, so grouped and per-slot launches agree bit for bit. */
@@ -56,14 +84,14 @@ __device__ __forceinline__ float Iq1Dot(uint32_t grid, float c, const float* x) 
   const uint32_t hi = (grid >> 4) & 0x0F0F0F0F;
   const float4 a = *reinterpret_cast<const float4*>(x);
   const float4 b = *reinterpret_cast<const float4*>(x + 4);
-  float dot = static_cast<float>(lo & 0xFF) * a.x;
-  dot = __builtin_fmaf(static_cast<float>((lo >> 8) & 0xFF), a.y, dot);
-  dot = __builtin_fmaf(static_cast<float>((lo >> 16) & 0xFF), a.z, dot);
-  dot = __builtin_fmaf(static_cast<float>(lo >> 24), a.w, dot);
-  dot = __builtin_fmaf(static_cast<float>(hi & 0xFF), b.x, dot);
-  dot = __builtin_fmaf(static_cast<float>((hi >> 8) & 0xFF), b.y, dot);
-  dot = __builtin_fmaf(static_cast<float>((hi >> 16) & 0xFF), b.z, dot);
-  dot = __builtin_fmaf(static_cast<float>(hi >> 24), b.w, dot);
+  float dot = ByteF<kDirect, 0>(lo) * a.x;
+  dot = __builtin_fmaf(ByteF<kDirect, 1>(lo), a.y, dot);
+  dot = __builtin_fmaf(ByteF<kDirect, 2>(lo), a.z, dot);
+  dot = __builtin_fmaf(ByteF<kDirect, 3>(lo), a.w, dot);
+  dot = __builtin_fmaf(ByteF<kDirect, 0>(hi), b.x, dot);
+  dot = __builtin_fmaf(ByteF<kDirect, 1>(hi), b.y, dot);
+  dot = __builtin_fmaf(ByteF<kDirect, 2>(hi), b.z, dot);
+  dot = __builtin_fmaf(ByteF<kDirect, 3>(hi), b.w, dot);
   const float sum = ((a.x + a.y) + (a.z + a.w)) + ((b.x + b.y) + (b.z + b.w));
   return __builtin_fmaf(c, sum, dot);
 }
@@ -208,7 +236,7 @@ struct Format<29> {
     float dot[4];
 #pragma unroll
     for (int l = 0; l < 4; ++l)
-      dot[l] = Iq1Dot(grid[((qs >> (8 * l)) & 0xFF) | high[l]], (flag[l] ? -IQ1M_DELTA : IQ1M_DELTA) - 1.0f,
+      dot[l] = Iq1Dot<true>(grid[((qs >> (8 * l)) & 0xFF) | high[l]], (flag[l] ? -IQ1M_DELTA : IQ1M_DELTA) - 1.0f,
                       x + 8 * l);
     return acc + __builtin_fmaf(s1, dot[0] + dot[1], s2 * (dot[2] + dot[3]));
   }
