@@ -652,8 +652,16 @@ both routing biases (`exp_probs_b`, `exp_probs_b_vl`) in the same order;
 every other tensor equals `IQ2_XXS`. The engine now takes the expert count
 from the GGUF (6 to 384, the same in every layer) for the router, the
 routing and the routed tile plans. The 72.1 GB backbone runs resident
-(66.7 GiB of device weights). `--stream-experts` refuses it: the streamed
-store and its built-in cache ranking index the full 384 experts.
+(66.7 GiB of device weights) or with streamed experts. The streamed store
+reads the build's 192 experts per layer and seeds its cache from the
+built-in V4.1 ranking of the kept experts: the release's `kept-experts.json`
+maps them to the original ids and is built in
+(`tools/ds41/import_pruned_experts.py`), recognized by a fingerprint of the
+routing biases. An unknown pruned build seeds without a ranking.
+
+Streamed with an 8 GiB cache (35-45% of routes read from the SSD), the
+decode and batched 3K scores are byte-identical to the resident ones
+(columns 1-4 of all 2,999 positions).
 
 Teacher-forced scores on the 3K text against the oracle run on the same
 file (`tools/ds41/reference.py`, CPU):
@@ -686,6 +694,17 @@ returns the parameter verbatim, as the official encoder does; the full
 |---|---:|---:|
 | Coder, resident | 1,430 ± 3 | 24.53 ± 0.07 |
 | `IQ1_M`, resident | 1,297 ± 69 | 24.79 ± 0.11 |
+
+Streamed (`gufo bench`, three repetitions, the benchmark's repeated
+sentence, so routing is narrower than real text; one run each, in this
+order, GPU 46 → 76 °C):
+
+| Coder | pp2048 | tg128 | pp2048 @ 32K | tg128 @ 32K |
+|---|---:|---:|---:|---:|
+| Resident | 1,454 ± 3 | 24.61 ± 0.04 | 1,357 ± 3 | 23.73 ± 0.00 |
+| Streamed, default cache (all 61.5 GiB, seeded in 13 s) | 1,400 ± 11 | 24.72 ± 0.04 | 1,304 ± 6 | 23.81 ± 0.02 |
+| Streamed, 30 GiB cache | 886 ± 155 | 14.49 ± 2.36 | 1,094 ± 56 | 21.81 ± 1.33 |
+| Streamed, 16 GiB cache | 722 ± 164 | 8.07 ± 1.09 | 740 ± 36 | 12.77 ± 1.47 |
 
 Served at the native 1M context with one session and the Q2_K/Q4_K
 drafter, 45.1 GiB of host memory stays available (1.75 GiB with `IQ1_M`).

@@ -129,6 +129,7 @@ Measurements first recorded in the backlog, without an E-number, are in
 | [E92](#e92--exact-victim-list-pops-eviction-scoring-against-the-offline-optimum-retained-scoring-change-not-retained) | expert cache | retained; scoring change not retained | Exact victim-list pops restore baseline reads (63.1–64.4 MiB per token); Belady's optimum halves decode misses; decay 3,200/bonus 8 inconclusive, not retained. |
 | [E94](#e94--single-token-expert-gemv-limits-on-the-gsq-rco-coder-iq1_m-direct-byte-converts-retained) | decode kernels | retained (IQ1_M byte converts); rest rejected | IQ1_M expert GEMV gate+up 163 → 160 µs, down 89 → 86.5 µs, bit-identical; LDS activations, shared gate/up activations, U=2/4/5 and the true16 flag gave nothing. |
 | [E95](#e95--128-slot-routed-fp16-tiles-on-the-gsq-rco-coder-rejected) | prefill kernels | rejected | 128-slot routed FP16 tiles on the Coder's routing (64% tile fill): IQ1_M gate+up 19.2 → 18.5 ms, down unchanged; IQ2_XXS gate+up +8%, down +23% (VGPR spills). |
+| [E96](#e96--streamed-expert-pruned-coder-retained) | streaming | retained | GSQ-RCO Coder with `--stream-experts`: kept-expert seed ranking, scores byte-identical to resident; default cache at resident speed (tg128 24.72 against 24.61), 30 GiB cache 14.5 tok/s cold. |
 
 ## Milestones
 
@@ -3410,6 +3411,32 @@ IQ2_XS spill 16 VGPRs. Even IQ1_M, without spills, gains only 3.5% on
 gate+up from 28% fewer decodes: the kernel is bound by WMMA issue and
 activation LDS reads, not decode. IQ1_M gate+up alone is ~16% of Coder
 prefill (~0.5% end to end), not worth a second tile plan per layer.
+
+## E96 — streamed expert-pruned Coder (retained)
+
+The expert store now sizes expert spans, the demand stage, the tails header
+and route checks by the GGUF's expert count, and `--stream-experts` accepts
+expert-pruned builds. Its cache seed maps the built-in V4.1 ranking through
+the build's kept experts: the GSQ-RCO Coder's `kept-experts.json` is built in
+(`pruned_gsq_rco_coder.inc`, `tools/ds41/import_pruned_experts.py`) and
+recognized by an FNV-1a fingerprint of the 40 layers' routing biases, since
+the GGUF does not name the kept experts. The ranking keeps its order and
+drops the pruned experts. An unknown pruned build seeds layer-interleaved
+experts without a ranking.
+
+Quality: with an 8 GiB cache (55-66% route hits during decode), the 3K decode
+and batched scores (columns 1-4, 2,999 positions) are byte-identical to the
+resident runs. `ds41.expert_store` adds a 192-expert store: its reads, the
+rejection of expert 192 and the unranked seed.
+
+`gufo bench` (three repetitions, repeated benchmark sentence), one run each:
+resident pp2048 1,454 / tg128 24.61, at 32K 1,357 / 23.73; streamed with the
+default cache (all 7,680 experts, 61.5 GiB, seeded in 13 s) 1,400 / 24.72 and
+1,304 / 23.81; 30 GiB cache (3,531 experts seeded) 886 ± 155 / 14.49 ± 2.36
+and 1,094 / 21.81; 16 GiB 722 / 8.07 and 740 / 12.77. The 30 GiB cache does
+not hold the hot set from the start: decode recovers as the cache learns
+the request (14.5 → 21.8 tok/s over the run). The runs heated the GPU from
+46 to 76 °C, so the default-cache prefill gap (−4%) is not attributed.
 
 ## Backlog measurements without an E-number
 

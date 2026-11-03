@@ -24,7 +24,8 @@ configuration.
   Unsloth's Dynamic `UD-IQ1_M` and `UD-IQ2_XXS` run with streamed experts; `UD-IQ1_S` uses
   only weight types Gufo supports but has not been tested
   ([Unsloth Dynamic quants](#unsloth-dynamic-quants)). The expert-pruned
-  GSQ-RCO `Coder` runs resident ([expert-pruned Coder](#expert-pruned-coder)).
+  GSQ-RCO `Coder` runs resident or with streamed experts
+  ([expert-pruned Coder](#expert-pruned-coder)).
 - **Engram tables:** the shared `IQ4_NL` file, read from disk. Unsloth's
   Engram shard holds the same tables.
 - **DSpark speculative decoding** with a separate drafter, plus prompt lookup:
@@ -115,7 +116,7 @@ hf download Lucebox/DeepSeek-V4.1-Flash-1017-ROCMFP-GGUF \
 | Source | File | Notes |
 | --- | --- | --- |
 | [ISTA-DASLab GSQ-RCO](https://huggingface.co/ISTA-DASLab/DeepSeek-V4.1-Flash-1017-GSQ-RCO-GGUF) | `*-IQ1_M-0000{1..5}-of-00006.gguf` or `*-IQ2_XXS-0000{1..5}-of-00006.gguf`, `DeepSeek-V4.1-Flash-Engram-IQ4_NL.gguf` (linked as shard 6) | `IQ1_M` fits resident; `IQ2_XXS` (138 GB) needs `--stream-experts`. |
-| [ISTA-DASLab GSQ-RCO Coder](https://huggingface.co/ISTA-DASLab/DeepSeek-V4.1-Flash-1017-GSQ-RCO-Coder-GGUF) | `IQ2_XXS/*-Coder-IQ2_XXS-0000{1..5}-of-00006.gguf`, the same Engram file (linked as shard 6) | Expert-pruned for code and agents; 72.1 GB, resident. See [expert-pruned Coder](#expert-pruned-coder). |
+| [ISTA-DASLab GSQ-RCO Coder](https://huggingface.co/ISTA-DASLab/DeepSeek-V4.1-Flash-1017-GSQ-RCO-Coder-GGUF) | `IQ2_XXS/*-Coder-IQ2_XXS-0000{1..5}-of-00006.gguf`, the same Engram file (linked as shard 6) | Expert-pruned for code and agents; 72.1 GB, resident or streamed. See [expert-pruned Coder](#expert-pruned-coder). |
 | [Lucebox](https://huggingface.co/Lucebox/DeepSeek-V4.1-Flash-1017-ROCMFP-GGUF) | `DeepSeek-V4.1-Flash-1017-DSpark-draft-Q2K-Q4K.gguf` | **Recommended drafter**: 4.59 GiB resident. |
 | [unsloth](https://huggingface.co/unsloth/DeepSeek-V4.1-Flash-1017-GGUF) | `UD-IQ1_M/*-0000{1..4}-of-00005.gguf`, Engram as shard 5 | `UD-IQ1_M` (140 GB) and `UD-IQ2_XXS` (165 GB) need `--stream-experts`; `UD-IQ1_S` (122 GB) is untested. See [Unsloth Dynamic quants](#unsloth-dynamic-quants). |
 | [unsloth](https://huggingface.co/unsloth/DeepSeek-V4.1-Flash-1017-GGUF) | `dspark-DeepSeek-V4.1-Flash-1017-Q8_0.gguf` | Supported: 7.42 GiB resident, about 2.6 GiB less host memory left, similar speed and acceptance. |
@@ -268,7 +269,11 @@ ln -s /path/to/ds41/DeepSeek-V4.1-Flash-Engram-IQ4_NL.gguf \
 
 The Engram file is the one of the unpruned builds; add `"*Engram*"` to the
 download if you do not have it. The DSpark drafters and the vision projector
-work unchanged. `--stream-experts` is not supported for pruned builds.
+work unchanged. With `--stream-experts` it keeps 5.2 GiB of dense weights
+resident and caches the experts in the free memory; by default all 61.5 GiB
+of them fit, and it runs at the resident speed. Smaller caches
+(`--expert-cache-bytes`) cost speed quickly: 30 GiB halved the first
+requests' decode in `gufo bench`.
 
 Streaming is never chosen automatically: without `--stream-experts`, a model
 that does not fit the available memory fails to load and states what it
