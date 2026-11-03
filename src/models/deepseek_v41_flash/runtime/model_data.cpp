@@ -1910,6 +1910,69 @@ static bool upload_directions(ds41_engine* e, const ds41_engine_options* opt) {
   return true;
 }
 
+/* Copies the LoRA halves to the device after checking each against the
+ * model's own matrix, and sizes the scratch for the largest batch. */
+static bool upload_loras(ds41_engine* e, const ds41_engine_options* opt) {
+  if (!opt->n_loras)
+    return true;
+  if (!opt->loras)
+    return false;
+  uint64_t floats = 0;
+  bool seen[DS41_N_LAYER][DS41_N_LORA_TARGETS] = {};
+  for (uint32_t i = 0; i < opt->n_loras; i++) {
+    const ds41_lora_matrix& m = opt->loras[i];
+    if (m.layer >= DS41_N_LAYER || m.target >= DS41_N_LORA_TARGETS || !m.rank || !m.a || !m.b ||
+        !std::isfinite(m.scale) || seen[m.layer][m.target]) {
+      fprintf(stderr, "ds41: LoRA matrix %u is invalid\n", i);
+      return false;
+    }
+    seen[m.layer][m.target] = true;
+    const ds41_layer_weights& l = e->weights->layer[m.layer];
+    const ds41_tensor* w = m.target == DS41_LORA_ATTN_OUTPUT_B   ? l.attn_output_b
+                           : m.target == DS41_LORA_FFN_DOWN_SHEXP ? l.ffn_down_shexp
+                                                                  : l.ffn_down_exps;
+    const bool experts = m.target == DS41_LORA_FFN_DOWN_EXPS;
+    const uint64_t in = w->dim[0], out = experts ? w->dim[1] : w->elements / w->dim[0];
+    if (m.in != in || m.out != out || m.experts != (experts ? DS41_N_EXPERT : 0)) {
+      fprintf(stderr,
+              "ds41: LoRA for blk.%u.%s is %u x %u (%u experts); the model's matrix is %" PRIu64 " x %" PRIu64
+              " (%u experts)\n",
+              m.layer, DS41_LORA_TARGETS[m.target], m.out, m.in, m.experts, out, in, experts ? DS41_N_EXPERT : 0);
+      return false;
+    }
+    floats += (uint64_t)std::max(m.experts, 1u) * m.rank * (m.in + m.out);
+    e->lora_max_rank = std::max(e->lora_max_rank, m.rank);
+  }
+  /* Rows of a down launch: routed slots of the largest batch; larger
+   * batches go through in chunks. */
+  e->lora_t_rows = (uint32_t)(DS41_MAX_PREFILL_BATCH * DS41_N_EXPERT_USED);
+  void* p = nullptr;
+  void* t = nullptr;
+  if (hipMalloc(&p, floats * sizeof(float)) != hipSuccess ||
+      hipMalloc(&t, (uint64_t)e->lora_t_rows * e->lora_max_rank * sizeof(float)) != hipSuccess) {
+    if (p)
+      (void)hipFree(p);
+    return false;
+  }
+  e->lora_buf = static_cast<float*>(p);
+  e->lora_t = static_cast<float*>(t);
+  float* next = e->lora_buf;
+  for (uint32_t i = 0; i < opt->n_loras; i++) {
+    const ds41_lora_matrix& m = opt->loras[i];
+    const uint64_t na = (uint64_t)std::max(m.experts, 1u) * m.rank * m.in;
+    const uint64_t nb = (uint64_t)std::max(m.experts, 1u) * m.rank * m.out;
+    if (hipMemcpy(next, m.a, na * sizeof(float), hipMemcpyHostToDevice) != hipSuccess ||
+        hipMemcpy(next + na, m.b, nb * sizeof(float), hipMemcpyHostToDevice) != hipSuccess)
+      return false;
+    e->lora[m.layer][m.target] = {next, next + na, m.rank, m.in, m.out, m.scale};
+    next += na + nb;
+  }
+  gufo::server::Logger::LogFormatted(gufo::server::LogLevel::kInfo, "ds41",
+                                     "LoRA adapter: %u matrices, rank up to %u, %.2f MiB", opt->n_loras,
+                                     e->lora_max_rank, (double)floats * sizeof(float) / 1048576.0);
+  return true;
+}
+
 int ds41_engine_open(ds41_engine** out, const ds41_engine_options* opt) {
   if (out)
     *out = nullptr;
@@ -2073,6 +2136,12 @@ int ds41_engine_open(ds41_engine** out, const ds41_engine_options* opt) {
       e->expert_histogram = strdup((std::string(opt->model_path) + ".expert-histogram").c_str());
       seed_experts(e);
     }
+    if (!upload_loras(e, opt)) {
+      fprintf(stderr, "ds41: failed to load the LoRA adapter\n");
+      ds41_engine_close(e);
+      *out = nullptr;
+      return 1;
+    }
     if (!upload_directions(e, opt)) {
       fprintf(stderr, "ds41: failed to load the direction adapter\n");
       ds41_engine_close(e);
@@ -2158,6 +2227,10 @@ void ds41_engine_close(ds41_engine* e) {
     (void)hipFree(e->image_bias);
   if (e->steer_vectors)
     (void)hipFree(e->steer_vectors);
+  if (e->lora_buf)
+    (void)hipFree(e->lora_buf);
+  if (e->lora_t)
+    (void)hipFree(e->lora_t);
   if (e->weights && e->weights->router_bf16)
     (void)hipFree(e->weights->router_bf16);
   ds41_expert_store_log(e->expert_store);

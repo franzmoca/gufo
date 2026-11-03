@@ -19,7 +19,7 @@
 #include <thread>
 #include <vector>
 
-#include "src/core/direction_adapter.hpp"
+#include "src/models/deepseek_v41_flash/adapter.hpp"
 #include "src/models/deepseek_v41_flash/runtime/model.h"
 #include "src/models/deepseek_v41_flash/runtime/model_data_internal.h"
 #include "src/models/deepseek_v41_flash/runtime/v41_dspark.h"
@@ -864,29 +864,14 @@ int main(int argc, char** argv) {
   options.stream_experts = stream_experts;
   options.expert_cache_bytes = expert_cache_bytes;
   options.dspark_model_path = dspark;
-  std::optional<gufo::core::DirectionAdapter> directions;
-  std::vector<ds41_direction_set> sets;
+  gufo::models::deepseek_v41_flash::Adapter loaded;
   if (adapter) {
-    static constexpr std::array<std::string_view, DS41_N_DIRECTION_SITES>
-        kSites = {DS41_DIRECTION_SITES[0], DS41_DIRECTION_SITES[1],
-                  DS41_DIRECTION_SITES[2]};
     std::string error;
-    directions = gufo::core::LoadDirectionAdapter(adapter,
-                                                  {.architecture = "deepseek41",
-                                                   .width = DS41_N_EMBD,
-                                                   .layers = DS41_N_LAYER,
-                                                   .sites = kSites},
-                                                  &error);
-    if (!directions) {
+    if (!loaded.Load(adapter, adapter_scale, &error)) {
       std::fprintf(stderr, "%s\n", error.c_str());
       return 1;
     }
-    for (const auto& set : directions->sets)
-      sets.push_back({set.layer, set.site, set.count, set.vectors.data()});
-    options.directions = sets.data();
-    options.n_directions = (uint32_t)sets.size();
-    options.direction_scale = directions->scale * adapter_scale;
-    options.direction_add = directions->mode == gufo::core::DirectionMode::kAdd;
+    loaded.Apply(&options);
   }
   if (ds41_engine_open(&engine, &options) != 0)
     return 1;

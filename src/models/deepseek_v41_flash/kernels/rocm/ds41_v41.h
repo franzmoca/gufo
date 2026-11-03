@@ -241,6 +241,18 @@ void ds41_v41_steer_gram(const float* extra_v, uint32_t extra_k, const float* to
 int ds41_v41_hc_expand_steer(const float* x, const float* extra, uint32_t rows, const float* residual,
                              const float* post, const float* comb, float* out, uint32_t hc, uint32_t dim, uint32_t n,
                              const ds41_v41_steer* s);
+/* LoRA low-rank terms, y += scale B (A x), in two launches through t.
+ * Down: t[c, j] = sum_k a[e][j][k] x[c, k] for rows c, with e = ids[c]
+ * (ids NULL: 0; ids[c] < 0: t[c] = 0); a [experts][rank][in]; x rows are
+ * FP16 when x_half, else FP32. */
+int ds41_v41_lora_down(const void* x, int x_half, const int32_t* ids, const float* a, uint32_t rank, uint32_t in,
+                       uint32_t rows, float* t);
+/* Up: y[r, i] += scale sum_{s < group} sum_j b[e][i][j] t[r group + s, j]
+ * for rows r, e = ids[r group + s] as for down; b [experts][out][rank]. A
+ * group of routed slots so adds their terms to one token row. */
+int ds41_v41_lora_up(const float* t, const int32_t* ids, uint32_t group, const float* b, uint32_t rank, uint32_t out,
+                     float scale, uint32_t rows, float* y);
+
 /* ds41_v41_hc_state_pass (with y) whose expanded sum takes the edits of s;
  * s NULL is the plain pass. */
 int ds41_v41_hc_state_pass_steer(const float* y, const float* x, uint32_t rows, const float* post, const float* comb,

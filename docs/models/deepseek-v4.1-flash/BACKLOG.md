@@ -347,7 +347,6 @@ under 1% of warm streamed prefill) and close.
 | 16 | Multi-user AR decode | Distinct-prompt `IQ1_M` C8 63.0 tok/s against a ~93 tok/s read ceiling | Card refresh with distinct prompts, then a C8 trace |
 | 10 | Batch-level draft width | DSpark trails AR with distinct prompts at C4 (53.6 against 55.5) and C8 (59.3 against 63.0) | Re-measure E27's batch plan after E42 |
 | 27 | Streamed kernels for the `IQ2_XS` build | Prerequisite for item 23 | IQ3_XXS down, IQ2_S gate/up paths |
-| 26 | LoRA adapters (GGUF `adapter.type = lora`) | Adapter compatibility; rank-1 abliteration adapters already load as directions (E94) | Low-rank GEMV/GEMM epilogues |
 
 ### 16. Multi-user AR decode below the card
 
@@ -377,23 +376,12 @@ layers 17, 25 and 30 (`fused_pair` and `routed_f16_type` exclude it)
 Check each against the resident MMQ/MMVQ outputs (`ds41.mmq_typed`,
 `ds41_gemv_bench`); existing builds stay bit-identical.
 
-### 26. LoRA adapters
+### Adapter follow-ups
 
-Load GGUF LoRA adapters as low-rank epilogues (`y += scale · B (A x)`) of
-the dense and shared-expert GEMVs/GEMMs, and for routed experts as
-per-expert A and B indexed by the route (~29 KB per expert at rank 1,
-resident while experts stream). Rank-1 abliteration adapters (one `lora_b`
-direction everywhere) already convert to direction adapters that remove it
-exactly (`tools/adapters/direction_adapter.py from-lora`, E94); loading
-such a LoRA as low-rank epilogues instead would compare the stored halves
-(3.8% off `-rᵀW` on `IQ1_M`) against the exact projection. The prompt cache
-must key on adapters and scales (`adapters=` in the disk identity, as
-`--adapter` does). Keep the loader in `src/core/` beside the direction
-adapter's.
-
-Direction adapter follow-ups: per-request scale (the cache would key on
-it), and the batched whole-FFN edit folded into `hc_state_pass` (LoRA
-direction prefill −2.5%, E94).
+Per-request adapter scale (the prompt cache would key on it). LoRA decode
+launches: each matrix adds a down and an up launch (240 per token for the
+L22 LoRA, −3.2% decode, E95); one-launch kernels lost, so the remaining
+option is the A dot and B term as epilogues of the producing GEMVs.
 
 ## Tried and closed
 
@@ -431,6 +419,7 @@ in EXPERIMENTS.md.
 
 | Item | Result | Ref |
 | --- | --- | --- |
+| LoRA adapters (item 26): `--adapter` on `attn_output_b`, `ffn_down_shexp`, `ffn_down_exps` | Bit-identical without one; L22 LoRA 3K KL 0.012, heretic 0.018; decode −1.6 to −3.2% | E95 |
 | Direction adapters (item 25): `--adapter`, mako files and rank-1 LoRAs | Bit-identical without one; 3K perplexity ±0.002 nats, KL 0.012-0.015; decode −0.5 to −0.9% | E94 |
 | Greedy DSpark width policy (DECODE.md lever 1) | Chat 16.5-16.9 → 17.6-18.9, code 26.6-27.4 → 28.3-28.7, long 24.7-26.2 → 26.4-26.7 tok/s | E87 |
 | Top-p softmax totals on the device (DECODE.md lever 4) | Sampled DSpark +0.3 to +1.1 tok/s, AR sampled +0.1 to +0.2 | E88 |

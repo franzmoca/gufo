@@ -331,9 +331,10 @@ single-user, concurrent, loading and memory tables for `IQ1_M` resident and
 for `IQ2_XXS`, `UD-IQ1_M` and `UD-IQ2_XXS` streamed. `UD-IQ2_XXS` against
 `UD-IQ1_M` on the same build is in [QUALITY.md](docs/models/deepseek-v4.1-flash/QUALITY.md#streamed-ud-iq2_xxs).
 
-## Direction adapters
+## Adapters
 
-`--adapter FILE` loads a direction adapter, a small GGUF of per-layer
+`--adapter FILE` loads a direction adapter or a LoRA adapter. A direction
+adapter is a small GGUF of per-layer
 vectors that the engine removes from (or adds to) what a sublayer writes
 into the residual streams. The model weights stay unchanged. The sites are
 `attn_out` (attention output), `shexp_out` (shared expert output) and
@@ -361,9 +362,22 @@ nix develop -c python3 tools/adapters/direction_adapter.py from-lora \
 The LoRA stores `lora_a = -rᵀW` computed from another quantization; as a
 projection the direction is removed exactly on any build (`--model` checks
 the LoRA's sign against that build: on `IQ1_M` its `lora_a` differs from
-`-rᵀW` by 3.8%). Without an adapter the engine is bit-identical. On
-`IQ1_M` the adapters cost 0.5-0.9% decode and 0.8-2.5% prefill
-([E94](docs/models/deepseek-v4.1-flash/EXPERIMENTS.md#e94--direction-adapters-retained)).
+`-rᵀW` by 3.8%).
+
+LoRA adapters (GGUF `adapter.type = lora`, llama.cpp's layout, F32, F16 or
+BF16) load as they are, on the matrices that write into the residual
+streams: `attn_output_b`, `ffn_down_shexp` and `ffn_down_exps` (per-expert
+halves, applied by the route). Each adds `scale · B (A x)` with
+`scale = --adapter-scale · alpha / rank`; files with other targets are
+rejected. The halves stay resident in F32, also while experts stream. Use
+this for LoRAs with a different direction per layer or rank above 1 (the
+heretic LoRA, for example), which have no direction-adapter form.
+
+Without an adapter the engine is bit-identical. On `IQ1_M` direction
+adapters cost 0.5-1.3% decode and under 1% prefill; LoRA adapters 1.6%
+(heretic) to 3.2% (the 120-matrix L22 LoRA) decode and 1.3-2.9% prefill
+([E94](docs/models/deepseek-v4.1-flash/EXPERIMENTS.md#e94--direction-adapters-retained),
+[E95](docs/models/deepseek-v4.1-flash/EXPERIMENTS.md#e95--lora-adapters-retained)).
 
 ## Model notes
 

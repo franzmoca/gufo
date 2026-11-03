@@ -55,6 +55,7 @@ target_link_libraries(gufo_deepseek_v41_flash_mmq PUBLIC
   roc::hipblas)
 
 add_library(gufo_deepseek_v41_flash STATIC
+  adapter.cpp
   chat_template.cpp
   continuation_adapter.cpp
   engine.cpp

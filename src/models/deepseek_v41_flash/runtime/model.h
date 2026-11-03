@@ -29,6 +29,23 @@ struct ds41_direction_set {
   const float* vectors;  // [count][DS41_N_EMBD], copied at open
 };
 
+/* LoRA targets (src/core/lora_adapter.hpp): the matrices that write into
+ * the residual streams. */
+inline constexpr const char* DS41_LORA_TARGETS[] = {"attn_output_b", "ffn_down_shexp", "ffn_down_exps"};
+enum : uint32_t { DS41_LORA_ATTN_OUTPUT_B, DS41_LORA_FFN_DOWN_SHEXP, DS41_LORA_FFN_DOWN_EXPS, DS41_N_LORA_TARGETS };
+
+struct ds41_lora_matrix {
+  uint32_t layer;
+  uint32_t target;  // DS41_LORA_*
+  uint32_t rank;
+  uint32_t in;
+  uint32_t out;
+  uint32_t experts;  // DS41_N_EXPERT for ffn_down_exps, else 0
+  float scale;       // the run-time scale times alpha / rank
+  const float* a;    // [max(experts, 1)][rank][in], copied at open
+  const float* b;    // [max(experts, 1)][out][rank]
+};
+
 struct ds41_engine_options {
   const char* model_path;
   /* Optional DSpark support model. NULL leaves speculative decoding off and
@@ -58,6 +75,10 @@ struct ds41_engine_options {
   uint32_t n_directions;
   float direction_scale;
   bool direction_add;
+  /* LoRA matrices, at most one per (layer, target); none leaves the engine
+   * bit-identical. */
+  const ds41_lora_matrix* loras;
+  uint32_t n_loras;
 };
 
 inline constexpr uint32_t DS41_MIN_PREFILL_BATCH = 16;

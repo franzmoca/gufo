@@ -1550,6 +1550,51 @@ __global__ __launch_bounds__(kSteerThreads) void steer_rows_kernel(float* y, con
   }
 }
 
+/* LoRA down: one block per (row, rank component), a dot over in. */
+template <bool kHalf>
+__global__ __launch_bounds__(kThreads) void lora_down_kernel(const void* x, const int32_t* ids, const float* a,
+                                                             uint32_t rank, uint32_t in, float* t) {
+  const uint64_t c = blockIdx.x;
+  const uint32_t j = blockIdx.y;
+  const int32_t e = ids ? ids[c] : 0;
+  __shared__ float red[kThreads / 32];
+  float acc = 0.0f;
+  if (e >= 0) {
+    const float* aj = a + ((uint64_t)e * rank + j) * in;
+    for (uint32_t k = threadIdx.x; k < in; k += blockDim.x) {
+      const float xv = kHalf ? __half2float(static_cast<const __half*>(x)[c * in + k])
+                             : static_cast<const float*>(x)[c * in + k];
+      acc += aj[k] * xv;
+    }
+  }
+  for (int o = 16; o > 0; o >>= 1) acc += __shfl_xor(acc, o, 32);
+  if (threadIdx.x % 32 == 0) red[threadIdx.x / 32] = acc;
+  __syncthreads();
+  if (threadIdx.x == 0) {
+    float sum = 0.0f;
+    for (uint32_t w = 0; w < blockDim.x / 32; w++) sum += red[w];
+    t[c * rank + j] = sum;
+  }
+}
+
+/* LoRA up: thread per output channel of one token row. */
+__global__ void lora_up_kernel(const float* t, const int32_t* ids, uint32_t group, const float* b, uint32_t rank,
+                               uint32_t out, float scale, float* y) {
+  const uint32_t i = blockIdx.x * blockDim.x + threadIdx.x;
+  if (i >= out) return;
+  const uint64_t r = blockIdx.y;
+  float acc = 0.0f;
+  for (uint32_t s = 0; s < group; s++) {
+    const uint64_t c = r * group + s;
+    const int32_t e = ids ? ids[c] : 0;
+    if (e < 0) continue;
+    const float* bi = b + ((uint64_t)e * out + i) * rank;
+    const float* tc = t + c * rank;
+    for (uint32_t j = 0; j < rank; j++) acc += bi[j] * tc[j];
+  }
+  y[r * out + i] += scale * acc;
+}
+
 /* Thread per channel; tokens in order, since groups span the frontier. */
 __global__ void compress_pool_kernel(const float* kv, const float* score, float* state_kv, float* state_score,
                                      uint32_t pos0, uint32_t n, uint32_t ratio, float* out, uint32_t dim) {
@@ -3330,6 +3375,26 @@ extern "C" void ds41_v41_steer_gram(const float* extra_v, uint32_t extra_k, cons
       if (j < total_k && a < extra_k)
         g[2 * kSteerMaxK * kSteerMaxK] = dot(extra_v + (uint64_t)a * dim, total_v + (uint64_t)j * dim);
     }
+}
+
+extern "C" int ds41_v41_lora_down(const void* x, int x_half, const int32_t* ids, const float* a, uint32_t rank,
+                                  uint32_t in, uint32_t rows, float* t) {
+  if (!x || !a || !t || rank == 0 || rank > 65535 || in == 0) return 1;
+  if (rows == 0) return 0;
+  const dim3 grid(rows, rank);
+  if (x_half)
+    lora_down_kernel<true><<<grid, kThreads>>>(x, ids, a, rank, in, t);
+  else
+    lora_down_kernel<false><<<grid, kThreads>>>(x, ids, a, rank, in, t);
+  return launch_ok("lora down");
+}
+
+extern "C" int ds41_v41_lora_up(const float* t, const int32_t* ids, uint32_t group, const float* b, uint32_t rank,
+                                uint32_t out, float scale, uint32_t rows, float* y) {
+  if (!t || !b || !y || rank == 0 || group == 0 || rows > 65535) return 1;
+  if (rows == 0) return 0;
+  lora_up_kernel<<<dim3(blocks_for(out), rows), kThreads>>>(t, ids, group, b, rank, out, scale, y);
+  return launch_ok("lora up");
 }
 
 extern "C" int ds41_v41_steer_rows(float* y, const float* x, uint32_t rows, uint32_t dim, uint32_t n,

@@ -3,7 +3,10 @@
 // shared expert's vectors on extra, then the whole-sum vectors over extra
 // plus six routed rows) and the in-place form followed by the plain expand
 // sum, in project and add modes. Project vectors are not orthogonal, so the
-// order of the per-vector edits is checked too.
+// order of the per-vector edits is checked too. LoRA low-rank terms are
+// checked the same way: dense and per-expert halves, FP16 and FP32 inputs,
+// routed slot groups and dropped slots.
+#include <hip/hip_fp16.h>
 #include <hip/hip_runtime.h>
 
 #include <algorithm>
@@ -223,6 +226,74 @@ bool StatePassCase(uint32_t n, uint32_t rows, uint32_t extra_k,
 /* Microseconds per launch for one decode token: the plain expands against
  * the fused forms at the attention (k = 2) and FFN (shared k = 2, whole
  * k = 1) sites. */
+// y += scale B (A x) through ds41_v41_lora_down/up: `group` slots per token
+// row, expert ids per slot (some dropped) when `experts` > 0.
+bool LoraCase(uint32_t n, uint32_t group, uint32_t experts, uint32_t rank,
+              uint32_t in, uint32_t out, bool half, std::mt19937& rng) {
+  const uint32_t slots = n * group, sets = std::max(experts, 1u);
+  const auto x = Random((std::size_t)slots * in, -1.0f, 1.0f, rng);
+  const auto a = Random((std::size_t)sets * rank * in, -0.05f, 0.05f, rng);
+  const auto b = Random((std::size_t)sets * out * rank, -0.05f, 0.05f, rng);
+  const auto y0 = Random((std::size_t)n * out, -1e-3f, 1e-3f, rng);
+  std::vector<int32_t> ids(slots, 0);
+  if (experts)
+    for (uint32_t c = 0; c < slots; ++c)
+      ids[c] = c % 5 == 3 ? -1 : (int32_t)(rng() % experts);
+  const float scale = 0.75f;
+  std::vector<__half> xh(x.size());
+  std::vector<float> xr(x);  // the values the kernel reads
+  for (std::size_t i = 0; i < x.size(); ++i) {
+    xh[i] = __float2half(x[i]);
+    if (half)
+      xr[i] = __half2float(xh[i]);
+  }
+  std::vector<double> want(y0.begin(), y0.end());
+  for (uint32_t r = 0; r < n; ++r)
+    for (uint32_t s = 0; s < group; ++s) {
+      const uint32_t c = r * group + s;
+      if (ids[c] < 0)
+        continue;
+      const std::size_t e = ids[c];
+      std::vector<double> t(rank, 0.0);
+      for (uint32_t j = 0; j < rank; ++j)
+        for (uint32_t k = 0; k < in; ++k)
+          t[j] +=
+              (double)a[(e * rank + j) * in + k] * xr[(std::size_t)c * in + k];
+      for (uint32_t i = 0; i < out; ++i)
+        for (uint32_t j = 0; j < rank; ++j)
+          want[(std::size_t)r * out + i] +=
+              scale * (double)b[(e * out + i) * rank + j] * t[j];
+    }
+  void* dx = nullptr;
+  int32_t* dids = nullptr;
+  if (half) {
+    (void)hipMalloc(&dx, xh.size() * sizeof(__half));
+    (void)hipMemcpy(dx, xh.data(), xh.size() * sizeof(__half),
+                    hipMemcpyHostToDevice);
+  } else {
+    dx = Device(x);
+  }
+  if (experts) {
+    (void)hipMalloc(&dids, ids.size() * sizeof(int32_t));
+    (void)hipMemcpy(dids, ids.data(), ids.size() * sizeof(int32_t),
+                    hipMemcpyHostToDevice);
+  }
+  float* da = Device(a);
+  float* db = Device(b);
+  float* dy = Device(y0);
+  float* dt = Device(std::vector<float>((std::size_t)slots * rank, NAN));
+  bool ok = ds41_v41_lora_down(dx, half, dids, da, rank, in, slots, dt) == 0 &&
+            ds41_v41_lora_up(dt, dids, group, db, rank, out, scale, n, dy) == 0;
+  const double err = ok ? RelErr(Host(dy, want.size()), want) : 1.0;
+  ok = ok && err < 1e-5;
+  std::printf("%s lora n=%u group=%u experts=%u rank=%u %s: err %.2e\n",
+              ok ? "ok  " : "FAIL", n, group, experts, rank,
+              half ? "f16" : "f32", err);
+  for (void* p : {dx, (void*)dids, (void*)da, (void*)db, (void*)dy, (void*)dt})
+    (void)hipFree(p);
+  return ok;
+}
+
 void Bench(std::mt19937& rng) {
   const uint32_t n = 1, rows = 6;
   auto* res = Device(Random(kHc * kDim, -2.0f, 2.0f, rng));
@@ -308,6 +379,12 @@ int main(int argc, char** argv) {
       ok = StatePassCase(n, 6, 2, 0, add, rng) && ok;
       ok = StatePassCase(n, 6, 0, 1, add, rng) && ok;
       ok = StatePassCase(n, 6, 4, 4, add, rng) && ok;
+    }
+  for (uint32_t n : {1u, 37u})
+    for (bool half : {false, true}) {
+      ok = LoraCase(n, 1, 0, 2, 4096, kDim, half, rng) && ok;   // attn_output_b
+      ok = LoraCase(n, 1, 0, 16, 2048, kDim, half, rng) && ok;  // shared down
+      ok = LoraCase(n, 6, 9, 4, 2048, kDim, half, rng) && ok;   // routed down
     }
   return ok ? 0 : 1;
 }

@@ -128,6 +128,7 @@ Measurements first recorded in the backlog, without an E-number, are in
 | [E91](#e91--eviction-victim-lists-retained-pop-check-corrected-in-e92) | expert cache | retained, corrected by E92 | Eviction victim lists: 3K probe 58.85 → 56.15 ms/token; the served gains did not reproduce (E92). |
 | [E92](#e92--exact-victim-list-pops-eviction-scoring-against-the-offline-optimum-retained-scoring-change-not-retained) | expert cache | retained; scoring change not retained | Exact victim-list pops restore baseline reads (63.1–64.4 MiB per token); Belady's optimum halves decode misses; decay 3,200/bonus 8 inconclusive, not retained. |
 | [E94](#e94--direction-adapters-retained) | features | retained | Direction adapters (`--adapter`): mako files and rank-1 LoRAs as exact projections; bit-identical without one; 3K perplexity within ±0.002 nats, KL 0.012-0.015; decode −0.5 to −0.9%. |
+| [E95](#e95--lora-adapters-retained) | features | retained | LoRA adapters (`--adapter`, `adapter.type = lora`) on `attn_output_b`, `ffn_down_shexp` and per-expert `ffn_down_exps`; bit-identical without one; L22 abliteration LoRA 3K KL 0.012, heretic 0.018. Decode −1.6% (heretic) to −3.2% (L22), prefill −1.3% to −2.9%. |
 
 ## Milestones
 
@@ -3412,12 +3413,85 @@ steps:
 
 Speed, `gufo bench` pp2048/tg128 AR, three runs each in balanced order
 (tok/s): none 1,402 / 25.15, mako 1,390 / 25.02 (−0.8% / −0.5%), LoRA
-direction 1,367 / 24.93 (−2.5% / −0.9%). The LoRA's prefill cost is the
-in-place whole-FFN edit re-reading the routed rows; folding it into the
-state pass would remove it. DSpark tg128 (one request; each adapter
+direction 1,367 / 24.93 (−2.5% / −0.9%). The LoRA's prefill cost was the
+in-place whole-FFN edit re-reading the routed rows. With the batched edits
+folded into `hc_state_pass` (the expanded sum takes the edits; 16 more
+`ds41.steer` cases): none ~1,410 / 25.2, mako ~1,406 / 25.07, LoRA
+direction ~1,398 / 24.91 (prefill −0.3% and −0.9%). DSpark tg128 (one request; each adapter
 changes the text, so acceptance is not on the same tokens): none 39.6-40.3
 tok/s, 74-75 of 85-86 drafts accepted in 36-37 steps; mako 34.9-36.8,
 70-72 of 94-99 in 36-37; LoRA 31.4-31.8, 60-61 of 80 in 59-60 steps.
+
+Refusal rates were not measured here.
+
+## E95 — LoRA adapters (retained)
+
+BACKLOG item 26. `--adapter FILE` also loads GGUF LoRA adapters
+(`adapter.type = lora`, llama.cpp's layout; loader in
+`src/core/lora_adapter.cpp`, F32/F16/BF16 halves) on the three matrices
+that write into the residual streams: `attn_output_b`, `ffn_down_shexp` and
+`ffn_down_exps` (per-expert halves indexed by the route). Other targets are
+rejected with the supported list. Each term is `y += scale · B (A x)` with
+`scale = --adapter-scale · alpha / rank` in two launches: A over the
+matrix's own input rows (FP16 when the batched path keeps them in FP16),
+then B summing the six routed slots of a token into the shared-expert
+output, so the routed terms add no rows to the hc expand. The halves stay
+resident in F32 while experts stream (L22 abliteration LoRA: 120 matrices,
+438 MiB; heretic: 38 matrices, rank 2, 3.9 MiB). The disk prompt cache keys
+on `lora:<digest>:scale=<s>`.
+
+`ds41.steer` checks both launches against a double-precision reference
+(dense and per-expert halves, FP32 and FP16 inputs, six-slot groups with
+dropped slots; ≤ 2.5e-7 relative to the LoRA term). `lora_adapter_test`
+covers the loader.
+
+Gates, ISTA `IQ1_M` resident, `gpu-test` probe, the E94 3K set (2,048-token
+batches plus 64 greedy steps):
+
+- No adapter: all 3,064 logit rows and the 64 generated tokens
+  byte-identical to the build before.
+- Against no adapter (standard error over 100-token blocks):
+
+| Adapter | Perplexity | ΔNLL | KL mean | KL p99 | KL max | Top-1 agreement |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| none | 6.873 | | | | | |
+| BoldingBuilds rank-1 L22 as LoRA | 6.859 | −0.0020 ± 0.0032 | 0.0116 | 0.065 | 1.92 | 95.0% |
+| the same as projection (E94) | 6.875 | +0.0003 ± 0.0027 | 0.0110 | 0.065 | 2.17 | 95.6% |
+| heretic LoRA (`attn_output_b`, layers 2-39, rank 2) | 6.841 | −0.0047 ± 0.0039 | 0.0176 | 0.115 | 2.36 | 93.5% |
+
+  The L22 LoRA against its projection: KL 0.0099, agreement 95.5%, about
+  the distance of either from no adapter.
+- Decode path against batched path on 512 positions, the same adapter on
+  both: KL mean 0.0157 (none), 0.0160 (L22 LoRA), 0.0213 (heretic);
+  agreement 95.3%, 94.5%, 94.1%. Whole-model comparisons do not isolate
+  the paths: even at `--adapter-scale 0.05` the adapters move KL by
+  0.013, since a small change flips routed experts (the decoded token's
+  layer-0 route already differs between the two paths without an
+  adapter). Isolated instead: random rank-4 LoRAs on layer 39 alone, whose
+  `ffn_down` terms no routing follows; per position the logit change of
+  the decode path against the batched path (128 positions): shared expert
+  cosine 0.9998 (median, min 0.937), routed experts 0.985, attention output
+  0.991, norm ratios 0.99. A slot-order or id error would put the routed
+  cosine near zero; the low minimums are positions whose layer-39 routes
+  differ between the paths.
+
+Speed, `gufo bench` pp2048/tg128 AR, three runs each in balanced order
+(medians, tok/s; one cold first run of none at 1,385 / 24.64 left out):
+none 1,404 / 25.19; L22 direction adapter (E94) 1,392 / 24.86 (−0.9% /
+−1.3%); heretic LoRA 1,386 / 24.79 (−1.3% / −1.6%); L22 LoRA 1,363 / 24.38
+(−2.9% / −3.2%). The L22 LoRA's 120 matrices add 240 small dependent
+launches per token, which is the decode cost; the reads are tiny. Two
+one-launch forms lost: one block per token row (decode 24.38 → 21.8 tok/s,
+one workgroup reads the 180 KB of routed halves) and one block per 256
+output channels recomputing the A dots in LDS (→ 22.4; one wave per dot
+over 8,192 inputs is a long serial chain). Folding the terms into the
+producing GEMV/GEMM epilogues is the remaining option (BACKLOG).
+
+Greedy DSpark output equals AR output for both LoRAs (`gufo bench` output
+hashes; L22 35.1 tok/s, 71 of 85 drafts in 53 steps; heretic 31.2, 59 of
+82 in 63). With `--stream-experts` the L22 LoRA's output equals the
+resident one (tg64 hashes, also without an adapter); streamed pp2048/tg64
+1,341 / 24.98 without, 1,299 / 23.48 with it (one run each).
 
 Refusal rates were not measured here.
 

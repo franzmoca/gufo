@@ -316,6 +316,7 @@ add_library(gufo_core STATIC
   src/core/gguf_reader.cpp
   src/core/gguf_identity.cpp
   src/core/direction_adapter.cpp
+  src/core/lora_adapter.cpp
   src/core/json_constraint.cpp
   src/core/json_schema_lexeme.cpp
   src/core/json_schema_regex.cpp
@@ -966,6 +967,10 @@ if (BUILD_TESTING)
   target_link_libraries(direction_adapter_test PRIVATE gufo_core)
   add_test(NAME direction_adapter_test COMMAND direction_adapter_test)
   set_tests_properties(direction_adapter_test PROPERTIES LABELS "cpu;core;gguf")
+  add_executable(lora_adapter_test tests/core/lora_adapter_test.cpp)
+  target_link_libraries(lora_adapter_test PRIVATE gufo_core)
+  add_test(NAME lora_adapter_test COMMAND lora_adapter_test)
+  set_tests_properties(lora_adapter_test PROPERTIES LABELS "cpu;core;gguf")
   endif()
 
   add_executable(minimax_h3_runtime_test
