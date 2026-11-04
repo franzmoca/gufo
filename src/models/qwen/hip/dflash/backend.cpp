@@ -547,9 +547,11 @@ std::optional<speculative::DraftProposal> QwenDFlashGpuDraftBackend::TryLookup(
     return std::nullopt;
   const auto committed = tokens.first(position);
   lookup_.Extend(committed, sampled);
-  const auto cap = std::min(limit, copy_limit);
-  const auto match =
-      lookup_.Find(committed, tokens.last(1), minimum, [&](std::size_t start) {
+  auto cap = std::min(limit, copy_limit);
+  std::size_t agreed = std::numeric_limits<std::size_t>::max();
+  const auto match = lookup_.Find(
+      committed, tokens.last(1), minimum,
+      [&](std::size_t start) {
         const auto count =
             std::min(std::size_t{cap}, lookup_.IndexedTokens() - start);
         // A repeated passage often matches closest to the end of a user
@@ -561,9 +563,15 @@ std::optional<speculative::DraftProposal> QwenDFlashGpuDraftBackend::TryLookup(
               return std::ranges::find(lookup_boundaries_, token) !=
                      lookup_boundaries_.end();
             });
-      });
+      },
+      /*require_resume=*/false, &agreed);
   if (match.length == 0)
     return std::nullopt;
+  // Copies go only as far as the other occurrences matching about as
+  // well agree. Without disagreement, agreed reaches the end of the indexed
+  // source and a short-period repetition still continues into the copy.
+  if (agreed < lookup_.IndexedTokens() - match.start)
+    cap = static_cast<std::uint32_t>(std::min<std::size_t>(cap, agreed));
   // The source aligns with the context ending at the anchor, so its
   // continuation runs past the committed tokens into the anchor and the copy
   // itself. A short-period repetition then fills the block instead of

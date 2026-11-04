@@ -955,16 +955,21 @@ bool Session::AppendLookup(PendingDecode& pending, bool stop_at_eos,
   if (stop_at_eos && model_->IsStopToken(pending.chain.back())) {
     return false;
   }
+  // Greedy copies go only as far as the other occurrences matching about as
+  // well agree: repeated syntax (a log line's timestamp) matches many earlier
+  // lines, and their continuations show how much of the copy is ambiguous.
+  std::size_t agreed = std::numeric_limits<std::size_t>::max();
   const auto match = lookup_.Find(
       tokens_, pending.chain,
       pending.sampled ? speculative::PromptLookup<>::kSampledMinMatch
                       : speculative::PromptLookup<>::kMinMatch,
-      require_resume);
+      require_resume, pending.sampled ? nullptr : &agreed);
   if (match.length == 0) {
     return false;
   }
-  const std::size_t available = std::min(cap - pending.chain.size(),
-                                         lookup_.IndexedTokens() - match.start);
+  const std::size_t available =
+      std::min({cap - pending.chain.size(),
+                lookup_.IndexedTokens() - match.start, agreed});
   if (available < minimum)
     return false;
   std::size_t count = 0;
