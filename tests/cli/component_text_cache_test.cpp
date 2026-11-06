@@ -42,6 +42,7 @@ public:
   mutable std::size_t captures{};
   bool defer_idle{};
   bool in_pass{};
+  bool in_place{};
   bool partial{};
   std::size_t alignment{1};
   /// Every prefill step's end and in-pass checkpoint, in order.
@@ -95,6 +96,7 @@ public:
     auto owned = window_rows ? std::make_unique<FakeAdapter>(
                                    window_rows, ring_rows, private_state)
                              : std::make_unique<FakeAdapter>(rows_per_chunk);
+    owned->SetInPlace(in_place);
     adapter = owned.get();
     return server::testing::MakeFakeCacheResources(
         ledger, std::move(owned),
@@ -218,6 +220,56 @@ TextRunnerToken Generate(TextRunnerPool::Request& request) {
   const auto token = request.SelectNext().token;
   request.Advance();
   return token;
+}
+void SameSlotRestoreKeepsRowsFromItsOwnHistory() {
+  auto runner = std::make_shared<Runner>();
+  runner->in_place = true;
+  TextRunnerPool pool(runner, 1);
+  std::vector<TextRunnerToken> prompt(40);
+  std::iota(prompt.begin(), prompt.end(), 10);
+  TextRunnerToken expected;
+  {
+    auto seed =
+        pool.Acquire(prompt, sampling::SamplingConfig{}, {}, {}, true, 35);
+    Prefill(seed);
+    expected = Generate(seed);
+    (void)seed.Commit();
+  }
+  {
+    auto retry = pool.Acquire(prompt);
+    assert(retry.cached_prompt_tokens() == prompt.size());
+    assert(retry.cache_restore_bytes() == 32);  // recurrent private state only
+    Prefill(retry);
+    assert(Generate(retry) == expected);
+    (void)retry.Commit();
+  }
+  // A rewritten prefix must not inherit rows from a different execution
+  // history.
+  auto edited = prompt;
+  edited.front() += 1000;
+  {
+    auto other = pool.Acquire(edited);
+    assert(!other.cached_prompt_tokens());
+    Prefill(other);
+    (void)Generate(other);
+    (void)other.Commit();
+  }
+  {
+    auto retry = pool.Acquire(prompt);
+    assert(retry.cached_prompt_tokens() == prompt.size());
+    assert(retry.cache_restore_bytes() > 32);
+    Prefill(retry);
+    assert(Generate(retry) == expected);
+    (void)retry.Commit();
+  }
+  // A failed private load must invalidate before retrying another boundary.
+  runner->adapter->FailNextTransfer();
+  const auto invalidations = runner->adapter->Invalidations();
+  auto retry = pool.Acquire(prompt);
+  assert(runner->adapter->Invalidations() > invalidations);
+  Prefill(retry);
+  assert(Generate(retry) == expected);
+  retry.Invalidate();
 }
 void InPassCapturePreservesBoundaryAndLiveTail() {
   std::vector<TextRunnerToken> prompt(40);
@@ -2849,6 +2901,7 @@ int main() {
   PartialFrontierDoesNotServeAnEqualPrompt();
   CompletedCancelledPromptGetsARetrySnapshot();
   BudgetUsesAllocatedSlotsInsteadOfLazyStateClaim();
+  SameSlotRestoreKeepsRowsFromItsOwnHistory();
   InPassCapturePreservesBoundaryAndLiveTail();
   AlignedPrefillKeepsAlignedBoundaries();
   UnalignedPromptEndPublishesBeforeDroppingTheFrontier();

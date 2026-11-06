@@ -419,6 +419,7 @@ ExecutionHistory ExecutionHistory::Restored(ResourceLedger& ledger,
   if (entries_reservation)
     history.entries_metadata_ = entries_reservation.Convert();
   history.tokens_metadata_ = tokens_reservation.Convert();
+  history.Record(checkpoint.id_);
   return history;
 }
 std::shared_ptr<const Checkpoint> ExecutionHistory::Capture(
@@ -641,7 +642,17 @@ std::shared_ptr<const Checkpoint> ExecutionHistory::Capture(
   if (!reuse_entries)
     entries_metadata_ = std::move(entries_metadata);
   tokens_metadata_ = std::move(tokens_metadata);
+  Record(checkpoint->id_);
   return checkpoint;
+}
+void ExecutionHistory::Record(CheckpointId id) noexcept {
+  recorded_[recorded_count_++ % kRecordedCheckpoints] = id;
+}
+bool ExecutionHistory::Contains(CheckpointId id) const noexcept {
+  const auto count = std::min(recorded_count_, kRecordedCheckpoints);
+  return id.value != 0 &&
+         std::find(recorded_.begin(), recorded_.begin() + count, id) !=
+             recorded_.begin() + count;
 }
 ExecutionHistory::ChunkCursor ExecutionHistory::Chunks(ComponentId id) const {
   return {std::ranges::lower_bound(entries_, std::pair{id.value, Rows{0}}, {},

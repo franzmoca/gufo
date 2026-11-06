@@ -800,6 +800,13 @@ void LeasedSlot::StopIdleSpill() {
 }
 SlotLease LeasedSlot::Acquire(std::optional<BorrowedLocation> live,
                               std::stop_token stop) {
+  return Claim(live, stop, false);
+}
+SlotLease LeasedSlot::AcquireInPlace(std::stop_token stop) {
+  return Claim({}, stop, true);
+}
+SlotLease LeasedSlot::Claim(std::optional<BorrowedLocation> live,
+                            std::stop_token stop, bool in_place) {
   const auto start = detail::LeaseState::Clock::now();
   {
     std::unique_lock lock(state_->mutex);
@@ -807,6 +814,8 @@ SlotLease LeasedSlot::Acquire(std::optional<BorrowedLocation> live,
       throw std::runtime_error("slot acquisition cancelled");
     if (state_->leased)
       throw SlotBusy();
+    if (in_place && !state_->slot)
+      throw std::logic_error("no slot state to restore in place");
     if (live) {
       std::lock_guard source_lock(state_->source->mutex);
       if (!state_->live || live->slot != state_->source->id ||
@@ -825,9 +834,11 @@ SlotLease LeasedSlot::Acquire(std::optional<BorrowedLocation> live,
       throw std::runtime_error("slot acquisition cancelled during idle spill");
     }
     state_->stop = stop;
+    if (in_place)
+      state_->live = false;
   }
   try {
-    if (!live) {
+    if (!live && !in_place) {
       // Finish cancellable admission, copies and reader waits BEFORE entering
       // the adapter's nonthrowing invalidation/release path. On refusal the
       // original generation and execution frontier remain reusable.

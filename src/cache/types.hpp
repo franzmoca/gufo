@@ -75,6 +75,8 @@ struct Capabilities {
   // False explicitly describes models with no token-prefix continuation.
   bool continuation{false};
   bool persistent_encoding{false};
+  // ResidentRows and the kept-rows BeginRestore are implemented.
+  bool in_place_restore{false};
 };
 
 }  // namespace gufo::cache

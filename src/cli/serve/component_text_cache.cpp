@@ -997,6 +997,8 @@ std::unique_ptr<ComponentTextCache::Lease> ComponentTextCache::Acquire(
   cache::PrefixLookup found;
   Impl::Entry* entry = nullptr;
   std::optional<cache::BorrowedLocation> live;
+  // The checkpoint to restore in place into `entry`, if any.
+  std::shared_ptr<const cache::Checkpoint> in_place;
   std::size_t common = 0;
   {
     const std::lock_guard lock(impl_->mutex);
@@ -1015,6 +1017,25 @@ std::unique_ptr<ComponentTextCache::Lease> ComponentTextCache::Acquire(
       if (!selected_entry.busy) {
         entry = &selected_entry;
         live = location;
+      }
+    }
+    // A retry of the same conversation (swipe, regenerate) restores in place
+    // into the slot whose branch holds the checkpoint: it keeps the rows the
+    // slot still has and discards the reply after them.
+    if (!entry && found.selected && found.selected->checkpoint &&
+        impl_->resources->adapter->GetCapabilities().in_place_restore) {
+      const auto tokens = found.selected->checkpoint->Tokens();
+      for (auto& candidate : impl_->entries) {
+        auto& e = *candidate;
+        if (e.busy || !e.history ||
+            !e.history->Contains(found.selected->checkpoint->Id()) ||
+            (e.live && (e.live_tokens.size() < tokens.size() ||
+                        !std::equal(tokens.begin(), tokens.end(),
+                                    e.live_tokens.begin()))))
+          continue;
+        entry = &e;
+        in_place = found.selected->checkpoint;
+        break;
       }
     }
     if (!entry) {
@@ -1111,8 +1132,21 @@ std::unique_ptr<ComponentTextCache::Lease> ComponentTextCache::Acquire(
     entry->busy = true;
     entry->used = ++impl_->clock;
     if (!live) {
+      // A new branch keeps captures still in flight on the old one from
+      // attaching. An in-place restore keeps the rows up to its checkpoint,
+      // so the durable ancestor that ends within them stays this slot's.
       entry->branch = std::make_shared<const std::uint8_t>(0);
-      entry->durable.reset();
+      if (entry->durable && in_place) {
+        const auto& kept = entry->durable->Manifest();
+        const auto tokens = in_place->Tokens();
+        if (kept.tokens.size() > tokens.size() ||
+            !std::equal(kept.tokens.begin(), kept.tokens.end(),
+                        tokens.begin()) ||
+            kept.input != At(input, kept.tokens.size()))
+          entry->durable.reset();
+      } else {
+        entry->durable.reset();
+      }
     }
     if (entry->live) {
       impl_->index.Erase(*entry->live);
@@ -1122,7 +1156,8 @@ std::unique_ptr<ComponentTextCache::Lease> ComponentTextCache::Acquire(
   }
   std::unique_ptr<Lease> lease;
   try {
-    auto slot = entry->slot->Acquire(live);
+    auto slot =
+        in_place ? entry->slot->AcquireInPlace() : entry->slot->Acquire(live);
     lease = std::make_unique<Lease>(std::make_unique<Lease::Impl>(
         impl_.get(), entry, std::move(slot), prompt, input, stable));
     auto& request = *lease->impl_;
@@ -1131,9 +1166,10 @@ std::unique_ptr<ComponentTextCache::Lease> ComponentTextCache::Acquire(
     request.state->SetStopAtEos(stop_at_eos);
     impl_->runner->SetPromptContext(*request.state, context);
     const auto started = Clock::now();
-    // Cold Acquire has already reset the slot. Only an attempted restore (or
-    // an unusable live frontier) can require another reset before cold use.
-    bool clean = !live;
+    // Cold Acquire has already reset the slot. In-place acquisition and live
+    // frontiers retain rows; attempted restores (or an unusable live
+    // frontier) can also dirty a cold slot.
+    bool clean = !live && !in_place;
     // A frontier captured between prefill passes cannot select the next token
     // of a prompt that ends there; serve that prompt from a shallower boundary.
     const auto decodable = [&](std::size_t boundary) {
@@ -1174,9 +1210,31 @@ std::unique_ptr<ComponentTextCache::Lease> ComponentTextCache::Acquire(
           std::vector<cache::ComponentPosition> positions;
           for (const auto& c : checkpoint.Components())
             positions.push_back(c.position);
+          // Rows the slot still holds stay; only the rest are loaded.
+          std::vector<cache::ResidentRange> kept;
+          if (in_place && candidate.checkpoint == in_place)
+            for (auto range : impl_->resources->adapter->ResidentRows(
+                     request.slot.Execution(), positions)) {
+              const auto c = std::ranges::find_if(
+                  checkpoint.Components(),
+                  [&](const auto& x) { return x.descriptor.id == range.id; });
+              if (c == checkpoint.Components().end() ||
+                  c->descriptor.kind != cache::ComponentKind::kAppendRows)
+                continue;
+              range.first = std::max(range.first, cache::Rows{0});
+              range.end = std::min(range.end, c->position.valid_rows);
+              if (range.first < range.end)
+                kept.push_back(range);
+            }
+          const auto kept_for = [&](cache::ComponentId id) {
+            const auto k =
+                std::ranges::find(kept, id, &cache::ResidentRange::id);
+            return k == kept.end() ? std::optional<cache::ResidentRange>{}
+                                   : std::optional{*k};
+          };
           clean = false;
           impl_->resources->adapter->BeginRestore(request.slot.Execution(),
-                                                  positions);
+                                                  positions, kept);
           // Every pin outlives all submitted loads, including failure drain.
           // Borrowed views name immutable native rows; materialized views name
           // assigned host backing. No source slot execution lease is needed.
@@ -1225,6 +1283,36 @@ std::unique_ptr<ComponentTextCache::Lease> ComponentTextCache::Acquire(
             };
             if (c.private_state)
               load(pins[base++], 0, 0);
+            if (const auto k = kept_for(c.descriptor.id)) {
+              // Load each chunk and the tail around the kept rows.
+              const auto row = c.descriptor.row_bytes;
+              const auto around = [&](const cache::RowPin& pin,
+                                      cache::Rows first, cache::Rows end) {
+                for (const auto& [a, b] :
+                     {std::pair{first, std::min(end, k->first)},
+                      std::pair{std::max(first, k->end), end}}) {
+                  if (a >= b)
+                    continue;
+                  const std::span<const std::byte> buffer(
+                      pin.Bytes().data() + (a - first) * row, (b - a) * row);
+                  transfers.Add([&] { return impl_->resources->stream(); },
+                                [&, a, b, buffer](cache::Stream& stream) {
+                                  return impl_->resources->adapter->CopyRowsIn(
+                                      request.slot.Execution(), c.descriptor.id,
+                                      a, b, buffer, stream);
+                                });
+                  request.restored += buffer.size();
+                }
+              };
+              for (const auto& chunk : c.chunks)
+                around(pins[base++], chunk.First(), chunk.End());
+              if (c.tail)
+                around(pins[base++],
+                       c.position.valid_rows / c.descriptor.rows_per_chunk *
+                           c.descriptor.rows_per_chunk,
+                       c.position.valid_rows);
+              continue;
+            }
             auto same_source = [](const cache::RowPin& a,
                                   const cache::RowPin& b) {
               if (a.Location() || b.Location())
@@ -1330,16 +1418,26 @@ std::unique_ptr<ComponentTextCache::Lease> ComponentTextCache::Acquire(
         if (restored) {
           request.cached = candidate.boundary;
           const std::lock_guard lock(impl_->mutex);
-          entry->durable = candidate.durable;
+          // The in-place checkpoint without a file of its own leaves the
+          // slot's earlier ancestor, which ends within the kept rows.
+          if (candidate.durable ||
+              !(in_place && candidate.checkpoint == in_place))
+            entry->durable = candidate.durable;
         }
       } catch (...) {
         if (!impl_->resources->adapter->Invalidate(request.slot.Execution()))
           throw;
         clean = true;
         request.restored = 0;
+        const std::lock_guard lock(impl_->mutex);
+        entry->durable.reset();
       }
     }
     if (!restored) {
+      {
+        const std::lock_guard lock(impl_->mutex);
+        entry->durable.reset();
+      }
       if (!clean &&
           !impl_->resources->adapter->Invalidate(request.slot.Execution()))
         throw std::runtime_error("component cold initialization failed");

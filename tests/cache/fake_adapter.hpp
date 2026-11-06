@@ -67,7 +67,12 @@ public:
   void SetExecutionComplete(Slot&, bool);
   [[nodiscard]] std::vector<ComponentPosition> PrefillCheckpointPositions(
       const Slot&, Rows boundary) const override;
+  void SetInPlace(bool enabled) { in_place_ = enabled; }
+  [[nodiscard]] std::vector<ResidentRange> ResidentRows(
+      const Slot&, std::span<const ComponentPosition>) const override;
   void BeginRestore(Slot&, std::span<const ComponentPosition>) override;
+  void BeginRestore(Slot&, std::span<const ComponentPosition>,
+                    std::span<const ResidentRange>) override;
   [[nodiscard]] Completion CapturePrivate(const Slot&, ComponentId,
                                           std::span<std::byte>,
                                           Stream&) override;
@@ -118,6 +123,7 @@ private:
   std::vector<ComponentDescriptor> components_;
   Rows ring_rows_{0};
   bool private_state_{true};
+  bool in_place_{false};
   bool fail_allocation_{false};
   bool fail_transfer_{false};
   std::atomic<std::size_t> invalidations_{};

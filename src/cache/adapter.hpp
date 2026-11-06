@@ -58,6 +58,12 @@ struct BackingClass {
   std::size_t block_bytes{}, blocks{}, metadata_bytes{};
 };
 
+struct ResidentRange {
+  ComponentId id;
+  Rows first{}, end{};
+  bool operator==(const ResidentRange&) const = default;
+};
+
 class Adapter {
 public:
   Adapter() = default;
@@ -106,6 +112,25 @@ public:
   // allow loads. Refuse if any slot transfer is pending or failure is latched.
   // After success, CopyRowsIn/LoadPrivate need no further preservation waits.
   virtual void BeginRestore(Slot&, std::span<const ComponentPosition>) = 0;
+
+  // In-place restore of a checkpoint the slot's current branch captured or
+  // was restored from. Of the row ranges below `positions`, those the slot
+  // still holds unchanged: rows past them may have been rewritten or evicted
+  // since. Pure host query on an idle slot; empty refuses in-place restore.
+  [[nodiscard]] virtual std::vector<ResidentRange> ResidentRows(
+      const Slot&, std::span<const ComponentPosition>) const {
+    return {};
+  }
+  // BeginRestore that keeps `kept` (a subset of ResidentRows) in place: it
+  // guards and expects loads only for the other rows and the private state,
+  // and Validate counts kept rows as covered.
+  virtual void BeginRestore(Slot& slot,
+                            std::span<const ComponentPosition> positions,
+                            std::span<const ResidentRange> kept) {
+    if (!kept.empty())
+      throw std::logic_error("adapter cannot restore in place");
+    BeginRestore(slot, positions);
+  }
 
   // Transfers touch exactly the supplied range/buffer. Private state is copied
   // whole; append rows use component-specific positions, never prompt length.

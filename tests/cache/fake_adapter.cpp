@@ -278,7 +278,9 @@ FakeAdapter::FakeAdapter(Rows window_rows, Rows ring_rows, bool private_state)
     });
 }
 Capabilities FakeAdapter::GetCapabilities() const {
-  return {.continuation = true, .persistent_encoding = true};
+  return {.continuation = true,
+          .persistent_encoding = true,
+          .in_place_restore = in_place_};
 }
 FakeAdapter::FakeAdapter(Rows rows_per_chunk)
     : components_{
@@ -358,8 +360,23 @@ std::vector<ComponentPosition> FakeAdapter::PrefillCheckpointPositions(
     positions.push_back({kWindow, boundary});
   return positions;
 }
+std::vector<ResidentRange> FakeAdapter::ResidentRows(
+    const Slot& slot, std::span<const ComponentPosition> positions) const {
+  const auto& state = AsSlot(slot);
+  if (!in_place_ || !slot.IsValid() || state.Busy())
+    return {};
+  return {{kTarget, 0,
+           std::min<Rows>(Position(positions, kTarget), state.target.size())},
+          {kDraft, 0,
+           std::min<Rows>(Position(positions, kDraft), state.draft.size())}};
+}
 void FakeAdapter::BeginRestore(Slot& slot,
                                std::span<const ComponentPosition> positions) {
+  BeginRestore(slot, positions, {});
+}
+void FakeAdapter::BeginRestore(Slot& slot,
+                               std::span<const ComponentPosition> positions,
+                               std::span<const ResidentRange> kept) {
   auto& state = AsSlot(slot);
   if (state.Busy() || state.failed || state.restoring)
     throw std::logic_error(
@@ -381,10 +398,23 @@ void FakeAdapter::BeginRestore(Slot& slot,
   std::vector<Token> draft(static_cast<std::size_t>(draft_end));
   std::vector<std::uint8_t> target_loaded(target.size()),
       draft_loaded(draft.size());
-  // All preservation runs while the old rows/private state remain readable.
-  state.guard_.BeforeOverwrite(kTarget, 0,
+  const auto resident = ResidentRows(slot, positions);
+  Rows target_keep = 0, draft_keep = 0;
+  for (const auto& k : kept) {
+    const auto r = std::ranges::find(resident, k.id, &ResidentRange::id);
+    if (r == resident.end() || k.first != 0 || k.end > r->end ||
+        k.first >= k.end)
+      throw std::invalid_argument("fake kept rows are not resident");
+    (k.id == kTarget ? target_keep : draft_keep) = k.end;
+  }
+  std::copy_n(state.target.begin(), target_keep, target.begin());
+  std::copy_n(state.draft.begin(), draft_keep, draft.begin());
+  std::fill_n(target_loaded.begin(), target_keep, 1);
+  std::fill_n(draft_loaded.begin(), draft_keep, 1);
+  // Guard only replaced rows. Retained borrowed rows stay in this generation.
+  state.guard_.BeforeOverwrite(kTarget, target_keep,
                                std::max<Rows>(state.target.size(), target_end));
-  state.guard_.BeforeOverwrite(kDraft, 0,
+  state.guard_.BeforeOverwrite(kDraft, draft_keep,
                                std::max<Rows>(state.draft.size(), draft_end));
   if (ring_rows_) {
     state.guard_.BeforeOverwrite(kWindow, 0,

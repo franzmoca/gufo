@@ -299,7 +299,9 @@ void ContinuationAdapter::PrefillThrough(
     throw std::runtime_error("component in-pass prefill failed: " + error);
 }
 cache::Capabilities ContinuationAdapter::GetCapabilities() const {
-  return {.continuation = true, .persistent_encoding = true};
+  return {.continuation = true,
+          .persistent_encoding = true,
+          .in_place_restore = true};
 }
 std::span<const cache::ComponentDescriptor> ContinuationAdapter::Components()
     const {
@@ -392,8 +394,41 @@ void* ContinuationAdapter::RowData(
   }
 }
 
+std::vector<cache::ResidentRange> ContinuationAdapter::ResidentRows(
+    const cache::Slot& slot,
+    std::span<const cache::ComponentPosition> positions) const {
+  const auto& state = As(slot);
+  // Durable keys use the native (factor-one) representation. Keeping scaled
+  // keys would mix representations when Validate adopts factor one below.
+  if (!state.IsValid() || state.pending || state.at_boundary ||
+      state.CaptureState().yarn_factor_ != 1.0F)
+    return {};
+  const auto current = Positions(slot);
+  std::vector<cache::ResidentRange> kept;
+  for (const auto& p : positions) {
+    const auto& component = Component(p.id);
+    if (component.descriptor.kind != cache::ComponentKind::kAppendRows)
+      continue;
+    const auto now =
+        std::ranges::find(current, p.id, &cache::ComponentPosition::id);
+    if (now == current.end())
+      return {};
+    // The cache proves that this execution history captured/restored the
+    // checkpoint. Append rows below its current logical frontier remain the
+    // same prefix; speculative scratch beyond that frontier is never kept.
+    const auto end = std::min(p.valid_rows, now->valid_rows);
+    if (end)
+      kept.push_back({p.id, 0, end});
+  }
+  return kept;
+}
 void ContinuationAdapter::BeginRestore(
     cache::Slot& slot, std::span<const cache::ComponentPosition> positions) {
+  BeginRestore(slot, positions, {});
+}
+void ContinuationAdapter::BeginRestore(
+    cache::Slot& slot, std::span<const cache::ComponentPosition> positions,
+    std::span<const cache::ResidentRange> kept) {
   auto& state = As(slot);
   state.BeforeExecution();
   if (positions.size() != descriptors_.size())
@@ -428,7 +463,36 @@ void ContinuationAdapter::BeginRestore(
   state.session->tokens_.reserve(target);
   state.session->logits_.reserve(model_->VocabSize());
   std::vector<Coverage> coverage(descriptors_.size());
-  state.GuardAll();
+  const auto resident = ResidentRows(slot, ordered);
+  for (const auto& k : kept) {
+    const auto r = std::ranges::find(resident, k.id, &cache::ResidentRange::id);
+    if (r == resident.end() || k.first < r->first || k.end > r->end ||
+        k.first >= k.end ||
+        std::ranges::count(kept, k.id, &cache::ResidentRange::id) != 1)
+      throw std::invalid_argument("Flash-Next kept rows are not resident");
+    const auto row = Component(k.id).descriptor.row_bytes;
+    coverage[k.id.value - 1].emplace_back(k.first * row, k.end * row);
+  }
+  {
+    State::CaptureDuringGuard readable(state);
+    for (const auto& component : layout_.Components()) {
+      if (component.descriptor.kind != cache::ComponentKind::kAppendRows)
+        continue;
+      const auto id = component.descriptor.id;
+      const auto capacity = Pool(component.part)
+                                ? context_ / model_->config().compress_ratio + 1
+                                : context_;
+      const auto k = std::ranges::find(kept, id, &cache::ResidentRange::id);
+      if (k == kept.end()) {
+        state.guard.BeforeOverwrite(id, 0, capacity);
+      } else {
+        if (k->first)
+          state.guard.BeforeOverwrite(id, 0, k->first);
+        if (k->end < capacity)
+          state.guard.BeforeOverwrite(id, k->end, capacity);
+      }
+    }
+  }
   Check(hipStreamSynchronize(model_->executor_->stream()));
   state.session->session_->PreserveSnapshots(0, 0);
   state.expected = std::move(ordered);
