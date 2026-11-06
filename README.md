@@ -11,7 +11,8 @@ native engines to Gufo, each with its own HIP kernels for prefill, decode and
 speculative verification on Strix Halo. Neither model is on upstream's
 roadmap, so both are maintained here. The default branch, `main`, runs both;
 each model also has its own branch (`feat/ds41`, `feat/gemma`) on top of
-upstream.
+upstream. Gemma 4 now continues in
+[its own extension](https://github.com/franzmoca/gemma4-gufo-extension).
 
 > [!NOTE]
 > **What's new:** the [fork changelog](CHANGELOG_FORK.md) lists the fork's
@@ -38,8 +39,16 @@ in [README_DEEPSEEK.md](README_DEEPSEEK.md); every number is on the
 
 ### Gemma 4
 
-The native **Gemma 4** engine is also on this branch. Upstream
-[PR #426](https://github.com/gufo-org/gufo/pull/426) stays open for feedback.
+> [!IMPORTANT]
+> **Gemma 4 has moved to its own Gufo extension:
+> [franzmoca/gemma4-gufo-extension](https://github.com/franzmoca/gemma4-gufo-extension).**
+> Build and use it from there; new Gemma fixes land only in the extension. The
+> engine on this branch and on `feat/gemma` no longer receives them. If you find
+> a regression compared with this fork, or any other Gemma 4 problem,
+> [open an issue on the extension](https://github.com/franzmoca/gemma4-gufo-extension/issues).
+
+Upstream [PR #426](https://github.com/gufo-org/gufo/pull/426) stays open for
+feedback.
 
 #### What it runs
 
@@ -65,9 +74,9 @@ The native **Gemma 4** engine is also on this branch. Upstream
   disk prompt caching, and batched concurrent sessions.
 
 Benchmarks against llama.cpp and quality reports are in each model card:
-[26B-A4B](docs/models/gemma-4-26b-a4b/README.md),
-[31B](docs/models/gemma-4-31b/README.md) and
-[31B QAT](docs/models/gemma-4-31b-qat/README.md).
+[26B-A4B](https://github.com/franzmoca/gemma4-gufo-extension/blob/main/docs/models/gemma-4-26b-a4b/README.md),
+[31B](https://github.com/franzmoca/gemma4-gufo-extension/blob/main/docs/models/gemma-4-31b/README.md) and
+[31B QAT](https://github.com/franzmoca/gemma4-gufo-extension/blob/main/docs/models/gemma-4-31b-qat/README.md).
 
 ### Status
 
@@ -76,9 +85,10 @@ and kernel changes that are not specific to one model. All three are rebased
 onto upstream releases, and `main` merges them; they are currently based on
 v0.23.0. Like upstream, the fork is Strix Halo only (`gfx1151`, Linux).
 Everything below the line is upstream's README; its build steps apply
-unchanged ([Build from source](#build-from-source)). If a DeepSeek V4.1 or
-Gemma 4 GGUF doesn't load, open an issue on this fork with the file name. Bug reports, benchmark
-numbers from other setups, feature requests and PRs are welcome here.
+unchanged ([Build from source](#build-from-source)). If a DeepSeek V4.1 GGUF
+doesn't load, open an issue on this fork with the file name. Bug reports,
+benchmark numbers from other setups, feature requests and PRs are welcome here;
+Gemma 4 reports go to [the extension](https://github.com/franzmoca/gemma4-gufo-extension/issues).
 Thanks to the Gufo maintainers for the engine this builds on.
 
 ---
