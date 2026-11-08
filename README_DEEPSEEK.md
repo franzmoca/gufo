@@ -1,5 +1,12 @@
 # DeepSeek V4.1 Flash on one Strix Halo
 
+> [!IMPORTANT]
+> **DeepSeek V4.1 Flash has moved to
+> [franzmoca/ds41-gufo-extension](https://github.com/franzmoca/ds41-gufo-extension).**
+> This guide and the engine on this fork no longer receive changes; the extension's
+> README has the current setup, and its `docs/` the benchmarks, quality reports and
+> experiments.
+
 Gufo runs **DeepSeek-V4.1-Flash-1017**, a 763B-parameter mixture-of-experts
 model with a native 1M-token context, on a single AMD Strix Halo with 128 GB
 of unified memory. The `IQ1_M` backbone stays resident in GPU memory; the

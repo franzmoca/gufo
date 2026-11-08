@@ -11,8 +11,9 @@ native engines to Gufo, each with its own HIP kernels for prefill, decode and
 speculative verification on Strix Halo. Neither model is on upstream's
 roadmap, so both are maintained here. The default branch, `main`, runs both;
 each model also has its own branch (`feat/ds41`, `feat/gemma`) on top of
-upstream. Gemma 4 now continues in
-[its own extension](https://github.com/franzmoca/gemma4-gufo-extension).
+upstream. Both models now continue in their own extensions:
+[DeepSeek V4.1](https://github.com/franzmoca/ds41-gufo-extension) and
+[Gemma 4](https://github.com/franzmoca/gemma4-gufo-extension).
 
 > [!NOTE]
 > **What's new:** the [fork changelog](CHANGELOG_FORK.md) lists the fork's
@@ -20,6 +21,15 @@ upstream. Gemma 4 now continues in
 > request.
 
 ### DeepSeek V4.1 Flash, on one Strix Halo
+
+> [!IMPORTANT]
+> **DeepSeek V4.1 Flash has moved to its own Gufo extension:
+> [franzmoca/ds41-gufo-extension](https://github.com/franzmoca/ds41-gufo-extension).**
+> It builds against upstream Gufo; build and use it from there. New DeepSeek fixes
+> land only in the extension, and the engine on this branch and on `feat/ds41` no
+> longer receives them. If you find a regression compared with this fork, or any
+> other DeepSeek V4.1 problem,
+> [open an issue on the extension](https://github.com/franzmoca/ds41-gufo-extension/issues).
 
 The 763B-parameter **DeepSeek-V4.1-Flash-1017** runs on a single 128 GB Strix
 Halo, with its native 1M-token context:
@@ -34,8 +44,9 @@ Halo, with its native 1M-token context:
   concurrent users.
 
 Setup, downloads, memory limits and the headless-deployment requirement are
-in [README_DEEPSEEK.md](README_DEEPSEEK.md); every number is on the
-[benchmark card](docs/models/deepseek-v4.1-flash/BENCHMARKS.md).
+in [the extension's README](https://github.com/franzmoca/ds41-gufo-extension#readme);
+every number is on the
+[benchmark card](https://github.com/franzmoca/ds41-gufo-extension/blob/main/docs/models/deepseek-v4.1-flash/BENCHMARKS.md).
 
 ### Gemma 4
 
@@ -85,10 +96,10 @@ and kernel changes that are not specific to one model. All three are rebased
 onto upstream releases, and `main` merges them; they are currently based on
 v0.23.0. Like upstream, the fork is Strix Halo only (`gfx1151`, Linux).
 Everything below the line is upstream's README; its build steps apply
-unchanged ([Build from source](#build-from-source)). If a DeepSeek V4.1 GGUF
-doesn't load, open an issue on this fork with the file name. Bug reports,
-benchmark numbers from other setups, feature requests and PRs are welcome here;
-Gemma 4 reports go to [the extension](https://github.com/franzmoca/gemma4-gufo-extension/issues).
+unchanged ([Build from source](#build-from-source)). DeepSeek V4.1 and Gemma 4
+reports go to their extensions:
+[DeepSeek V4.1](https://github.com/franzmoca/ds41-gufo-extension/issues) and
+[Gemma 4](https://github.com/franzmoca/gemma4-gufo-extension/issues).
 Thanks to the Gufo maintainers for the engine this builds on.
 
 ---
