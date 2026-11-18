@@ -239,7 +239,7 @@ CreateHipComponentCacheResources(std::unique_ptr<cache::Adapter> adapter,
     // capture needs more than one segment; preparing 2 GiB avoids moving
     // registration onto that request's capture or decode path.
     const auto prepared = std::chrono::steady_clock::now();
-    backing->pool->GrowAhead(2ULL << 30);
+    backing->pool->GrowAhead(cache::kPreparedBackingBytes);
     backing->pool->WaitForGrowth();
     const auto prepare_ms =
         std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -269,6 +269,9 @@ CreateHipComponentCacheResources(std::unique_ptr<cache::Adapter> adapter,
   };
   result->release_host = [backing](std::size_t bytes) -> std::size_t {
     return backing->pool ? backing->pool->Surrender(bytes) : 0;
+  };
+  result->committed_backing_bytes = [backing]() -> std::size_t {
+    return backing->pool ? backing->pool->CommittedBytes() : 0;
   };
   result->set_shed = [backing](std::function<bool()> shed) {
     const std::lock_guard lock(backing->shed_mutex);
