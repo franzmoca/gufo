@@ -25,6 +25,7 @@
 
 namespace gufo::server {
 
+using ext::AutomaticRetainedBytes;
 using ext::CgroupAvailableBytes;
 using ext::ComponentCacheResources;
 using ext::HipTextModelRunner;
@@ -50,6 +51,7 @@ using ext::TextRunnerCapabilities;
 using ext::TextRunnerDecode;
 using ext::TextRunnerDescriptor;
 using ext::TextRunnerDiskCacheOptions;
+using ext::TextRunnerExpertCacheClaim;
 using ext::TextRunnerMeasuredResources;
 using ext::TextRunnerNgramRows;
 using ext::TextRunnerRamCacheOptions;
