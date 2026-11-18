@@ -21,6 +21,11 @@ namespace gufo::ext {
 [[nodiscard]] std::uint64_t CgroupAvailableBytes(
     const std::filesystem::path& root, std::string_view membership_text,
     std::uint64_t host_available);
+/// Host RAM still available (MemAvailable minus free CMA, or the
+/// platform's figure), after cgroup limits and less the state the host has
+/// promised to sessions but not committed. Unified-memory device allocations
+/// draw from the same RAM, so HIP's device capacity is not used.
+[[nodiscard]] std::uint64_t HostAvailableBytes();
 /// Automatic snapshot budget: half the host RAM available after loading
 /// (excluding free CMA pages), after cgroup limits.
 [[nodiscard]] std::size_t HostSnapshotBudgetBytes();
