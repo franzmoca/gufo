@@ -5,6 +5,10 @@
 
 #include <cstdio>
 #include <gufo/ext/gguf_reader.hpp>
+#include <gufo/ext/options.hpp>
+#include <gufo/ext/registry.hpp>
+#include <limits>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -216,6 +220,112 @@ void TestTensorRefusals() {
       "Q4_1"));
 }
 
+void TestLoopCdOptions() {
+  using gufo::ext::OptionSpec;
+  using gufo::ext::OptionType;
+  using gufo::ext::ParsedOptions;
+  using gufo::ext::ParseOptions;
+  using gufo::ext::Registry;
+
+  Registry reg;
+  reg.BeginExtension({.name = "inkling2", .version = "0.1.0", .source = ""});
+  reg.AddProvider({
+      .id = "inkling2",
+      .keys = {"gguf:inkling2_loop"},
+      .options =
+          {
+              {"--loopcd",
+               OptionType::kString,
+               {"serve", "bench", "prompt"},
+               ""},
+              {"--loopcd-strength",
+               OptionType::kNumber,
+               {"serve", "bench", "prompt"},
+               ""},
+          },
+  });
+
+  const auto parse_and_validate =
+      [&](std::initializer_list<std::string_view> argv, LoopCdConfig* out,
+          std::string* why) -> bool {
+    std::vector<std::string_view> args(argv.begin(), argv.end());
+    try {
+      const ParsedOptions parsed = ParseOptions(reg, "serve", args);
+      return ParseLoopCdOptions(parsed, out, why);
+    } catch (const std::exception& ex) {
+      if (why != nullptr) {
+        *why = ex.what();
+      }
+      return false;
+    }
+  };
+
+  LoopCdConfig cfg;
+  std::string why;
+
+  // Defaults.
+  CHECK(parse_and_validate({}, &cfg, &why));
+  CHECK(cfg.mode == LoopCdMode::kOff && !cfg.enabled() && cfg.w_max == 0.5F);
+
+  // Explicit off.
+  CHECK(parse_and_validate({"--loopcd", "off"}, &cfg, &why));
+  CHECK(cfg.mode == LoopCdMode::kOff && !cfg.enabled());
+
+  // Valid modes and strengths.
+  CHECK(parse_and_validate({"--loopcd", "on"}, &cfg, &why));
+  CHECK(cfg.mode == LoopCdMode::kOn && cfg.enabled() && cfg.w_max == 0.5F);
+
+  CHECK(parse_and_validate(
+      {"--loopcd", "skip-thinking", "--loopcd-strength", "1.0"}, &cfg, &why));
+  CHECK(cfg.mode == LoopCdMode::kSkipThinking && cfg.enabled() &&
+        cfg.w_max == 1.0F);
+
+  CHECK(parse_and_validate({"--loopcd=on", "--loopcd-strength=4"}, &cfg, &why));
+  CHECK(cfg.mode == LoopCdMode::kOn && cfg.w_max == 4.0F);
+
+  CHECK(parse_and_validate({"--loopcd=on", "--loopcd-strength=0.001"}, &cfg,
+                           &why));
+  CHECK(cfg.mode == LoopCdMode::kOn && cfg.w_max > 0.0F);
+
+  // Unknown mode.
+  CHECK(!parse_and_validate({"--loopcd", "hidden"}, &cfg, &why));
+  CHECK(Has(why, "unknown --loopcd mode"));
+
+  // Strength without --loopcd or with --loopcd off.
+  CHECK(!parse_and_validate({"--loopcd-strength", "0.5"}, &cfg, &why));
+  CHECK(Has(why, "requires --loopcd"));
+  CHECK(!parse_and_validate({"--loopcd", "off", "--loopcd-strength", "0.5"},
+                            &cfg, &why));
+  CHECK(Has(why, "requires --loopcd"));
+
+  // Range refusals and non-numeric strength.
+  CHECK(!parse_and_validate({"--loopcd", "on", "--loopcd-strength", "0"}, &cfg,
+                            &why));
+  CHECK(Has(why, "(0, 4]"));
+  CHECK(!parse_and_validate({"--loopcd", "on", "--loopcd-strength=-0.5"}, &cfg,
+                            &why));
+  CHECK(Has(why, "(0, 4]"));
+  CHECK(!parse_and_validate({"--loopcd", "on", "--loopcd-strength", "4.0001"},
+                            &cfg, &why));
+  CHECK(Has(why, "(0, 4]"));
+  CHECK(!parse_and_validate({"--loopcd", "on", "--loopcd-strength", "nan"},
+                            &cfg, &why));
+  CHECK(Has(why, "invalid value for --loopcd-strength"));
+  CHECK(!parse_and_validate({"--loopcd", "on", "--loopcd-strength", "inf"},
+                            &cfg, &why));
+  CHECK(Has(why, "invalid value for --loopcd-strength"));
+  CHECK(!parse_and_validate({"--loopcd", "on", "--loopcd-strength", "abc"},
+                            &cfg, &why));
+  CHECK(Has(why, "invalid value for --loopcd-strength"));
+
+  // Direct ParseLoopCdOptions refusal on non-finite doubles (bypassing CLI).
+  ParsedOptions raw;
+  raw.emplace("--loopcd", std::string("on"));
+  raw.emplace("--loopcd-strength", std::numeric_limits<double>::infinity());
+  CHECK(!ParseLoopCdOptions(raw, &cfg, &why));
+  CHECK(Has(why, "(0, 4]"));
+}
+
 }  // namespace
 
 int main() {
@@ -223,6 +333,7 @@ int main() {
   TestConfig();
   TestRefusals();
   TestTensorRefusals();
+  TestLoopCdOptions();
   if (g_failures == 0) {
     std::puts("inkling2 probe test: OK");
   }

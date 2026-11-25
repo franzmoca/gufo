@@ -92,6 +92,32 @@
         "inkling2"
       ],
       "help": "DSpark draft model path for speculative decoding"
+    },
+    {
+      "name": "--loopcd",
+      "type": "string",
+      "commands": [
+        "serve",
+        "bench",
+        "prompt"
+      ],
+      "providers": [
+        "inkling2"
+      ],
+      "help": "LoopCD-Logits contrastive decoding mode: off, on, skip-thinking (default: off)"
+    },
+    {
+      "name": "--loopcd-strength",
+      "type": "number",
+      "commands": [
+        "serve",
+        "bench",
+        "prompt"
+      ],
+      "providers": [
+        "inkling2"
+      ],
+      "help": "LoopCD adaptive guidance upper bound w_max in (0, 4] (default: 0.5)"
     }
   ],
   "targets": {
@@ -150,6 +176,13 @@
       "role": "test"
     },
     "inkling2_cache_test": {
+      "requires": [
+        "hip",
+        "testing"
+      ],
+      "role": "test"
+    },
+    "inkling2_loopcd_test": {
       "requires": [
         "hip",
         "testing"

@@ -314,16 +314,53 @@ results stay inconclusive and are rerun only for the affected histories.
 | Device memory per session at 32K / 256K | `off` vs `on` | reported |
 | End-to-end wall time of the 7.3 suites | all arms | reported (guided answers can be shorter) |
 
+## Progress
+
+- **M1 (complete)**:
+  - Options `--loopcd off|on|skip-thinking` and `--loopcd-strength` (`0.5`
+    default, `(0, 4]`) on `serve`/`bench`/`prompt`; `inkling2.probe` covers option
+    validation and refusals.
+  - Parameterized `slot_stride` / `n_slots` across HIP decode/attention/conv
+    kernels; added `LoopCdGuide` (FP64 online top-2 + softmax sum, `guide_mask`,
+    `control_bits` logsumexp renorm) with `inkling2_loopcd_test` §6.1 unit
+    checks passing.
+  - Sequential reference coda + head in `Engine` (`n_slots_=54`, `kRefVisitBase=51`,
+    `kRefVisits=6`), `StateMeta::kVersion=3`, `kStateAbi="inkling2-hip-m2-v3"`, and
+    `BuildIdentity` cache key isolation (`loopcd=off` vs `loopcd=mode:w_max`).
+  - Verified on gfx1151:
+    - §6.1 kernel unit tests & §6.2 engine checks (`w_max=0` == `off`, `z_1` ==
+      `override_passes=1`, graph == eager, concurrent == alone, sink & interior
+      checkpoints, 19/20 prompts differ, global KV ratio `1.1250` at 32K/256K):
+      all pass.
+    - §6.3 `inkling2_spec_test` (`off` 34.7% DSpark, `on` 25.2% DSpark) and server
+      AR vs DSpark parity (`20/20` identical greedy outputs across `off`/`on` and
+      `c1`/`c4`): pass.
+    - §6.4 `inkling2_cache_test` (`off` 106 comps, `on` 119 comps, worst
+      `max |dlogit| = 0.000e+00`, stale `kVersion=2` refused) and server RAM/disk
+      cache hit + isolation (`on`/`off`/`w_max`): pass.
+    - §6.5 `off` vs `main` (`4060f397`): `20/20` greedy server outputs identical;
+      ABBA speed benchmark (`accelerator-performance`) shows `0` regressions
+      (AR c1 `50.30–50.32` vs `50.26 tok/s`, Prefill 4K `2113.59` vs `2107.78`,
+      Prefill 32K `2023.43` vs `2018.54`, DSpark c1 `75.99–76.13` vs `75.98–76.08`).
+- **M1.5 (complete)**:
+  - §4 special tokens: `vocab=200058`, `count=60`, strictly contiguous
+    `[199998, 200057]`.
+  - §7.1 diagnostic (4,434 rows): all `top1_agree=66.67%`, `mean_KL=0.9632`,
+    `mean(1-margin)=0.2457`, `w_max=0.5` `mean_w=0.1229`, `flip_rate=8.23%`;
+    thinking (3,863 rows) `top1_agree=65.00%`, `flip_rate=9.14%`; non-thinking
+    (571 rows) `top1_agree=77.93%`, `flip_rate=2.10%`. 1-pass samples stay
+    coherent initially then show repetition/arithmetic slips.
+
 ## Milestones
 
 Each milestone ends with its exit criterion met and results retained.
 
-1. **M1**: options, state refactor, sequential reference coda + kernel, `on`
-   mode. Exit: 6.1, 6.2 (sequential), 6.3 greedy, 6.4, 6.5 pass; 8 "main vs
+1. **M1 (done)**: options, state refactor, sequential reference coda + kernel,
+   `on` mode. Exit: 6.1, 6.2 (sequential), 6.3 greedy, 6.4, 6.5 pass; 8 "main vs
    `off`" has no regression.
-2. **M1.5**: weak-model diagnostic 7.1.
-3. **M2**: skip-thinking (runner flags, verify rows, control renorm) with 6.3
-   for it, then the quick quality signal for both arms. Exit: 7.6 M2 gate
+2. **M1.5 (done)**: weak-model diagnostic 7.1.
+3. **M2 (in progress)**: skip-thinking (runner flags, verify rows, control renorm)
+   with 6.3 for it, then the quick quality signal for both arms. Exit: 7.6 M2 gate
    decided and posted.
 4. **M3**: stacked coda/head. Exit: 6.2 stacked + 6.3 pass; speed table 8.
 5. **M4**: full evaluation (7.3 at M4 sizes, 7.4, optional strength 1.0).

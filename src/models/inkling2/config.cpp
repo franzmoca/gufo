@@ -217,4 +217,55 @@ bool ParseConfig(const core::GgufReader& reader, Inkling2Config* out,
   return true;
 }
 
+std::string_view LoopCdModeName(LoopCdMode mode) {
+  switch (mode) {
+    case LoopCdMode::kOff:
+      return "off";
+    case LoopCdMode::kOn:
+      return "on";
+    case LoopCdMode::kSkipThinking:
+      return "skip-thinking";
+  }
+  return "off";
+}
+
+bool ParseLoopCdOptions(const ext::ParsedOptions& options, LoopCdConfig* out,
+                        std::string* error) {
+  const auto fail = [&](std::string message) {
+    if (error != nullptr) {
+      *error = std::move(message);
+    }
+    return false;
+  };
+  LoopCdConfig cfg;
+  if (const auto* mode = ext::FindOption<std::string>(options, "--loopcd")) {
+    if (*mode == "off") {
+      cfg.mode = LoopCdMode::kOff;
+    } else if (*mode == "on") {
+      cfg.mode = LoopCdMode::kOn;
+    } else if (*mode == "skip-thinking") {
+      cfg.mode = LoopCdMode::kSkipThinking;
+    } else {
+      return fail("unknown --loopcd mode '" + *mode +
+                  "' (expected off, on, or skip-thinking)");
+    }
+  }
+  if (const auto* strength =
+          ext::FindOption<double>(options, "--loopcd-strength")) {
+    if (!cfg.enabled()) {
+      return fail(
+          "--loopcd-strength requires --loopcd to be on or "
+          "skip-thinking");
+    }
+    if (!std::isfinite(*strength) || *strength <= 0.0 || *strength > 4.0) {
+      return fail("--loopcd-strength must be in (0, 4]");
+    }
+    cfg.w_max = static_cast<float>(*strength);
+  }
+  if (out != nullptr) {
+    *out = cfg;
+  }
+  return true;
+}
+
 }  // namespace gufo::models::inkling2

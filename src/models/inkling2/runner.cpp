@@ -56,7 +56,7 @@ namespace {
 namespace g = ::gufo::ext;
 namespace ga = ::inkling2::text::gufo_adapter;
 
-constexpr std::string_view kStateAbi = "inkling2-hip-m2-v2";
+constexpr std::string_view kStateAbi = "inkling2-hip-m2-v3";
 /// Layer groups one pass may be split into (48 visits; the host caps it by pass
 /// length).
 constexpr std::size_t kMaxLayerGroups = 16;
@@ -2179,6 +2179,14 @@ cache::Identity BuildIdentity(const ext::TextRunnerOptions& options,
        << (draft_fingerprint.empty() ? "process" : draft_fingerprint) << '\n';
   else
     id << "speculative=none\n";
+  if (engine.has_loopcd()) {
+    const auto& lc = engine.loopcd();
+    char w_buf[32];
+    std::snprintf(w_buf, sizeof w_buf, "%.9g", static_cast<double>(lc.w_max));
+    id << "loopcd=" << LoopCdModeName(lc.mode) << ':' << w_buf << '\n';
+  } else {
+    id << "loopcd=off\n";
+  }
   const auto text = id.str();
   return {text.begin(), text.end()};
 }
@@ -2227,13 +2235,26 @@ std::shared_ptr<ext::TextModelRunner> CreateInkling2TextRunner(
     const std::uint32_t max_context =
         options.max_context ? options.max_context : NativeContext(*reader);
     std::string why;
+    LoopCdConfig loopcd;
+    if (!ParseLoopCdOptions(options.provider_options, &loopcd, &why)) {
+      if (error)
+        *error = "inkling2: " + why;
+      return nullptr;
+    }
+    if (loopcd.mode == LoopCdMode::kSkipThinking) {
+      if (error)
+        *error = "inkling2: --loopcd skip-thinking is not implemented yet (M2)";
+      return nullptr;
+    }
     auto tok = ::inkling2::text::Tokenizer::CreateFromGguf(*reader, &why);
     if (!tok) {
       if (error)
         *error = "inkling2: tokenizer: " + why;
       return nullptr;
     }
-    auto engine = Engine::Create(reader, max_context, &why);
+    Engine::Options engine_opts;
+    engine_opts.loopcd = loopcd;
+    auto engine = Engine::Create(reader, max_context, &why, engine_opts);
     if (!engine) {
       if (error)
         *error = why;

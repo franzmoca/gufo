@@ -1366,7 +1366,8 @@ __device__ __forceinline__ float block_sum(float v, float* red /*[32]*/) {
 __device__ __forceinline__ void conv_resid_elem(const ConvResidArgs& a, int c,
                                                 int tok = 0) {
   const size_t to = (size_t)tok * 2304;
-  float* st = a.slot[tok * 48].conv + (size_t)a.conv_off * 3 + (size_t)c * 3;
+  float* st = a.slot[tok * a.slot_stride].conv + (size_t)a.conv_off * 3 +
+              (size_t)c * 3;
   auto input = [&](int r) {
     float xc;
     if (a.nsum == 8) {
@@ -1423,7 +1424,7 @@ __device__ __forceinline__ void conv_resid_block(const ConvResidArgs& a,
                                                  int tok) {
   constexpr int R = 5;  // ceil(2304 / 512)
   const size_t to = (size_t)tok * 2304;
-  const SlotEntry* sl = a.slot + tok * 48;
+  const SlotEntry* sl = a.slot + tok * a.slot_stride;
   float xin[R][4], wv[R][4], cv[R];
 #pragma unroll
   for (int r = 0; r < R; ++r) {
@@ -1764,7 +1765,7 @@ __device__ __forceinline__ void kvprep_block(const KvPrepArgs& a, int kvh,
                                              int tk, float* red /*[32]*/) {
   const int d = threadIdx.x, c = kvh * 128 + d;
   const int pos = a.pos[tk];
-  const SlotEntry* slot = a.slot + tk * 48;
+  const SlotEntry* slot = a.slot + tk * a.slot_stride;
   const float* ak = a.k + (size_t)tk * a.ld;
   const float* av = a.v + (size_t)tk * a.ld;
   float* sk = slot->conv + (size_t)a.conv_off_k * 3 + (size_t)c * 3;
@@ -2370,7 +2371,7 @@ __device__ __forceinline__ void attn_decode_body(const AttnArgs& a) {
   const int tid = threadIdx.x, lane = tid & 31, w = tid >> 5;
   const int kvh = blockIdx.x, split = blockIdx.y, tk = blockIdx.z;
   const int p0 = a.pos[tk];
-  const SlotEntry* slot = a.slot + tk * 48;
+  const SlotEntry* slot = a.slot + tk * a.slot_stride;
   const float* aq_ = a.q + (size_t)tk * a.ldp;
   const float* ar_ = a.r + (size_t)tk * a.ldp;
   float* ws_o = a.ws_o + (size_t)tk * a.ws_tok * 128;
@@ -4862,8 +4863,8 @@ void RowsLinearSample(hipStream_t s, const LinearSampleArgs& a) {
 }
 
 void CommitVerifyConv(hipStream_t s, const SlotEntry* tbl, const float* cap,
-                      int keep, int row0) {
-  k_conv_commit<<<dim3(26, 48), 256, 0, s>>>(tbl, cap, keep, row0);
+                      int keep, int row0, int n_slots) {
+  k_conv_commit<<<dim3(26, n_slots), 256, 0, s>>>(tbl, cap, keep, row0);
   Chk("conv_commit");
 }
 void RouteBuild(hipStream_t s, const int* ids, int p, int e, int* off,
@@ -5201,6 +5202,323 @@ void SkinnyPrefill(hipStream_t s, const float* x, int ldx, const float* w,
   g.j[0] = {x, ldx, nullptr, 0, w, 2304, 2304, 0, 0, out, ldo, rows};
   k_gate_v2<64, 32><<<dim3((t + 63) / 64, 1, 1), 256, 0, s>>>(g, t, 0.f);
   Chk("skinny_prefill");
+}
+
+// ================================================================================================
+// LoopCD-Logits guidance
+// ================================================================================================
+namespace {
+
+constexpr int kLcBlocks = 64;
+
+struct alignas(16) LcStat {
+  double sum;
+  float m1;
+  float m2;
+};
+
+struct alignas(16) LcLse {
+  double sz;
+  double sr;
+  float mz;
+  float mr;
+};
+
+__device__ __forceinline__ void lc_push(LcStat& s, float y) {
+  if (!isfinite(y))
+    return;
+  if (y > s.m1) {
+    s.sum = (s.m1 > -INFINITY
+                 ? s.sum * exp(static_cast<double>(s.m1) - static_cast<double>(y))
+                 : 0.0) +
+            1.0;
+    s.m2 = s.m1;
+    s.m1 = y;
+  } else {
+    if (y > s.m2)
+      s.m2 = y;
+    s.sum += exp(static_cast<double>(y) - static_cast<double>(s.m1));
+  }
+}
+
+__device__ __forceinline__ LcStat lc_merge(LcStat a, LcStat b) {
+  if (a.m1 == -INFINITY)
+    return b;
+  if (b.m1 == -INFINITY)
+    return a;
+  if (b.m1 > a.m1) {
+    LcStat t = a;
+    a = b;
+    b = t;
+  }
+  LcStat out;
+  out.m1 = a.m1;
+  out.m2 = fmaxf(a.m2, b.m1);
+  out.sum = a.sum + b.sum * exp(static_cast<double>(b.m1) -
+                                static_cast<double>(a.m1));
+  return out;
+}
+
+__device__ __forceinline__ void lse_push(float& m, double& s, float y) {
+  if (!isfinite(y))
+    return;
+  if (y > m) {
+    s = (m > -INFINITY
+             ? s * exp(static_cast<double>(m) - static_cast<double>(y))
+             : 0.0) +
+        1.0;
+    m = y;
+  } else {
+    s += exp(static_cast<double>(y) - static_cast<double>(m));
+  }
+}
+
+__device__ __forceinline__ void lse_merge(float ma, double sa, float mb,
+                                          double sb, float& mo, double& so) {
+  if (ma == -INFINITY) {
+    mo = mb;
+    so = sb;
+    return;
+  }
+  if (mb == -INFINITY) {
+    mo = ma;
+    so = sa;
+    return;
+  }
+  if (mb > ma) {
+    mo = mb;
+    so = sb + sa * exp(static_cast<double>(ma) - static_cast<double>(mb));
+  } else {
+    mo = ma;
+    so = sa + sb * exp(static_cast<double>(mb) - static_cast<double>(ma));
+  }
+}
+
+__device__ __forceinline__ bool lc_is_ctrl(const uint32_t* ctrl, int i) {
+  return ((ctrl[i >> 5] >> (i & 31)) & 1u) != 0u;
+}
+
+__global__ void __launch_bounds__(256)
+    k_loopcd_stats(const float* logits, int vocab, const uint8_t* mask,
+                   LcStat* blk_stats) {
+  const int r = blockIdx.y;
+  if (mask && mask[r] == 0)
+    return;
+  const int per = (vocab + kLcBlocks - 1) / kLcBlocks;
+  const int lo = blockIdx.x * per, hi = min(vocab, lo + per);
+  const float* x = logits + static_cast<size_t>(r) * vocab;
+  LcStat st{0.0, -INFINITY, -INFINITY};
+  for (int i = lo + threadIdx.x; i < hi; i += 256)
+    lc_push(st, x[i]);
+#pragma unroll
+  for (int o = 16; o > 0; o >>= 1) {
+    LcStat other;
+    other.m1 = __shfl_xor(st.m1, o, 32);
+    other.m2 = __shfl_xor(st.m2, o, 32);
+    other.sum = __shfl_xor(st.sum, o, 32);
+    st = lc_merge(st, other);
+  }
+  __shared__ LcStat red[8];
+  if ((threadIdx.x & 31) == 0)
+    red[threadIdx.x >> 5] = st;
+  __syncthreads();
+  if (threadIdx.x == 0) {
+    LcStat total = red[0];
+    for (int w = 1; w < 8; ++w)
+      total = lc_merge(total, red[w]);
+    blk_stats[static_cast<size_t>(r) * kLcBlocks + blockIdx.x] = total;
+  }
+}
+
+__global__ void __launch_bounds__(64)
+    k_loopcd_reduce_w(const LcStat* blk_stats, int rows, float w_max,
+                      bool adaptive, const uint8_t* mask, float* row_w) {
+  const int r = blockIdx.x * blockDim.x + threadIdx.x;
+  if (r >= rows)
+    return;
+  if ((mask && mask[r] == 0) || !(w_max > 0.0f)) {
+    row_w[r] = 0.0f;
+    return;
+  }
+  if (!adaptive) {
+    row_w[r] = w_max;
+    return;
+  }
+  const LcStat* bs = blk_stats + static_cast<size_t>(r) * kLcBlocks;
+  LcStat total = bs[0];
+  for (int b = 1; b < kLcBlocks; ++b)
+    total = lc_merge(total, bs[b]);
+  double margin = 0.0;
+  if (total.m1 > -INFINITY && total.sum > 0.0) {
+    const double p1 = 1.0 / total.sum;
+    const double p2 =
+        total.m2 > -INFINITY
+            ? exp(static_cast<double>(total.m2) -
+                  static_cast<double>(total.m1)) /
+                  total.sum
+            : 0.0;
+    margin = fmin(1.0, fmax(0.0, p1 - p2));
+  }
+  row_w[r] = static_cast<float>(static_cast<double>(w_max) * (1.0 - margin));
+}
+
+__global__ void __launch_bounds__(256)
+    k_loopcd_apply(float* logits, const float* ref_logits, int vocab,
+                   const float* row_w) {
+  const int r = blockIdx.y;
+  const float w = row_w[r];
+  if (w == 0.0f)
+    return;
+  const int per = (vocab + kLcBlocks - 1) / kLcBlocks;
+  const int lo = blockIdx.x * per, hi = min(vocab, lo + per);
+  const size_t off = static_cast<size_t>(r) * vocab;
+  float* z = logits + off;
+  const float* z1 = ref_logits + off;
+  for (int i = lo + threadIdx.x; i < hi; i += 256) {
+    const float zi = z[i];
+    z[i] = zi + w * (zi - z1[i]);
+  }
+}
+
+__global__ void __launch_bounds__(256)
+    k_loopcd_ctrl_lse(const float* logits, const float* ref_logits, int vocab,
+                      const float* row_w, const uint32_t* ctrl, LcLse* out) {
+  const int r = blockIdx.y;
+  const float w = row_w[r];
+  if (w == 0.0f)
+    return;
+  const int per = (vocab + kLcBlocks - 1) / kLcBlocks;
+  const int lo = blockIdx.x * per, hi = min(vocab, lo + per);
+  const size_t off = static_cast<size_t>(r) * vocab;
+  const float* z = logits + off;
+  const float* z1 = ref_logits + off;
+  float mz = -INFINITY, mr = -INFINITY;
+  double sz = 0.0, sr = 0.0;
+  for (int i = lo + threadIdx.x; i < hi; i += 256) {
+    if (lc_is_ctrl(ctrl, i))
+      continue;
+    const float zi = z[i];
+    const float ri = zi + w * (zi - z1[i]);
+    lse_push(mz, sz, zi);
+    lse_push(mr, sr, ri);
+  }
+#pragma unroll
+  for (int o = 16; o > 0; o >>= 1) {
+    lse_merge(mz, sz, __shfl_xor(mz, o, 32), __shfl_xor(sz, o, 32), mz, sz);
+    lse_merge(mr, sr, __shfl_xor(mr, o, 32), __shfl_xor(sr, o, 32), mr, sr);
+  }
+  __shared__ LcLse red[8];
+  if ((threadIdx.x & 31) == 0)
+    red[threadIdx.x >> 5] = {sz, sr, mz, mr};
+  __syncthreads();
+  if (threadIdx.x == 0) {
+    LcLse total = red[0];
+    for (int w_idx = 1; w_idx < 8; ++w_idx) {
+      lse_merge(total.mz, total.sz, red[w_idx].mz, red[w_idx].sz, total.mz,
+                total.sz);
+      lse_merge(total.mr, total.sr, red[w_idx].mr, red[w_idx].sr, total.mr,
+                total.sr);
+    }
+    out[static_cast<size_t>(r) * kLcBlocks + blockIdx.x] = total;
+  }
+}
+
+__global__ void __launch_bounds__(64)
+    k_loopcd_reduce_delta(const LcLse* blk_lse, int rows, const float* row_w,
+                          float* row_delta) {
+  const int r = blockIdx.x * blockDim.x + threadIdx.x;
+  if (r >= rows)
+    return;
+  if (row_w[r] == 0.0f) {
+    row_delta[r] = 0.0f;
+    return;
+  }
+  const LcLse* bl = blk_lse + static_cast<size_t>(r) * kLcBlocks;
+  LcLse total = bl[0];
+  for (int b = 1; b < kLcBlocks; ++b) {
+    lse_merge(total.mz, total.sz, bl[b].mz, bl[b].sz, total.mz, total.sz);
+    lse_merge(total.mr, total.sr, bl[b].mr, bl[b].sr, total.mr, total.sr);
+  }
+  if (total.sz > 0.0 && total.sr > 0.0) {
+    const double lse_z = static_cast<double>(total.mz) + log(total.sz);
+    const double lse_r = static_cast<double>(total.mr) + log(total.sr);
+    row_delta[r] = static_cast<float>(lse_z - lse_r);
+  } else {
+    row_delta[r] = 0.0f;
+  }
+}
+
+__global__ void __launch_bounds__(256)
+    k_loopcd_apply_ctrl(float* logits, const float* ref_logits, int vocab,
+                        const float* row_w, const float* row_delta,
+                        const uint32_t* ctrl) {
+  const int r = blockIdx.y;
+  const float w = row_w[r];
+  if (w == 0.0f)
+    return;
+  const float delta = row_delta[r];
+  const int per = (vocab + kLcBlocks - 1) / kLcBlocks;
+  const int lo = blockIdx.x * per, hi = min(vocab, lo + per);
+  const size_t off = static_cast<size_t>(r) * vocab;
+  float* z = logits + off;
+  const float* z1 = ref_logits + off;
+  for (int i = lo + threadIdx.x; i < hi; i += 256) {
+    if (!lc_is_ctrl(ctrl, i)) {
+      const float zi = z[i];
+      z[i] = (zi + w * (zi - z1[i])) + delta;
+    }
+  }
+}
+
+size_t Align16(size_t n) {
+  return (n + 15u) & ~size_t{15};
+}
+
+}  // namespace
+
+std::size_t LoopCdWorkspaceBytes(int max_rows) {
+  if (max_rows <= 0)
+    return 16;
+  const size_t r = static_cast<size_t>(max_rows);
+  const size_t w_bytes = Align16(r * sizeof(float));
+  const size_t d_bytes = Align16(r * sizeof(float));
+  const size_t blk_bytes =
+      r * kLcBlocks * std::max(sizeof(LcStat), sizeof(LcLse));
+  return w_bytes + d_bytes + blk_bytes;
+}
+
+void LoopCdGuide(hipStream_t s, const LoopCdArgs& a) {
+  if (a.rows <= 0 || a.vocab <= 0)
+    return;
+  auto* base = static_cast<uint8_t*>(a.ws);
+  const size_t r = static_cast<size_t>(a.rows);
+  const size_t w_bytes = Align16(r * sizeof(float));
+  const size_t d_bytes = Align16(r * sizeof(float));
+  auto* row_w = reinterpret_cast<float*>(base);
+  auto* row_delta = reinterpret_cast<float*>(base + w_bytes);
+  auto* blk_raw = base + w_bytes + d_bytes;
+  auto* blk_stats = reinterpret_cast<LcStat*>(blk_raw);
+  auto* blk_lse = reinterpret_cast<LcLse*>(blk_raw);
+
+  if (a.adaptive && a.w_max > 0.0f) {
+    k_loopcd_stats<<<dim3(kLcBlocks, a.rows), 256, 0, s>>>(
+        a.logits, a.vocab, a.guide_mask, blk_stats);
+  }
+  k_loopcd_reduce_w<<<(a.rows + 63) / 64, 64, 0, s>>>(
+      blk_stats, a.rows, a.w_max, a.adaptive, a.guide_mask, row_w);
+
+  if (a.control_bits == nullptr) {
+    k_loopcd_apply<<<dim3(kLcBlocks, a.rows), 256, 0, s>>>(
+        a.logits, a.ref_logits, a.vocab, row_w);
+  } else {
+    k_loopcd_ctrl_lse<<<dim3(kLcBlocks, a.rows), 256, 0, s>>>(
+        a.logits, a.ref_logits, a.vocab, row_w, a.control_bits, blk_lse);
+    k_loopcd_reduce_delta<<<(a.rows + 63) / 64, 64, 0, s>>>(
+        blk_lse, a.rows, row_w, row_delta);
+    k_loopcd_apply_ctrl<<<dim3(kLcBlocks, a.rows), 256, 0, s>>>(
+        a.logits, a.ref_logits, a.vocab, row_w, row_delta, a.control_bits);
+  }
+  Chk("loopcd_guide");
 }
 
 }  // namespace gufo::models::inkling2::fast

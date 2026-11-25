@@ -40,13 +40,28 @@ inline constexpr std::size_t kMetaBytes = 64;
 /// Drafter layers after the 48 target visits: visit kVisits + l.
 inline constexpr std::uint32_t kDraftLayers = 3;
 inline constexpr std::size_t kDraftFBytes = 2304 * 4;  // Markov vector, F32
+/// LoopCD reference-coda visits (layers 18..23 on pass 1's stash): fixed
+/// component visit numbering after the drafter slots so drafter ids never
+/// depend on LoopCD. Engine slots are `kVisits + (0..5)`.
+inline constexpr std::uint32_t kRefVisits = 6;
+inline constexpr std::uint32_t kRefVisitBase =
+    static_cast<std::uint32_t>(kVisits) + kDraftLayers;
+inline constexpr std::size_t kRefConvBytes = kRefVisits * kConvBytesPerVisit;
 
-enum class Part : std::uint8_t { kMeta, kLogits, kConv, kKey, kValue, kDraftF };
+enum class Part : std::uint8_t {
+  kMeta,
+  kLogits,
+  kConv,
+  kKey,
+  kValue,
+  kDraftF,
+  kRefConv
+};
 
 struct StateComponent {
   cache::ComponentDescriptor descriptor;
   Part part;
-  std::uint32_t visit{0};  // slot index 0..47 for kKey / kValue
+  std::uint32_t visit{0};  // 0..47 main, 48..50 drafter, 51..56 ref coda
   bool global{false};
 };
 
@@ -64,7 +79,7 @@ enum class Block : std::uint8_t {
 /// The 64-byte private metadata component. Fixed layout, little endian on the
 /// supported hosts.
 struct StateMeta {
-  static constexpr std::uint32_t kVersion = 2;
+  static constexpr std::uint32_t kVersion = 3;
   std::uint32_t version{kVersion};
   std::uint32_t block{0};
   std::uint64_t position{0};
@@ -81,8 +96,9 @@ class StateLayout {
 public:
   /// `ring_rows`: rows of one sliding-window ring (at least window + chunk -
   /// 1). `drafter`: the session also holds a DSpark drafter's context.
+  /// `loopcd`: the session also holds LoopCD's 6-layer reference coda state.
   StateLayout(const Inkling2Config& config, std::uint32_t ring_rows,
-              bool drafter = false);
+              bool drafter = false, bool loopcd = false);
 
   [[nodiscard]] std::span<const StateComponent> components() const {
     return components_;
@@ -92,6 +108,7 @@ public:
   [[nodiscard]] std::size_t logits_bytes() const { return logits_bytes_; }
   [[nodiscard]] std::size_t vocab() const { return vocab_; }
   [[nodiscard]] bool drafter() const { return drafter_; }
+  [[nodiscard]] bool loopcd() const { return loopcd_; }
 
   /// The frontier of every component for a session standing at `position`
   /// tokens.
@@ -119,6 +136,7 @@ private:
   std::uint32_t ring_rows_;
   std::size_t logits_bytes_, vocab_;
   bool drafter_;
+  bool loopcd_;
 };
 
 /// The only code that touches a Session's buffers for the cache: row ranges in

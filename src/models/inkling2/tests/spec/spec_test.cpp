@@ -54,6 +54,7 @@ int main(int argc, char** argv) {
   std::string model, dspark, ids_in;
   int prompt = 600, tokens = 48;
   double min_acceptance = 0.2;  // 26% on the built-in prompt (UD-Q4_K_XL)
+  gufo::models::inkling2::LoopCdConfig loopcd;
   for (int i = 1; i < argc; ++i) {
     const std::string k = argv[i];
     auto next = [&]() -> std::string { return i + 1 < argc ? argv[++i] : ""; };
@@ -69,6 +70,18 @@ int main(int argc, char** argv) {
       tokens = std::atoi(next().c_str());
     else if (k == "--min-acceptance")
       min_acceptance = std::atof(next().c_str());
+    else if (k == "--loopcd") {
+      const std::string m = next();
+      if (m == "off")
+        loopcd.mode = gufo::models::inkling2::LoopCdMode::kOff;
+      else if (m == "on")
+        loopcd.mode = gufo::models::inkling2::LoopCdMode::kOn;
+      else {
+        std::fprintf(stderr, "unsupported --loopcd mode %s\n", m.c_str());
+        return 2;
+      }
+    } else if (k == "--loopcd-strength")
+      loopcd.w_max = std::strtof(next().c_str(), nullptr);
     else {
       std::fprintf(stderr, "unknown option %s\n", k.c_str());
       return 2;
@@ -99,7 +112,9 @@ int main(int argc, char** argv) {
     std::fprintf(stderr, "open: %s\n", err.c_str());
     return 1;
   }
-  auto engine = Engine::Create(reader, 8192, &err);
+  Engine::Options engine_opts;
+  engine_opts.loopcd = loopcd;
+  auto engine = Engine::Create(reader, 8192, &err, engine_opts);
   if (!engine) {
     std::fprintf(stderr, "engine: %s\n", err.c_str());
     return 1;

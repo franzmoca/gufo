@@ -85,7 +85,8 @@ struct CountingGuard final : gc::MutationGuard {
       // callback.
       const auto pos = adapter->Positions(*slot);
       const auto have = pos[id.value - 1].valid_rows;
-      if (first < have && id.value > 3) {
+      if (first < have &&
+          gc::HasRows(adapter->layout().Component(id).descriptor.kind)) {
         const auto stop = std::min<gc::Rows>(end, have);
         std::vector<std::byte> buf((stop - first) * i2::kKvRowBytes);
         NullStream st;
@@ -157,8 +158,8 @@ Checkpoint Capture(i2::Inkling2CacheAdapter& a, gc::Slot& slot) {
   return cp;
 }
 
-void Restore(i2::Inkling2CacheAdapter& a, gc::Slot& slot,
-             const Checkpoint& cp) {
+bool LoadCheckpoint(i2::Inkling2CacheAdapter& a, gc::Slot& slot,
+                    const Checkpoint& cp) {
   NullStream st;
   a.BeginRestore(slot, cp.positions);
   const auto comps = a.Components();
@@ -187,7 +188,12 @@ void Restore(i2::Inkling2CacheAdapter& a, gc::Slot& slot,
       }
     }
   }
-  REQUIRE(a.Validate(slot, cp.positions), "Validate refused the restore");
+  return a.Validate(slot, cp.positions);
+}
+
+void Restore(i2::Inkling2CacheAdapter& a, gc::Slot& slot,
+             const Checkpoint& cp) {
+  REQUIRE(LoadCheckpoint(a, slot, cp), "Validate refused the restore");
 }
 
 std::vector<float> Run(i2::Engine& e, i2::Session& s,
@@ -235,6 +241,7 @@ int main(int argc, char** argv) {
   std::size_t chunk_prompt = 1853;  // over 1K keys, under one ubatch
   bool chunks_only = false;
   std::string dspark;  // drafter GGUF: its context is checkpointed too
+  i2::LoopCdConfig loopcd;
   for (int i = 1; i < argc; ++i) {
     const std::string k = argv[i];
     auto next = [&] {
@@ -254,6 +261,18 @@ int main(int argc, char** argv) {
       chunks_only = true;
     else if (k == "--dspark")
       dspark = next();
+    else if (k == "--loopcd") {
+      const std::string m = next();
+      if (m == "off")
+        loopcd.mode = i2::LoopCdMode::kOff;
+      else if (m == "on")
+        loopcd.mode = i2::LoopCdMode::kOn;
+      else {
+        std::fprintf(stderr, "unsupported --loopcd mode %s\n", m.c_str());
+        return 2;
+      }
+    } else if (k == "--loopcd-strength")
+      loopcd.w_max = std::strtof(next().c_str(), nullptr);
   }
   if (model.empty() || idsf.empty()) {
     std::fprintf(stderr,
@@ -282,8 +301,10 @@ int main(int argc, char** argv) {
     std::fprintf(stderr, "open: %s\n", err.c_str());
     return 1;
   }
+  i2::Engine::Options engine_opts;
+  engine_opts.loopcd = loopcd;
   auto engine = i2::Engine::Create(
-      reader, static_cast<std::uint32_t>(n + tail + 512), &err);
+      reader, static_cast<std::uint32_t>(n + tail + 512), &err, engine_opts);
   if (!engine) {
     std::fprintf(stderr, "engine: %s\n", err.c_str());
     return 1;
@@ -300,6 +321,16 @@ int main(int argc, char** argv) {
       gc::Identity{'t', 'e', 's', 't'}, false, 2048);
   auto& eng = *adapter.engine_for_test();
   guard.adapter = &adapter;
+  if (loopcd.enabled()) {
+    REQUIRE(adapter.layout().loopcd(), "layout missing loopcd flag");
+    const std::size_t expected =
+        3 + 2 * i2::kVisits +
+        (eng.has_drafter() ? 1 + 2 * i2::kDraftLayers : 0) + 1 +
+        2 * i2::kRefVisits;
+    REQUIRE(adapter.Components().size() == expected,
+            "unexpected component count %zu != %zu",
+            adapter.Components().size(), expected);
+  }
 
   const std::span<const std::int32_t> prompt(ids.data(), n),
       more(ids.data() + n, tail);
@@ -430,6 +461,17 @@ int main(int argc, char** argv) {
                               : " (comparisons use 8x)");
   }
 
+  {
+    auto slot_stale = adapter.CreateSlot(guard);
+    Checkpoint stale = cp;
+    i2::StateMeta bad_meta{};
+    std::memcpy(&bad_meta, stale.data[0].data(), sizeof bad_meta);
+    bad_meta.version = 2;
+    std::memcpy(stale.data[0].data(), &bad_meta, sizeof bad_meta);
+    REQUIRE(!LoadCheckpoint(adapter, *slot_stale, stale),
+            "Validate accepted stale StateMeta version");
+    REQUIRE(adapter.Invalidate(*slot_stale), "Invalidate stale slot");
+  }
   auto slot_b = adapter.CreateSlot(guard);
   Restore(adapter, *slot_b, cp);
   auto& sb = adapter.GetSession(*slot_b);

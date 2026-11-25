@@ -100,7 +100,8 @@ Inkling2CacheAdapter::Inkling2CacheAdapter(std::shared_ptr<Engine> engine,
                                            cache::Identity identity,
                                            bool durable, std::size_t plan_step)
     : engine_(std::move(engine)),
-      layout_(engine_->config(), engine_->ring_rows(), engine_->has_drafter()),
+      layout_(engine_->config(), engine_->ring_rows(), engine_->has_drafter(),
+              engine_->has_loopcd()),
       identity_(std::move(identity)),
       durable_(durable),
       plan_step_(plan_step) {
@@ -275,6 +276,27 @@ void Inkling2CacheAdapter::CapturePrivateInto(const Inkling2Slot& slot,
       else
         SessionStateAccess::DraftFOut(session, offset, out.size(), out.data());
       break;
+    case Part::kRefConv: {
+      if (bv != nullptr && bv->cp->conv != nullptr) {
+        SessionStateAccess::DeviceBytesOut(
+            reinterpret_cast<const std::byte*>(bv->cp->conv) + kConvBytes +
+                offset,
+            out.size(), out.data());
+        break;
+      }
+      std::size_t done = 0;
+      while (done < out.size()) {
+        const std::size_t at = offset + done,
+                          v = kVisits + at / kConvBytesPerVisit,
+                          inner = at % kConvBytesPerVisit;
+        const std::size_t n =
+            std::min(out.size() - done, kConvBytesPerVisit - inner);
+        SessionStateAccess::ConvVisitOut(session, static_cast<std::uint32_t>(v),
+                                         inner, n, out.data() + done);
+        done += n;
+      }
+      break;
+    }
     default:
       throw std::invalid_argument("component is not private state");
   }
@@ -474,6 +496,21 @@ cache::Completion Inkling2CacheAdapter::LoadPrivatePiece(
         SessionStateAccess::DraftFIn(s.session(), offset, bytes.size(),
                                      bytes.data());
         break;
+      case Part::kRefConv: {
+        std::size_t done = 0;
+        while (done < bytes.size()) {
+          const std::size_t at = offset + done,
+                            v = kVisits + at / kConvBytesPerVisit,
+                            inner = at % kConvBytesPerVisit;
+          const std::size_t n =
+              std::min(bytes.size() - done, kConvBytesPerVisit - inner);
+          SessionStateAccess::ConvVisitIn(s.session(),
+                                          static_cast<std::uint32_t>(v), inner,
+                                          n, bytes.data() + done);
+          done += n;
+        }
+        break;
+      }
       default:
         throw std::invalid_argument("component is not private state");
     }
