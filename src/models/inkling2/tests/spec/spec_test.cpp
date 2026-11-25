@@ -40,6 +40,7 @@
 #include "src/models/inkling2/engine.hpp"
 #include "src/models/inkling2/text/chat_template.hpp"
 #include "src/models/inkling2/text/tokenizer.hpp"
+#include "src/models/inkling2/text/tool_dialect.hpp"
 
 namespace {
 using gufo::models::inkling2::Engine;
@@ -76,6 +77,8 @@ int main(int argc, char** argv) {
         loopcd.mode = gufo::models::inkling2::LoopCdMode::kOff;
       else if (m == "on")
         loopcd.mode = gufo::models::inkling2::LoopCdMode::kOn;
+      else if (m == "skip-thinking")
+        loopcd.mode = gufo::models::inkling2::LoopCdMode::kSkipThinking;
       else {
         std::fprintf(stderr, "unsupported --loopcd mode %s\n", m.c_str());
         return 2;
@@ -114,6 +117,19 @@ int main(int argc, char** argv) {
   }
   Engine::Options engine_opts;
   engine_opts.loopcd = loopcd;
+  if (loopcd.mode == gufo::models::inkling2::LoopCdMode::kSkipThinking) {
+    auto tok = inkling2::text::Tokenizer::CreateFromGguf(*reader, &err);
+    if (!tok) {
+      std::fprintf(stderr, "tokenizer: %s\n", err.c_str());
+      return 1;
+    }
+    const std::size_t Vtok = tok->VocabSize();
+    engine_opts.loopcd_control_bits.assign((Vtok + 31) / 32, 0U);
+    for (std::size_t id = 0; id < Vtok; ++id)
+      if (tok->IsSpecial(static_cast<std::uint32_t>(id)))
+        engine_opts.loopcd_control_bits[id / 32] |=
+            (1U << static_cast<unsigned>(id % 32));
+  }
   auto engine = Engine::Create(reader, 8192, &err, engine_opts);
   if (!engine) {
     std::fprintf(stderr, "engine: %s\n", err.c_str());
@@ -540,6 +556,87 @@ int main(int argc, char** argv) {
     std::printf("gpu linear sample + lazy row read: 8 rows, %d errors\n",
                 ls_bad);
     failures += ls_bad != 0;
+  }
+  if (loopcd.mode == gufo::models::inkling2::LoopCdMode::kSkipThinking) {
+    // 5. Verify crossing a thinking -> end_message -> text block boundary,
+    // forcing rejection (CommitVerify) at each position and checking AR
+    // bit-identity.
+    auto tok = inkling2::text::Tokenizer::CreateFromGguf(*reader, &err);
+    if (!tok) {
+      std::fprintf(stderr, "tokenizer: %s\n", err.c_str());
+      return 1;
+    }
+    inkling2::text::PromptTokens pt;
+    inkling2::text::RenderOptions ro;
+    ro.generation_prefix = inkling2::text::RenderOptions::Prefix::kHeader;
+    if (!inkling2::text::RenderAndTokenize(
+            *tok,
+            {inkling2::text::Message::Text(
+                "user", "Briefly say hello after thinking.")},
+            {}, ro, &pt, &err)) {
+      std::fprintf(stderr, "render: %s\n", err.c_str());
+      return 1;
+    }
+    const auto t_think =
+        tok->FindSpecial(inkling2::text::dialect::kThinking).value();
+    const auto t_end =
+        tok->FindSpecial(inkling2::text::dialect::kEndMessage).value();
+    const auto t_hdr =
+        tok->FindSpecial(inkling2::text::dialect::kHeader).value();
+    const auto t_text =
+        tok->FindSpecial(inkling2::text::dialect::kContentText).value();
+    std::vector<std::int32_t> base(pt.ids.begin(), pt.ids.end());
+    std::vector<std::uint8_t> base_guide(base.size(), 1);
+    // Enter kThinking inside prompt; trailing tokens remain inside thinking.
+    base.push_back(static_cast<std::int32_t>(t_think));
+    base_guide.push_back(0);
+    for (int i = 0; i < 3; ++i) {
+      base.push_back(1200 + i * 7);
+      base_guide.push_back(0);
+    }
+    // Seq crosses kThinking -> kIdle -> kAfterHeader -> kText -> text tokens.
+    const std::vector<std::int32_t> seq = {1250,
+                                           static_cast<std::int32_t>(t_end),
+                                           static_cast<std::int32_t>(t_hdr),
+                                           static_cast<std::int32_t>(t_text),
+                                           2000,
+                                           2001};
+    const std::vector<std::uint8_t> seq_guide = {0, 1, 1, 1, 1, 1};
+    int st_bad = 0;
+    for (std::size_t keep = 1; keep <= seq.size(); ++keep) {
+      auto sar = engine->NewSession();
+      auto sver = engine->NewSession();
+      engine->Forward(*sar, base, {}, nullptr, {}, {}, {}, base_guide);
+      engine->Forward(*sver, base, {}, nullptr, {}, {}, {}, base_guide);
+      std::span<const float> vout;
+      engine->Verify(*sver, seq, &vout, nullptr, {}, nullptr, seq_guide);
+      for (std::size_t r = 0; r < seq.size(); ++r) {
+        engine->Decode(*sar, seq[r], seq_guide[r] != 0);
+        const auto row = vout.subspan(r * V, V);
+        if (std::memcmp(sar->logits().data(), row.data(), V * sizeof(float)) !=
+            0) {
+          ++st_bad;
+          break;
+        }
+        if (r + 1 == keep) {
+          engine->CommitVerify(*sver, keep, vout);
+          if (std::memcmp(sar->logits().data(), sver->logits().data(),
+                          V * sizeof(float)) != 0)
+            ++st_bad;
+          engine->Decode(*sar, 2002, true);
+          engine->Decode(*sver, 2002, true);
+          if (std::memcmp(sar->logits().data(), sver->logits().data(),
+                          V * sizeof(float)) != 0)
+            ++st_bad;
+          break;
+        }
+      }
+    }
+    std::printf(
+        "skip-thinking boundary Verify (k=1..%zu across <|end_message|>): "
+        "%d errors\n",
+        seq.size(), st_bad);
+    failures += st_bad != 0;
   }
   std::printf(failures ? "FAIL\n" : "ALL PASS\n");
   return failures ? 1 : 0;

@@ -30,6 +30,7 @@
 
 #include "src/models/inkling2/cache_adapter.hpp"
 #include "src/models/inkling2/engine.hpp"
+#include "src/models/inkling2/text/tokenizer.hpp"
 
 // An external extension target may not link gufo_cache (the `gufo` binary has
 // it), so this tool carries its own copy of the 40 lines of
@@ -267,6 +268,8 @@ int main(int argc, char** argv) {
         loopcd.mode = i2::LoopCdMode::kOff;
       else if (m == "on")
         loopcd.mode = i2::LoopCdMode::kOn;
+      else if (m == "skip-thinking")
+        loopcd.mode = i2::LoopCdMode::kSkipThinking;
       else {
         std::fprintf(stderr, "unsupported --loopcd mode %s\n", m.c_str());
         return 2;
@@ -303,6 +306,19 @@ int main(int argc, char** argv) {
   }
   i2::Engine::Options engine_opts;
   engine_opts.loopcd = loopcd;
+  if (loopcd.mode == i2::LoopCdMode::kSkipThinking) {
+    auto tok = ::inkling2::text::Tokenizer::CreateFromGguf(*reader, &err);
+    if (!tok) {
+      std::fprintf(stderr, "tokenizer: %s\n", err.c_str());
+      return 1;
+    }
+    const std::size_t Vtok = tok->VocabSize();
+    engine_opts.loopcd_control_bits.assign((Vtok + 31) / 32, 0U);
+    for (std::size_t id = 0; id < Vtok; ++id)
+      if (tok->IsSpecial(static_cast<std::uint32_t>(id)))
+        engine_opts.loopcd_control_bits[id / 32] |=
+            (1U << static_cast<unsigned>(id % 32));
+  }
   auto engine = i2::Engine::Create(
       reader, static_cast<std::uint32_t>(n + tail + 512), &err, engine_opts);
   if (!engine) {

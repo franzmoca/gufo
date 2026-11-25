@@ -502,11 +502,12 @@ public:
     }
     return std::string(tok_->TokenBytes(token));
   }
-  [[nodiscard]] Block NextBlock(const Inkling2State& st,
-                                g::TextRunnerToken token) const {
+  [[nodiscard]] Block NextBlockSimple(Block cur, g::TextRunnerToken token,
+                                      bool continues_name = false,
+                                      bool has_calls = false) const {
     if (token == t_header_)
       return Block::kAfterHeader;
-    switch (st.block) {
+    switch (cur) {
       case Block::kAfterHeader:
       case Block::kTool:
         if (token == t_text_)
@@ -517,15 +518,54 @@ public:
           return Block::kToolBody;
         if (token == t_end_message_)
           return Block::kIdle;
-        return ContinuesName(st, token) ? Block::kTool : Block::kText;
+        return continues_name ? Block::kTool : Block::kText;
       case Block::kText:
         // The invoke token ends the block's words as a call's header
         // (streamed as content), and the call itself follows.
-        if (token == t_invoke_ && !st.call_names.empty())
+        if (token == t_invoke_ && has_calls)
           return Block::kToolBody;
-        return token == t_end_message_ ? Block::kIdle : st.block;
+        return token == t_end_message_ ? Block::kIdle : cur;
       default:
-        return token == t_end_message_ ? Block::kIdle : st.block;
+        return token == t_end_message_ ? Block::kIdle : cur;
+    }
+  }
+  [[nodiscard]] Block NextBlock(const Inkling2State& st,
+                                g::TextRunnerToken token) const {
+    return NextBlockSimple(st.block, token, ContinuesName(st, token),
+                           !st.call_names.empty());
+  }
+  [[nodiscard]] bool SkipThinkingLoopCd() const {
+    return engine_->loopcd().mode == LoopCdMode::kSkipThinking;
+  }
+  [[nodiscard]] std::vector<std::uint8_t> PromptGuide(
+      std::span<const g::TextRunnerToken> prompt, std::size_t offset,
+      std::size_t consumed, Block* out_end_block = nullptr) const {
+    Block blk = Block::kIdle;
+    for (std::size_t i = 0; i < offset; ++i)
+      blk = NextBlockSimple(blk, prompt[i]);
+    std::vector<std::uint8_t> guide;
+    const bool need_mask = SkipThinkingLoopCd();
+    if (need_mask)
+      guide.resize(consumed);
+    for (std::size_t i = 0; i < consumed; ++i) {
+      blk = NextBlockSimple(blk, prompt[offset + i]);
+      if (need_mask)
+        guide[i] = blk != Block::kThinking ? 1 : 0;
+    }
+    if (out_end_block != nullptr)
+      *out_end_block = blk;
+    return guide;
+  }
+  void FillVerifyGuide(Block after_anchor, std::span<const std::int32_t> drafts,
+                       std::vector<std::uint8_t>* out) const {
+    if (!SkipThinkingLoopCd())
+      return;
+    out->reserve(out->size() + 1 + drafts.size());
+    Block blk = after_anchor;
+    out->push_back(blk != Block::kThinking ? 1 : 0);
+    for (const std::int32_t d : drafts) {
+      blk = NextBlockSimple(blk, static_cast<g::TextRunnerToken>(d));
+      out->push_back(blk != Block::kThinking ? 1 : 0);
     }
   }
   /// The header text Piece() holds back after the committed tokens and
@@ -862,24 +902,21 @@ public:
                         e->rows->device + (lo - e->first) * kVisionDim});
       }
     }
+    Block end_blk = Block::kIdle;
+    const auto guide = PromptGuide(prompt, offset, consumed, &end_blk);
     engine_->Forward(st.session(), ids, {},
                      yield.groups >= 2 || yield.cancelled ? &yield : nullptr,
-                     rows);
+                     rows, {}, {}, guide);
     // The prompt may end inside the assistant's block (reasoning off: header +
-    // text token).
+    // text token, or prefilled thinking continuation).
     st.block = Block::kIdle;
     const auto done = offset + consumed;
     if (done == prompt.size() && max_draft_ > 0) {
       st.history.assign(prompt.begin(), prompt.end());
       st.history_ok = true;
     }
-    if (done == prompt.size()) {
-      if (done >= 1 && prompt[done - 1] == t_header_)
-        st.block = Block::kAfterHeader;
-      if (done >= 2 && prompt[done - 2] == t_header_ &&
-          prompt[done - 1] == t_text_)
-        st.block = Block::kText;
-    }
+    if (done == prompt.size())
+      st.block = end_blk;
     return {.consumed_tokens = consumed,
             .decode_ready = offset + consumed == prompt.size()};
   }
@@ -943,6 +980,8 @@ public:
                         e->rows->device + (lo - e->first) * kVisionDim});
       }
     }
+    Block end_blk = Block::kIdle;
+    const auto guide = PromptGuide(prompt, offset, consumed, &end_blk);
     std::vector<Block> blocks;
     blocks.reserve(boundaries.size());
     for (const std::size_t b : boundaries)
@@ -957,7 +996,7 @@ public:
                             std::chrono::steady_clock::now() - t0)
                             .count();
         },
-        yield.groups >= 2 || yield.cancelled ? &yield : nullptr, rows);
+        yield.groups >= 2 || yield.cancelled ? &yield : nullptr, rows, guide);
     st.block = Block::kIdle;
     const auto done = offset + consumed;
     if (done == prompt.size() && max_draft_ > 0) {
@@ -965,7 +1004,7 @@ public:
       st.history_ok = true;
     }
     if (done == prompt.size())
-      st.block = BlockAt(prompt, done);
+      st.block = end_blk;
     return {.consumed_tokens = consumed,
             .decode_ready = done == prompt.size(),
             .checkpoint_ms = capture_ms};
@@ -1086,7 +1125,9 @@ public:
                g::TextRunnerToken token) const override {
     auto& st = Require(state);
     const std::int32_t id = static_cast<std::int32_t>(token);
-    engine_->Decode(st.session(), id);
+    const bool guide =
+        !SkipThinkingLoopCd() || NextBlock(st, token) != Block::kThinking;
+    engine_->Decode(st.session(), id, guide);
     CommitToken(st, token);
   }
   void CommitToken(Inkling2State& st, g::TextRunnerToken token) const {
@@ -1115,13 +1156,18 @@ public:
     std::vector<Inkling2State*> states;
     std::vector<Session*> sessions;
     std::vector<std::int32_t> ids;
+    std::vector<std::uint8_t> guide;
+    const bool need_guide = SkipThinkingLoopCd();
     for (const auto& a : advances) {
       states.push_back(&Require(a.state.get()));
       sessions.push_back(&states.back()->session());
       ids.push_back(static_cast<std::int32_t>(a.token));
+      if (need_guide)
+        guide.push_back(
+            NextBlock(*states.back(), a.token) != Block::kThinking ? 1 : 0);
     }
     try {
-      engine_->DecodeBatch(sessions, ids);
+      engine_->DecodeBatch(sessions, ids, guide);
     } catch (...) {
       // A failed step leaves the sessions unchanged or half-advanced: report it
       // to every lane.
@@ -1564,8 +1610,13 @@ public:
     if (width == 0) {
       // Nothing to verify: a plain decode step (logits left on the device
       // when greedy or GPU-sampled).
+      const bool guide = !SkipThinkingLoopCd() || st.block != Block::kThinking;
+      const std::uint8_t g = guide ? 1 : 0;
+      const std::span<const std::uint8_t> g_span =
+          SkipThinkingLoopCd() ? std::span<const std::uint8_t>(&g, 1)
+                               : std::span<const std::uint8_t>{};
       if (greedy) {
-        engine_->Step(ss, static_cast<std::int32_t>(a), amax);
+        engine_->Step(ss, static_cast<std::int32_t>(a), amax, guide);
       } else if (use_gpu_linear) {
         const std::int32_t id = static_cast<std::int32_t>(a);
         Session* const sp = &ss;
@@ -1574,7 +1625,8 @@ public:
             std::span<Session* const>(&sp, 1),
             std::span<const std::int32_t>(&id, 1),
             std::span<const bool>(&host, 1), nullptr, nullptr,
-            std::span<const Engine::LinearSample>(ls.data(), 1), gpu_samp);
+            std::span<const Engine::LinearSample>(ls.data(), 1), gpu_samp,
+            g_span);
       } else {
         // the row's logits through the pinned buffer (the session keeps its
         // copy on the device)
@@ -1583,16 +1635,19 @@ public:
         const bool host = true;
         engine_->DecodeBatchRows(std::span<Session* const>(&sp, 1),
                                  std::span<const std::int32_t>(&id, 1),
-                                 std::span<const bool>(&host, 1), &out,
-                                 nullptr);
+                                 std::span<const bool>(&host, 1), &out, nullptr,
+                                 {}, nullptr, g_span);
       }
     } else {
+      std::vector<std::uint8_t> guide;
+      FillVerifyGuide(st.block, std::span<const std::int32_t>(drafts, width),
+                      &guide);
       engine_->Verify(ss, rows, (greedy || use_gpu_linear) ? nullptr : &out,
                       greedy ? amax : nullptr,
                       use_gpu_linear ? std::span<const Engine::LinearSample>(
                                            ls.data(), rows.size())
                                      : std::span<const Engine::LinearSample>{},
-                      use_gpu_linear ? gpu_samp : nullptr);
+                      use_gpu_linear ? gpu_samp : nullptr, guide);
     }
     const auto t2 = Clock::now();
     const std::size_t keep =
@@ -1823,9 +1878,13 @@ public:
       // is selected from its new logits and kept as the next anchor.
       std::vector<Session*> sessions;
       std::vector<std::int32_t> ids;
+      std::vector<std::uint8_t> guide;
+      const bool need_guide = SkipThinkingLoopCd();
       for (const auto& l : lanes) {
         sessions.push_back(l.ss);
         ids.push_back(l.anchor);
+        if (need_guide)
+          guide.push_back(l.st->block != Block::kThinking ? 1 : 0);
       }
       bool ok = !sessions.empty();
       // greedy and GPU-linear rows avoid D2H logits; only host-sampled rows
@@ -1864,7 +1923,7 @@ public:
               any_gpu_lin
                   ? std::span<const Engine::LinearSample>(ls, lanes.size())
                   : std::span<const Engine::LinearSample>{},
-              any_gpu_lin ? gpu_samp : nullptr);
+              any_gpu_lin ? gpu_samp : nullptr, guide);
         } catch (...) {
           for (const auto& l : lanes)
             steps[l.i].failure = std::current_exception();
@@ -1946,6 +2005,7 @@ public:
       std::vector<Session*> sessions;
       std::vector<std::size_t> counts;
       std::vector<std::int32_t> rows;
+      std::vector<std::uint8_t> guide;
       std::vector<std::size_t> first(lanes.size()), keeps(lanes.size(), 0);
       std::vector<bool> use_gpu_lin(lanes.size(), false);
       std::vector<std::array<std::uint64_t, Engine::kMaxVerifyRows + 1>>
@@ -1959,6 +2019,9 @@ public:
         counts.push_back(static_cast<std::size_t>(1 + l.width));
         rows.push_back(l.anchor);
         rows.insert(rows.end(), l.drafts, l.drafts + l.width);
+        FillVerifyGuide(l.st->block,
+                        std::span<const std::int32_t>(l.drafts, l.width),
+                        &guide);
         l.pos = l.ss->position();
         use_gpu_lin[k] =
             l.mode.gpu_linear &&
@@ -1992,7 +2055,7 @@ public:
             any_gpu_lin
                 ? std::span<const Engine::LinearSample>(ls.data(), rows.size())
                 : std::span<const Engine::LinearSample>{},
-            any_gpu_lin ? gpu_samp : nullptr);
+            any_gpu_lin ? gpu_samp : nullptr, guide);
       } catch (...) {
         for (const auto& l : lanes)
           steps[l.i].failure = std::current_exception();
@@ -2322,11 +2385,6 @@ std::shared_ptr<ext::TextModelRunner> CreateInkling2TextRunner(
         *error = "inkling2: " + why;
       return nullptr;
     }
-    if (loopcd.mode == LoopCdMode::kSkipThinking) {
-      if (error)
-        *error = "inkling2: --loopcd skip-thinking is not implemented yet (M2)";
-      return nullptr;
-    }
     auto tok = ::inkling2::text::Tokenizer::CreateFromGguf(*reader, &why);
     if (!tok) {
       if (error)
@@ -2335,6 +2393,15 @@ std::shared_ptr<ext::TextModelRunner> CreateInkling2TextRunner(
     }
     Engine::Options engine_opts;
     engine_opts.loopcd = loopcd;
+    if (loopcd.mode == LoopCdMode::kSkipThinking) {
+      const std::size_t V = tok->VocabSize();
+      engine_opts.loopcd_control_bits.assign((V + 31) / 32, 0U);
+      for (std::size_t id = 0; id < V; ++id) {
+        if (tok->IsSpecial(static_cast<g::TextRunnerToken>(id)))
+          engine_opts.loopcd_control_bits[id / 32] |=
+              (1U << static_cast<unsigned>(id % 32));
+      }
+    }
     auto engine = Engine::Create(reader, max_context, &why, engine_opts);
     if (!engine) {
       if (error)

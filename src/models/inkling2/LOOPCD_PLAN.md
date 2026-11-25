@@ -350,6 +350,28 @@ results stay inconclusive and are rerun only for the affected histories.
     thinking (3,863 rows) `top1_agree=65.00%`, `flip_rate=9.14%`; non-thinking
     (571 rows) `top1_agree=77.93%`, `flip_rate=2.10%`. 1-pass samples stay
     coherent initially then show repetition/arithmetic slips.
+- **M2 (code & §6.2–§6.6 verified; quality gate pending)**:
+  - Implemented per-row `guide_mask` & `control_bits` across `Engine`
+    (`Forward`, `Decode`, `Step`, `DecodeBatch`, `DecodeBatchRows`, `Verify`,
+    `VerifyBatch`), `Inkling2CacheAdapter::PrefillThrough`, and
+    `Inkling2Runner` (`NextBlockSimple`, `PromptGuide`, `FillVerifyGuide`,
+    `Tokenizer::IsSpecial` bitset).
+  - `inkling2_loopcd_test`: `PASS §6.2 skip-thinking (guide=0 == off, ctrl_mass
+    diff=9.82e-11, Verify == Decode bit-exact)`.
+  - `inkling2_spec_test --loopcd skip-thinking`: `48/48` equal plain
+    decoding, `30/119` (`25.2%`) DSpark acceptance, `k=1..6` boundary
+    verification across `<|end_message|>` `0` errors.
+  - `inkling2_cache_test --loopcd skip-thinking`: `worst max |dlogit| =
+    0.000e+00`, `ALL PASS`.
+  - Server verification (`build/release/gufo`): §6.3 `DSpark == AR` `20/20`
+    greedy + `10/10` sampled (`seed=42`) for both `on` and `skip-thinking` at
+    `c=1` and `c=4`; `skip-thinking` `reasoning_content` `100%` identical to
+    `off` (`8/8`) while post-thinking answers differ (`4/8`); §6.4
+    `skip-thinking` RAM (`2048`) & disk (`2247`) cache hits + `on`/`off` misses
+    (`0`).
+  - §6.6 functional suites with `--mmproj`: `stops`, `conversation`,
+    `structured`, `tool-history`, `long-context`, and all `14` `cache` sub-runs
+    (`baseline passed`) for both `--loopcd skip-thinking` and `--loopcd on`.
 
 ## Milestones
 
