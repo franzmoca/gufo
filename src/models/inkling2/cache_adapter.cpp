@@ -159,23 +159,26 @@ void Inkling2CacheAdapter::PrefillThrough(
     cache::Slot& slot, std::span<const std::int32_t> tokens,
     std::span<const std::size_t> boundaries, std::span<const Block> blocks,
     const std::function<void(std::size_t)>& consume, const PrefillYield* yield,
-    std::span<const InputRows> rows) const {
+    std::span<const InputRows> rows,
+    std::span<const std::uint8_t> guide) const {
   auto& s = AsSlot(slot);
   if (!s.IsValid() || s.boundary != nullptr)
     throw std::logic_error("Inkling 2 slot is not ready for PrefillThrough");
   if (!consume || boundaries.empty() || blocks.size() != boundaries.size())
     throw std::invalid_argument("invalid Inkling 2 PrefillThrough request");
-  engine_->Forward(s.session(), tokens, {}, yield, rows, boundaries,
-                   [&](std::size_t index, const Engine::PrefillCheckpoint& cp) {
-                     const Inkling2Slot::BoundaryView view{&cp, blocks[index]};
-                     struct Scope {
-                       Inkling2Slot& slot;
-                       const Inkling2Slot::BoundaryView* saved;
-                       ~Scope() { slot.boundary = saved; }
-                     } scope{s, s.boundary};
-                     s.boundary = &view;
-                     consume(index);
-                   });
+  engine_->Forward(
+      s.session(), tokens, {}, yield, rows, boundaries,
+      [&](std::size_t index, const Engine::PrefillCheckpoint& cp) {
+        const Inkling2Slot::BoundaryView view{&cp, blocks[index]};
+        struct Scope {
+          Inkling2Slot& slot;
+          const Inkling2Slot::BoundaryView* saved;
+          ~Scope() { slot.boundary = saved; }
+        } scope{s, s.boundary};
+        s.boundary = &view;
+        consume(index);
+      },
+      guide);
 }
 
 std::vector<Rows> Inkling2CacheAdapter::PlanPrefill(const cache::Slot& slot,

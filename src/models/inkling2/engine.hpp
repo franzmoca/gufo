@@ -167,6 +167,10 @@ public:
 
   struct Options {
     LoopCdConfig loopcd{};
+    /// Per-vocabulary control-token bitset (ceil(n_vocab_text / 32) words;
+    /// word `t / 32`, bit `t % 32`). Used by kSkipThinking to renormalize
+    /// control-token probabilities after subtracting the reference log-odds.
+    std::vector<std::uint32_t> loopcd_control_bits;
     /// Test-only: 0 = config default (3), 1 = 1 core pass (24 visits) for z_1
     /// oracle.
     std::uint32_t override_passes = 0;
@@ -248,10 +252,11 @@ public:
                const LogitsSink& sink = {}, const PrefillYield* yield = nullptr,
                std::span<const InputRows> rows = {},
                std::span<const std::size_t> checkpoints = {},
-               const PrefillCheckpointConsumer& on_checkpoint = {});
+               const PrefillCheckpointConsumer& on_checkpoint = {},
+               std::span<const std::uint8_t> guide = {});
   /// One decode step of `token` (the decode arithmetic, as Step); afterwards
   /// `s.logits()` holds its logits on the host.
-  void Decode(Session& s, std::int32_t token);
+  void Decode(Session& s, std::int32_t token, bool guide = true);
 
   /// Waits for all queued device work (M2: the cache adapter copies state with
   /// hipMemcpy).
@@ -273,7 +278,8 @@ public:
   /// sessions as one step (otherwise it runs them one by one).
   [[nodiscard]] bool batch_capable() const;
   void DecodeBatch(std::span<Session* const> sessions,
-                   std::span<const std::int32_t> tokens);
+                   std::span<const std::int32_t> tokens,
+                   std::span<const std::uint8_t> guide = {});
   /// Per-row parameters for GPU-side linear sampling (temperature <= 0 skips
   /// the row).
   struct LinearSample {
@@ -291,7 +297,8 @@ public:
                        std::span<const bool> host, std::span<const float>* rows,
                        std::int32_t* argmax,
                        std::span<const LinearSample> linear = {},
-                       std::int32_t* sampled = nullptr);
+                       std::int32_t* sampled = nullptr,
+                       std::span<const std::uint8_t> guide = {});
 
   /// Speculative verification. `Verify` evaluates up to VerifyRows() tokens
   /// at the session's next positions in one step; row i's logits (`tokens`
@@ -309,7 +316,8 @@ public:
   void Verify(Session& s, std::span<const std::int32_t> tokens,
               std::span<const float>* logits, std::int32_t* argmax = nullptr,
               std::span<const LinearSample> linear = {},
-              std::int32_t* sampled = nullptr);
+              std::int32_t* sampled = nullptr,
+              std::span<const std::uint8_t> guide = {});
   /// Verification of several distinct sessions in one step: counts[g] rows
   /// of sessions[g] (each within VerifyRows of its session), tokens laid out
   /// session after session, at most kMaxVerifyRows in all; `logits` /
@@ -322,7 +330,8 @@ public:
                    std::span<const std::int32_t> tokens,
                    std::span<const float>* logits, std::int32_t* argmax,
                    std::span<const LinearSample> linear = {},
-                   std::int32_t* sampled = nullptr);
+                   std::int32_t* sampled = nullptr,
+                   std::span<const std::uint8_t> guide = {});
   /// Copies rows [first, first + count) of the last Verify/DecodeBatchRows
   /// step's device logits into host memory on demand (e.g. when a constrained
   /// greedy argmax is rejected).
@@ -365,7 +374,8 @@ public:
     int done = 0;  // out
   };
   void ProposeBatch(std::span<ProposeRequest> requests);
-  void Step(Session& s, std::int32_t token, std::int32_t* argmax);
+  void Step(Session& s, std::int32_t token, std::int32_t* argmax,
+            bool guide = true);
 
   /// Optional per-visit hidden-state tap for bisecting against llama.cpp:
   /// called with the visit index (0..num_slots-1), a label ("l_out" or

@@ -314,6 +314,11 @@ struct Engine::Impl {
   float* d_vcap = nullptr;  // [n_slots][6656][kVerifyRows] conv inputs
   void* d_loopcd_ws = nullptr;
   float* d_ref_cur = nullptr;
+  std::uint8_t* d_loopcd_mask = nullptr;
+  std::uint8_t* h_loopcd_mask = nullptr;    // pinned [kMaxB] (ds)
+  std::uint8_t* p_loopcd_mask_d = nullptr;  // device [kLogitChunk] (s)
+  std::uint8_t* p_loopcd_mask = nullptr;    // pinned [kLogitChunk] (s)
+  std::uint32_t* d_loopcd_ctrl = nullptr;
   // device argmax and GPU linear sampler workspaces
   float* d_amax_ws = nullptr;
   int* d_amax = nullptr;
@@ -386,6 +391,8 @@ struct Engine::Impl {
   // around a yield) ----
   std::span<const InputRows>
       input_rows;  // set by Forward (under the engine mutex)
+  std::span<const std::uint8_t>
+      prefill_guide;  // set by Forward (under the engine mutex)
   struct YieldRun {
     const PrefillYield* spec = nullptr;
     std::unique_lock<std::mutex>* lock = nullptr;
@@ -558,6 +565,10 @@ struct Engine::Impl {
       (void)hipHostFree(h_amax);
     if (h_rows)
       (void)hipHostFree(h_rows);
+    if (h_loopcd_mask)
+      (void)hipHostFree(h_loopcd_mask);
+    if (p_loopcd_mask)
+      (void)hipHostFree(p_loopcd_mask);
     if (h_ls_temp)
       (void)hipHostFree(h_ls_temp);
     if (h_ls_minp)
@@ -795,6 +806,30 @@ struct Engine::Impl {
     if (eng->has_loopcd()) {
       d_loopcd_ws = NewRaw(fs::LoopCdWorkspaceBytes(kMaxB));
       d_ref_cur = NewBuf(B * kEmbd);
+      if (eng->options_.loopcd.mode == LoopCdMode::kSkipThinking) {
+        d_loopcd_mask =
+            static_cast<std::uint8_t*>(AllocDevice(B, "loopcd mask"));
+        scratch_allocs.push_back(d_loopcd_mask);
+        p_loopcd_mask_d = static_cast<std::uint8_t*>(
+            AllocDevice(kLogitChunk, "loopcd prefill mask"));
+        scratch_allocs.push_back(p_loopcd_mask_d);
+        Check(hipHostMalloc(reinterpret_cast<void**>(&h_loopcd_mask), B),
+              "pinned");
+        Check(hipHostMalloc(reinterpret_cast<void**>(&p_loopcd_mask),
+                            kLogitChunk),
+              "pinned");
+        if (!eng->options_.loopcd_control_bits.empty()) {
+          const std::size_t bytes =
+              eng->options_.loopcd_control_bits.size() * sizeof(std::uint32_t);
+          d_loopcd_ctrl =
+              static_cast<std::uint32_t*>(AllocDevice(bytes, "loopcd ctrl"));
+          scratch_allocs.push_back(d_loopcd_ctrl);
+          Check(
+              hipMemcpy(d_loopcd_ctrl, eng->options_.loopcd_control_bits.data(),
+                        bytes, hipMemcpyHostToDevice),
+              "loopcd ctrl");
+        }
+      }
     }
     d_feat = NewBuf(B * Drafter::kFeatureFloats);
     d_amax_ws = NewBuf(B * 64 * 2);
@@ -1898,6 +1933,8 @@ struct Engine::Impl {
       la.vocab = static_cast<int>(cfg->n_vocab_text);
       la.w_max = eng->options_.loopcd.w_max;
       la.adaptive = true;
+      la.guide_mask = d_loopcd_mask;
+      la.control_bits = d_loopcd_ctrl;
       la.ws = d_loopcd_ws;
       fs::LoopCdGuide(ds, la);
     }
@@ -1968,10 +2005,26 @@ struct Engine::Impl {
     return true;
   }
 
-  void Decode(Session& ss, std::int32_t token, std::vector<float>* out) {
+  static void UploadGuideMask(hipStream_t stream, std::uint8_t* h_buf,
+                              std::uint8_t* d_buf, const std::uint8_t* src,
+                              int n) {
+    if (d_buf == nullptr || n <= 0)
+      return;
+    if (src != nullptr)
+      std::memcpy(h_buf, src, static_cast<std::size_t>(n));
+    else
+      std::memset(h_buf, 1, static_cast<std::size_t>(n));
+    Check(hipMemcpyAsync(d_buf, h_buf, static_cast<std::size_t>(n),
+                         hipMemcpyHostToDevice, stream),
+          "loopcd mask");
+  }
+
+  void Decode(Session& ss, std::int32_t token, std::vector<float>* out,
+              bool guide = true) {
     Session* sp = &ss;
     std::vector<float>* op = out;
-    DecodeN(&sp, &token, &op, 1);
+    const std::uint8_t g = guide ? 1 : 0;
+    DecodeN(&sp, &token, &op, 1, nullptr, nullptr, {}, nullptr, &g);
   }
 
   void LaunchLinearSample(std::span<const Engine::LinearSample> linear, int n) {
@@ -2017,7 +2070,8 @@ struct Engine::Impl {
                std::int32_t* step_argmax = nullptr,
                const bool* pinned = nullptr,
                std::span<const Engine::LinearSample> linear = {},
-               std::int32_t* step_sampled = nullptr) {
+               std::int32_t* step_sampled = nullptr,
+               const std::uint8_t* guide = nullptr) {
     nb = n;
     int maxpos = 0;
     std::int32_t step[2 * kMaxB] = {};
@@ -2033,6 +2087,7 @@ struct Engine::Impl {
     Check(hipStreamSynchronize(s), "pre-decode sync");
     Check(hipMemcpyAsync(d_step, step, sizeof step, hipMemcpyHostToDevice, ds),
           "step");
+    UploadGuideMask(ds, h_loopcd_mask, d_loopcd_mask, guide, n);
     for (int b = 0; b < n; ++b)
       Check(hipMemcpyAsync(d_tbl + static_cast<std::size_t>(b) * eng->n_slots_,
                            sess[b]->tbl_, eng->n_slots_ * sizeof(fs::SlotEntry),
@@ -2118,7 +2173,8 @@ struct Engine::Impl {
                const std::int32_t* tokens, std::span<const float>* out,
                std::int32_t* argmax,
                std::span<const Engine::LinearSample> linear = {},
-               std::int32_t* sampled = nullptr) {
+               std::int32_t* sampled = nullptr,
+               const std::uint8_t* guide = nullptr) {
     int n = 0;
     std::int32_t step[3 * kMaxB] = {};
     int maxpos = 0;
@@ -2138,6 +2194,7 @@ struct Engine::Impl {
     Check(hipStreamSynchronize(s), "pre-verify sync");
     Check(hipMemcpyAsync(d_step, step, sizeof step, hipMemcpyHostToDevice, ds),
           "step");
+    UploadGuideMask(ds, h_loopcd_mask, d_loopcd_mask, guide, n);
     for (int g = 0, b = 0; g < ng; ++g)
       for (int j = 0; j < counts[g]; ++j, ++b)
         Check(
@@ -2421,7 +2478,8 @@ struct Engine::Impl {
     }
 
     const int V = static_cast<int>(cfg->n_vocab_text);
-    auto chunk = [&](const float* src_hn, const float* src_ref_hn, int n,
+    auto chunk = [&](const float* src_hn, const float* src_ref_hn,
+                     const std::uint8_t* guide_ptr, int n,
                      std::vector<float>* host) {
       G(w->output, src_hn, kEmbd, logits_d, V, n, V);
       kk::Softcap(s, logits_d, static_cast<std::int64_t>(n) * V,
@@ -2439,6 +2497,7 @@ struct Engine::Impl {
           Check(hipStreamSynchronize(s), "ref logits sync");
           eng->ref_logits_tap_(static_cast<std::size_t>(n), ref_host.data());
         }
+        UploadGuideMask(s, p_loopcd_mask, p_loopcd_mask_d, guide_ptr, n);
         fs::LoopCdArgs la{};
         la.logits = logits_d;
         la.ref_logits = logits_ref_d;
@@ -2446,6 +2505,8 @@ struct Engine::Impl {
         la.vocab = V;
         la.w_max = eng->options_.loopcd.w_max;
         la.adaptive = true;
+        la.guide_mask = p_loopcd_mask_d;
+        la.control_bits = d_loopcd_ctrl;
         la.ws = d_loopcd_ws;
         fs::LoopCdGuide(s, la);
       }
@@ -2459,10 +2520,13 @@ struct Engine::Impl {
     if (sink) {
       for (int a = 0; a < T; a += kLogitChunk) {
         const int n = std::min(kLogitChunk, T - a);
+        const std::uint8_t* gp = prefill_guide.empty()
+                                     ? nullptr
+                                     : prefill_guide.data() + first_idx + a;
         chunk(hn + static_cast<std::size_t>(a) * kEmbd,
               eng->has_loopcd() ? ref_hn + static_cast<std::size_t>(a) * kEmbd
                                 : nullptr,
-              n, &host);
+              gp, n, &host);
         sink(static_cast<std::size_t>(first_idx + a), n, host.data());
         if (has_interior) {
           for (auto& cp : *ubatch_cps) {
@@ -2481,6 +2545,7 @@ struct Engine::Impl {
       // Pack every interior checkpoint's final hidden row (and the ubatch end
       // row when needed) so the LM head weights are read once.
       std::vector<UbatchCheckpoint*> interior_ptrs;
+      std::vector<std::uint8_t> cp_guide;
       int n_out = 0;
       for (auto& cp : *ubatch_cps) {
         if (cp.local_t < T) {
@@ -2495,6 +2560,9 @@ struct Engine::Impl {
                       ref_hn + static_cast<std::size_t>(cp.local_t - 1) * kEmbd,
                       kEmbd * sizeof(float), hipMemcpyDeviceToDevice, s),
                   "cp ref hn copy");
+          if (!prefill_guide.empty())
+            cp_guide.push_back(prefill_guide[static_cast<std::size_t>(
+                first_idx + cp.local_t - 1)]);
           interior_ptrs.push_back(&cp);
           ++n_out;
         }
@@ -2511,9 +2579,13 @@ struct Engine::Impl {
                              ref_hn + static_cast<std::size_t>(T - 1) * kEmbd,
                              kEmbd * sizeof(float), hipMemcpyDeviceToDevice, s),
               "cp end ref hn copy");
+        if (!prefill_guide.empty())
+          cp_guide.push_back(
+              prefill_guide[static_cast<std::size_t>(first_idx + T - 1)]);
         ++n_out;
       }
-      chunk(mixf, eng->has_loopcd() ? cur : nullptr, n_out, &host);
+      chunk(mixf, eng->has_loopcd() ? cur : nullptr,
+            cp_guide.empty() ? nullptr : cp_guide.data(), n_out, &host);
       for (std::size_t i = 0; i < interior_ptrs.size(); ++i)
         interior_ptrs[i]->logits.assign(
             host.begin() + static_cast<std::ptrdiff_t>(i) * V,
@@ -2523,8 +2595,12 @@ struct Engine::Impl {
         ss.logits_stale_ = false;
       }
     } else {
+      const std::uint8_t* gp =
+          prefill_guide.empty()
+              ? nullptr
+              : &prefill_guide[static_cast<std::size_t>(first_idx + T - 1)];
       chunk(hn + static_cast<std::size_t>(need_all ? T - 1 : 0) * kEmbd,
-            eng->has_loopcd() ? ref_hn : nullptr, 1, &host);
+            eng->has_loopcd() ? ref_hn : nullptr, gp, 1, &host);
       ss.logits_ = std::move(host);
       ss.logits_stale_ = false;
     }
@@ -2611,6 +2687,14 @@ std::unique_ptr<Engine> Engine::Create(
       return nullptr;
     }
     e->weights_ = std::move(*bound);
+    if (options.loopcd.mode == LoopCdMode::kSkipThinking &&
+        !options.loopcd_control_bits.empty()) {
+      const std::size_t need_words =
+          (e->weights_.config.n_vocab_text + 31) / 32;
+      if (options.loopcd_control_bits.size() != need_words)
+        throw std::invalid_argument(
+            "inkling2: loopcd_control_bits size mismatch");
+    }
     e->options_ = options;
     if (options.override_passes == 1) {
       e->weights_.config.n_passes = 1;
@@ -2816,8 +2900,10 @@ bool Engine::batch_capable() const {
 }
 
 void Engine::DecodeBatch(std::span<Session* const> sessions,
-                         std::span<const std::int32_t> tokens) {
-  if (sessions.size() != tokens.size() || sessions.size() > kMaxDecodeBatch)
+                         std::span<const std::int32_t> tokens,
+                         std::span<const std::uint8_t> guide) {
+  if (sessions.size() != tokens.size() || sessions.size() > kMaxDecodeBatch ||
+      (!guide.empty() && guide.size() != sessions.size()))
     throw std::runtime_error("inkling2: bad decode batch");
   const std::lock_guard lock(mutex_);
   for (std::size_t i = 0; i < sessions.size(); ++i) {
@@ -2842,11 +2928,13 @@ void Engine::DecodeBatch(std::span<Session* const> sessions,
     for (std::size_t i = 0; i < sessions.size(); ++i)
       outs[i] = &sessions[i]->logits_;
     impl_->DecodeN(sessions.data(), tokens.data(), outs,
-                   static_cast<int>(sessions.size()));
+                   static_cast<int>(sessions.size()), nullptr, nullptr, {},
+                   nullptr, guide.empty() ? nullptr : guide.data());
     return;
   }
   for (std::size_t i = 0; i < sessions.size(); ++i)
-    impl_->Decode(*sessions[i], tokens[i], &sessions[i]->logits_);
+    impl_->Decode(*sessions[i], tokens[i], &sessions[i]->logits_,
+                  guide.empty() ? true : (guide[i] != 0));
 }
 
 void Engine::DecodeBatchRows(std::span<Session* const> sessions,
@@ -2854,11 +2942,13 @@ void Engine::DecodeBatchRows(std::span<Session* const> sessions,
                              std::span<const bool> host,
                              std::span<const float>* rows, std::int32_t* argmax,
                              std::span<const LinearSample> linear,
-                             std::int32_t* sampled) {
+                             std::int32_t* sampled,
+                             std::span<const std::uint8_t> guide) {
   if (!batch_capable() || sessions.empty() ||
       sessions.size() != tokens.size() || host.size() != sessions.size() ||
       sessions.size() > kMaxDecodeBatch ||
-      (!linear.empty() && linear.size() != sessions.size()))
+      (!linear.empty() && linear.size() != sessions.size()) ||
+      (!guide.empty() && guide.size() != sessions.size()))
     throw std::runtime_error("inkling2: bad decode batch");
   const std::lock_guard lock(mutex_);
   for (std::size_t i = 0; i < sessions.size(); ++i) {
@@ -2884,7 +2974,7 @@ void Engine::DecodeBatchRows(std::span<Session* const> sessions,
     pinned[i] = host[i];
   impl_->DecodeN(sessions.data(), tokens.data(), outs,
                  static_cast<int>(sessions.size()), argmax, pinned, linear,
-                 sampled);
+                 sampled, guide.empty() ? nullptr : guide.data());
   if (rows != nullptr)
     *rows = {impl_->h_rows, sessions.size() * weights_.config.n_vocab_text};
 }
@@ -2907,13 +2997,13 @@ std::size_t Engine::VerifyRows(const Session& s) const {
 
 void Engine::Verify(Session& s, std::span<const std::int32_t> tokens,
                     std::span<const float>* logits, std::int32_t* argmax,
-                    std::span<const LinearSample> linear,
-                    std::int32_t* sampled) {
+                    std::span<const LinearSample> linear, std::int32_t* sampled,
+                    std::span<const std::uint8_t> guide) {
   Session* sp = &s;
   const std::size_t n = tokens.size();
   VerifyBatch(std::span<Session* const>(&sp, 1),
               std::span<const std::size_t>(&n, 1), tokens, logits, argmax,
-              linear, sampled);
+              linear, sampled, guide);
 }
 
 void Engine::VerifyBatch(std::span<Session* const> sessions,
@@ -2921,7 +3011,8 @@ void Engine::VerifyBatch(std::span<Session* const> sessions,
                          std::span<const std::int32_t> tokens,
                          std::span<const float>* logits, std::int32_t* argmax,
                          std::span<const LinearSample> linear,
-                         std::int32_t* sampled) {
+                         std::int32_t* sampled,
+                         std::span<const std::uint8_t> guide) {
   const std::lock_guard lock(mutex_);
   std::size_t total = 0;
   if (sessions.empty() || sessions.size() != counts.size())
@@ -2937,7 +3028,8 @@ void Engine::VerifyBatch(std::span<Session* const> sessions,
   }
   if (total != tokens.size() ||
       total > (sessions.size() == 1 ? kMaxVerifyRows : kMaxBatchVerifyRows) ||
-      (!linear.empty() && linear.size() != total))
+      (!linear.empty() && linear.size() != total) ||
+      (!guide.empty() && guide.size() != total))
     throw std::runtime_error("inkling2: bad verification width");
   for (auto t : tokens)
     if (t < 0 || static_cast<std::uint32_t>(t) >= weights_.config.n_vocab_text)
@@ -2955,7 +3047,8 @@ void Engine::VerifyBatch(std::span<Session* const> sessions,
     row0 += counts[g];
   }
   impl_->VerifyN(sessions.data(), cnt, static_cast<int>(sessions.size()),
-                 tokens.data(), logits, argmax, linear, sampled);
+                 tokens.data(), logits, argmax, linear, sampled,
+                 guide.empty() ? nullptr : guide.data());
 }
 
 void Engine::ReadVerifyRows(std::size_t first, std::size_t count,
@@ -3113,7 +3206,8 @@ void Engine::ProposeBatch(std::span<ProposeRequest> requests) {
     requests[g].done = r[g].done;
 }
 
-void Engine::Step(Session& s, std::int32_t token, std::int32_t* argmax) {
+void Engine::Step(Session& s, std::int32_t token, std::int32_t* argmax,
+                  bool guide) {
   const std::lock_guard lock(mutex_);
   if (s.pos_ + 1 > max_context_)
     throw std::runtime_error("inkling2: context exhausted");
@@ -3125,10 +3219,11 @@ void Engine::Step(Session& s, std::int32_t token, std::int32_t* argmax) {
   s.BackRows(s.pos_, s.pos_ + 1);
   Session* sp = &s;
   std::vector<float>* none = nullptr;
-  impl_->DecodeN(&sp, &token, &none, 1, argmax);
+  const std::uint8_t g = guide ? 1 : 0;
+  impl_->DecodeN(&sp, &token, &none, 1, argmax, nullptr, {}, nullptr, &g);
 }
 
-void Engine::Decode(Session& s, std::int32_t token) {
+void Engine::Decode(Session& s, std::int32_t token, bool guide) {
   const std::lock_guard lock(mutex_);
   if (s.pos_ + 1 > max_context_)
     throw std::runtime_error("inkling2: context exhausted");
@@ -3138,7 +3233,7 @@ void Engine::Decode(Session& s, std::int32_t token) {
   if (s.hooks_ != nullptr)
     s.hooks_->BeforeWrite(s.pos_, s.pos_ + 1);
   s.BackRows(s.pos_, s.pos_ + 1);
-  impl_->Decode(s, token, &s.logits_);
+  impl_->Decode(s, token, &s.logits_, guide);
 }
 
 void Engine::Synchronize() {
@@ -3174,10 +3269,13 @@ void Engine::Forward(Session& s, std::span<const std::int32_t> tokens,
                      const LogitsSink& sink, const PrefillYield* yield,
                      std::span<const InputRows> rows,
                      std::span<const std::size_t> checkpoints,
-                     const PrefillCheckpointConsumer& on_checkpoint) {
+                     const PrefillCheckpointConsumer& on_checkpoint,
+                     std::span<const std::uint8_t> guide) {
   std::unique_lock<std::mutex> lock(mutex_);
   if (s.pos_ + tokens.size() > max_context_)
     throw std::runtime_error("inkling2: context exhausted");
+  if (!guide.empty() && guide.size() != tokens.size())
+    throw std::runtime_error("inkling2: bad forward guide size");
   for (auto t : tokens)
     if (t < 0 || static_cast<std::uint32_t>(t) >= weights_.config.n_vocab_text)
       throw std::runtime_error("inkling2: token id out of range");
@@ -3209,12 +3307,16 @@ void Engine::Forward(Session& s, std::span<const std::int32_t> tokens,
     Impl* i;
     std::span<const InputRows> saved;
     std::vector<Impl::UbatchCheckpoint>* saved_cps;
+    std::span<const std::uint8_t> saved_guide;
     ~RowsScope() {
       i->input_rows = saved;
       i->ubatch_cps = saved_cps;
+      i->prefill_guide = saved_guide;
     }
-  } rows_scope{impl_.get(), impl_->input_rows, impl_->ubatch_cps};
+  } rows_scope{impl_.get(), impl_->input_rows, impl_->ubatch_cps,
+               impl_->prefill_guide};
   impl_->input_rows = rows;
+  impl_->prefill_guide = guide;
   std::size_t done = 0;
   std::size_t next_cp = 0;
   while (done < tokens.size()) {

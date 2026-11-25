@@ -780,7 +780,88 @@ void RunEngineTests(const std::string& model_path) {
             diff);
   }
 
-  // 6. Session memory check at 32K and 256K.
+  // 6. Skip-thinking engine check: guide=0 bit-exact with off; guide=1
+  // preserves control-token softmax mass; Verify + DecodeBatch + checkpoints
+  // agree bit-exact with standalone Decode.
+  {
+    auto tok = inkling2::text::Tokenizer::CreateFromGguf(*reader, &err);
+    REQUIRE(tok != nullptr, "tokenizer: %s", err.c_str());
+    const std::size_t Vtok = tok->VocabSize();
+    i2::Engine::Options opt_skip;
+    opt_skip.loopcd.mode = i2::LoopCdMode::kSkipThinking;
+    opt_skip.loopcd.w_max = 0.5F;
+    opt_skip.loopcd_control_bits.assign((Vtok + 31) / 32, 0U);
+    for (std::size_t id = 0; id < Vtok; ++id)
+      if (tok->IsSpecial(static_cast<std::uint32_t>(id)))
+        opt_skip.loopcd_control_bits[id / 32] |=
+            (1U << static_cast<unsigned>(id % 32));
+    auto eng_skip = i2::Engine::Create(reader, 4096, &err, opt_skip);
+    REQUIRE(eng_skip != nullptr, "eng_skip create: %s", err.c_str());
+
+    const auto p_skip = std::span<const std::int32_t>(prompt).first(64);
+    const std::vector<std::uint8_t> zeros(p_skip.size(), 0);
+    auto soff = eng_off->NewSession();
+    auto ssk0 = eng_skip->NewSession();
+    eng_off->Forward(*soff, p_skip);
+    eng_skip->Forward(*ssk0, p_skip, {}, nullptr, {}, {}, {}, zeros);
+    REQUIRE(std::memcmp(soff->logits().data(), ssk0->logits().data(),
+                        V * sizeof(float)) == 0,
+            "skip-thinking guide=0 Forward != off");
+    for (int i = 0; i < 4; ++i) {
+      const std::int32_t tok_id = 1500 + i * 19;
+      eng_off->Decode(*soff, tok_id);
+      eng_skip->Decode(*ssk0, tok_id, false);
+      REQUIRE(std::memcmp(soff->logits().data(), ssk0->logits().data(),
+                          V * sizeof(float)) == 0,
+              "skip-thinking guide=0 Decode step %d != off", i);
+    }
+
+    // Compare guide=1 softmax control mass against eng_off at the same state.
+    eng_off->Decode(*soff, 2000);
+    eng_skip->Decode(*ssk0, 2000, true);
+    auto ctrl_mass = [&](std::span<const float> row) {
+      double mx = -INFINITY;
+      for (float v : row)
+        if (std::isfinite(v) && v > mx)
+          mx = v;
+      double zsum = 0.0, csum = 0.0;
+      for (std::size_t id = 0; id < V; ++id) {
+        if (!std::isfinite(row[id]))
+          continue;
+        const double e = std::exp(static_cast<double>(row[id]) - mx);
+        zsum += e;
+        if (tok->IsSpecial(static_cast<std::uint32_t>(id)))
+          csum += e;
+      }
+      return csum / zsum;
+    };
+    const double cm_off = ctrl_mass(soff->logits());
+    const double cm_skip = ctrl_mass(ssk0->logits());
+    REQUIRE(std::fabs(cm_off - cm_skip) <= 1e-6,
+            "control mass drift %.3e vs %.3e", cm_off, cm_skip);
+
+    // Alternating guide={0,1,1,0,1,0} in Verify & DecodeBatch vs lone Decode.
+    const std::vector<std::int32_t> vt = {2100, 2101, 2102, 2103, 2104, 2105};
+    const std::vector<std::uint8_t> vg = {0, 1, 1, 0, 1, 0};
+    auto sver = eng_skip->NewSession();
+    eng_skip->Forward(*sver, p_skip, {}, nullptr, {}, {}, {}, zeros);
+    std::span<const float> vout;
+    eng_skip->Verify(*sver, vt, &vout, nullptr, {}, nullptr, vg);
+    auto sare = eng_skip->NewSession();
+    eng_skip->Forward(*sare, p_skip, {}, nullptr, {}, {}, {}, zeros);
+    for (std::size_t r = 0; r < vt.size(); ++r) {
+      eng_skip->Decode(*sare, vt[r], vg[r] != 0);
+      REQUIRE(std::memcmp(sare->logits().data(), vout.subspan(r * V, V).data(),
+                          V * sizeof(float)) == 0,
+              "skip-thinking Verify row %zu != Decode", r);
+    }
+    std::printf(
+        "PASS §6.2 skip-thinking (guide=0 == off, ctrl_mass diff=%.2e, Verify "
+        "== Decode bit-exact)\n",
+        std::fabs(cm_off - cm_skip));
+  }
+
+  // 7. Session memory check at 32K and 256K.
   eng_off.reset();
   eng_zero.reset();
   eng_p1.reset();

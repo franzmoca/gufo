@@ -103,7 +103,8 @@ public:
                       std::span<const Block> blocks,
                       const std::function<void(std::size_t)>& consume,
                       const PrefillYield* yield = nullptr,
-                      std::span<const InputRows> rows = {}) const;
+                      std::span<const InputRows> rows = {},
+                      std::span<const std::uint8_t> guide = {}) const;
   void BeginRestore(cache::Slot&,
                     std::span<const cache::ComponentPosition>) override;
   [[nodiscard]] cache::Completion CapturePrivate(const cache::Slot&,
