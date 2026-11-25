@@ -1,7 +1,28 @@
 # Gemma 4 as a Gufo extension: migration plan
 
-Status: planned 2026-11-04. Covers all three Gemma 4 checkpoints (31B, 31B QAT,
+Status: planned 2026-11-04; port on upstream `main` done 2026-11-06 (see
+[Status](#status-2026-11-06)). Covers all three Gemma 4 checkpoints (31B, 31B QAT,
 26B-A4B), their `gemma4-assistant` drafters and the vision sidecar.
+
+## Status (2026-11-06)
+
+- **Blocking PRs merged upstream:** B1 #1008, B2 #1009, B3 #1013, B4 #1010,
+  B5 #1011 and F1 (B7) #1012. Follow-ups also merged: #1032 public link targets
+  (`gufo_ext_core`, `gufo_ext_hip`, `gufo_ext_cache`), #1033 shared provider
+  options (`--mtp-model` in external manifests) and #1026 (component cache only
+  contract). Extension API series 0.2.
+- **Extension port:** builds on upstream `main` `6cc8a42c` with
+  `api_version >= 0.2.7`, no fork branch needed. `gemma-main` and the per-PR
+  branches are retired.
+- **Kernel trim:** the extension owns the GGML and binary16 kernels Gemma
+  dispatches for every format its loader accepts (F32, F16, BF16, Q4_0, Q5_0,
+  Q5_1, Q8_0, Q4_K, Q5_K, Q6_K) in any role, in its own namespace, with no Qwen
+  or Flash-Next library copies (10,490 → 5,033 copied lines). Verified: 19/19
+  Gemma CTests; identical greedy output on 36/36 prompts across 31B MTP, 26B AR,
+  26B QAT, 31B Q8, 31B QAT and 31B QAT MTP; no kernel uses more resources; 31B
+  UD-Q8_K_XL ABBA pp2048 603.9 → 602.4 tok/s (noise ±7), tg16 6.94 on every run.
+- **Remaining:** B6 (#979, design first); performance PRs P1–P5; P6 to
+  re-verify; upstream #890 routed-expert port deferred (below).
 
 ## Goal
 
@@ -27,8 +48,8 @@ delimiters), [#979](https://github.com/gufo-org/gufo/issues/979) (provider optio
 | Topic | Decision |
 | --- | --- |
 | Repository | `franzmoca/gemma4-gufo-extension` |
-| Upstream baseline | `origin/main` at `d2b01f24` (v0.28.1-47, extension API series 0.1); re-pin once the PRs merge |
-| Flash-Next / Qwen code Gemma links today | Copy the few kernels and helpers needed into the extension; drop the link to private family/model libraries |
+| Upstream baseline | Upstream `main` `6cc8a42c` (extension API series 0.2), after the blocking PRs merged; first planned on `d2b01f24` |
+| Flash-Next / Qwen code Gemma links today | Done: the extension owns trimmed copies of the kernels and helpers it dispatches; no link to private family/model libraries |
 | Upstream PRs | Prepared locally, **not opened until phase 6 passes**, so contract gaps found during the port are fixed in the PRs first |
 
 ## Branches
@@ -68,7 +89,8 @@ excluding tests.
 | B5 | Indivisible prompt spans / `PrefillStop` (`ext-api`) | The pool never ends a prefill step, checkpoint or shared-prefix boundary inside a span the prompt context declares (Gemma images attend bidirectionally) | produces wrong KV or unrestorable checkpoints for images near cache boundaries | None (no spans declared: positions unchanged) | Small |
 | B6 | #979 provider options (`ext-api`) | Typed provider options delivered to the text runner and prompt/chat/bench drivers | runs without `--image-tokens`, `--draft-calibration`, `--prefill-weights` and `--draft-trace`; only their defaults remain. Seeded-replay functional checks need `--draft-calibration request` | None | Medium |
 
-B6 blocks only the non-default modes, so it can land after B1–B5.
+B1–B5 and F1 are merged (#1008–#1013). B6 blocks only the non-default modes;
+next, after a design review.
 
 ### Performance: open only with measured upstream gains
 
@@ -79,16 +101,22 @@ B6 blocks only the non-default modes, so it can land after B1–B5.
 | P3 | In-pass checkpoints with the disk store | Lift the pool's `!disk_store` restriction on in-pass checkpoints (if it has no hard reason) | +2–10% pp2048 (the old lookahead's gain) when the disk cache is on, as on the `gemma` server | Flash-Next with disk cache: *unmeasured* | Unknown until the reason is found | Small |
 | P4 | Shared transfer streams + batched gather | One stream per transfer batch so an adapter can launch it as one gather kernel (1.5–5× faster than single copies at 128 KiB–2 MiB) | Shared-prefix captures ~3 ms faster | Needs a gather in the Flash-Next adapter; *unmeasured* | Low: opt-in resource flag | Medium |
 | P5 | Capture join | Scheduler waits up to 10 ms for a peer finishing its prompt capture so it joins the batch's first decode | Concurrent first tokens: *unmeasured* | Any batched model: *unmeasured* | Low | Small |
+| P6 | Whole-block host cache backing (`core/cache-host-registration-blocks`) | Align anonymous backing mappings to 2 MiB and retain whole blocks, avoiding neighbour-unmap interference with HIP registration | Historical ROCm 7.3.x 31B cache-growth restore waits 3.7–17.2 ms → 0.09–0.18 ms; see [continuation notes](CONTINUATION-ADAPTER.md) | No demonstrated current restore gain on Qwen AR, Gemma MTP or DeepSeek DSpark; the cause of the lost gain is unexplained, so P6 is re-verified before it is dropped (below) | Shared allocator change; qualify backing growth, release and restore | Small (~60 lines in original commit) |
+
+| P7 | Upstream #890 register-resident routed prefill experts, ported into the extension's 26B routed kernel | Extension-only kernel change, no upstream PR | 26B prefill: *unmeasured* | n/a | None outside Gemma | Medium |
+
+P7 is deferred: keep it only if faster at 2,048 rows and bit-exact, confirmed by
+one balanced `gufo bench` A/B. Upstream #933 does not apply to Gemma.
 
 ### Fixes
 
 | # | PR | What it does | Gemma | Other models | Size |
 | --- | --- | --- | --- | --- | --- |
-| F1 | `core/json-arrays-without-items` | A non-strict tool parameter `{"type": "array"}` without `items` no longer drops the whole tool's argument schema to "any object" | Not needed | All models: confirmed on upstream main (`const` arguments unenforced) | Tiny |
+| F1 | `core/json-arrays-without-items` (merged, #1012) | A non-strict tool parameter `{"type": "array"}` without `items` no longer drops the whole tool's argument schema to "any object" | Not needed | All models: confirmed on upstream main (`const` arguments unenforced) | Tiny |
 
 ### Not upstreamed
 
-Q4_0/Q5_0 (upstream #930 covers it); 2 MiB pinned pages (DeepSeek work);
+Q4_0/Q5_0 (upstream #930 covers it);
 bicubic resize and `WithoutTopP` (in the extension); `SetPromptLookahead` (in-pass
 checkpoints instead); `model_bench` tooling; functional harness changes unless
 upstream's harness still fails.
@@ -96,7 +124,7 @@ upstream's harness still fails.
 ### Order
 
 B1 → B2 → B3 → B4 → B5 → B6 while porting; P1 alongside (small, already
-measured); P2–P5 after switch-over, each measured on Flash-Next first; F1 last.
+measured); P2–P6 after switch-over, each measured on Flash-Next first; F1 last.
 
 ## Inventory of `feat/gemma` outside `src/models/gemma4`
 
@@ -124,7 +152,7 @@ nearly unchanged; the work is in the ~3.5k lines of shared files.
 | Cache in-place same-slot restore, shared transfer streams | Separate later PRs, implemented and measured on Flash-Next (phase 8) |
 | Capture join to the first decode batch (`TextRunnerPool::Request::AwaitSnapshot`, scheduler) | Optional core PR after switch-over (phase 8); not needed by the extension |
 | Prompt-lookup agreement rule (`core/speculative/prompt_lookup.hpp`) | `ext-api` PR (additive) if it measurably helps Flash-Next; otherwise a copy in the extension |
-| 2 MiB pinned pages (`core/platform/pages*`) | Not needed by Gemma; stays with the DeepSeek work |
+| Whole-block host backing (`core/platform/pages*`, `core/hip/committed_backing.cpp`) | P6: shared cache/platform performance PR; relevant to Gemma, Qwen and DeepSeek; not a model-extension prerequisite |
 | Antialiased bicubic resize moved into `src/core/image` | Copied into the extension |
 | JSON arrays-without-items fix (`json_constraint.cpp`) | Core PR, last (independent bug fix, still present upstream) |
 | Q4_0/Q5_0 in `ggml_dequant`/`ggml_gemm` | Dropped: upstream #930 dequantizes every GGML block format, and Gemma calls only `quant::Dequantize` |
@@ -256,7 +284,7 @@ label even when additive.
 3. `core/json-arrays-without-items` (`8d8e3568`): last; independent of the
    migration.
 
-Dropped from phase 1: Q4_0/Q5_0 (upstream #930), 2 MiB pages (DeepSeek work),
+Dropped from phase 1: Q4_0/Q5_0 (upstream #930),
 the bicubic resize and `WithoutTopP` (in the extension), the bench tooling, and
 the functional harness changes unless upstream's harness still fails.
 
@@ -353,6 +381,93 @@ Fix gaps in the PR branches, not with workarounds in the extension.
 - **Capture join**: the scheduler waits up to 10 ms (`AwaitSnapshot`) for a
   peer whose prompt capture is finishing and lets it join the batch's first
   decode. Measure concurrent first tokens on Flash-Next.
+
+### Whole-block host backing (P6)
+
+Port the allocation change from `8ee46f24` as a focused shared cache/platform
+PR, only after demonstrating a current upstream-model gain. Changes to the
+audited public `platform/pages.hpp` require the `ext-api` label, a change
+record and an updated API inventory/hash. This is address-range isolation, not huge-page allocation: align the base
+to 2 MiB, retain the mapping rounded up to whole blocks, keep `MADV_NOHUGEPAGE`,
+and register only the requested bytes with HIP. Pair it with
+`ReleaseZeroedPages` so release unmaps the rounded extent; preserve the separate
+weight-mapping release contract and the Windows implementation. The original
+commit also sets `FD_CLOEXEC` on page-pin descriptors; assess that independent
+change separately rather than mixing it into the alignment comparison.
+
+On local `upstream-main` `d2b01f24`, both `src/models/qwen/runner.cpp` (AR and
+DFlash2) and `src/models/qwen38_flash_next/runner.cpp` (AR and MTP) call
+`hip::CreateHipComponentCacheResources`. That creates `CommittedBackingPool`,
+which calls `CommitZeroedPages` and `hipHostRegister`. Its POSIX allocator does
+not isolate 2 MiB blocks. This establishes shared exposure, not a measured
+Qwen stall or speedup. The retained Gemma evidence is in
+[CONTINUATION-ADAPTER](CONTINUATION-ADAPTER.md), “Restore stalls after backing
+growth”.
+
+Qualification: retain a controlled neighbour-unmap GPU reproduction and matched
+upstream/candidate Qwen cache-growth histories, with the same toolchain, cache
+budget and inputs. Record growth/restore work and each affected request/phase;
+check outputs and restored state. Only claim an upstream-model gain when those
+measurements demonstrate it. If current runs do not reproduce the stall, keep
+that result visible and leave P6 unqualified for publication under the
+performance-PR rule.
+
+**2026-11-04 measurement: deferred, no demonstrated upstream-model gain.**
+Tested local `upstream-main` `d2b01f24` against its exact allocation-only patch
+from `8ee46f24`, with the same production build preset and pinned toolchain.
+Qwen 27B UD-Q4_K_XL and Flash-Next UD-Q4_K_XL ran in AR, two sessions, 16K
+context. The matched ABBA cache-growth histories passed all 72 functional
+requests with identical outputs and cache work. Restore checks passed; cold
+prefill timing flags remain inconclusive, including unchanged-main drift.
+
+An additional 44 diagnostic HTTP requests verified actual backing growth after
+readiness, with an 8 GiB cache budget and traced HIP registrations. Both models
+registered 133,496,832-byte segments: Qwen 17 → 57, Flash-Next 17 → 55. Original
+mappings were not all 2 MiB-aligned; the candidate aligned every segment.
+Older-prompt restores (zero prefill, identical outputs/work) showed no meaningful
+gain: Qwen 6.826/7.023/7.082 → 7.254/7.361/7.149 ms; Flash-Next
+3.524/3.504/3.624 → 3.625/3.533/3.374 ms. These are individual diagnostic
+observations, not repeated performance qualification.
+
+The controlled neighbour-unmap reproducer also failed to reproduce the old
+multi-millisecond stall: all 96 GPU-write checks passed; maximum subsequent
+launch/synchronisation was 0.263 ms under production's pinned ROCr. Memlock was
+8 MiB; high-memlock configurations and DFlash2/MTP were not measured. Keep the
+historical Gemma evidence, but do not open P6 as a measured Qwen performance win
+without further evidence. [Full measurements, exact scope and raw
+artifacts](artifacts/2026-11-04-host-registration/README.md).
+
+### Gemma / DeepSeek on current ROCm (2026-11-04)
+
+The original Gemma result used **ROCm 7.3.x** (user clarification). A fresh
+allocation-only on/off comparison on pinned ROCm 10.1 also finds **no demonstrated
+current restore benefit** for Gemma 31B UD-Q4_K_XL MTP or full DeepSeek V4.1
+IQ2_XXS DSpark (streamed, fixed 48 GiB expert cache). Each model ran four matched
+ABBA histories, two sessions, 16K context and unlimited memlock, matching the
+scripts' pinning policy. All 136 requests passed the selected output/cache-work
+checks; actual drafting and post-readiness backing growth were verified.
+
+Gemma's same-slot restores were 0.804–1.402 ms without isolation and
+1.074–1.361 ms with it; older-prompt restores were 10.842–11.371 versus
+10.609–11.255 ms. DeepSeek restores were approximately 0.8–0.9 ms in both
+variants. A further 12-request Gemma comparison at 8 MiB memlock (failed
+long-term pins, as in the historical report) also reproduced no multi-millisecond
+stall. Exact per-request measurements, draft counts, unsuccessful attempts and
+thermal limitations are retained in the [model comparison
+report](artifacts/2026-11-04-host-registration-models/README.md).
+
+**To re-verify before dropping P6.** The historical 3.7–17.2 ms stalls are no
+longer reproduced and no cause has been found for their disappearance. Before
+dropping P6, identify which change removed them (ROCm 7.3.x → 10.1, the smaller
+backing segments, or the page-population path), for example by repeating the
+historical 1 GiB-segment configuration on ROCm 10.1.
+
+Keep P6 deferred and leave the existing fork implementation intact. These
+bounded tests do not prove the fix universally unnecessary or establish a
+causal ROCm fix: the old roughly 1 GiB backing segments are now about 127 MiB,
+which also changes the page-population worker/thread-stack path. Gemma's whole
+inference timings remain inconclusive due to thermal drift; the unchanged
+controls and every flag remain visible. No end-to-end speedup is claimed.
 
 ## Open questions
 

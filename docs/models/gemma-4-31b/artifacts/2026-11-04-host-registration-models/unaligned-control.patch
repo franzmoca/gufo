@@ -1,0 +1,41 @@
+diff --git a/src/core/platform/pages_posix.cpp b/src/core/platform/pages_posix.cpp
+index b78d19e3..84d422ca 100644
+--- a/src/core/platform/pages_posix.cpp
++++ b/src/core/platform/pages_posix.cpp
+@@ -20,31 +20,12 @@
+ namespace gufo::platform {
+ namespace {
+ 
+-// GPU registration tracks host memory in 2 MiB blocks. Unmapping another
+-// mapping that shares a block with a registered range, such as a thread
+-// stack glibc frees next to a segment, evicts the process's GPU queues until
+-// the range is revalidated: 8-26 ms for 1 GiB. Each mapping therefore covers
+-// whole blocks; callers register only `bytes` of it.
+-constexpr std::size_t kRegistrationBlock = 2ULL << 20;
+-std::size_t MappedBytes(std::size_t bytes) {
+-  return (bytes + kRegistrationBlock - 1) / kRegistrationBlock *
+-         kRegistrationBlock;
+-}
++// Measurement control: original unaligned, exact-size anonymous mapping.
++std::size_t MappedBytes(std::size_t bytes) { return bytes; }
+ void* MapBlocks(std::size_t bytes) {
+-  const auto mapped = MappedBytes(bytes);
+-  void* raw = mmap(nullptr, mapped + kRegistrationBlock, PROT_READ | PROT_WRITE,
+-                   MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+-  if (raw == MAP_FAILED)
+-    return nullptr;
+-  auto* begin = static_cast<std::byte*>(raw);
+-  const auto head =
+-      (kRegistrationBlock -
+-       reinterpret_cast<std::uintptr_t>(raw) % kRegistrationBlock) %
+-      kRegistrationBlock;
+-  if (head)
+-    munmap(begin, head);
+-  munmap(begin + head + mapped, kRegistrationBlock - head);
+-  return begin + head;
++  void* data = mmap(nullptr, bytes, PROT_READ | PROT_WRITE,
++                    MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
++  return data == MAP_FAILED ? nullptr : data;
+ }
+ 
+ // Ordinary anonymous pages, populated before use. Opting out of THP before

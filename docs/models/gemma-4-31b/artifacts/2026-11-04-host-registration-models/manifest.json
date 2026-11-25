@@ -1,0 +1,34 @@
+{
+  "source_revision": "01fb6f4e39464003efffd97d79607005146280f0",
+  "aligned": "unmodified main",
+  "unaligned": "same tree plus unaligned-control.patch; only anonymous mapping alignment/extent changes",
+  "gemma_source_identity": "git diff feat/gemma main -- src/models/gemma4 is empty",
+  "runtime_recipe_identity": "git diff 8ee46f24 main -- flake.lock .devops/nix is empty",
+  "production_rocr": "/nix/store/88jjsz00km321bcl9851aiwwdig79b4l-rocm-runtime-10.1/lib/libhsa-runtime64.so.1",
+  "build": "nix develop -c cmake --preset release; nix develop -c cmake --build --preset release --target gufo --parallel 4",
+  "binary_sha256": {
+    "aligned": "aed049503b302b85781f75af0991732ca137c96519a147784f45bcd27d0b7f59",
+    "unaligned": "c5c793625c5eea2ce36aaca07cd514930c33482547c357cb0eff09fe7f4cbbd4"
+  },
+  "kernel": "7.2.11-200.fc44.x86_64",
+  "primary_memlock": "unlimited (matching gemma/ds41 wrappers)",
+  "observed_hsa_mappings": [
+    "/nix/store/88jjsz00km321bcl9851aiwwdig79b4l-rocm-runtime-10.1/lib/libhsa-runtime64.so.1.21.0"
+  ],
+  "environment": {
+    "GPU_MAX_HW_QUEUES": null,
+    "HSA_ENABLE_SDMA": null,
+    "HSA_ENABLE_INTERRUPT": null,
+    "HSA_USERPTR_FOR_PAGED_MEM": null,
+    "HIP_VISIBLE_DEVICES": null
+  },
+  "historical_runtime": {
+    "version": "ROCm 7.3.x",
+    "provenance": "User clarified the runtime used for the original measurement; exact old binary/runtime revision is not available in this experiment."
+  },
+  "thermal_observation": {
+    "source": "Interactive sensors reading during the original Gemma ABBA",
+    "Tctl_c": 98.1,
+    "limitation": "No per-request thermal trace for those initial Gemma runs; DeepSeek and low-memlock Gemma controls record temperatures."
+  }
+}

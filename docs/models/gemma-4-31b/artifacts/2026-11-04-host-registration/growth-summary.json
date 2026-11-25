@@ -1,0 +1,132 @@
+{
+  "qwen27b": {
+    "differences": [],
+    "variants": {
+      "baseline": {
+        "status": "passed",
+        "request_count": 11,
+        "segments_at_ready": 17,
+        "segments_after_requests": 57,
+        "segment_bytes": 133496832,
+        "all_segments_2m_aligned": false,
+        "all_registrations_succeeded": true,
+        "grew_after_readiness": true,
+        "restores": [
+          {
+            "label": "restore_5",
+            "ms": 6.825556,
+            "bytes": 515330208,
+            "prefill_tokens": 0
+          },
+          {
+            "label": "restore_6",
+            "ms": 7.022586,
+            "bytes": 515330208,
+            "prefill_tokens": 0
+          },
+          {
+            "label": "restore_7",
+            "ms": 7.08227,
+            "bytes": 515330208,
+            "prefill_tokens": 0
+          }
+        ]
+      },
+      "candidate": {
+        "status": "passed",
+        "request_count": 11,
+        "segments_at_ready": 17,
+        "segments_after_requests": 57,
+        "segment_bytes": 133496832,
+        "all_segments_2m_aligned": true,
+        "all_registrations_succeeded": true,
+        "grew_after_readiness": true,
+        "restores": [
+          {
+            "label": "restore_5",
+            "ms": 7.253899,
+            "bytes": 515330208,
+            "prefill_tokens": 0
+          },
+          {
+            "label": "restore_6",
+            "ms": 7.360844,
+            "bytes": 515330208,
+            "prefill_tokens": 0
+          },
+          {
+            "label": "restore_7",
+            "ms": 7.148833,
+            "bytes": 515330208,
+            "prefill_tokens": 0
+          }
+        ]
+      }
+    }
+  },
+  "flash-next": {
+    "differences": [],
+    "variants": {
+      "baseline": {
+        "status": "passed",
+        "request_count": 11,
+        "segments_at_ready": 17,
+        "segments_after_requests": 55,
+        "segment_bytes": 133496832,
+        "all_segments_2m_aligned": false,
+        "all_registrations_succeeded": true,
+        "grew_after_readiness": true,
+        "restores": [
+          {
+            "label": "restore_5",
+            "ms": 3.523862,
+            "bytes": 268721444,
+            "prefill_tokens": 0
+          },
+          {
+            "label": "restore_6",
+            "ms": 3.504242,
+            "bytes": 268721444,
+            "prefill_tokens": 0
+          },
+          {
+            "label": "restore_7",
+            "ms": 3.624368,
+            "bytes": 268721444,
+            "prefill_tokens": 0
+          }
+        ]
+      },
+      "candidate": {
+        "status": "passed",
+        "request_count": 11,
+        "segments_at_ready": 17,
+        "segments_after_requests": 55,
+        "segment_bytes": 133496832,
+        "all_segments_2m_aligned": true,
+        "all_registrations_succeeded": true,
+        "grew_after_readiness": true,
+        "restores": [
+          {
+            "label": "restore_5",
+            "ms": 3.624638,
+            "bytes": 268721444,
+            "prefill_tokens": 0
+          },
+          {
+            "label": "restore_6",
+            "ms": 3.532573,
+            "bytes": 268721444,
+            "prefill_tokens": 0
+          },
+          {
+            "label": "restore_7",
+            "ms": 3.373745,
+            "bytes": 268721444,
+            "prefill_tokens": 0
+          }
+        ]
+      }
+    }
+  }
+}

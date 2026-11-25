@@ -1,0 +1,3042 @@
+{
+  "command": [
+    "/tmp/gufo-2m-candidate",
+    "serve",
+    "--host",
+    "127.0.0.1",
+    "--port",
+    "44897",
+    "llm",
+    "--model",
+    "/home/franz/models/qwen3.8-flash-next/gufo/UD-Q4_K_XL/Qwen3.8-Flash-Next-UD-Q4_K_XL-00001-of-00004.gguf",
+    "--served-model-name",
+    "probe",
+    "--context",
+    "16384",
+    "--sessions",
+    "2",
+    "--speculative",
+    "off",
+    "--cache-ram-bytes",
+    "8589934592"
+  ],
+  "requests": [
+    {
+      "label": "capture_0",
+      "wall_ms": 2962.2135880053975,
+      "response": {
+        "id": "chatcmpl-nvimmnzagowjjmwqv51v",
+        "object": "chat.completion",
+        "created": 1793816018,
+        "model": "probe",
+        "choices": [
+          {
+            "index": 0,
+            "message": {
+              "role": "assistant",
+              "content": "BETA"
+            },
+            "finish_reason": "stop"
+          }
+        ],
+        "usage": {
+          "prompt_tokens": 5409,
+          "completion_tokens": 2,
+          "total_tokens": 5411,
+          "prompt_tokens_details": {
+            "cached_tokens": 0
+          },
+          "completion_tokens_details": {
+            "reasoning_tokens": 0
+          },
+          "cached_tokens": 0,
+          "prompt_tokens_per_second": 1878.8225820346893,
+          "completion_tokens_per_second": 28.7173467434536,
+          "draft_tokens": 0,
+          "draft_tokens_accepted": 0,
+          "gufo": {
+            "component_cache": {
+              "schema": "component-cache-v1",
+              "reuse": "none",
+              "selection_reason": 6,
+              "deepest_live_tokens": 0,
+              "deepest_ram_tokens": 0,
+              "deepest_disk_tokens": 0,
+              "selected_tokens": 0,
+              "restored_bytes": 0,
+              "prefilled_tokens": 5409,
+              "captures": 4,
+              "captured_capacity_bytes": 670498816,
+              "borrowed_capacity_bytes": 136052736,
+              "copied_payload_bytes": 528367468,
+              "captured_checkpoint_ids": [
+                2,
+                203,
+                452,
+                590
+              ],
+              "global_spill": {
+                "idle_bytes": 0,
+                "foreground_bytes": 0,
+                "idle_copy_ms": 0,
+                "foreground_copy_ms": 0,
+                "stream_wait_ms": 0,
+                "residual_wait_ms": 1.880988,
+                "reassignments": 1,
+                "idle_failures": 0
+              },
+              "global_ledger_bytes": 2656008858,
+              "global_ram_bytes": 2656008858,
+              "global_peak_ledger_bytes": 2656032236,
+              "global_peak_ram_bytes": 2656032236,
+              "global_persistence_pinned_bytes": 0,
+              "global_peak_persistence_pinned_bytes": 0,
+              "global_categories": {
+                "backing_free": {
+                  "bytes": 1865940992,
+                  "reserved_bytes": 0,
+                  "peak_bytes": 2269446144
+                },
+                "backing_assigned": {
+                  "bytes": 136052736,
+                  "reserved_bytes": 136052736,
+                  "peak_bytes": 136380416
+                },
+                "backing_materialized": {
+                  "bytes": 1376256,
+                  "reserved_bytes": 0,
+                  "peak_bytes": 1376256
+                },
+                "private_state": {
+                  "bytes": 528220160,
+                  "reserved_bytes": 0,
+                  "peak_bytes": 528220160
+                },
+                "private_tail": {
+                  "bytes": 4849664,
+                  "reserved_bytes": 0,
+                  "peak_bytes": 4849664
+                },
+                "metadata": {
+                  "bytes": 119569050,
+                  "reserved_bytes": 0,
+                  "peak_bytes": 119592428
+                },
+                "transfer_staging": {
+                  "bytes": 0,
+                  "reserved_bytes": 0,
+                  "peak_bytes": 0
+                }
+              }
+            },
+            "cache_hit": false,
+            "cache_miss_reason": "no_checkpoint",
+            "cache_common_prefix_tokens": 0,
+            "cache_checkpoint_tokens": 0,
+            "cache_restore_bytes": 0,
+            "cache_snapshot_bytes": 664420204,
+            "cache_disk_queued_bytes": 0,
+            "cache_shared_bytes": 0,
+            "cache_restore_ms": 0,
+            "cache_snapshot_ms": 11.168289000000001,
+            "cache_disk_enqueue_ms": 0.001351,
+            "cache_disk_hit": false,
+            "cache_shared_prefix_snapshots": 0,
+            "cache_shared_prefix_bytes": 0,
+            "cache_shared_prefix_ms": 0,
+            "draft_rounds": 0,
+            "prefill_tokens": 5409,
+            "prefill_chunks": 3,
+            "active_decode_prefill_chunks": 0,
+            "max_prefill_chunk_tokens": 2048,
+            "queue_depth_at_submit": 1,
+            "client_queue_depth_at_submit": 1,
+            "resident_requests_at_admission": 1,
+            "requested_logical_concurrency": 2,
+            "physical_execution_width": 1,
+            "queue_ms": 2.409365,
+            "shared_prefix_wait_ms": 0,
+            "prefill_ms": 2878.930694,
+            "decode_ms": 69.644317,
+            "ttft_ms": 2887.775713,
+            "mean_inter_token_ms": 38.160046,
+            "max_inter_token_ms": 38.160046,
+            "execution_plan": "serial-fallback"
+          }
+        },
+        "timings": {
+          "prompt_n": 5409,
+          "prompt_ms": 2878.930694,
+          "prompt_per_token_ms": 0.5322482333148456,
+          "prompt_per_second": 1878.8225820346893,
+          "predicted_n": 2,
+          "predicted_ms": 69.644317,
+          "predicted_per_token_ms": 34.8221585,
+          "predicted_per_second": 28.717346743453597,
+          "cache_n": 0,
+          "cache_restore_ms": 0,
+          "cache_snapshot_ms": 11.168289000000001,
+          "cache_disk_enqueue_ms": 0.001351,
+          "draft_rounds": 0,
+          "draft_n": 0,
+          "draft_n_accepted": 0,
+          "component_cache": {
+            "schema": "component-cache-v1",
+            "reuse": "none",
+            "selection_reason": 6,
+            "deepest_live_tokens": 0,
+            "deepest_ram_tokens": 0,
+            "deepest_disk_tokens": 0,
+            "selected_tokens": 0,
+            "restored_bytes": 0,
+            "prefilled_tokens": 5409,
+            "captures": 4,
+            "captured_capacity_bytes": 670498816,
+            "borrowed_capacity_bytes": 136052736,
+            "copied_payload_bytes": 528367468,
+            "captured_checkpoint_ids": [
+              2,
+              203,
+              452,
+              590
+            ],
+            "global_spill": {
+              "idle_bytes": 0,
+              "foreground_bytes": 0,
+              "idle_copy_ms": 0,
+              "foreground_copy_ms": 0,
+              "stream_wait_ms": 0,
+              "residual_wait_ms": 1.880988,
+              "reassignments": 1,
+              "idle_failures": 0
+            },
+            "global_ledger_bytes": 2656008858,
+            "global_ram_bytes": 2656008858,
+            "global_peak_ledger_bytes": 2656032236,
+            "global_peak_ram_bytes": 2656032236,
+            "global_persistence_pinned_bytes": 0,
+            "global_peak_persistence_pinned_bytes": 0,
+            "global_categories": {
+              "backing_free": {
+                "bytes": 1865940992,
+                "reserved_bytes": 0,
+                "peak_bytes": 2269446144
+              },
+              "backing_assigned": {
+                "bytes": 136052736,
+                "reserved_bytes": 136052736,
+                "peak_bytes": 136380416
+              },
+              "backing_materialized": {
+                "bytes": 1376256,
+                "reserved_bytes": 0,
+                "peak_bytes": 1376256
+              },
+              "private_state": {
+                "bytes": 528220160,
+                "reserved_bytes": 0,
+                "peak_bytes": 528220160
+              },
+              "private_tail": {
+                "bytes": 4849664,
+                "reserved_bytes": 0,
+                "peak_bytes": 4849664
+              },
+              "metadata": {
+                "bytes": 119569050,
+                "reserved_bytes": 0,
+                "peak_bytes": 119592428
+              },
+              "transfer_staging": {
+                "bytes": 0,
+                "reserved_bytes": 0,
+                "peak_bytes": 0
+              }
+            }
+          }
+        },
+        "cache_persist": true
+      },
+      "registrations_after": 19
+    },
+    {
+      "label": "capture_1",
+      "wall_ms": 3049.7830230015097,
+      "response": {
+        "id": "chatcmpl-fptrtdrgadfxh34bngob",
+        "object": "chat.completion",
+        "created": 1793816021,
+        "model": "probe",
+        "choices": [
+          {
+            "index": 0,
+            "message": {
+              "role": "assistant",
+              "content": "BETA"
+            },
+            "finish_reason": "stop"
+          }
+        ],
+        "usage": {
+          "prompt_tokens": 5409,
+          "completion_tokens": 2,
+          "total_tokens": 5411,
+          "prompt_tokens_details": {
+            "cached_tokens": 0
+          },
+          "completion_tokens_details": {
+            "reasoning_tokens": 0
+          },
+          "cached_tokens": 0,
+          "prompt_tokens_per_second": 1822.0493927846076,
+          "completion_tokens_per_second": 28.965266821665605,
+          "draft_tokens": 0,
+          "draft_tokens_accepted": 0,
+          "gufo": {
+            "component_cache": {
+              "schema": "component-cache-v1",
+              "reuse": "none",
+              "selection_reason": 6,
+              "deepest_live_tokens": 0,
+              "deepest_ram_tokens": 0,
+              "deepest_disk_tokens": 0,
+              "selected_tokens": 0,
+              "restored_bytes": 0,
+              "prefilled_tokens": 5409,
+              "captures": 4,
+              "captured_capacity_bytes": 670498816,
+              "borrowed_capacity_bytes": 136052736,
+              "copied_payload_bytes": 528367468,
+              "captured_checkpoint_ids": [
+                592,
+                793,
+                1042,
+                1180
+              ],
+              "global_spill": {
+                "idle_bytes": 39583744,
+                "foreground_bytes": 0,
+                "idle_copy_ms": 2.168813,
+                "foreground_copy_ms": 0,
+                "stream_wait_ms": 0.012522,
+                "residual_wait_ms": 2.458798,
+                "reassignments": 2,
+                "idle_failures": 0
+              },
+              "global_ledger_bytes": 3324147722,
+              "global_ram_bytes": 3324147722,
+              "global_peak_ledger_bytes": 3324171100,
+              "global_peak_ram_bytes": 3324171100,
+              "global_persistence_pinned_bytes": 0,
+              "global_peak_persistence_pinned_bytes": 0,
+              "global_categories": {
+                "backing_free": {
+                  "bytes": 1862926336,
+                  "reserved_bytes": 0,
+                  "peak_bytes": 2269446144
+                },
+                "backing_assigned": {
+                  "bytes": 232521728,
+                  "reserved_bytes": 232521728,
+                  "peak_bytes": 232849408
+                },
+                "backing_materialized": {
+                  "bytes": 42336256,
+                  "reserved_bytes": 0,
+                  "peak_bytes": 42336256
+                },
+                "private_state": {
+                  "bytes": 1056440320,
+                  "reserved_bytes": 0,
+                  "peak_bytes": 1056440320
+                },
+                "private_tail": {
+                  "bytes": 9699328,
+                  "reserved_bytes": 0,
+                  "peak_bytes": 9699328
+                },
+                "metadata": {
+                  "bytes": 120223754,
+                  "reserved_bytes": 0,
+                  "peak_bytes": 120247132
+                },
+                "transfer_staging": {
+                  "bytes": 0,
+                  "reserved_bytes": 0,
+                  "peak_bytes": 0
+                }
+              }
+            },
+            "cache_hit": false,
+            "cache_miss_reason": "no_compatible_boundary",
+            "cache_common_prefix_tokens": 6,
+            "cache_checkpoint_tokens": 0,
+            "cache_restore_bytes": 0,
+            "cache_snapshot_bytes": 664420204,
+            "cache_disk_queued_bytes": 0,
+            "cache_shared_bytes": 0,
+            "cache_restore_ms": 0,
+            "cache_snapshot_ms": 10.765656,
+            "cache_disk_enqueue_ms": 0.00119,
+            "cache_disk_hit": false,
+            "cache_shared_prefix_snapshots": 0,
+            "cache_shared_prefix_bytes": 0,
+            "cache_shared_prefix_ms": 0,
+            "draft_rounds": 0,
+            "prefill_tokens": 5409,
+            "prefill_chunks": 3,
+            "active_decode_prefill_chunks": 0,
+            "max_prefill_chunk_tokens": 2048,
+            "queue_depth_at_submit": 1,
+            "client_queue_depth_at_submit": 1,
+            "resident_requests_at_admission": 1,
+            "requested_logical_concurrency": 2,
+            "physical_execution_width": 1,
+            "queue_ms": 1.056395,
+            "shared_prefix_wait_ms": 0,
+            "prefill_ms": 2968.63522,
+            "decode_ms": 69.048216,
+            "ttft_ms": 2976.076316,
+            "mean_inter_token_ms": 37.706603,
+            "max_inter_token_ms": 37.706603,
+            "execution_plan": "serial-fallback"
+          }
+        },
+        "timings": {
+          "prompt_n": 5409,
+          "prompt_ms": 2968.63522,
+          "prompt_per_token_ms": 0.5488325420595305,
+          "prompt_per_second": 1822.0493927846076,
+          "predicted_n": 2,
+          "predicted_ms": 69.048216,
+          "predicted_per_token_ms": 34.524108,
+          "predicted_per_second": 28.965266821665605,
+          "cache_n": 0,
+          "cache_restore_ms": 0,
+          "cache_snapshot_ms": 10.765656,
+          "cache_disk_enqueue_ms": 0.00119,
+          "draft_rounds": 0,
+          "draft_n": 0,
+          "draft_n_accepted": 0,
+          "component_cache": {
+            "schema": "component-cache-v1",
+            "reuse": "none",
+            "selection_reason": 6,
+            "deepest_live_tokens": 0,
+            "deepest_ram_tokens": 0,
+            "deepest_disk_tokens": 0,
+            "selected_tokens": 0,
+            "restored_bytes": 0,
+            "prefilled_tokens": 5409,
+            "captures": 4,
+            "captured_capacity_bytes": 670498816,
+            "borrowed_capacity_bytes": 136052736,
+            "copied_payload_bytes": 528367468,
+            "captured_checkpoint_ids": [
+              592,
+              793,
+              1042,
+              1180
+            ],
+            "global_spill": {
+              "idle_bytes": 39583744,
+              "foreground_bytes": 0,
+              "idle_copy_ms": 2.168813,
+              "foreground_copy_ms": 0,
+              "stream_wait_ms": 0.012522,
+              "residual_wait_ms": 2.458798,
+              "reassignments": 2,
+              "idle_failures": 0
+            },
+            "global_ledger_bytes": 3324147722,
+            "global_ram_bytes": 3324147722,
+            "global_peak_ledger_bytes": 3324171100,
+            "global_peak_ram_bytes": 3324171100,
+            "global_persistence_pinned_bytes": 0,
+            "global_peak_persistence_pinned_bytes": 0,
+            "global_categories": {
+              "backing_free": {
+                "bytes": 1862926336,
+                "reserved_bytes": 0,
+                "peak_bytes": 2269446144
+              },
+              "backing_assigned": {
+                "bytes": 232521728,
+                "reserved_bytes": 232521728,
+                "peak_bytes": 232849408
+              },
+              "backing_materialized": {
+                "bytes": 42336256,
+                "reserved_bytes": 0,
+                "peak_bytes": 42336256
+              },
+              "private_state": {
+                "bytes": 1056440320,
+                "reserved_bytes": 0,
+                "peak_bytes": 1056440320
+              },
+              "private_tail": {
+                "bytes": 9699328,
+                "reserved_bytes": 0,
+                "peak_bytes": 9699328
+              },
+              "metadata": {
+                "bytes": 120223754,
+                "reserved_bytes": 0,
+                "peak_bytes": 120247132
+              },
+              "transfer_staging": {
+                "bytes": 0,
+                "reserved_bytes": 0,
+                "peak_bytes": 0
+              }
+            }
+          }
+        },
+        "cache_persist": true
+      },
+      "registrations_after": 24
+    },
+    {
+      "label": "capture_2",
+      "wall_ms": 3043.783462009742,
+      "response": {
+        "id": "chatcmpl-dcuesb26jwly2eqi9cnt",
+        "object": "chat.completion",
+        "created": 1793816024,
+        "model": "probe",
+        "choices": [
+          {
+            "index": 0,
+            "message": {
+              "role": "assistant",
+              "content": "BETA"
+            },
+            "finish_reason": "stop"
+          }
+        ],
+        "usage": {
+          "prompt_tokens": 5409,
+          "completion_tokens": 2,
+          "total_tokens": 5411,
+          "prompt_tokens_details": {
+            "cached_tokens": 0
+          },
+          "completion_tokens_details": {
+            "reasoning_tokens": 0
+          },
+          "cached_tokens": 0,
+          "prompt_tokens_per_second": 1830.2180245140758,
+          "completion_tokens_per_second": 29.13540850086145,
+          "draft_tokens": 0,
+          "draft_tokens_accepted": 0,
+          "gufo": {
+            "component_cache": {
+              "schema": "component-cache-v1",
+              "reuse": "none",
+              "selection_reason": 6,
+              "deepest_live_tokens": 0,
+              "deepest_ram_tokens": 0,
+              "deepest_disk_tokens": 0,
+              "selected_tokens": 0,
+              "restored_bytes": 0,
+              "prefilled_tokens": 5409,
+              "captures": 4,
+              "captured_capacity_bytes": 670498816,
+              "borrowed_capacity_bytes": 136052736,
+              "copied_payload_bytes": 528367468,
+              "captured_checkpoint_ids": [
+                1182,
+                1383,
+                1632,
+                1770
+              ],
+              "global_spill": {
+                "idle_bytes": 87293952,
+                "foreground_bytes": 96468992,
+                "idle_copy_ms": 4.763559,
+                "foreground_copy_ms": 5.775097,
+                "stream_wait_ms": 0.060278,
+                "residual_wait_ms": 9.234409,
+                "reassignments": 3,
+                "idle_failures": 0
+              },
+              "global_ledger_bytes": 3992183514,
+              "global_ram_bytes": 3992183514,
+              "global_peak_ledger_bytes": 3992206892,
+              "global_peak_ram_bytes": 3992206892,
+              "global_persistence_pinned_bytes": 0,
+              "global_peak_persistence_pinned_bytes": 0,
+              "global_categories": {
+                "backing_free": {
+                  "bytes": 1859911680,
+                  "reserved_bytes": 0,
+                  "peak_bytes": 2269446144
+                },
+                "backing_assigned": {
+                  "bytes": 224395264,
+                  "reserved_bytes": 224395264,
+                  "peak_bytes": 232849408
+                },
+                "backing_materialized": {
+                  "bytes": 187891712,
+                  "reserved_bytes": 0,
+                  "peak_bytes": 187891712
+                },
+                "private_state": {
+                  "bytes": 1584660480,
+                  "reserved_bytes": 0,
+                  "peak_bytes": 1584660480
+                },
+                "private_tail": {
+                  "bytes": 14548992,
+                  "reserved_bytes": 0,
+                  "peak_bytes": 14548992
+                },
+                "metadata": {
+                  "bytes": 120775386,
+                  "reserved_bytes": 0,
+                  "peak_bytes": 120798764
+                },
+                "transfer_staging": {
+                  "bytes": 0,
+                  "reserved_bytes": 0,
+                  "peak_bytes": 0
+                }
+              }
+            },
+            "cache_hit": false,
+            "cache_miss_reason": "no_compatible_boundary",
+            "cache_common_prefix_tokens": 6,
+            "cache_checkpoint_tokens": 0,
+            "cache_restore_bytes": 0,
+            "cache_snapshot_bytes": 664420204,
+            "cache_disk_queued_bytes": 0,
+            "cache_shared_bytes": 0,
+            "cache_restore_ms": 0,
+            "cache_snapshot_ms": 11.226261,
+            "cache_disk_enqueue_ms": 0.0015,
+            "cache_disk_hit": false,
+            "cache_shared_prefix_snapshots": 0,
+            "cache_shared_prefix_bytes": 0,
+            "cache_shared_prefix_ms": 0,
+            "draft_rounds": 0,
+            "prefill_tokens": 5409,
+            "prefill_chunks": 3,
+            "active_decode_prefill_chunks": 0,
+            "max_prefill_chunk_tokens": 2048,
+            "queue_depth_at_submit": 1,
+            "client_queue_depth_at_submit": 1,
+            "resident_requests_at_admission": 1,
+            "requested_logical_concurrency": 2,
+            "physical_execution_width": 1,
+            "queue_ms": 7.33216,
+            "shared_prefix_wait_ms": 0,
+            "prefill_ms": 2955.3856029999997,
+            "decode_ms": 68.644996,
+            "ttft_ms": 2970.18656,
+            "mean_inter_token_ms": 37.738995,
+            "max_inter_token_ms": 37.738995,
+            "execution_plan": "serial-fallback"
+          }
+        },
+        "timings": {
+          "prompt_n": 5409,
+          "prompt_ms": 2955.3856029999997,
+          "prompt_per_token_ms": 0.5463829918654094,
+          "prompt_per_second": 1830.2180245140758,
+          "predicted_n": 2,
+          "predicted_ms": 68.644996,
+          "predicted_per_token_ms": 34.322498,
+          "predicted_per_second": 29.135408500861445,
+          "cache_n": 0,
+          "cache_restore_ms": 0,
+          "cache_snapshot_ms": 11.226261,
+          "cache_disk_enqueue_ms": 0.0015,
+          "draft_rounds": 0,
+          "draft_n": 0,
+          "draft_n_accepted": 0,
+          "component_cache": {
+            "schema": "component-cache-v1",
+            "reuse": "none",
+            "selection_reason": 6,
+            "deepest_live_tokens": 0,
+            "deepest_ram_tokens": 0,
+            "deepest_disk_tokens": 0,
+            "selected_tokens": 0,
+            "restored_bytes": 0,
+            "prefilled_tokens": 5409,
+            "captures": 4,
+            "captured_capacity_bytes": 670498816,
+            "borrowed_capacity_bytes": 136052736,
+            "copied_payload_bytes": 528367468,
+            "captured_checkpoint_ids": [
+              1182,
+              1383,
+              1632,
+              1770
+            ],
+            "global_spill": {
+              "idle_bytes": 87293952,
+              "foreground_bytes": 96468992,
+              "idle_copy_ms": 4.763559,
+              "foreground_copy_ms": 5.775097,
+              "stream_wait_ms": 0.060278,
+              "residual_wait_ms": 9.234409,
+              "reassignments": 3,
+              "idle_failures": 0
+            },
+            "global_ledger_bytes": 3992183514,
+            "global_ram_bytes": 3992183514,
+            "global_peak_ledger_bytes": 3992206892,
+            "global_peak_ram_bytes": 3992206892,
+            "global_persistence_pinned_bytes": 0,
+            "global_peak_persistence_pinned_bytes": 0,
+            "global_categories": {
+              "backing_free": {
+                "bytes": 1859911680,
+                "reserved_bytes": 0,
+                "peak_bytes": 2269446144
+              },
+              "backing_assigned": {
+                "bytes": 224395264,
+                "reserved_bytes": 224395264,
+                "peak_bytes": 232849408
+              },
+              "backing_materialized": {
+                "bytes": 187891712,
+                "reserved_bytes": 0,
+                "peak_bytes": 187891712
+              },
+              "private_state": {
+                "bytes": 1584660480,
+                "reserved_bytes": 0,
+                "peak_bytes": 1584660480
+              },
+              "private_tail": {
+                "bytes": 14548992,
+                "reserved_bytes": 0,
+                "peak_bytes": 14548992
+              },
+              "metadata": {
+                "bytes": 120775386,
+                "reserved_bytes": 0,
+                "peak_bytes": 120798764
+              },
+              "transfer_staging": {
+                "bytes": 0,
+                "reserved_bytes": 0,
+                "peak_bytes": 0
+              }
+            }
+          }
+        },
+        "cache_persist": true
+      },
+      "registrations_after": 29
+    },
+    {
+      "label": "capture_3",
+      "wall_ms": 3040.404066996416,
+      "response": {
+        "id": "chatcmpl-yu4ehqpbnce6fiargz1h",
+        "object": "chat.completion",
+        "created": 1793816027,
+        "model": "probe",
+        "choices": [
+          {
+            "index": 0,
+            "message": {
+              "role": "assistant",
+              "content": "BETA"
+            },
+            "finish_reason": "stop"
+          }
+        ],
+        "usage": {
+          "prompt_tokens": 5409,
+          "completion_tokens": 2,
+          "total_tokens": 5411,
+          "prompt_tokens_details": {
+            "cached_tokens": 0
+          },
+          "completion_tokens_details": {
+            "reasoning_tokens": 0
+          },
+          "cached_tokens": 0,
+          "prompt_tokens_per_second": 1830.8341025093093,
+          "completion_tokens_per_second": 29.159354897677417,
+          "draft_tokens": 0,
+          "draft_tokens_accepted": 0,
+          "gufo": {
+            "component_cache": {
+              "schema": "component-cache-v1",
+              "reuse": "none",
+              "selection_reason": 6,
+              "deepest_live_tokens": 0,
+              "deepest_ram_tokens": 0,
+              "deepest_disk_tokens": 0,
+              "selected_tokens": 0,
+              "restored_bytes": 0,
+              "prefilled_tokens": 5409,
+              "captures": 4,
+              "captured_capacity_bytes": 670498816,
+              "borrowed_capacity_bytes": 136052736,
+              "copied_payload_bytes": 528367468,
+              "captured_checkpoint_ids": [
+                1772,
+                1973,
+                2222,
+                2360
+              ],
+              "global_spill": {
+                "idle_bytes": 130023424,
+                "foreground_bytes": 184811520,
+                "idle_copy_ms": 7.191107,
+                "foreground_copy_ms": 10.700918,
+                "stream_wait_ms": 0.095928,
+                "residual_wait_ms": 15.074742,
+                "reassignments": 4,
+                "idle_failures": 0
+              },
+              "global_ledger_bytes": 4660219306,
+              "global_ram_bytes": 4660219306,
+              "global_peak_ledger_bytes": 4660242684,
+              "global_peak_ram_bytes": 4660242684,
+              "global_persistence_pinned_bytes": 0,
+              "global_peak_persistence_pinned_bytes": 0,
+              "global_categories": {
+                "backing_free": {
+                  "bytes": 1856897024,
+                  "reserved_bytes": 0,
+                  "peak_bytes": 2269446144
+                },
+                "backing_assigned": {
+                  "bytes": 229376000,
+                  "reserved_bytes": 229376000,
+                  "peak_bytes": 232849408
+                },
+                "backing_materialized": {
+                  "bytes": 320339968,
+                  "reserved_bytes": 0,
+                  "peak_bytes": 320339968
+                },
+                "private_state": {
+                  "bytes": 2112880640,
+                  "reserved_bytes": 0,
+                  "peak_bytes": 2112880640
+                },
+                "private_tail": {
+                  "bytes": 19398656,
+                  "reserved_bytes": 0,
+                  "peak_bytes": 19398656
+                },
+                "metadata": {
+                  "bytes": 121327018,
+                  "reserved_bytes": 0,
+                  "peak_bytes": 121350396
+                },
+                "transfer_staging": {
+                  "bytes": 0,
+                  "reserved_bytes": 0,
+                  "peak_bytes": 0
+                }
+              }
+            },
+            "cache_hit": false,
+            "cache_miss_reason": "no_compatible_boundary",
+            "cache_common_prefix_tokens": 6,
+            "cache_checkpoint_tokens": 0,
+            "cache_restore_bytes": 0,
+            "cache_snapshot_bytes": 664420204,
+            "cache_disk_queued_bytes": 0,
+            "cache_shared_bytes": 0,
+            "cache_restore_ms": 0,
+            "cache_snapshot_ms": 11.111346,
+            "cache_disk_enqueue_ms": 0.00133,
+            "cache_disk_hit": false,
+            "cache_shared_prefix_snapshots": 0,
+            "cache_shared_prefix_bytes": 0,
+            "cache_shared_prefix_ms": 0,
+            "draft_rounds": 0,
+            "prefill_tokens": 5409,
+            "prefill_chunks": 3,
+            "active_decode_prefill_chunks": 0,
+            "max_prefill_chunk_tokens": 2048,
+            "queue_depth_at_submit": 1,
+            "client_queue_depth_at_submit": 1,
+            "resident_requests_at_admission": 1,
+            "requested_logical_concurrency": 2,
+            "physical_execution_width": 1,
+            "queue_ms": 6.387771,
+            "shared_prefix_wait_ms": 0,
+            "prefill_ms": 2954.391112,
+            "decode_ms": 68.588623,
+            "ttft_ms": 2967.156913,
+            "mean_inter_token_ms": 37.673962,
+            "max_inter_token_ms": 37.673962,
+            "execution_plan": "serial-fallback"
+          }
+        },
+        "timings": {
+          "prompt_n": 5409,
+          "prompt_ms": 2954.391112,
+          "prompt_per_token_ms": 0.5461991332963578,
+          "prompt_per_second": 1830.8341025093093,
+          "predicted_n": 2,
+          "predicted_ms": 68.588623,
+          "predicted_per_token_ms": 34.2943115,
+          "predicted_per_second": 29.159354897677417,
+          "cache_n": 0,
+          "cache_restore_ms": 0,
+          "cache_snapshot_ms": 11.111346,
+          "cache_disk_enqueue_ms": 0.00133,
+          "draft_rounds": 0,
+          "draft_n": 0,
+          "draft_n_accepted": 0,
+          "component_cache": {
+            "schema": "component-cache-v1",
+            "reuse": "none",
+            "selection_reason": 6,
+            "deepest_live_tokens": 0,
+            "deepest_ram_tokens": 0,
+            "deepest_disk_tokens": 0,
+            "selected_tokens": 0,
+            "restored_bytes": 0,
+            "prefilled_tokens": 5409,
+            "captures": 4,
+            "captured_capacity_bytes": 670498816,
+            "borrowed_capacity_bytes": 136052736,
+            "copied_payload_bytes": 528367468,
+            "captured_checkpoint_ids": [
+              1772,
+              1973,
+              2222,
+              2360
+            ],
+            "global_spill": {
+              "idle_bytes": 130023424,
+              "foreground_bytes": 184811520,
+              "idle_copy_ms": 7.191107,
+              "foreground_copy_ms": 10.700918,
+              "stream_wait_ms": 0.095928,
+              "residual_wait_ms": 15.074742,
+              "reassignments": 4,
+              "idle_failures": 0
+            },
+            "global_ledger_bytes": 4660219306,
+            "global_ram_bytes": 4660219306,
+            "global_peak_ledger_bytes": 4660242684,
+            "global_peak_ram_bytes": 4660242684,
+            "global_persistence_pinned_bytes": 0,
+            "global_peak_persistence_pinned_bytes": 0,
+            "global_categories": {
+              "backing_free": {
+                "bytes": 1856897024,
+                "reserved_bytes": 0,
+                "peak_bytes": 2269446144
+              },
+              "backing_assigned": {
+                "bytes": 229376000,
+                "reserved_bytes": 229376000,
+                "peak_bytes": 232849408
+              },
+              "backing_materialized": {
+                "bytes": 320339968,
+                "reserved_bytes": 0,
+                "peak_bytes": 320339968
+              },
+              "private_state": {
+                "bytes": 2112880640,
+                "reserved_bytes": 0,
+                "peak_bytes": 2112880640
+              },
+              "private_tail": {
+                "bytes": 19398656,
+                "reserved_bytes": 0,
+                "peak_bytes": 19398656
+              },
+              "metadata": {
+                "bytes": 121327018,
+                "reserved_bytes": 0,
+                "peak_bytes": 121350396
+              },
+              "transfer_staging": {
+                "bytes": 0,
+                "reserved_bytes": 0,
+                "peak_bytes": 0
+              }
+            }
+          }
+        },
+        "cache_persist": true
+      },
+      "registrations_after": 34
+    },
+    {
+      "label": "capture_4",
+      "wall_ms": 3051.128493010765,
+      "response": {
+        "id": "chatcmpl-07v3hwz9c11z603w90eb",
+        "object": "chat.completion",
+        "created": 1793816030,
+        "model": "probe",
+        "choices": [
+          {
+            "index": 0,
+            "message": {
+              "role": "assistant",
+              "content": "BETA"
+            },
+            "finish_reason": "stop"
+          }
+        ],
+        "usage": {
+          "prompt_tokens": 5409,
+          "completion_tokens": 2,
+          "total_tokens": 5411,
+          "prompt_tokens_details": {
+            "cached_tokens": 0
+          },
+          "completion_tokens_details": {
+            "reasoning_tokens": 0
+          },
+          "cached_tokens": 0,
+          "prompt_tokens_per_second": 1824.4379061883194,
+          "completion_tokens_per_second": 29.17175367353695,
+          "draft_tokens": 0,
+          "draft_tokens_accepted": 0,
+          "gufo": {
+            "component_cache": {
+              "schema": "component-cache-v1",
+              "reuse": "none",
+              "selection_reason": 6,
+              "deepest_live_tokens": 0,
+              "deepest_ram_tokens": 0,
+              "deepest_disk_tokens": 0,
+              "selected_tokens": 0,
+              "restored_bytes": 0,
+              "prefilled_tokens": 5409,
+              "captures": 4,
+              "captured_capacity_bytes": 670498816,
+              "borrowed_capacity_bytes": 136052736,
+              "copied_payload_bytes": 528367468,
+              "captured_checkpoint_ids": [
+                2362,
+                2563,
+                2812,
+                2950
+              ],
+              "global_spill": {
+                "idle_bytes": 171442176,
+                "foreground_bytes": 278134784,
+                "idle_copy_ms": 9.384629,
+                "foreground_copy_ms": 15.91386,
+                "stream_wait_ms": 0.131429,
+                "residual_wait_ms": 21.318225,
+                "reassignments": 5,
+                "idle_failures": 0
+              },
+              "global_ledger_bytes": 5328255098,
+              "global_ram_bytes": 5328255098,
+              "global_peak_ledger_bytes": 5328278476,
+              "global_peak_ram_bytes": 5328278476,
+              "global_persistence_pinned_bytes": 0,
+              "global_peak_persistence_pinned_bytes": 0,
+              "global_categories": {
+                "backing_free": {
+                  "bytes": 1853882368,
+                  "reserved_bytes": 0,
+                  "peak_bytes": 2269446144
+                },
+                "backing_assigned": {
+                  "bytes": 230686720,
+                  "reserved_bytes": 230686720,
+                  "peak_bytes": 232849408
+                },
+                "backing_materialized": {
+                  "bytes": 456458240,
+                  "reserved_bytes": 0,
+                  "peak_bytes": 456458240
+                },
+                "private_state": {
+                  "bytes": 2641100800,
+                  "reserved_bytes": 0,
+                  "peak_bytes": 2641100800
+                },
+                "private_tail": {
+                  "bytes": 24248320,
+                  "reserved_bytes": 0,
+                  "peak_bytes": 24248320
+                },
+                "metadata": {
+                  "bytes": 121878650,
+                  "reserved_bytes": 0,
+                  "peak_bytes": 121902028
+                },
+                "transfer_staging": {
+                  "bytes": 0,
+                  "reserved_bytes": 0,
+                  "peak_bytes": 0
+                }
+              }
+            },
+            "cache_hit": false,
+            "cache_miss_reason": "no_compatible_boundary",
+            "cache_common_prefix_tokens": 6,
+            "cache_checkpoint_tokens": 0,
+            "cache_restore_bytes": 0,
+            "cache_snapshot_bytes": 664420204,
+            "cache_disk_queued_bytes": 0,
+            "cache_shared_bytes": 0,
+            "cache_restore_ms": 0,
+            "cache_snapshot_ms": 11.085653,
+            "cache_disk_enqueue_ms": 0.00146,
+            "cache_disk_hit": false,
+            "cache_shared_prefix_snapshots": 0,
+            "cache_shared_prefix_bytes": 0,
+            "cache_shared_prefix_ms": 0,
+            "draft_rounds": 0,
+            "prefill_tokens": 5409,
+            "prefill_chunks": 3,
+            "active_decode_prefill_chunks": 0,
+            "max_prefill_chunk_tokens": 2048,
+            "queue_depth_at_submit": 1,
+            "client_queue_depth_at_submit": 1,
+            "resident_requests_at_admission": 1,
+            "requested_logical_concurrency": 2,
+            "physical_execution_width": 1,
+            "queue_ms": 6.883437,
+            "shared_prefix_wait_ms": 0,
+            "prefill_ms": 2964.7487490000003,
+            "decode_ms": 68.559471,
+            "ttft_ms": 2978.019386,
+            "mean_inter_token_ms": 37.64506,
+            "max_inter_token_ms": 37.64506,
+            "execution_plan": "serial-fallback"
+          }
+        },
+        "timings": {
+          "prompt_n": 5409,
+          "prompt_ms": 2964.7487490000003,
+          "prompt_per_token_ms": 0.5481140227398781,
+          "prompt_per_second": 1824.4379061883194,
+          "predicted_n": 2,
+          "predicted_ms": 68.559471,
+          "predicted_per_token_ms": 34.2797355,
+          "predicted_per_second": 29.171753673536948,
+          "cache_n": 0,
+          "cache_restore_ms": 0,
+          "cache_snapshot_ms": 11.085653,
+          "cache_disk_enqueue_ms": 0.00146,
+          "draft_rounds": 0,
+          "draft_n": 0,
+          "draft_n_accepted": 0,
+          "component_cache": {
+            "schema": "component-cache-v1",
+            "reuse": "none",
+            "selection_reason": 6,
+            "deepest_live_tokens": 0,
+            "deepest_ram_tokens": 0,
+            "deepest_disk_tokens": 0,
+            "selected_tokens": 0,
+            "restored_bytes": 0,
+            "prefilled_tokens": 5409,
+            "captures": 4,
+            "captured_capacity_bytes": 670498816,
+            "borrowed_capacity_bytes": 136052736,
+            "copied_payload_bytes": 528367468,
+            "captured_checkpoint_ids": [
+              2362,
+              2563,
+              2812,
+              2950
+            ],
+            "global_spill": {
+              "idle_bytes": 171442176,
+              "foreground_bytes": 278134784,
+              "idle_copy_ms": 9.384629,
+              "foreground_copy_ms": 15.91386,
+              "stream_wait_ms": 0.131429,
+              "residual_wait_ms": 21.318225,
+              "reassignments": 5,
+              "idle_failures": 0
+            },
+            "global_ledger_bytes": 5328255098,
+            "global_ram_bytes": 5328255098,
+            "global_peak_ledger_bytes": 5328278476,
+            "global_peak_ram_bytes": 5328278476,
+            "global_persistence_pinned_bytes": 0,
+            "global_peak_persistence_pinned_bytes": 0,
+            "global_categories": {
+              "backing_free": {
+                "bytes": 1853882368,
+                "reserved_bytes": 0,
+                "peak_bytes": 2269446144
+              },
+              "backing_assigned": {
+                "bytes": 230686720,
+                "reserved_bytes": 230686720,
+                "peak_bytes": 232849408
+              },
+              "backing_materialized": {
+                "bytes": 456458240,
+                "reserved_bytes": 0,
+                "peak_bytes": 456458240
+              },
+              "private_state": {
+                "bytes": 2641100800,
+                "reserved_bytes": 0,
+                "peak_bytes": 2641100800
+              },
+              "private_tail": {
+                "bytes": 24248320,
+                "reserved_bytes": 0,
+                "peak_bytes": 24248320
+              },
+              "metadata": {
+                "bytes": 121878650,
+                "reserved_bytes": 0,
+                "peak_bytes": 121902028
+              },
+              "transfer_staging": {
+                "bytes": 0,
+                "reserved_bytes": 0,
+                "peak_bytes": 0
+              }
+            }
+          }
+        },
+        "cache_persist": true
+      },
+      "registrations_after": 39
+    },
+    {
+      "label": "capture_5",
+      "wall_ms": 3085.0545599969337,
+      "response": {
+        "id": "chatcmpl-h5j1ck80dpxfnp5e65me",
+        "object": "chat.completion",
+        "created": 1793816033,
+        "model": "probe",
+        "choices": [
+          {
+            "index": 0,
+            "message": {
+              "role": "assistant",
+              "content": "BETA"
+            },
+            "finish_reason": "stop"
+          }
+        ],
+        "usage": {
+          "prompt_tokens": 5409,
+          "completion_tokens": 2,
+          "total_tokens": 5411,
+          "prompt_tokens_details": {
+            "cached_tokens": 0
+          },
+          "completion_tokens_details": {
+            "reasoning_tokens": 0
+          },
+          "cached_tokens": 0,
+          "prompt_tokens_per_second": 1803.9470698063856,
+          "completion_tokens_per_second": 29.173123833740554,
+          "draft_tokens": 0,
+          "draft_tokens_accepted": 0,
+          "gufo": {
+            "component_cache": {
+              "schema": "component-cache-v1",
+              "reuse": "none",
+              "selection_reason": 6,
+              "deepest_live_tokens": 0,
+              "deepest_ram_tokens": 0,
+              "deepest_disk_tokens": 0,
+              "selected_tokens": 0,
+              "restored_bytes": 0,
+              "prefilled_tokens": 5409,
+              "captures": 4,
+              "captured_capacity_bytes": 670498816,
+              "borrowed_capacity_bytes": 136052736,
+              "copied_payload_bytes": 528367468,
+              "captured_checkpoint_ids": [
+                2952,
+                3153,
+                3402,
+                3540
+              ],
+              "global_spill": {
+                "idle_bytes": 212598784,
+                "foreground_bytes": 372768768,
+                "idle_copy_ms": 11.531742,
+                "foreground_copy_ms": 21.186841,
+                "stream_wait_ms": 0.165449,
+                "residual_wait_ms": 27.645903,
+                "reassignments": 6,
+                "idle_failures": 0
+              },
+              "global_ledger_bytes": 5996290890,
+              "global_ram_bytes": 5996290890,
+              "global_peak_ledger_bytes": 5996314268,
+              "global_peak_ram_bytes": 5996314268,
+              "global_persistence_pinned_bytes": 0,
+              "global_peak_persistence_pinned_bytes": 0,
+              "global_categories": {
+                "backing_free": {
+                  "bytes": 1850867712,
+                  "reserved_bytes": 0,
+                  "peak_bytes": 2269446144
+                },
+                "backing_assigned": {
+                  "bytes": 230948864,
+                  "reserved_bytes": 230948864,
+                  "peak_bytes": 232849408
+                },
+                "backing_materialized": {
+                  "bytes": 593625088,
+                  "reserved_bytes": 0,
+                  "peak_bytes": 593625088
+                },
+                "private_state": {
+                  "bytes": 3169320960,
+                  "reserved_bytes": 0,
+                  "peak_bytes": 3169320960
+                },
+                "private_tail": {
+                  "bytes": 29097984,
+                  "reserved_bytes": 0,
+                  "peak_bytes": 29097984
+                },
+                "metadata": {
+                  "bytes": 122430282,
+                  "reserved_bytes": 0,
+                  "peak_bytes": 122453660
+                },
+                "transfer_staging": {
+                  "bytes": 0,
+                  "reserved_bytes": 0,
+                  "peak_bytes": 0
+                }
+              }
+            },
+            "cache_hit": false,
+            "cache_miss_reason": "no_compatible_boundary",
+            "cache_common_prefix_tokens": 6,
+            "cache_checkpoint_tokens": 0,
+            "cache_restore_bytes": 0,
+            "cache_snapshot_bytes": 664420204,
+            "cache_disk_queued_bytes": 0,
+            "cache_shared_bytes": 0,
+            "cache_restore_ms": 0,
+            "cache_snapshot_ms": 11.215929999999998,
+            "cache_disk_enqueue_ms": 0.0015400000000000001,
+            "cache_disk_hit": false,
+            "cache_shared_prefix_snapshots": 0,
+            "cache_shared_prefix_bytes": 0,
+            "cache_shared_prefix_ms": 0,
+            "draft_rounds": 0,
+            "prefill_tokens": 5409,
+            "prefill_chunks": 3,
+            "active_decode_prefill_chunks": 0,
+            "max_prefill_chunk_tokens": 2048,
+            "queue_depth_at_submit": 1,
+            "client_queue_depth_at_submit": 1,
+            "resident_requests_at_admission": 1,
+            "requested_logical_concurrency": 2,
+            "physical_execution_width": 1,
+            "queue_ms": 6.936049,
+            "shared_prefix_wait_ms": 0,
+            "prefill_ms": 2998.425004,
+            "decode_ms": 68.55625100000002,
+            "ttft_ms": 3011.735212,
+            "mean_inter_token_ms": 37.64902,
+            "max_inter_token_ms": 37.64902,
+            "execution_plan": "serial-fallback"
+          }
+        },
+        "timings": {
+          "prompt_n": 5409,
+          "prompt_ms": 2998.425004,
+          "prompt_per_token_ms": 0.5543399896468848,
+          "prompt_per_second": 1803.9470698063856,
+          "predicted_n": 2,
+          "predicted_ms": 68.55625100000002,
+          "predicted_per_token_ms": 34.27812550000001,
+          "predicted_per_second": 29.17312383374055,
+          "cache_n": 0,
+          "cache_restore_ms": 0,
+          "cache_snapshot_ms": 11.215929999999998,
+          "cache_disk_enqueue_ms": 0.0015400000000000001,
+          "draft_rounds": 0,
+          "draft_n": 0,
+          "draft_n_accepted": 0,
+          "component_cache": {
+            "schema": "component-cache-v1",
+            "reuse": "none",
+            "selection_reason": 6,
+            "deepest_live_tokens": 0,
+            "deepest_ram_tokens": 0,
+            "deepest_disk_tokens": 0,
+            "selected_tokens": 0,
+            "restored_bytes": 0,
+            "prefilled_tokens": 5409,
+            "captures": 4,
+            "captured_capacity_bytes": 670498816,
+            "borrowed_capacity_bytes": 136052736,
+            "copied_payload_bytes": 528367468,
+            "captured_checkpoint_ids": [
+              2952,
+              3153,
+              3402,
+              3540
+            ],
+            "global_spill": {
+              "idle_bytes": 212598784,
+              "foreground_bytes": 372768768,
+              "idle_copy_ms": 11.531742,
+              "foreground_copy_ms": 21.186841,
+              "stream_wait_ms": 0.165449,
+              "residual_wait_ms": 27.645903,
+              "reassignments": 6,
+              "idle_failures": 0
+            },
+            "global_ledger_bytes": 5996290890,
+            "global_ram_bytes": 5996290890,
+            "global_peak_ledger_bytes": 5996314268,
+            "global_peak_ram_bytes": 5996314268,
+            "global_persistence_pinned_bytes": 0,
+            "global_peak_persistence_pinned_bytes": 0,
+            "global_categories": {
+              "backing_free": {
+                "bytes": 1850867712,
+                "reserved_bytes": 0,
+                "peak_bytes": 2269446144
+              },
+              "backing_assigned": {
+                "bytes": 230948864,
+                "reserved_bytes": 230948864,
+                "peak_bytes": 232849408
+              },
+              "backing_materialized": {
+                "bytes": 593625088,
+                "reserved_bytes": 0,
+                "peak_bytes": 593625088
+              },
+              "private_state": {
+                "bytes": 3169320960,
+                "reserved_bytes": 0,
+                "peak_bytes": 3169320960
+              },
+              "private_tail": {
+                "bytes": 29097984,
+                "reserved_bytes": 0,
+                "peak_bytes": 29097984
+              },
+              "metadata": {
+                "bytes": 122430282,
+                "reserved_bytes": 0,
+                "peak_bytes": 122453660
+              },
+              "transfer_staging": {
+                "bytes": 0,
+                "reserved_bytes": 0,
+                "peak_bytes": 0
+              }
+            }
+          }
+        },
+        "cache_persist": true
+      },
+      "registrations_after": 44
+    },
+    {
+      "label": "capture_6",
+      "wall_ms": 3165.504375996534,
+      "response": {
+        "id": "chatcmpl-4glefe4by5q6bfvzyb2v",
+        "object": "chat.completion",
+        "created": 1793816036,
+        "model": "probe",
+        "choices": [
+          {
+            "index": 0,
+            "message": {
+              "role": "assistant",
+              "content": "BETA"
+            },
+            "finish_reason": "stop"
+          }
+        ],
+        "usage": {
+          "prompt_tokens": 5409,
+          "completion_tokens": 2,
+          "total_tokens": 5411,
+          "prompt_tokens_details": {
+            "cached_tokens": 0
+          },
+          "completion_tokens_details": {
+            "reasoning_tokens": 0
+          },
+          "cached_tokens": 0,
+          "prompt_tokens_per_second": 1757.6413962558584,
+          "completion_tokens_per_second": 29.091771899969505,
+          "draft_tokens": 0,
+          "draft_tokens_accepted": 0,
+          "gufo": {
+            "component_cache": {
+              "schema": "component-cache-v1",
+              "reuse": "none",
+              "selection_reason": 6,
+              "deepest_live_tokens": 0,
+              "deepest_ram_tokens": 0,
+              "deepest_disk_tokens": 0,
+              "selected_tokens": 0,
+              "restored_bytes": 0,
+              "prefilled_tokens": 5409,
+              "captures": 4,
+              "captured_capacity_bytes": 670498816,
+              "borrowed_capacity_bytes": 136052736,
+              "copied_payload_bytes": 528367468,
+              "captured_checkpoint_ids": [
+                3542,
+                3743,
+                3992,
+                4130
+              ],
+              "global_spill": {
+                "idle_bytes": 259522560,
+                "foreground_bytes": 467664896,
+                "idle_copy_ms": 14.0567,
+                "foreground_copy_ms": 26.520135,
+                "stream_wait_ms": 0.204302,
+                "residual_wait_ms": 34.077346,
+                "reassignments": 7,
+                "idle_failures": 0
+              },
+              "global_ledger_bytes": 6664326682,
+              "global_ram_bytes": 6664326682,
+              "global_peak_ledger_bytes": 6664350060,
+              "global_peak_ram_bytes": 6664350060,
+              "global_persistence_pinned_bytes": 0,
+              "global_peak_persistence_pinned_bytes": 0,
+              "global_categories": {
+                "backing_free": {
+                  "bytes": 1847853056,
+                  "reserved_bytes": 0,
+                  "peak_bytes": 2269446144
+                },
+                "backing_assigned": {
+                  "bytes": 225181696,
+                  "reserved_bytes": 225181696,
+                  "peak_bytes": 232849408
+                },
+                "backing_materialized": {
+                  "bytes": 736821248,
+                  "reserved_bytes": 0,
+                  "peak_bytes": 736821248
+                },
+                "private_state": {
+                  "bytes": 3697541120,
+                  "reserved_bytes": 0,
+                  "peak_bytes": 3697541120
+                },
+                "private_tail": {
+                  "bytes": 33947648,
+                  "reserved_bytes": 0,
+                  "peak_bytes": 33947648
+                },
+                "metadata": {
+                  "bytes": 122981914,
+                  "reserved_bytes": 0,
+                  "peak_bytes": 123005292
+                },
+                "transfer_staging": {
+                  "bytes": 0,
+                  "reserved_bytes": 0,
+                  "peak_bytes": 0
+                }
+              }
+            },
+            "cache_hit": false,
+            "cache_miss_reason": "no_compatible_boundary",
+            "cache_common_prefix_tokens": 6,
+            "cache_checkpoint_tokens": 0,
+            "cache_restore_bytes": 0,
+            "cache_snapshot_bytes": 664420204,
+            "cache_disk_queued_bytes": 0,
+            "cache_shared_bytes": 0,
+            "cache_restore_ms": 0,
+            "cache_snapshot_ms": 11.445492,
+            "cache_disk_enqueue_ms": 0.00149,
+            "cache_disk_hit": false,
+            "cache_shared_prefix_snapshots": 0,
+            "cache_shared_prefix_bytes": 0,
+            "cache_shared_prefix_ms": 0,
+            "draft_rounds": 0,
+            "prefill_tokens": 5409,
+            "prefill_chunks": 3,
+            "active_decode_prefill_chunks": 0,
+            "max_prefill_chunk_tokens": 2048,
+            "queue_depth_at_submit": 1,
+            "client_queue_depth_at_submit": 1,
+            "resident_requests_at_admission": 1,
+            "requested_logical_concurrency": 2,
+            "physical_execution_width": 1,
+            "queue_ms": 7.156051,
+            "shared_prefix_wait_ms": 0,
+            "prefill_ms": 3077.419553,
+            "decode_ms": 68.74796100000002,
+            "ttft_ms": 3092.00749,
+            "mean_inter_token_ms": 37.709213,
+            "max_inter_token_ms": 37.709213,
+            "execution_plan": "serial-fallback"
+          }
+        },
+        "timings": {
+          "prompt_n": 5409,
+          "prompt_ms": 3077.419553,
+          "prompt_per_token_ms": 0.5689442693658717,
+          "prompt_per_second": 1757.6413962558584,
+          "predicted_n": 2,
+          "predicted_ms": 68.74796100000002,
+          "predicted_per_token_ms": 34.37398050000001,
+          "predicted_per_second": 29.091771899969505,
+          "cache_n": 0,
+          "cache_restore_ms": 0,
+          "cache_snapshot_ms": 11.445492,
+          "cache_disk_enqueue_ms": 0.00149,
+          "draft_rounds": 0,
+          "draft_n": 0,
+          "draft_n_accepted": 0,
+          "component_cache": {
+            "schema": "component-cache-v1",
+            "reuse": "none",
+            "selection_reason": 6,
+            "deepest_live_tokens": 0,
+            "deepest_ram_tokens": 0,
+            "deepest_disk_tokens": 0,
+            "selected_tokens": 0,
+            "restored_bytes": 0,
+            "prefilled_tokens": 5409,
+            "captures": 4,
+            "captured_capacity_bytes": 670498816,
+            "borrowed_capacity_bytes": 136052736,
+            "copied_payload_bytes": 528367468,
+            "captured_checkpoint_ids": [
+              3542,
+              3743,
+              3992,
+              4130
+            ],
+            "global_spill": {
+              "idle_bytes": 259522560,
+              "foreground_bytes": 467664896,
+              "idle_copy_ms": 14.0567,
+              "foreground_copy_ms": 26.520135,
+              "stream_wait_ms": 0.204302,
+              "residual_wait_ms": 34.077346,
+              "reassignments": 7,
+              "idle_failures": 0
+            },
+            "global_ledger_bytes": 6664326682,
+            "global_ram_bytes": 6664326682,
+            "global_peak_ledger_bytes": 6664350060,
+            "global_peak_ram_bytes": 6664350060,
+            "global_persistence_pinned_bytes": 0,
+            "global_peak_persistence_pinned_bytes": 0,
+            "global_categories": {
+              "backing_free": {
+                "bytes": 1847853056,
+                "reserved_bytes": 0,
+                "peak_bytes": 2269446144
+              },
+              "backing_assigned": {
+                "bytes": 225181696,
+                "reserved_bytes": 225181696,
+                "peak_bytes": 232849408
+              },
+              "backing_materialized": {
+                "bytes": 736821248,
+                "reserved_bytes": 0,
+                "peak_bytes": 736821248
+              },
+              "private_state": {
+                "bytes": 3697541120,
+                "reserved_bytes": 0,
+                "peak_bytes": 3697541120
+              },
+              "private_tail": {
+                "bytes": 33947648,
+                "reserved_bytes": 0,
+                "peak_bytes": 33947648
+              },
+              "metadata": {
+                "bytes": 122981914,
+                "reserved_bytes": 0,
+                "peak_bytes": 123005292
+              },
+              "transfer_staging": {
+                "bytes": 0,
+                "reserved_bytes": 0,
+                "peak_bytes": 0
+              }
+            }
+          }
+        },
+        "cache_persist": true
+      },
+      "registrations_after": 49
+    },
+    {
+      "label": "capture_7",
+      "wall_ms": 3276.996540997061,
+      "response": {
+        "id": "chatcmpl-a3paf90nizxizebpgej2",
+        "object": "chat.completion",
+        "created": 1793816040,
+        "model": "probe",
+        "choices": [
+          {
+            "index": 0,
+            "message": {
+              "role": "assistant",
+              "content": "BETA"
+            },
+            "finish_reason": "stop"
+          }
+        ],
+        "usage": {
+          "prompt_tokens": 5409,
+          "completion_tokens": 2,
+          "total_tokens": 5411,
+          "prompt_tokens_details": {
+            "cached_tokens": 0
+          },
+          "completion_tokens_details": {
+            "reasoning_tokens": 0
+          },
+          "cached_tokens": 0,
+          "prompt_tokens_per_second": 1696.4498558524772,
+          "completion_tokens_per_second": 29.208969835122815,
+          "draft_tokens": 0,
+          "draft_tokens_accepted": 0,
+          "gufo": {
+            "component_cache": {
+              "schema": "component-cache-v1",
+              "reuse": "none",
+              "selection_reason": 6,
+              "deepest_live_tokens": 0,
+              "deepest_ram_tokens": 0,
+              "deepest_disk_tokens": 0,
+              "selected_tokens": 0,
+              "restored_bytes": 0,
+              "prefilled_tokens": 5409,
+              "captures": 4,
+              "captured_capacity_bytes": 670498816,
+              "borrowed_capacity_bytes": 136052736,
+              "copied_payload_bytes": 528367468,
+              "captured_checkpoint_ids": [
+                4132,
+                4333,
+                4582,
+                4720
+              ],
+              "global_spill": {
+                "idle_bytes": 306970624,
+                "foreground_bytes": 556793856,
+                "idle_copy_ms": 16.517629,
+                "foreground_copy_ms": 31.54597,
+                "stream_wait_ms": 0.241297,
+                "residual_wait_ms": 40.173421,
+                "reassignments": 8,
+                "idle_failures": 0
+              },
+              "global_ledger_bytes": 7465859306,
+              "global_ram_bytes": 7465859306,
+              "global_peak_ledger_bytes": 7465882684,
+              "global_peak_ram_bytes": 7465882684,
+              "global_persistence_pinned_bytes": 0,
+              "global_peak_persistence_pinned_bytes": 0,
+              "global_categories": {
+                "backing_free": {
+                  "bytes": 1978335232,
+                  "reserved_bytes": 0,
+                  "peak_bytes": 2279866368
+                },
+                "backing_assigned": {
+                  "bytes": 224657408,
+                  "reserved_bytes": 224657408,
+                  "peak_bytes": 232849408
+                },
+                "backing_materialized": {
+                  "bytes": 874774528,
+                  "reserved_bytes": 0,
+                  "peak_bytes": 874774528
+                },
+                "private_state": {
+                  "bytes": 4225761280,
+                  "reserved_bytes": 0,
+                  "peak_bytes": 4225761280
+                },
+                "private_tail": {
+                  "bytes": 38797312,
+                  "reserved_bytes": 0,
+                  "peak_bytes": 38797312
+                },
+                "metadata": {
+                  "bytes": 123533546,
+                  "reserved_bytes": 0,
+                  "peak_bytes": 123556924
+                },
+                "transfer_staging": {
+                  "bytes": 0,
+                  "reserved_bytes": 0,
+                  "peak_bytes": 0
+                }
+              }
+            },
+            "cache_hit": false,
+            "cache_miss_reason": "no_compatible_boundary",
+            "cache_common_prefix_tokens": 6,
+            "cache_checkpoint_tokens": 0,
+            "cache_restore_bytes": 0,
+            "cache_snapshot_bytes": 664420204,
+            "cache_disk_queued_bytes": 0,
+            "cache_shared_bytes": 0,
+            "cache_restore_ms": 0,
+            "cache_snapshot_ms": 13.175362999999999,
+            "cache_disk_enqueue_ms": 0.0015600000000000002,
+            "cache_disk_hit": false,
+            "cache_shared_prefix_snapshots": 0,
+            "cache_shared_prefix_bytes": 0,
+            "cache_shared_prefix_ms": 0,
+            "draft_rounds": 0,
+            "prefill_tokens": 5409,
+            "prefill_chunks": 3,
+            "active_decode_prefill_chunks": 0,
+            "max_prefill_chunk_tokens": 2048,
+            "queue_depth_at_submit": 1,
+            "client_queue_depth_at_submit": 1,
+            "resident_requests_at_admission": 1,
+            "requested_logical_concurrency": 2,
+            "physical_execution_width": 1,
+            "queue_ms": 6.863585,
+            "shared_prefix_wait_ms": 0,
+            "prefill_ms": 3188.4231539999996,
+            "decode_ms": 68.472117,
+            "ttft_ms": 3203.80375,
+            "mean_inter_token_ms": 37.598207,
+            "max_inter_token_ms": 37.598207,
+            "execution_plan": "serial-fallback"
+          }
+        },
+        "timings": {
+          "prompt_n": 5409,
+          "prompt_ms": 3188.4231539999996,
+          "prompt_per_token_ms": 0.5894662884082085,
+          "prompt_per_second": 1696.4498558524772,
+          "predicted_n": 2,
+          "predicted_ms": 68.472117,
+          "predicted_per_token_ms": 34.2360585,
+          "predicted_per_second": 29.208969835122815,
+          "cache_n": 0,
+          "cache_restore_ms": 0,
+          "cache_snapshot_ms": 13.175362999999999,
+          "cache_disk_enqueue_ms": 0.0015600000000000002,
+          "draft_rounds": 0,
+          "draft_n": 0,
+          "draft_n_accepted": 0,
+          "component_cache": {
+            "schema": "component-cache-v1",
+            "reuse": "none",
+            "selection_reason": 6,
+            "deepest_live_tokens": 0,
+            "deepest_ram_tokens": 0,
+            "deepest_disk_tokens": 0,
+            "selected_tokens": 0,
+            "restored_bytes": 0,
+            "prefilled_tokens": 5409,
+            "captures": 4,
+            "captured_capacity_bytes": 670498816,
+            "borrowed_capacity_bytes": 136052736,
+            "copied_payload_bytes": 528367468,
+            "captured_checkpoint_ids": [
+              4132,
+              4333,
+              4582,
+              4720
+            ],
+            "global_spill": {
+              "idle_bytes": 306970624,
+              "foreground_bytes": 556793856,
+              "idle_copy_ms": 16.517629,
+              "foreground_copy_ms": 31.54597,
+              "stream_wait_ms": 0.241297,
+              "residual_wait_ms": 40.173421,
+              "reassignments": 8,
+              "idle_failures": 0
+            },
+            "global_ledger_bytes": 7465859306,
+            "global_ram_bytes": 7465859306,
+            "global_peak_ledger_bytes": 7465882684,
+            "global_peak_ram_bytes": 7465882684,
+            "global_persistence_pinned_bytes": 0,
+            "global_peak_persistence_pinned_bytes": 0,
+            "global_categories": {
+              "backing_free": {
+                "bytes": 1978335232,
+                "reserved_bytes": 0,
+                "peak_bytes": 2279866368
+              },
+              "backing_assigned": {
+                "bytes": 224657408,
+                "reserved_bytes": 224657408,
+                "peak_bytes": 232849408
+              },
+              "backing_materialized": {
+                "bytes": 874774528,
+                "reserved_bytes": 0,
+                "peak_bytes": 874774528
+              },
+              "private_state": {
+                "bytes": 4225761280,
+                "reserved_bytes": 0,
+                "peak_bytes": 4225761280
+              },
+              "private_tail": {
+                "bytes": 38797312,
+                "reserved_bytes": 0,
+                "peak_bytes": 38797312
+              },
+              "metadata": {
+                "bytes": 123533546,
+                "reserved_bytes": 0,
+                "peak_bytes": 123556924
+              },
+              "transfer_staging": {
+                "bytes": 0,
+                "reserved_bytes": 0,
+                "peak_bytes": 0
+              }
+            }
+          }
+        },
+        "cache_persist": true
+      },
+      "registrations_after": 55
+    },
+    {
+      "label": "restore_5",
+      "wall_ms": 80.53018100326881,
+      "response": {
+        "id": "chatcmpl-q5136web0yed1vqbhwkp",
+        "object": "chat.completion",
+        "created": 1793816040,
+        "model": "probe",
+        "choices": [
+          {
+            "index": 0,
+            "message": {
+              "role": "assistant",
+              "content": "BETA"
+            },
+            "finish_reason": "stop"
+          }
+        ],
+        "usage": {
+          "prompt_tokens": 5409,
+          "completion_tokens": 2,
+          "total_tokens": 5411,
+          "prompt_tokens_details": {
+            "cached_tokens": 5409
+          },
+          "completion_tokens_details": {
+            "reasoning_tokens": 0
+          },
+          "cached_tokens": 5409,
+          "prompt_tokens_per_second": 0,
+          "completion_tokens_per_second": 29.200039939814626,
+          "draft_tokens": 0,
+          "draft_tokens_accepted": 0,
+          "gufo": {
+            "component_cache": {
+              "schema": "component-cache-v1",
+              "reuse": "ram",
+              "selection_reason": 1,
+              "deepest_live_tokens": 0,
+              "deepest_ram_tokens": 5409,
+              "deepest_disk_tokens": 0,
+              "selected_tokens": 5409,
+              "restored_bytes": 268721444,
+              "prefilled_tokens": 0,
+              "captures": 0,
+              "captured_capacity_bytes": 0,
+              "borrowed_capacity_bytes": 0,
+              "copied_payload_bytes": 0,
+              "captured_checkpoint_ids": [],
+              "global_spill": {
+                "idle_bytes": 359923712,
+                "foreground_bytes": 645398528,
+                "idle_copy_ms": 19.204841,
+                "foreground_copy_ms": 36.728918,
+                "stream_wait_ms": 0.280199,
+                "residual_wait_ms": 46.487358,
+                "reassignments": 9,
+                "idle_failures": 0
+              },
+              "global_ledger_bytes": 7465859306,
+              "global_ram_bytes": 7465859306,
+              "global_peak_ledger_bytes": 7465933382,
+              "global_peak_ram_bytes": 7465933382,
+              "global_persistence_pinned_bytes": 0,
+              "global_peak_persistence_pinned_bytes": 0,
+              "global_categories": {
+                "backing_free": {
+                  "bytes": 1978335232,
+                  "reserved_bytes": 0,
+                  "peak_bytes": 2279866368
+                },
+                "backing_assigned": {
+                  "bytes": 83099648,
+                  "reserved_bytes": 83099648,
+                  "peak_bytes": 232849408
+                },
+                "backing_materialized": {
+                  "bytes": 1016332288,
+                  "reserved_bytes": 0,
+                  "peak_bytes": 1016332288
+                },
+                "private_state": {
+                  "bytes": 4225761280,
+                  "reserved_bytes": 0,
+                  "peak_bytes": 4225761280
+                },
+                "private_tail": {
+                  "bytes": 38797312,
+                  "reserved_bytes": 0,
+                  "peak_bytes": 38797312
+                },
+                "metadata": {
+                  "bytes": 123533546,
+                  "reserved_bytes": 0,
+                  "peak_bytes": 123607622
+                },
+                "transfer_staging": {
+                  "bytes": 0,
+                  "reserved_bytes": 0,
+                  "peak_bytes": 0
+                }
+              }
+            },
+            "cache_hit": true,
+            "cache_restore_bytes": 268721444,
+            "cache_snapshot_bytes": 0,
+            "cache_disk_queued_bytes": 0,
+            "cache_shared_bytes": 0,
+            "cache_restore_ms": 3.624638,
+            "cache_snapshot_ms": 0,
+            "cache_disk_enqueue_ms": 0,
+            "cache_disk_hit": false,
+            "cache_shared_prefix_snapshots": 0,
+            "cache_shared_prefix_bytes": 0,
+            "cache_shared_prefix_ms": 0,
+            "draft_rounds": 0,
+            "prefill_tokens": 0,
+            "prefill_chunks": 0,
+            "active_decode_prefill_chunks": 0,
+            "max_prefill_chunk_tokens": 0,
+            "queue_depth_at_submit": 1,
+            "client_queue_depth_at_submit": 1,
+            "resident_requests_at_admission": 1,
+            "requested_logical_concurrency": 2,
+            "physical_execution_width": 1,
+            "queue_ms": 10.830421,
+            "shared_prefix_wait_ms": 0,
+            "prefill_ms": 0,
+            "decode_ms": 68.49305700000001,
+            "ttft_ms": 10.861272,
+            "mean_inter_token_ms": 34.404672,
+            "max_inter_token_ms": 34.404672,
+            "execution_plan": "serial-fallback"
+          }
+        },
+        "timings": {
+          "prompt_n": 0,
+          "prompt_ms": 0,
+          "prompt_per_token_ms": 0,
+          "prompt_per_second": 0,
+          "predicted_n": 2,
+          "predicted_ms": 68.49305700000001,
+          "predicted_per_token_ms": 34.246528500000004,
+          "predicted_per_second": 29.200039939814626,
+          "cache_n": 5409,
+          "cache_restore_ms": 3.624638,
+          "cache_snapshot_ms": 0,
+          "cache_disk_enqueue_ms": 0,
+          "draft_rounds": 0,
+          "draft_n": 0,
+          "draft_n_accepted": 0,
+          "component_cache": {
+            "schema": "component-cache-v1",
+            "reuse": "ram",
+            "selection_reason": 1,
+            "deepest_live_tokens": 0,
+            "deepest_ram_tokens": 5409,
+            "deepest_disk_tokens": 0,
+            "selected_tokens": 5409,
+            "restored_bytes": 268721444,
+            "prefilled_tokens": 0,
+            "captures": 0,
+            "captured_capacity_bytes": 0,
+            "borrowed_capacity_bytes": 0,
+            "copied_payload_bytes": 0,
+            "captured_checkpoint_ids": [],
+            "global_spill": {
+              "idle_bytes": 359923712,
+              "foreground_bytes": 645398528,
+              "idle_copy_ms": 19.204841,
+              "foreground_copy_ms": 36.728918,
+              "stream_wait_ms": 0.280199,
+              "residual_wait_ms": 46.487358,
+              "reassignments": 9,
+              "idle_failures": 0
+            },
+            "global_ledger_bytes": 7465859306,
+            "global_ram_bytes": 7465859306,
+            "global_peak_ledger_bytes": 7465933382,
+            "global_peak_ram_bytes": 7465933382,
+            "global_persistence_pinned_bytes": 0,
+            "global_peak_persistence_pinned_bytes": 0,
+            "global_categories": {
+              "backing_free": {
+                "bytes": 1978335232,
+                "reserved_bytes": 0,
+                "peak_bytes": 2279866368
+              },
+              "backing_assigned": {
+                "bytes": 83099648,
+                "reserved_bytes": 83099648,
+                "peak_bytes": 232849408
+              },
+              "backing_materialized": {
+                "bytes": 1016332288,
+                "reserved_bytes": 0,
+                "peak_bytes": 1016332288
+              },
+              "private_state": {
+                "bytes": 4225761280,
+                "reserved_bytes": 0,
+                "peak_bytes": 4225761280
+              },
+              "private_tail": {
+                "bytes": 38797312,
+                "reserved_bytes": 0,
+                "peak_bytes": 38797312
+              },
+              "metadata": {
+                "bytes": 123533546,
+                "reserved_bytes": 0,
+                "peak_bytes": 123607622
+              },
+              "transfer_staging": {
+                "bytes": 0,
+                "reserved_bytes": 0,
+                "peak_bytes": 0
+              }
+            }
+          }
+        },
+        "cache_persist": true
+      },
+      "registrations_after": 55
+    },
+    {
+      "label": "restore_6",
+      "wall_ms": 74.47057700483128,
+      "response": {
+        "id": "chatcmpl-6jbwhb2r2eyyw9ws7p3m",
+        "object": "chat.completion",
+        "created": 1793816040,
+        "model": "probe",
+        "choices": [
+          {
+            "index": 0,
+            "message": {
+              "role": "assistant",
+              "content": "BETA"
+            },
+            "finish_reason": "stop"
+          }
+        ],
+        "usage": {
+          "prompt_tokens": 5409,
+          "completion_tokens": 2,
+          "total_tokens": 5411,
+          "prompt_tokens_details": {
+            "cached_tokens": 5409
+          },
+          "completion_tokens_details": {
+            "reasoning_tokens": 0
+          },
+          "cached_tokens": 5409,
+          "prompt_tokens_per_second": 0,
+          "completion_tokens_per_second": 29.234383792469316,
+          "draft_tokens": 0,
+          "draft_tokens_accepted": 0,
+          "gufo": {
+            "component_cache": {
+              "schema": "component-cache-v1",
+              "reuse": "ram",
+              "selection_reason": 1,
+              "deepest_live_tokens": 0,
+              "deepest_ram_tokens": 5409,
+              "deepest_disk_tokens": 0,
+              "selected_tokens": 5409,
+              "restored_bytes": 268721444,
+              "prefilled_tokens": 0,
+              "captures": 0,
+              "captured_capacity_bytes": 0,
+              "borrowed_capacity_bytes": 0,
+              "copied_payload_bytes": 0,
+              "captured_checkpoint_ids": [],
+              "global_spill": {
+                "idle_bytes": 359923712,
+                "foreground_bytes": 645398528,
+                "idle_copy_ms": 19.204841,
+                "foreground_copy_ms": 36.728918,
+                "stream_wait_ms": 0.280199,
+                "residual_wait_ms": 47.594065,
+                "reassignments": 10,
+                "idle_failures": 0
+              },
+              "global_ledger_bytes": 7465859306,
+              "global_ram_bytes": 7465859306,
+              "global_peak_ledger_bytes": 7465933382,
+              "global_peak_ram_bytes": 7465933382,
+              "global_persistence_pinned_bytes": 0,
+              "global_peak_persistence_pinned_bytes": 0,
+              "global_categories": {
+                "backing_free": {
+                  "bytes": 1978335232,
+                  "reserved_bytes": 0,
+                  "peak_bytes": 2279866368
+                },
+                "backing_assigned": {
+                  "bytes": 83099648,
+                  "reserved_bytes": 83099648,
+                  "peak_bytes": 232849408
+                },
+                "backing_materialized": {
+                  "bytes": 1016332288,
+                  "reserved_bytes": 0,
+                  "peak_bytes": 1016332288
+                },
+                "private_state": {
+                  "bytes": 4225761280,
+                  "reserved_bytes": 0,
+                  "peak_bytes": 4225761280
+                },
+                "private_tail": {
+                  "bytes": 38797312,
+                  "reserved_bytes": 0,
+                  "peak_bytes": 38797312
+                },
+                "metadata": {
+                  "bytes": 123533546,
+                  "reserved_bytes": 0,
+                  "peak_bytes": 123607622
+                },
+                "transfer_staging": {
+                  "bytes": 0,
+                  "reserved_bytes": 0,
+                  "peak_bytes": 0
+                }
+              }
+            },
+            "cache_hit": true,
+            "cache_restore_bytes": 268721444,
+            "cache_snapshot_bytes": 0,
+            "cache_disk_queued_bytes": 0,
+            "cache_shared_bytes": 0,
+            "cache_restore_ms": 3.532573,
+            "cache_snapshot_ms": 0,
+            "cache_disk_enqueue_ms": 0,
+            "cache_disk_hit": false,
+            "cache_shared_prefix_snapshots": 0,
+            "cache_shared_prefix_bytes": 0,
+            "cache_shared_prefix_ms": 0,
+            "draft_rounds": 0,
+            "prefill_tokens": 0,
+            "prefill_chunks": 0,
+            "active_decode_prefill_chunks": 0,
+            "max_prefill_chunk_tokens": 0,
+            "queue_depth_at_submit": 1,
+            "client_queue_depth_at_submit": 1,
+            "resident_requests_at_admission": 1,
+            "requested_logical_concurrency": 2,
+            "physical_execution_width": 1,
+            "queue_ms": 5.121825,
+            "shared_prefix_wait_ms": 0,
+            "prefill_ms": 0,
+            "decode_ms": 68.412593,
+            "ttft_ms": 5.151526,
+            "mean_inter_token_ms": 34.389772,
+            "max_inter_token_ms": 34.389772,
+            "execution_plan": "serial-fallback"
+          }
+        },
+        "timings": {
+          "prompt_n": 0,
+          "prompt_ms": 0,
+          "prompt_per_token_ms": 0,
+          "prompt_per_second": 0,
+          "predicted_n": 2,
+          "predicted_ms": 68.412593,
+          "predicted_per_token_ms": 34.2062965,
+          "predicted_per_second": 29.23438379246932,
+          "cache_n": 5409,
+          "cache_restore_ms": 3.532573,
+          "cache_snapshot_ms": 0,
+          "cache_disk_enqueue_ms": 0,
+          "draft_rounds": 0,
+          "draft_n": 0,
+          "draft_n_accepted": 0,
+          "component_cache": {
+            "schema": "component-cache-v1",
+            "reuse": "ram",
+            "selection_reason": 1,
+            "deepest_live_tokens": 0,
+            "deepest_ram_tokens": 5409,
+            "deepest_disk_tokens": 0,
+            "selected_tokens": 5409,
+            "restored_bytes": 268721444,
+            "prefilled_tokens": 0,
+            "captures": 0,
+            "captured_capacity_bytes": 0,
+            "borrowed_capacity_bytes": 0,
+            "copied_payload_bytes": 0,
+            "captured_checkpoint_ids": [],
+            "global_spill": {
+              "idle_bytes": 359923712,
+              "foreground_bytes": 645398528,
+              "idle_copy_ms": 19.204841,
+              "foreground_copy_ms": 36.728918,
+              "stream_wait_ms": 0.280199,
+              "residual_wait_ms": 47.594065,
+              "reassignments": 10,
+              "idle_failures": 0
+            },
+            "global_ledger_bytes": 7465859306,
+            "global_ram_bytes": 7465859306,
+            "global_peak_ledger_bytes": 7465933382,
+            "global_peak_ram_bytes": 7465933382,
+            "global_persistence_pinned_bytes": 0,
+            "global_peak_persistence_pinned_bytes": 0,
+            "global_categories": {
+              "backing_free": {
+                "bytes": 1978335232,
+                "reserved_bytes": 0,
+                "peak_bytes": 2279866368
+              },
+              "backing_assigned": {
+                "bytes": 83099648,
+                "reserved_bytes": 83099648,
+                "peak_bytes": 232849408
+              },
+              "backing_materialized": {
+                "bytes": 1016332288,
+                "reserved_bytes": 0,
+                "peak_bytes": 1016332288
+              },
+              "private_state": {
+                "bytes": 4225761280,
+                "reserved_bytes": 0,
+                "peak_bytes": 4225761280
+              },
+              "private_tail": {
+                "bytes": 38797312,
+                "reserved_bytes": 0,
+                "peak_bytes": 38797312
+              },
+              "metadata": {
+                "bytes": 123533546,
+                "reserved_bytes": 0,
+                "peak_bytes": 123607622
+              },
+              "transfer_staging": {
+                "bytes": 0,
+                "reserved_bytes": 0,
+                "peak_bytes": 0
+              }
+            }
+          }
+        },
+        "cache_persist": true
+      },
+      "registrations_after": 55
+    },
+    {
+      "label": "restore_7",
+      "wall_ms": 73.87217599898577,
+      "response": {
+        "id": "chatcmpl-adfjbqoxl1u9bnf0wihe",
+        "object": "chat.completion",
+        "created": 1793816040,
+        "model": "probe",
+        "choices": [
+          {
+            "index": 0,
+            "message": {
+              "role": "assistant",
+              "content": "BETA"
+            },
+            "finish_reason": "stop"
+          }
+        ],
+        "usage": {
+          "prompt_tokens": 5409,
+          "completion_tokens": 2,
+          "total_tokens": 5411,
+          "prompt_tokens_details": {
+            "cached_tokens": 5409
+          },
+          "completion_tokens_details": {
+            "reasoning_tokens": 0
+          },
+          "cached_tokens": 5409,
+          "prompt_tokens_per_second": 0,
+          "completion_tokens_per_second": 29.263947343623716,
+          "draft_tokens": 0,
+          "draft_tokens_accepted": 0,
+          "gufo": {
+            "component_cache": {
+              "schema": "component-cache-v1",
+              "reuse": "ram",
+              "selection_reason": 1,
+              "deepest_live_tokens": 0,
+              "deepest_ram_tokens": 5409,
+              "deepest_disk_tokens": 0,
+              "selected_tokens": 5409,
+              "restored_bytes": 268721444,
+              "prefilled_tokens": 0,
+              "captures": 0,
+              "captured_capacity_bytes": 0,
+              "borrowed_capacity_bytes": 0,
+              "copied_payload_bytes": 0,
+              "captured_checkpoint_ids": [],
+              "global_spill": {
+                "idle_bytes": 359923712,
+                "foreground_bytes": 645398528,
+                "idle_copy_ms": 19.204841,
+                "foreground_copy_ms": 36.728918,
+                "stream_wait_ms": 0.280199,
+                "residual_wait_ms": 48.720973,
+                "reassignments": 11,
+                "idle_failures": 0
+              },
+              "global_ledger_bytes": 7465859130,
+              "global_ram_bytes": 7465859130,
+              "global_peak_ledger_bytes": 7465933382,
+              "global_peak_ram_bytes": 7465933382,
+              "global_persistence_pinned_bytes": 0,
+              "global_peak_persistence_pinned_bytes": 0,
+              "global_categories": {
+                "backing_free": {
+                  "bytes": 1978335232,
+                  "reserved_bytes": 0,
+                  "peak_bytes": 2279866368
+                },
+                "backing_assigned": {
+                  "bytes": 83099648,
+                  "reserved_bytes": 83099648,
+                  "peak_bytes": 232849408
+                },
+                "backing_materialized": {
+                  "bytes": 1016332288,
+                  "reserved_bytes": 0,
+                  "peak_bytes": 1016332288
+                },
+                "private_state": {
+                  "bytes": 4225761280,
+                  "reserved_bytes": 0,
+                  "peak_bytes": 4225761280
+                },
+                "private_tail": {
+                  "bytes": 38797312,
+                  "reserved_bytes": 0,
+                  "peak_bytes": 38797312
+                },
+                "metadata": {
+                  "bytes": 123533370,
+                  "reserved_bytes": 0,
+                  "peak_bytes": 123607622
+                },
+                "transfer_staging": {
+                  "bytes": 0,
+                  "reserved_bytes": 0,
+                  "peak_bytes": 0
+                }
+              }
+            },
+            "cache_hit": true,
+            "cache_restore_bytes": 268721444,
+            "cache_snapshot_bytes": 0,
+            "cache_disk_queued_bytes": 0,
+            "cache_shared_bytes": 0,
+            "cache_restore_ms": 3.373745,
+            "cache_snapshot_ms": 0,
+            "cache_disk_enqueue_ms": 0,
+            "cache_disk_hit": false,
+            "cache_shared_prefix_snapshots": 0,
+            "cache_shared_prefix_bytes": 0,
+            "cache_shared_prefix_ms": 0,
+            "draft_rounds": 0,
+            "prefill_tokens": 0,
+            "prefill_chunks": 0,
+            "active_decode_prefill_chunks": 0,
+            "max_prefill_chunk_tokens": 0,
+            "queue_depth_at_submit": 1,
+            "client_queue_depth_at_submit": 1,
+            "resident_requests_at_admission": 1,
+            "requested_logical_concurrency": 2,
+            "physical_execution_width": 1,
+            "queue_ms": 4.84085,
+            "shared_prefix_wait_ms": 0,
+            "prefill_ms": 0,
+            "decode_ms": 68.34347999999999,
+            "ttft_ms": 4.870362,
+            "mean_inter_token_ms": 34.353729,
+            "max_inter_token_ms": 34.353729,
+            "execution_plan": "serial-fallback"
+          }
+        },
+        "timings": {
+          "prompt_n": 0,
+          "prompt_ms": 0,
+          "prompt_per_token_ms": 0,
+          "prompt_per_second": 0,
+          "predicted_n": 2,
+          "predicted_ms": 68.34347999999999,
+          "predicted_per_token_ms": 34.17173999999999,
+          "predicted_per_second": 29.263947343623713,
+          "cache_n": 5409,
+          "cache_restore_ms": 3.373745,
+          "cache_snapshot_ms": 0,
+          "cache_disk_enqueue_ms": 0,
+          "draft_rounds": 0,
+          "draft_n": 0,
+          "draft_n_accepted": 0,
+          "component_cache": {
+            "schema": "component-cache-v1",
+            "reuse": "ram",
+            "selection_reason": 1,
+            "deepest_live_tokens": 0,
+            "deepest_ram_tokens": 5409,
+            "deepest_disk_tokens": 0,
+            "selected_tokens": 5409,
+            "restored_bytes": 268721444,
+            "prefilled_tokens": 0,
+            "captures": 0,
+            "captured_capacity_bytes": 0,
+            "borrowed_capacity_bytes": 0,
+            "copied_payload_bytes": 0,
+            "captured_checkpoint_ids": [],
+            "global_spill": {
+              "idle_bytes": 359923712,
+              "foreground_bytes": 645398528,
+              "idle_copy_ms": 19.204841,
+              "foreground_copy_ms": 36.728918,
+              "stream_wait_ms": 0.280199,
+              "residual_wait_ms": 48.720973,
+              "reassignments": 11,
+              "idle_failures": 0
+            },
+            "global_ledger_bytes": 7465859130,
+            "global_ram_bytes": 7465859130,
+            "global_peak_ledger_bytes": 7465933382,
+            "global_peak_ram_bytes": 7465933382,
+            "global_persistence_pinned_bytes": 0,
+            "global_peak_persistence_pinned_bytes": 0,
+            "global_categories": {
+              "backing_free": {
+                "bytes": 1978335232,
+                "reserved_bytes": 0,
+                "peak_bytes": 2279866368
+              },
+              "backing_assigned": {
+                "bytes": 83099648,
+                "reserved_bytes": 83099648,
+                "peak_bytes": 232849408
+              },
+              "backing_materialized": {
+                "bytes": 1016332288,
+                "reserved_bytes": 0,
+                "peak_bytes": 1016332288
+              },
+              "private_state": {
+                "bytes": 4225761280,
+                "reserved_bytes": 0,
+                "peak_bytes": 4225761280
+              },
+              "private_tail": {
+                "bytes": 38797312,
+                "reserved_bytes": 0,
+                "peak_bytes": 38797312
+              },
+              "metadata": {
+                "bytes": 123533370,
+                "reserved_bytes": 0,
+                "peak_bytes": 123607622
+              },
+              "transfer_staging": {
+                "bytes": 0,
+                "reserved_bytes": 0,
+                "peak_bytes": 0
+              }
+            }
+          }
+        },
+        "cache_persist": true
+      },
+      "registrations_after": 55
+    }
+  ],
+  "status": "passed",
+  "registrations_at_ready": [
+    [
+      "133496832",
+      "0",
+      "0",
+      "1.089956"
+    ],
+    [
+      "133496832",
+      "0",
+      "0",
+      "1.150620"
+    ],
+    [
+      "133496832",
+      "0",
+      "0",
+      "0.607861"
+    ],
+    [
+      "133496832",
+      "0",
+      "0",
+      "3.956145"
+    ],
+    [
+      "133496832",
+      "0",
+      "0",
+      "2.439777"
+    ],
+    [
+      "133496832",
+      "0",
+      "0",
+      "2.463838"
+    ],
+    [
+      "133496832",
+      "0",
+      "0",
+      "2.403315"
+    ],
+    [
+      "133496832",
+      "0",
+      "0",
+      "2.360072"
+    ],
+    [
+      "133496832",
+      "0",
+      "0",
+      "2.390594"
+    ],
+    [
+      "133496832",
+      "0",
+      "0",
+      "3.262959"
+    ],
+    [
+      "133496832",
+      "0",
+      "0",
+      "3.309852"
+    ],
+    [
+      "133496832",
+      "0",
+      "0",
+      "3.273850"
+    ],
+    [
+      "133496832",
+      "0",
+      "0",
+      "3.309521"
+    ],
+    [
+      "133496832",
+      "0",
+      "0",
+      "3.292430"
+    ],
+    [
+      "133496832",
+      "0",
+      "0",
+      "1.523919"
+    ],
+    [
+      "133496832",
+      "0",
+      "0",
+      "1.589212"
+    ],
+    [
+      "133496832",
+      "0",
+      "0",
+      "1.568372"
+    ]
+  ],
+  "registrations_final": [
+    [
+      "133496832",
+      "0",
+      "0",
+      "1.089956"
+    ],
+    [
+      "133496832",
+      "0",
+      "0",
+      "1.150620"
+    ],
+    [
+      "133496832",
+      "0",
+      "0",
+      "0.607861"
+    ],
+    [
+      "133496832",
+      "0",
+      "0",
+      "3.956145"
+    ],
+    [
+      "133496832",
+      "0",
+      "0",
+      "2.439777"
+    ],
+    [
+      "133496832",
+      "0",
+      "0",
+      "2.463838"
+    ],
+    [
+      "133496832",
+      "0",
+      "0",
+      "2.403315"
+    ],
+    [
+      "133496832",
+      "0",
+      "0",
+      "2.360072"
+    ],
+    [
+      "133496832",
+      "0",
+      "0",
+      "2.390594"
+    ],
+    [
+      "133496832",
+      "0",
+      "0",
+      "3.262959"
+    ],
+    [
+      "133496832",
+      "0",
+      "0",
+      "3.309852"
+    ],
+    [
+      "133496832",
+      "0",
+      "0",
+      "3.273850"
+    ],
+    [
+      "133496832",
+      "0",
+      "0",
+      "3.309521"
+    ],
+    [
+      "133496832",
+      "0",
+      "0",
+      "3.292430"
+    ],
+    [
+      "133496832",
+      "0",
+      "0",
+      "1.523919"
+    ],
+    [
+      "133496832",
+      "0",
+      "0",
+      "1.589212"
+    ],
+    [
+      "133496832",
+      "0",
+      "0",
+      "1.568372"
+    ],
+    [
+      "133496832",
+      "0",
+      "0",
+      "4.854622"
+    ],
+    [
+      "133496832",
+      "0",
+      "0",
+      "6.356649"
+    ],
+    [
+      "133496832",
+      "0",
+      "0",
+      "4.962157"
+    ],
+    [
+      "133496832",
+      "0",
+      "0",
+      "3.502422"
+    ],
+    [
+      "133496832",
+      "0",
+      "0",
+      "3.487210"
+    ],
+    [
+      "133496832",
+      "0",
+      "0",
+      "5.801671"
+    ],
+    [
+      "133496832",
+      "0",
+      "0",
+      "1.869807"
+    ],
+    [
+      "133496832",
+      "0",
+      "0",
+      "1.573932"
+    ],
+    [
+      "133496832",
+      "0",
+      "0",
+      "2.662408"
+    ],
+    [
+      "133496832",
+      "0",
+      "0",
+      "2.899210"
+    ],
+    [
+      "133496832",
+      "0",
+      "0",
+      "3.393606"
+    ],
+    [
+      "133496832",
+      "0",
+      "0",
+      "2.678778"
+    ],
+    [
+      "133496832",
+      "0",
+      "0",
+      "2.571154"
+    ],
+    [
+      "133496832",
+      "0",
+      "0",
+      "1.649855"
+    ],
+    [
+      "133496832",
+      "0",
+      "0",
+      "2.070667"
+    ],
+    [
+      "133496832",
+      "0",
+      "0",
+      "1.234054"
+    ],
+    [
+      "133496832",
+      "0",
+      "0",
+      "0.904287"
+    ],
+    [
+      "133496832",
+      "0",
+      "0",
+      "1.133359"
+    ],
+    [
+      "133496832",
+      "0",
+      "0",
+      "1.796214"
+    ],
+    [
+      "133496832",
+      "0",
+      "0",
+      "0.935849"
+    ],
+    [
+      "133496832",
+      "0",
+      "0",
+      "0.845114"
+    ],
+    [
+      "133496832",
+      "0",
+      "0",
+      "1.409703"
+    ],
+    [
+      "133496832",
+      "0",
+      "0",
+      "0.934738"
+    ],
+    [
+      "133496832",
+      "0",
+      "0",
+      "1.085376"
+    ],
+    [
+      "133496832",
+      "0",
+      "0",
+      "0.744589"
+    ],
+    [
+      "133496832",
+      "0",
+      "0",
+      "0.847624"
+    ],
+    [
+      "133496832",
+      "0",
+      "0",
+      "0.910047"
+    ],
+    [
+      "133496832",
+      "0",
+      "0",
+      "0.680435"
+    ],
+    [
+      "133496832",
+      "0",
+      "0",
+      "0.887436"
+    ],
+    [
+      "133496832",
+      "0",
+      "0",
+      "0.671885"
+    ],
+    [
+      "133496832",
+      "0",
+      "0",
+      "0.746408"
+    ],
+    [
+      "133496832",
+      "0",
+      "0",
+      "1.272876"
+    ],
+    [
+      "133496832",
+      "0",
+      "0",
+      "0.755489"
+    ],
+    [
+      "133496832",
+      "0",
+      "0",
+      "1.203443"
+    ],
+    [
+      "133496832",
+      "0",
+      "0",
+      "0.682835"
+    ],
+    [
+      "133496832",
+      "0",
+      "0",
+      "0.734598"
+    ],
+    [
+      "133496832",
+      "0",
+      "0",
+      "0.965580"
+    ],
+    [
+      "133496832",
+      "0",
+      "0",
+      "0.674045"
+    ]
+  ],
+  "grew_after_readiness": true
+}

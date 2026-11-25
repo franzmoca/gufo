@@ -1,0 +1,2010 @@
+{
+  "model": "gemma31b",
+  "variant": "unaligned",
+  "label": "A1",
+  "pin": "8MiB",
+  "command": [
+    "/tmp/gufo-models-unaligned",
+    "serve",
+    "--host",
+    "127.0.0.1",
+    "--port",
+    "50183",
+    "llm",
+    "--model",
+    "/home/franz/models/gemma-4/gemma-31b-it/gemma-4-31B-it-UD-Q4_K_XL.gguf",
+    "--served-model-name",
+    "probe",
+    "--context",
+    "16384",
+    "--sessions",
+    "2",
+    "--cache-ram-bytes",
+    "25769803776",
+    "--speculative",
+    "mtp",
+    "--mtp-model",
+    "/home/franz/models/gemma-4/drafts/31b-unsloth-mtp/MTP/mtp-gemma-4-31B-it-Q8_0.gguf",
+    "--draft-calibration",
+    "request"
+  ],
+  "launch": [
+    "/tmp/gufo-models-unaligned",
+    "serve",
+    "--host",
+    "127.0.0.1",
+    "--port",
+    "50183",
+    "llm",
+    "--model",
+    "/home/franz/models/gemma-4/gemma-31b-it/gemma-4-31B-it-UD-Q4_K_XL.gguf",
+    "--served-model-name",
+    "probe",
+    "--context",
+    "16384",
+    "--sessions",
+    "2",
+    "--cache-ram-bytes",
+    "25769803776",
+    "--speculative",
+    "mtp",
+    "--mtp-model",
+    "/home/franz/models/gemma-4/drafts/31b-unsloth-mtp/MTP/mtp-gemma-4-31B-it-Q8_0.gguf",
+    "--draft-calibration",
+    "request"
+  ],
+  "suites": {
+    "history": {}
+  },
+  "status": "passed",
+  "launch_temperature_c": 59.0,
+  "responses": [
+    {
+      "case": "growing_0",
+      "body": {
+        "model": "probe",
+        "messages": [
+          {
+            "role": "system",
+            "content": "unique_archive_0\nThe response code for this session is MAPLE.\nFollow the final instruction. Background notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\n"
+          },
+          {
+            "role": "user",
+            "content": "Repeat the session response code exactly eight times, separated by spaces. Output nothing else."
+          }
+        ],
+        "temperature": 0,
+        "seed": 31,
+        "max_completion_tokens": 64,
+        "reasoning_effort": "none",
+        "chat_template_kwargs": {
+          "enable_thinking": false
+        },
+        "cache_prompt": true
+      },
+      "response": {
+        "id": "chatcmpl-vrs39vywn2kfckv7xug3",
+        "object": "chat.completion",
+        "created": 1793817475,
+        "model": "probe",
+        "choices": [
+          {
+            "index": 0,
+            "message": {
+              "role": "assistant",
+              "content": "MAPLE MAPLE MAPLE MAPLE MAPLE MAPLE MAPLE MAPLE"
+            },
+            "finish_reason": "stop"
+          }
+        ],
+        "usage": {
+          "prompt_tokens": 2751,
+          "completion_tokens": 16,
+          "total_tokens": 2767,
+          "prompt_tokens_details": {
+            "cached_tokens": 0
+          },
+          "cached_tokens": 0,
+          "prompt_tokens_per_second": 565.3432099533298,
+          "completion_tokens_per_second": 37.31725872511211,
+          "draft_tokens": 34,
+          "draft_tokens_accepted": 13,
+          "gufo": {
+            "component_cache": {
+              "schema": "component-cache-v1",
+              "reuse": "none",
+              "selection_reason": 6,
+              "deepest_live_tokens": 0,
+              "deepest_ram_tokens": 0,
+              "deepest_disk_tokens": 0,
+              "selected_tokens": 0,
+              "restored_bytes": 0,
+              "prefilled_tokens": 2751,
+              "captures": 3,
+              "captured_capacity_bytes": 1616510976,
+              "borrowed_capacity_bytes": 0,
+              "copied_payload_bytes": 1614250508,
+              "captured_checkpoint_ids": [
+                2,
+                1771,
+                2814
+              ],
+              "global_spill": {
+                "idle_bytes": 0,
+                "foreground_bytes": 0,
+                "idle_copy_ms": 0,
+                "foreground_copy_ms": 0,
+                "stream_wait_ms": 0,
+                "residual_wait_ms": 0.00727,
+                "reassignments": 1,
+                "idle_failures": 0
+              },
+              "global_ledger_bytes": 3563058472,
+              "global_ram_bytes": 3563058472,
+              "global_peak_ledger_bytes": 3563273264,
+              "global_peak_ram_bytes": 3563273264,
+              "global_persistence_pinned_bytes": 0,
+              "global_peak_persistence_pinned_bytes": 0,
+              "global_categories": {
+                "backing_free": {
+                  "bytes": 1588985856,
+                  "reserved_bytes": 0,
+                  "peak_bytes": 2270560256
+                },
+                "backing_assigned": {
+                  "bytes": 0,
+                  "reserved_bytes": 0,
+                  "peak_bytes": 944242688
+                },
+                "backing_materialized": {
+                  "bytes": 1494876160,
+                  "reserved_bytes": 0,
+                  "peak_bytes": 1494876160
+                },
+                "private_state": {
+                  "bytes": 3538944,
+                  "reserved_bytes": 0,
+                  "peak_bytes": 3538944
+                },
+                "private_tail": {
+                  "bytes": 118095872,
+                  "reserved_bytes": 0,
+                  "peak_bytes": 118095872
+                },
+                "metadata": {
+                  "bytes": 357561640,
+                  "reserved_bytes": 0,
+                  "peak_bytes": 357776432
+                },
+                "transfer_staging": {
+                  "bytes": 0,
+                  "reserved_bytes": 0,
+                  "peak_bytes": 0
+                }
+              }
+            },
+            "cache_hit": false,
+            "cache_miss_reason": "no_checkpoint",
+            "cache_common_prefix_tokens": 0,
+            "cache_checkpoint_tokens": 0,
+            "cache_restore_bytes": 0,
+            "cache_snapshot_bytes": 1614250508,
+            "cache_disk_queued_bytes": 0,
+            "cache_shared_bytes": 0,
+            "cache_restore_ms": 0,
+            "cache_snapshot_ms": 20.860526,
+            "cache_disk_enqueue_ms": 0.0017200000000000002,
+            "cache_disk_hit": false,
+            "cache_shared_prefix_snapshots": 0,
+            "cache_shared_prefix_bytes": 0,
+            "cache_shared_prefix_ms": 0,
+            "draft_rounds": 3,
+            "prefill_tokens": 2751,
+            "prefill_chunks": 3,
+            "active_decode_prefill_chunks": 0,
+            "max_prefill_chunk_tokens": 2048,
+            "queue_depth_at_submit": 1,
+            "client_queue_depth_at_submit": 1,
+            "resident_requests_at_admission": 1,
+            "requested_logical_concurrency": 2,
+            "physical_execution_width": 1,
+            "queue_ms": 0.851174,
+            "shared_prefix_wait_ms": 0,
+            "prefill_ms": 4866.070648,
+            "decode_ms": 428.756038,
+            "ttft_ms": 4886.996079,
+            "mean_inter_token_ms": 28.72429246666666,
+            "max_inter_token_ms": 159.085168,
+            "execution_plan": "serial-fallback"
+          }
+        },
+        "timings": {
+          "prompt_n": 2751,
+          "prompt_ms": 4866.070648,
+          "prompt_per_token_ms": 1.768837022173755,
+          "prompt_per_second": 565.3432099533298,
+          "predicted_n": 16,
+          "predicted_ms": 428.756038,
+          "predicted_per_token_ms": 26.797252375,
+          "predicted_per_second": 37.31725872511211,
+          "cache_n": 0,
+          "cache_restore_ms": 0,
+          "cache_snapshot_ms": 20.860526,
+          "cache_disk_enqueue_ms": 0.0017200000000000002,
+          "draft_rounds": 3,
+          "draft_n": 34,
+          "draft_n_accepted": 13,
+          "component_cache": {
+            "schema": "component-cache-v1",
+            "reuse": "none",
+            "selection_reason": 6,
+            "deepest_live_tokens": 0,
+            "deepest_ram_tokens": 0,
+            "deepest_disk_tokens": 0,
+            "selected_tokens": 0,
+            "restored_bytes": 0,
+            "prefilled_tokens": 2751,
+            "captures": 3,
+            "captured_capacity_bytes": 1616510976,
+            "borrowed_capacity_bytes": 0,
+            "copied_payload_bytes": 1614250508,
+            "captured_checkpoint_ids": [
+              2,
+              1771,
+              2814
+            ],
+            "global_spill": {
+              "idle_bytes": 0,
+              "foreground_bytes": 0,
+              "idle_copy_ms": 0,
+              "foreground_copy_ms": 0,
+              "stream_wait_ms": 0,
+              "residual_wait_ms": 0.00727,
+              "reassignments": 1,
+              "idle_failures": 0
+            },
+            "global_ledger_bytes": 3563058472,
+            "global_ram_bytes": 3563058472,
+            "global_peak_ledger_bytes": 3563273264,
+            "global_peak_ram_bytes": 3563273264,
+            "global_persistence_pinned_bytes": 0,
+            "global_peak_persistence_pinned_bytes": 0,
+            "global_categories": {
+              "backing_free": {
+                "bytes": 1588985856,
+                "reserved_bytes": 0,
+                "peak_bytes": 2270560256
+              },
+              "backing_assigned": {
+                "bytes": 0,
+                "reserved_bytes": 0,
+                "peak_bytes": 944242688
+              },
+              "backing_materialized": {
+                "bytes": 1494876160,
+                "reserved_bytes": 0,
+                "peak_bytes": 1494876160
+              },
+              "private_state": {
+                "bytes": 3538944,
+                "reserved_bytes": 0,
+                "peak_bytes": 3538944
+              },
+              "private_tail": {
+                "bytes": 118095872,
+                "reserved_bytes": 0,
+                "peak_bytes": 118095872
+              },
+              "metadata": {
+                "bytes": 357561640,
+                "reserved_bytes": 0,
+                "peak_bytes": 357776432
+              },
+              "transfer_staging": {
+                "bytes": 0,
+                "reserved_bytes": 0,
+                "peak_bytes": 0
+              }
+            }
+          }
+        },
+        "cache_persist": true
+      },
+      "registrations_after": 27,
+      "temperature_before_c": 69.25,
+      "temperature_after_c": 93.125
+    },
+    {
+      "case": "growing_1",
+      "body": {
+        "model": "probe",
+        "messages": [
+          {
+            "role": "system",
+            "content": "unique_archive_0\nThe response code for this session is MAPLE.\nFollow the final instruction. Background notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\n"
+          },
+          {
+            "role": "user",
+            "content": "Repeat the session response code exactly eight times, separated by spaces. Output nothing else."
+          },
+          {
+            "role": "assistant",
+            "content": "MAPLE MAPLE MAPLE MAPLE MAPLE MAPLE MAPLE MAPLE"
+          },
+          {
+            "role": "user",
+            "content": "Again repeat the session response code exactly eight times, separated by spaces. Output nothing else."
+          }
+        ],
+        "temperature": 0,
+        "seed": 31,
+        "max_completion_tokens": 64,
+        "reasoning_effort": "none",
+        "chat_template_kwargs": {
+          "enable_thinking": false
+        },
+        "cache_prompt": true
+      },
+      "response": {
+        "id": "chatcmpl-f7aa13ozcru8h1b9vhvk",
+        "object": "chat.completion",
+        "created": 1793817476,
+        "model": "probe",
+        "choices": [
+          {
+            "index": 0,
+            "message": {
+              "role": "assistant",
+              "content": "MAPLE MAPLE MAPLE MAPLE MAPLE MAPLE MAPLE MAPLE"
+            },
+            "finish_reason": "stop"
+          }
+        ],
+        "usage": {
+          "prompt_tokens": 2795,
+          "completion_tokens": 16,
+          "total_tokens": 2811,
+          "prompt_tokens_details": {
+            "cached_tokens": 2744
+          },
+          "cached_tokens": 2744,
+          "prompt_tokens_per_second": 319.20991565140855,
+          "completion_tokens_per_second": 60.28780493760137,
+          "draft_tokens": 29,
+          "draft_tokens_accepted": 14,
+          "gufo": {
+            "component_cache": {
+              "schema": "component-cache-v1",
+              "reuse": "ram",
+              "selection_reason": 1,
+              "deepest_live_tokens": 0,
+              "deepest_ram_tokens": 2744,
+              "deepest_disk_tokens": 0,
+              "selected_tokens": 2744,
+              "restored_bytes": 1111056,
+              "prefilled_tokens": 51,
+              "captures": 2,
+              "captured_capacity_bytes": 151912448,
+              "borrowed_capacity_bytes": 0,
+              "copied_payload_bytes": 143075164,
+              "captured_checkpoint_ids": [
+                2815,
+                2916
+              ],
+              "global_spill": {
+                "idle_bytes": 0,
+                "foreground_bytes": 0,
+                "idle_copy_ms": 0,
+                "foreground_copy_ms": 0,
+                "stream_wait_ms": 0,
+                "residual_wait_ms": 0.00727,
+                "reassignments": 1,
+                "idle_failures": 0
+              },
+              "global_ledger_bytes": 3563220816,
+              "global_ram_bytes": 3563220816,
+              "global_peak_ledger_bytes": 3563330428,
+              "global_peak_ram_bytes": 3563330428,
+              "global_persistence_pinned_bytes": 0,
+              "global_peak_persistence_pinned_bytes": 0,
+              "global_categories": {
+                "backing_free": {
+                  "bytes": 1437073408,
+                  "reserved_bytes": 0,
+                  "peak_bytes": 2270560256
+                },
+                "backing_assigned": {
+                  "bytes": 0,
+                  "reserved_bytes": 0,
+                  "peak_bytes": 944242688
+                },
+                "backing_materialized": {
+                  "bytes": 1547304960,
+                  "reserved_bytes": 0,
+                  "peak_bytes": 1547304960
+                },
+                "private_state": {
+                  "bytes": 5898240,
+                  "reserved_bytes": 0,
+                  "peak_bytes": 5898240
+                },
+                "private_tail": {
+                  "bytes": 215220224,
+                  "reserved_bytes": 0,
+                  "peak_bytes": 215220224
+                },
+                "metadata": {
+                  "bytes": 357723984,
+                  "reserved_bytes": 0,
+                  "peak_bytes": 357833596
+                },
+                "transfer_staging": {
+                  "bytes": 0,
+                  "reserved_bytes": 0,
+                  "peak_bytes": 0
+                }
+              }
+            },
+            "cache_hit": true,
+            "cache_restore_bytes": 1111056,
+            "cache_snapshot_bytes": 143075164,
+            "cache_disk_queued_bytes": 0,
+            "cache_shared_bytes": 0,
+            "cache_restore_ms": 1.376151,
+            "cache_snapshot_ms": 2.959083,
+            "cache_disk_enqueue_ms": 0.00022,
+            "cache_disk_hit": false,
+            "cache_shared_prefix_snapshots": 0,
+            "cache_shared_prefix_bytes": 0,
+            "cache_shared_prefix_ms": 0,
+            "draft_rounds": 2,
+            "prefill_tokens": 51,
+            "prefill_chunks": 2,
+            "active_decode_prefill_chunks": 0,
+            "max_prefill_chunk_tokens": 44,
+            "queue_depth_at_submit": 1,
+            "client_queue_depth_at_submit": 1,
+            "resident_requests_at_admission": 1,
+            "requested_logical_concurrency": 2,
+            "physical_execution_width": 1,
+            "queue_ms": 2.262517,
+            "shared_prefix_wait_ms": 0,
+            "prefill_ms": 159.769473,
+            "decode_ms": 265.39364,
+            "ttft_ms": 164.178911,
+            "mean_inter_token_ms": 9.826482933333335,
+            "max_inter_token_ms": 147.394844,
+            "execution_plan": "serial-fallback"
+          }
+        },
+        "timings": {
+          "prompt_n": 51,
+          "prompt_ms": 159.769473,
+          "prompt_per_token_ms": 3.1327347647058823,
+          "prompt_per_second": 319.20991565140855,
+          "predicted_n": 16,
+          "predicted_ms": 265.39364,
+          "predicted_per_token_ms": 16.5871025,
+          "predicted_per_second": 60.287804937601365,
+          "cache_n": 2744,
+          "cache_restore_ms": 1.376151,
+          "cache_snapshot_ms": 2.959083,
+          "cache_disk_enqueue_ms": 0.00022,
+          "draft_rounds": 2,
+          "draft_n": 29,
+          "draft_n_accepted": 14,
+          "component_cache": {
+            "schema": "component-cache-v1",
+            "reuse": "ram",
+            "selection_reason": 1,
+            "deepest_live_tokens": 0,
+            "deepest_ram_tokens": 2744,
+            "deepest_disk_tokens": 0,
+            "selected_tokens": 2744,
+            "restored_bytes": 1111056,
+            "prefilled_tokens": 51,
+            "captures": 2,
+            "captured_capacity_bytes": 151912448,
+            "borrowed_capacity_bytes": 0,
+            "copied_payload_bytes": 143075164,
+            "captured_checkpoint_ids": [
+              2815,
+              2916
+            ],
+            "global_spill": {
+              "idle_bytes": 0,
+              "foreground_bytes": 0,
+              "idle_copy_ms": 0,
+              "foreground_copy_ms": 0,
+              "stream_wait_ms": 0,
+              "residual_wait_ms": 0.00727,
+              "reassignments": 1,
+              "idle_failures": 0
+            },
+            "global_ledger_bytes": 3563220816,
+            "global_ram_bytes": 3563220816,
+            "global_peak_ledger_bytes": 3563330428,
+            "global_peak_ram_bytes": 3563330428,
+            "global_persistence_pinned_bytes": 0,
+            "global_peak_persistence_pinned_bytes": 0,
+            "global_categories": {
+              "backing_free": {
+                "bytes": 1437073408,
+                "reserved_bytes": 0,
+                "peak_bytes": 2270560256
+              },
+              "backing_assigned": {
+                "bytes": 0,
+                "reserved_bytes": 0,
+                "peak_bytes": 944242688
+              },
+              "backing_materialized": {
+                "bytes": 1547304960,
+                "reserved_bytes": 0,
+                "peak_bytes": 1547304960
+              },
+              "private_state": {
+                "bytes": 5898240,
+                "reserved_bytes": 0,
+                "peak_bytes": 5898240
+              },
+              "private_tail": {
+                "bytes": 215220224,
+                "reserved_bytes": 0,
+                "peak_bytes": 215220224
+              },
+              "metadata": {
+                "bytes": 357723984,
+                "reserved_bytes": 0,
+                "peak_bytes": 357833596
+              },
+              "transfer_staging": {
+                "bytes": 0,
+                "reserved_bytes": 0,
+                "peak_bytes": 0
+              }
+            }
+          },
+          "lookup_n": 13,
+          "lookup_n_accepted": 0
+        },
+        "cache_persist": true
+      },
+      "registrations_after": 27,
+      "temperature_before_c": 93.125,
+      "temperature_after_c": 93.125
+    },
+    {
+      "case": "growing_2",
+      "body": {
+        "model": "probe",
+        "messages": [
+          {
+            "role": "system",
+            "content": "unique_archive_0\nThe response code for this session is MAPLE.\nFollow the final instruction. Background notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\n"
+          },
+          {
+            "role": "user",
+            "content": "Repeat the session response code exactly eight times, separated by spaces. Output nothing else."
+          },
+          {
+            "role": "assistant",
+            "content": "MAPLE MAPLE MAPLE MAPLE MAPLE MAPLE MAPLE MAPLE"
+          },
+          {
+            "role": "user",
+            "content": "Again repeat the session response code exactly eight times, separated by spaces. Output nothing else."
+          },
+          {
+            "role": "assistant",
+            "content": "MAPLE MAPLE MAPLE MAPLE MAPLE MAPLE MAPLE MAPLE"
+          },
+          {
+            "role": "user",
+            "content": "Again repeat the session response code exactly eight times, separated by spaces. Output nothing else."
+          }
+        ],
+        "temperature": 0,
+        "seed": 31,
+        "max_completion_tokens": 64,
+        "reasoning_effort": "none",
+        "chat_template_kwargs": {
+          "enable_thinking": false
+        },
+        "cache_prompt": true
+      },
+      "response": {
+        "id": "chatcmpl-dlpggf75xluu72gwq0rz",
+        "object": "chat.completion",
+        "created": 1793817476,
+        "model": "probe",
+        "choices": [
+          {
+            "index": 0,
+            "message": {
+              "role": "assistant",
+              "content": "MAPLE MAPLE MAPLE MAPLE MAPLE MAPLE MAPLE MAPLE"
+            },
+            "finish_reason": "stop"
+          }
+        ],
+        "usage": {
+          "prompt_tokens": 2839,
+          "completion_tokens": 16,
+          "total_tokens": 2855,
+          "prompt_tokens_details": {
+            "cached_tokens": 2788
+          },
+          "cached_tokens": 2788,
+          "prompt_tokens_per_second": 318.5048070369228,
+          "completion_tokens_per_second": 60.341827856094305,
+          "draft_tokens": 29,
+          "draft_tokens_accepted": 14,
+          "gufo": {
+            "component_cache": {
+              "schema": "component-cache-v1",
+              "reuse": "ram",
+              "selection_reason": 1,
+              "deepest_live_tokens": 0,
+              "deepest_ram_tokens": 2788,
+              "deepest_disk_tokens": 0,
+              "selected_tokens": 2788,
+              "restored_bytes": 1111056,
+              "prefilled_tokens": 51,
+              "captures": 2,
+              "captured_capacity_bytes": 104136704,
+              "borrowed_capacity_bytes": 0,
+              "copied_payload_bytes": 101704892,
+              "captured_checkpoint_ids": [
+                2917,
+                3039
+              ],
+              "global_spill": {
+                "idle_bytes": 0,
+                "foreground_bytes": 0,
+                "idle_copy_ms": 0,
+                "foreground_copy_ms": 0,
+                "stream_wait_ms": 0,
+                "residual_wait_ms": 0.00727,
+                "reassignments": 1,
+                "idle_failures": 0
+              },
+              "global_ledger_bytes": 3563383584,
+              "global_ram_bytes": 3563383584,
+              "global_peak_ledger_bytes": 3563495700,
+              "global_peak_ram_bytes": 3563495700,
+              "global_persistence_pinned_bytes": 0,
+              "global_peak_persistence_pinned_bytes": 0,
+              "global_categories": {
+                "backing_free": {
+                  "bytes": 1332936704,
+                  "reserved_bytes": 0,
+                  "peak_bytes": 2270560256
+                },
+                "backing_assigned": {
+                  "bytes": 0,
+                  "reserved_bytes": 0,
+                  "peak_bytes": 944242688
+                },
+                "backing_materialized": {
+                  "bytes": 1612906496,
+                  "reserved_bytes": 0,
+                  "peak_bytes": 1612906496
+                },
+                "private_state": {
+                  "bytes": 8257536,
+                  "reserved_bytes": 0,
+                  "peak_bytes": 8257536
+                },
+                "private_tail": {
+                  "bytes": 251396096,
+                  "reserved_bytes": 0,
+                  "peak_bytes": 251396096
+                },
+                "metadata": {
+                  "bytes": 357886752,
+                  "reserved_bytes": 0,
+                  "peak_bytes": 357998868
+                },
+                "transfer_staging": {
+                  "bytes": 0,
+                  "reserved_bytes": 0,
+                  "peak_bytes": 0
+                }
+              }
+            },
+            "cache_hit": true,
+            "cache_restore_bytes": 1111056,
+            "cache_snapshot_bytes": 101704892,
+            "cache_disk_queued_bytes": 0,
+            "cache_shared_bytes": 0,
+            "cache_restore_ms": 1.222063,
+            "cache_snapshot_ms": 2.692469,
+            "cache_disk_enqueue_ms": 0.00038,
+            "cache_disk_hit": false,
+            "cache_shared_prefix_snapshots": 0,
+            "cache_shared_prefix_bytes": 0,
+            "cache_shared_prefix_ms": 0,
+            "draft_rounds": 2,
+            "prefill_tokens": 51,
+            "prefill_chunks": 2,
+            "active_decode_prefill_chunks": 0,
+            "max_prefill_chunk_tokens": 44,
+            "queue_depth_at_submit": 1,
+            "client_queue_depth_at_submit": 1,
+            "resident_requests_at_admission": 1,
+            "requested_logical_concurrency": 2,
+            "physical_execution_width": 1,
+            "queue_ms": 2.113809,
+            "shared_prefix_wait_ms": 0,
+            "prefill_ms": 160.123172,
+            "decode_ms": 265.15603799999997,
+            "ttft_ms": 164.380141,
+            "mean_inter_token_ms": 9.7826694,
+            "max_inter_token_ms": 146.737631,
+            "execution_plan": "serial-fallback"
+          }
+        },
+        "timings": {
+          "prompt_n": 51,
+          "prompt_ms": 160.123172,
+          "prompt_per_token_ms": 3.1396700392156864,
+          "prompt_per_second": 318.5048070369228,
+          "predicted_n": 16,
+          "predicted_ms": 265.15603799999997,
+          "predicted_per_token_ms": 16.572252374999998,
+          "predicted_per_second": 60.34182785609431,
+          "cache_n": 2788,
+          "cache_restore_ms": 1.222063,
+          "cache_snapshot_ms": 2.692469,
+          "cache_disk_enqueue_ms": 0.00038,
+          "draft_rounds": 2,
+          "draft_n": 29,
+          "draft_n_accepted": 14,
+          "component_cache": {
+            "schema": "component-cache-v1",
+            "reuse": "ram",
+            "selection_reason": 1,
+            "deepest_live_tokens": 0,
+            "deepest_ram_tokens": 2788,
+            "deepest_disk_tokens": 0,
+            "selected_tokens": 2788,
+            "restored_bytes": 1111056,
+            "prefilled_tokens": 51,
+            "captures": 2,
+            "captured_capacity_bytes": 104136704,
+            "borrowed_capacity_bytes": 0,
+            "copied_payload_bytes": 101704892,
+            "captured_checkpoint_ids": [
+              2917,
+              3039
+            ],
+            "global_spill": {
+              "idle_bytes": 0,
+              "foreground_bytes": 0,
+              "idle_copy_ms": 0,
+              "foreground_copy_ms": 0,
+              "stream_wait_ms": 0,
+              "residual_wait_ms": 0.00727,
+              "reassignments": 1,
+              "idle_failures": 0
+            },
+            "global_ledger_bytes": 3563383584,
+            "global_ram_bytes": 3563383584,
+            "global_peak_ledger_bytes": 3563495700,
+            "global_peak_ram_bytes": 3563495700,
+            "global_persistence_pinned_bytes": 0,
+            "global_peak_persistence_pinned_bytes": 0,
+            "global_categories": {
+              "backing_free": {
+                "bytes": 1332936704,
+                "reserved_bytes": 0,
+                "peak_bytes": 2270560256
+              },
+              "backing_assigned": {
+                "bytes": 0,
+                "reserved_bytes": 0,
+                "peak_bytes": 944242688
+              },
+              "backing_materialized": {
+                "bytes": 1612906496,
+                "reserved_bytes": 0,
+                "peak_bytes": 1612906496
+              },
+              "private_state": {
+                "bytes": 8257536,
+                "reserved_bytes": 0,
+                "peak_bytes": 8257536
+              },
+              "private_tail": {
+                "bytes": 251396096,
+                "reserved_bytes": 0,
+                "peak_bytes": 251396096
+              },
+              "metadata": {
+                "bytes": 357886752,
+                "reserved_bytes": 0,
+                "peak_bytes": 357998868
+              },
+              "transfer_staging": {
+                "bytes": 0,
+                "reserved_bytes": 0,
+                "peak_bytes": 0
+              }
+            }
+          },
+          "lookup_n": 13,
+          "lookup_n_accepted": 0
+        },
+        "cache_persist": true
+      },
+      "registrations_after": 27,
+      "temperature_before_c": 93.125,
+      "temperature_after_c": 93.25
+    },
+    {
+      "case": "growing_3",
+      "body": {
+        "model": "probe",
+        "messages": [
+          {
+            "role": "system",
+            "content": "unique_archive_0\nThe response code for this session is MAPLE.\nFollow the final instruction. Background notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\n"
+          },
+          {
+            "role": "user",
+            "content": "Repeat the session response code exactly eight times, separated by spaces. Output nothing else."
+          },
+          {
+            "role": "assistant",
+            "content": "MAPLE MAPLE MAPLE MAPLE MAPLE MAPLE MAPLE MAPLE"
+          },
+          {
+            "role": "user",
+            "content": "Again repeat the session response code exactly eight times, separated by spaces. Output nothing else."
+          },
+          {
+            "role": "assistant",
+            "content": "MAPLE MAPLE MAPLE MAPLE MAPLE MAPLE MAPLE MAPLE"
+          },
+          {
+            "role": "user",
+            "content": "Again repeat the session response code exactly eight times, separated by spaces. Output nothing else."
+          },
+          {
+            "role": "assistant",
+            "content": "MAPLE MAPLE MAPLE MAPLE MAPLE MAPLE MAPLE MAPLE"
+          },
+          {
+            "role": "user",
+            "content": "Again repeat the session response code exactly eight times, separated by spaces. Output nothing else."
+          }
+        ],
+        "temperature": 0,
+        "seed": 31,
+        "max_completion_tokens": 64,
+        "reasoning_effort": "none",
+        "chat_template_kwargs": {
+          "enable_thinking": false
+        },
+        "cache_prompt": true
+      },
+      "response": {
+        "id": "chatcmpl-19kvxcbc730jzq37q6qt",
+        "object": "chat.completion",
+        "created": 1793817477,
+        "model": "probe",
+        "choices": [
+          {
+            "index": 0,
+            "message": {
+              "role": "assistant",
+              "content": "MAPLE MAPLE MAPLE MAPLE MAPLE MAPLE MAPLE MAPLE"
+            },
+            "finish_reason": "stop"
+          }
+        ],
+        "usage": {
+          "prompt_tokens": 2883,
+          "completion_tokens": 16,
+          "total_tokens": 2899,
+          "prompt_tokens_details": {
+            "cached_tokens": 2832
+          },
+          "cached_tokens": 2832,
+          "prompt_tokens_per_second": 318.4249418685611,
+          "completion_tokens_per_second": 60.24003145041682,
+          "draft_tokens": 29,
+          "draft_tokens_accepted": 14,
+          "gufo": {
+            "component_cache": {
+              "schema": "component-cache-v1",
+              "reuse": "ram",
+              "selection_reason": 1,
+              "deepest_live_tokens": 0,
+              "deepest_ram_tokens": 2832,
+              "deepest_disk_tokens": 0,
+              "selected_tokens": 2832,
+              "restored_bytes": 1111056,
+              "prefilled_tokens": 51,
+              "captures": 2,
+              "captured_capacity_bytes": 121765888,
+              "borrowed_capacity_bytes": 0,
+              "copied_payload_bytes": 112763420,
+              "captured_checkpoint_ids": [
+                3040,
+                3041
+              ],
+              "global_spill": {
+                "idle_bytes": 0,
+                "foreground_bytes": 0,
+                "idle_copy_ms": 0,
+                "foreground_copy_ms": 0,
+                "stream_wait_ms": 0,
+                "residual_wait_ms": 0.00727,
+                "reassignments": 1,
+                "idle_failures": 0
+              },
+              "global_ledger_bytes": 3563542504,
+              "global_ram_bytes": 3563542504,
+              "global_peak_ledger_bytes": 3563724890,
+              "global_peak_ram_bytes": 3563724890,
+              "global_persistence_pinned_bytes": 0,
+              "global_peak_persistence_pinned_bytes": 0,
+              "global_categories": {
+                "backing_free": {
+                  "bytes": 1211170816,
+                  "reserved_bytes": 0,
+                  "peak_bytes": 2270560256
+                },
+                "backing_assigned": {
+                  "bytes": 0,
+                  "reserved_bytes": 0,
+                  "peak_bytes": 944242688
+                },
+                "backing_materialized": {
+                  "bytes": 1665335296,
+                  "reserved_bytes": 0,
+                  "peak_bytes": 1665335296
+                },
+                "private_state": {
+                  "bytes": 10616832,
+                  "reserved_bytes": 0,
+                  "peak_bytes": 10616832
+                },
+                "private_tail": {
+                  "bytes": 318373888,
+                  "reserved_bytes": 0,
+                  "peak_bytes": 318373888
+                },
+                "metadata": {
+                  "bytes": 358045672,
+                  "reserved_bytes": 0,
+                  "peak_bytes": 358228058
+                },
+                "transfer_staging": {
+                  "bytes": 0,
+                  "reserved_bytes": 0,
+                  "peak_bytes": 0
+                }
+              }
+            },
+            "cache_hit": true,
+            "cache_restore_bytes": 1111056,
+            "cache_snapshot_bytes": 112763420,
+            "cache_disk_queued_bytes": 0,
+            "cache_shared_bytes": 0,
+            "cache_restore_ms": 0.929488,
+            "cache_snapshot_ms": 2.8197460000000003,
+            "cache_disk_enqueue_ms": 0.00016999999999999999,
+            "cache_disk_hit": false,
+            "cache_shared_prefix_snapshots": 0,
+            "cache_shared_prefix_bytes": 0,
+            "cache_shared_prefix_ms": 0,
+            "draft_rounds": 2,
+            "prefill_tokens": 51,
+            "prefill_chunks": 2,
+            "active_decode_prefill_chunks": 0,
+            "max_prefill_chunk_tokens": 44,
+            "queue_depth_at_submit": 1,
+            "client_queue_depth_at_submit": 1,
+            "resident_requests_at_admission": 1,
+            "requested_logical_concurrency": 2,
+            "physical_execution_width": 1,
+            "queue_ms": 1.741,
+            "shared_prefix_wait_ms": 0,
+            "prefill_ms": 160.16333300000002,
+            "decode_ms": 265.604111,
+            "ttft_ms": 164.046174,
+            "mean_inter_token_ms": 9.84658066666667,
+            "max_inter_token_ms": 147.69654,
+            "execution_plan": "serial-fallback"
+          }
+        },
+        "timings": {
+          "prompt_n": 51,
+          "prompt_ms": 160.16333300000002,
+          "prompt_per_token_ms": 3.140457509803922,
+          "prompt_per_second": 318.4249418685611,
+          "predicted_n": 16,
+          "predicted_ms": 265.604111,
+          "predicted_per_token_ms": 16.6002569375,
+          "predicted_per_second": 60.24003145041682,
+          "cache_n": 2832,
+          "cache_restore_ms": 0.929488,
+          "cache_snapshot_ms": 2.8197460000000003,
+          "cache_disk_enqueue_ms": 0.00016999999999999999,
+          "draft_rounds": 2,
+          "draft_n": 29,
+          "draft_n_accepted": 14,
+          "component_cache": {
+            "schema": "component-cache-v1",
+            "reuse": "ram",
+            "selection_reason": 1,
+            "deepest_live_tokens": 0,
+            "deepest_ram_tokens": 2832,
+            "deepest_disk_tokens": 0,
+            "selected_tokens": 2832,
+            "restored_bytes": 1111056,
+            "prefilled_tokens": 51,
+            "captures": 2,
+            "captured_capacity_bytes": 121765888,
+            "borrowed_capacity_bytes": 0,
+            "copied_payload_bytes": 112763420,
+            "captured_checkpoint_ids": [
+              3040,
+              3041
+            ],
+            "global_spill": {
+              "idle_bytes": 0,
+              "foreground_bytes": 0,
+              "idle_copy_ms": 0,
+              "foreground_copy_ms": 0,
+              "stream_wait_ms": 0,
+              "residual_wait_ms": 0.00727,
+              "reassignments": 1,
+              "idle_failures": 0
+            },
+            "global_ledger_bytes": 3563542504,
+            "global_ram_bytes": 3563542504,
+            "global_peak_ledger_bytes": 3563724890,
+            "global_peak_ram_bytes": 3563724890,
+            "global_persistence_pinned_bytes": 0,
+            "global_peak_persistence_pinned_bytes": 0,
+            "global_categories": {
+              "backing_free": {
+                "bytes": 1211170816,
+                "reserved_bytes": 0,
+                "peak_bytes": 2270560256
+              },
+              "backing_assigned": {
+                "bytes": 0,
+                "reserved_bytes": 0,
+                "peak_bytes": 944242688
+              },
+              "backing_materialized": {
+                "bytes": 1665335296,
+                "reserved_bytes": 0,
+                "peak_bytes": 1665335296
+              },
+              "private_state": {
+                "bytes": 10616832,
+                "reserved_bytes": 0,
+                "peak_bytes": 10616832
+              },
+              "private_tail": {
+                "bytes": 318373888,
+                "reserved_bytes": 0,
+                "peak_bytes": 318373888
+              },
+              "metadata": {
+                "bytes": 358045672,
+                "reserved_bytes": 0,
+                "peak_bytes": 358228058
+              },
+              "transfer_staging": {
+                "bytes": 0,
+                "reserved_bytes": 0,
+                "peak_bytes": 0
+              }
+            }
+          },
+          "lookup_n": 13,
+          "lookup_n_accepted": 0
+        },
+        "cache_persist": true
+      },
+      "registrations_after": 27,
+      "temperature_before_c": 93.25,
+      "temperature_after_c": 93.375
+    },
+    {
+      "case": "unchanged",
+      "body": {
+        "model": "probe",
+        "messages": [
+          {
+            "role": "system",
+            "content": "unique_archive_0\nThe response code for this session is MAPLE.\nFollow the final instruction. Background notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\n"
+          },
+          {
+            "role": "user",
+            "content": "Repeat the session response code exactly eight times, separated by spaces. Output nothing else."
+          },
+          {
+            "role": "assistant",
+            "content": "MAPLE MAPLE MAPLE MAPLE MAPLE MAPLE MAPLE MAPLE"
+          },
+          {
+            "role": "user",
+            "content": "Again repeat the session response code exactly eight times, separated by spaces. Output nothing else."
+          },
+          {
+            "role": "assistant",
+            "content": "MAPLE MAPLE MAPLE MAPLE MAPLE MAPLE MAPLE MAPLE"
+          },
+          {
+            "role": "user",
+            "content": "Again repeat the session response code exactly eight times, separated by spaces. Output nothing else."
+          },
+          {
+            "role": "assistant",
+            "content": "MAPLE MAPLE MAPLE MAPLE MAPLE MAPLE MAPLE MAPLE"
+          },
+          {
+            "role": "user",
+            "content": "Again repeat the session response code exactly eight times, separated by spaces. Output nothing else."
+          }
+        ],
+        "temperature": 0,
+        "seed": 31,
+        "max_completion_tokens": 64,
+        "reasoning_effort": "none",
+        "chat_template_kwargs": {
+          "enable_thinking": false
+        },
+        "cache_prompt": true
+      },
+      "response": {
+        "id": "chatcmpl-40db1t28qyfxo0wq2r0t",
+        "object": "chat.completion",
+        "created": 1793817477,
+        "model": "probe",
+        "choices": [
+          {
+            "index": 0,
+            "message": {
+              "role": "assistant",
+              "content": "MAPLE MAPLE MAPLE MAPLE MAPLE MAPLE MAPLE MAPLE"
+            },
+            "finish_reason": "stop"
+          }
+        ],
+        "usage": {
+          "prompt_tokens": 2883,
+          "completion_tokens": 16,
+          "total_tokens": 2899,
+          "prompt_tokens_details": {
+            "cached_tokens": 2883
+          },
+          "cached_tokens": 2883,
+          "prompt_tokens_per_second": 0,
+          "completion_tokens_per_second": 60.13652577451683,
+          "draft_tokens": 29,
+          "draft_tokens_accepted": 14,
+          "gufo": {
+            "component_cache": {
+              "schema": "component-cache-v1",
+              "reuse": "ram",
+              "selection_reason": 1,
+              "deepest_live_tokens": 0,
+              "deepest_ram_tokens": 2883,
+              "deepest_disk_tokens": 0,
+              "selected_tokens": 2883,
+              "restored_bytes": 1111056,
+              "prefilled_tokens": 0,
+              "captures": 0,
+              "captured_capacity_bytes": 0,
+              "borrowed_capacity_bytes": 0,
+              "copied_payload_bytes": 0,
+              "captured_checkpoint_ids": [],
+              "global_spill": {
+                "idle_bytes": 0,
+                "foreground_bytes": 0,
+                "idle_copy_ms": 0,
+                "foreground_copy_ms": 0,
+                "stream_wait_ms": 0,
+                "residual_wait_ms": 0.00727,
+                "reassignments": 1,
+                "idle_failures": 0
+              },
+              "global_ledger_bytes": 3563542504,
+              "global_ram_bytes": 3563542504,
+              "global_peak_ledger_bytes": 3563797580,
+              "global_peak_ram_bytes": 3563797580,
+              "global_persistence_pinned_bytes": 0,
+              "global_peak_persistence_pinned_bytes": 0,
+              "global_categories": {
+                "backing_free": {
+                  "bytes": 1211170816,
+                  "reserved_bytes": 0,
+                  "peak_bytes": 2270560256
+                },
+                "backing_assigned": {
+                  "bytes": 0,
+                  "reserved_bytes": 0,
+                  "peak_bytes": 944242688
+                },
+                "backing_materialized": {
+                  "bytes": 1665335296,
+                  "reserved_bytes": 0,
+                  "peak_bytes": 1665335296
+                },
+                "private_state": {
+                  "bytes": 10616832,
+                  "reserved_bytes": 0,
+                  "peak_bytes": 10616832
+                },
+                "private_tail": {
+                  "bytes": 318373888,
+                  "reserved_bytes": 0,
+                  "peak_bytes": 318373888
+                },
+                "metadata": {
+                  "bytes": 358045672,
+                  "reserved_bytes": 0,
+                  "peak_bytes": 358300748
+                },
+                "transfer_staging": {
+                  "bytes": 0,
+                  "reserved_bytes": 0,
+                  "peak_bytes": 0
+                }
+              }
+            },
+            "cache_hit": true,
+            "cache_restore_bytes": 1111056,
+            "cache_snapshot_bytes": 0,
+            "cache_disk_queued_bytes": 0,
+            "cache_shared_bytes": 0,
+            "cache_restore_ms": 1.125168,
+            "cache_snapshot_ms": 0,
+            "cache_disk_enqueue_ms": 0,
+            "cache_disk_hit": false,
+            "cache_shared_prefix_snapshots": 0,
+            "cache_shared_prefix_bytes": 0,
+            "cache_shared_prefix_ms": 0,
+            "draft_rounds": 2,
+            "prefill_tokens": 0,
+            "prefill_chunks": 0,
+            "active_decode_prefill_chunks": 0,
+            "max_prefill_chunk_tokens": 0,
+            "queue_depth_at_submit": 1,
+            "client_queue_depth_at_submit": 1,
+            "resident_requests_at_admission": 1,
+            "requested_logical_concurrency": 2,
+            "physical_execution_width": 1,
+            "queue_ms": 1.948791,
+            "shared_prefix_wait_ms": 0,
+            "prefill_ms": 0,
+            "decode_ms": 266.061263,
+            "ttft_ms": 1.982522,
+            "mean_inter_token_ms": 9.719758133333334,
+            "max_inter_token_ms": 145.794182,
+            "execution_plan": "serial-fallback"
+          }
+        },
+        "timings": {
+          "prompt_n": 0,
+          "prompt_ms": 0,
+          "prompt_per_token_ms": 0,
+          "prompt_per_second": 0,
+          "predicted_n": 16,
+          "predicted_ms": 266.061263,
+          "predicted_per_token_ms": 16.6288289375,
+          "predicted_per_second": 60.13652577451683,
+          "cache_n": 2883,
+          "cache_restore_ms": 1.125168,
+          "cache_snapshot_ms": 0,
+          "cache_disk_enqueue_ms": 0,
+          "draft_rounds": 2,
+          "draft_n": 29,
+          "draft_n_accepted": 14,
+          "component_cache": {
+            "schema": "component-cache-v1",
+            "reuse": "ram",
+            "selection_reason": 1,
+            "deepest_live_tokens": 0,
+            "deepest_ram_tokens": 2883,
+            "deepest_disk_tokens": 0,
+            "selected_tokens": 2883,
+            "restored_bytes": 1111056,
+            "prefilled_tokens": 0,
+            "captures": 0,
+            "captured_capacity_bytes": 0,
+            "borrowed_capacity_bytes": 0,
+            "copied_payload_bytes": 0,
+            "captured_checkpoint_ids": [],
+            "global_spill": {
+              "idle_bytes": 0,
+              "foreground_bytes": 0,
+              "idle_copy_ms": 0,
+              "foreground_copy_ms": 0,
+              "stream_wait_ms": 0,
+              "residual_wait_ms": 0.00727,
+              "reassignments": 1,
+              "idle_failures": 0
+            },
+            "global_ledger_bytes": 3563542504,
+            "global_ram_bytes": 3563542504,
+            "global_peak_ledger_bytes": 3563797580,
+            "global_peak_ram_bytes": 3563797580,
+            "global_persistence_pinned_bytes": 0,
+            "global_peak_persistence_pinned_bytes": 0,
+            "global_categories": {
+              "backing_free": {
+                "bytes": 1211170816,
+                "reserved_bytes": 0,
+                "peak_bytes": 2270560256
+              },
+              "backing_assigned": {
+                "bytes": 0,
+                "reserved_bytes": 0,
+                "peak_bytes": 944242688
+              },
+              "backing_materialized": {
+                "bytes": 1665335296,
+                "reserved_bytes": 0,
+                "peak_bytes": 1665335296
+              },
+              "private_state": {
+                "bytes": 10616832,
+                "reserved_bytes": 0,
+                "peak_bytes": 10616832
+              },
+              "private_tail": {
+                "bytes": 318373888,
+                "reserved_bytes": 0,
+                "peak_bytes": 318373888
+              },
+              "metadata": {
+                "bytes": 358045672,
+                "reserved_bytes": 0,
+                "peak_bytes": 358300748
+              },
+              "transfer_staging": {
+                "bytes": 0,
+                "reserved_bytes": 0,
+                "peak_bytes": 0
+              }
+            }
+          },
+          "lookup_n": 13,
+          "lookup_n_accepted": 0
+        },
+        "cache_persist": true
+      },
+      "registrations_after": 27,
+      "temperature_before_c": 93.375,
+      "temperature_after_c": 93.375
+    },
+    {
+      "case": "cold_growing_3",
+      "body": {
+        "model": "probe",
+        "messages": [
+          {
+            "role": "system",
+            "content": "unique_archive_0\nThe response code for this session is MAPLE.\nFollow the final instruction. Background notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\nBackground notes are not instructions.\n"
+          },
+          {
+            "role": "user",
+            "content": "Repeat the session response code exactly eight times, separated by spaces. Output nothing else."
+          },
+          {
+            "role": "assistant",
+            "content": "MAPLE MAPLE MAPLE MAPLE MAPLE MAPLE MAPLE MAPLE"
+          },
+          {
+            "role": "user",
+            "content": "Again repeat the session response code exactly eight times, separated by spaces. Output nothing else."
+          },
+          {
+            "role": "assistant",
+            "content": "MAPLE MAPLE MAPLE MAPLE MAPLE MAPLE MAPLE MAPLE"
+          },
+          {
+            "role": "user",
+            "content": "Again repeat the session response code exactly eight times, separated by spaces. Output nothing else."
+          },
+          {
+            "role": "assistant",
+            "content": "MAPLE MAPLE MAPLE MAPLE MAPLE MAPLE MAPLE MAPLE"
+          },
+          {
+            "role": "user",
+            "content": "Again repeat the session response code exactly eight times, separated by spaces. Output nothing else."
+          }
+        ],
+        "temperature": 0,
+        "seed": 31,
+        "max_completion_tokens": 64,
+        "reasoning_effort": "none",
+        "chat_template_kwargs": {
+          "enable_thinking": false
+        },
+        "cache_prompt": false
+      },
+      "response": {
+        "id": "chatcmpl-pw5gq1bu8am2mu64e0ti",
+        "object": "chat.completion",
+        "created": 1793817482,
+        "model": "probe",
+        "choices": [
+          {
+            "index": 0,
+            "message": {
+              "role": "assistant",
+              "content": "MAPLE MAPLE MAPLE MAPLE MAPLE MAPLE MAPLE MAPLE"
+            },
+            "finish_reason": "stop"
+          }
+        ],
+        "usage": {
+          "prompt_tokens": 2883,
+          "completion_tokens": 16,
+          "total_tokens": 2899,
+          "prompt_tokens_details": {
+            "cached_tokens": 0
+          },
+          "cached_tokens": 0,
+          "prompt_tokens_per_second": 555.9960530551823,
+          "completion_tokens_per_second": 59.92250327515805,
+          "draft_tokens": 29,
+          "draft_tokens_accepted": 14,
+          "gufo": {
+            "component_cache": {
+              "schema": "component-cache-v1",
+              "reuse": "none",
+              "selection_reason": 4,
+              "deepest_live_tokens": 0,
+              "deepest_ram_tokens": 0,
+              "deepest_disk_tokens": 0,
+              "selected_tokens": 0,
+              "restored_bytes": 0,
+              "prefilled_tokens": 2883,
+              "captures": 2,
+              "captured_capacity_bytes": 1105526784,
+              "borrowed_capacity_bytes": 0,
+              "copied_payload_bytes": 1095814684,
+              "captured_checkpoint_ids": [
+                3143,
+                4975
+              ],
+              "global_spill": {
+                "idle_bytes": 0,
+                "foreground_bytes": 0,
+                "idle_copy_ms": 0,
+                "foreground_copy_ms": 0,
+                "stream_wait_ms": 0,
+                "residual_wait_ms": 0.011031,
+                "reassignments": 2,
+                "idle_failures": 0
+              },
+              "global_ledger_bytes": 4632468400,
+              "global_ram_bytes": 4632468400,
+              "global_peak_ledger_bytes": 4632799716,
+              "global_peak_ram_bytes": 4632799716,
+              "global_persistence_pinned_bytes": 0,
+              "global_peak_persistence_pinned_bytes": 0,
+              "global_categories": {
+                "backing_free": {
+                  "bytes": 1295908864,
+                  "reserved_bytes": 0,
+                  "peak_bytes": 2279669760
+                },
+                "backing_assigned": {
+                  "bytes": 0,
+                  "reserved_bytes": 0,
+                  "peak_bytes": 983760896
+                },
+                "backing_materialized": {
+                  "bytes": 2649096192,
+                  "reserved_bytes": 0,
+                  "peak_bytes": 2701524992
+                },
+                "private_state": {
+                  "bytes": 10616832,
+                  "reserved_bytes": 0,
+                  "peak_bytes": 11796480
+                },
+                "private_tail": {
+                  "bytes": 318373888,
+                  "reserved_bytes": 0,
+                  "peak_bytes": 374145024
+                },
+                "metadata": {
+                  "bytes": 358472624,
+                  "reserved_bytes": 0,
+                  "peak_bytes": 358803940
+                },
+                "transfer_staging": {
+                  "bytes": 0,
+                  "reserved_bytes": 0,
+                  "peak_bytes": 0
+                }
+              }
+            },
+            "cache_hit": false,
+            "cache_miss_reason": "disabled",
+            "cache_common_prefix_tokens": 0,
+            "cache_checkpoint_tokens": 0,
+            "cache_restore_bytes": 0,
+            "cache_snapshot_bytes": 1095814684,
+            "cache_disk_queued_bytes": 0,
+            "cache_shared_bytes": 0,
+            "cache_restore_ms": 0,
+            "cache_snapshot_ms": 15.327713,
+            "cache_disk_enqueue_ms": 0.00131,
+            "cache_disk_hit": false,
+            "cache_shared_prefix_snapshots": 0,
+            "cache_shared_prefix_bytes": 0,
+            "cache_shared_prefix_ms": 0,
+            "draft_rounds": 2,
+            "prefill_tokens": 2883,
+            "prefill_chunks": 2,
+            "active_decode_prefill_chunks": 0,
+            "max_prefill_chunk_tokens": 2876,
+            "queue_depth_at_submit": 1,
+            "client_queue_depth_at_submit": 1,
+            "resident_requests_at_admission": 1,
+            "requested_logical_concurrency": 2,
+            "physical_execution_width": 1,
+            "queue_ms": 0.763249,
+            "shared_prefix_wait_ms": 0,
+            "prefill_ms": 5185.288608,
+            "decode_ms": 267.01154199999996,
+            "ttft_ms": 5199.820029,
+            "mean_inter_token_ms": 9.859399333333334,
+            "max_inter_token_ms": 147.88517,
+            "execution_plan": "serial-fallback"
+          }
+        },
+        "timings": {
+          "prompt_n": 2883,
+          "prompt_ms": 5185.288608,
+          "prompt_per_token_ms": 1.7985739188345473,
+          "prompt_per_second": 555.9960530551823,
+          "predicted_n": 16,
+          "predicted_ms": 267.01154199999996,
+          "predicted_per_token_ms": 16.688221374999998,
+          "predicted_per_second": 59.92250327515806,
+          "cache_n": 0,
+          "cache_restore_ms": 0,
+          "cache_snapshot_ms": 15.327713,
+          "cache_disk_enqueue_ms": 0.00131,
+          "draft_rounds": 2,
+          "draft_n": 29,
+          "draft_n_accepted": 14,
+          "component_cache": {
+            "schema": "component-cache-v1",
+            "reuse": "none",
+            "selection_reason": 4,
+            "deepest_live_tokens": 0,
+            "deepest_ram_tokens": 0,
+            "deepest_disk_tokens": 0,
+            "selected_tokens": 0,
+            "restored_bytes": 0,
+            "prefilled_tokens": 2883,
+            "captures": 2,
+            "captured_capacity_bytes": 1105526784,
+            "borrowed_capacity_bytes": 0,
+            "copied_payload_bytes": 1095814684,
+            "captured_checkpoint_ids": [
+              3143,
+              4975
+            ],
+            "global_spill": {
+              "idle_bytes": 0,
+              "foreground_bytes": 0,
+              "idle_copy_ms": 0,
+              "foreground_copy_ms": 0,
+              "stream_wait_ms": 0,
+              "residual_wait_ms": 0.011031,
+              "reassignments": 2,
+              "idle_failures": 0
+            },
+            "global_ledger_bytes": 4632468400,
+            "global_ram_bytes": 4632468400,
+            "global_peak_ledger_bytes": 4632799716,
+            "global_peak_ram_bytes": 4632799716,
+            "global_persistence_pinned_bytes": 0,
+            "global_peak_persistence_pinned_bytes": 0,
+            "global_categories": {
+              "backing_free": {
+                "bytes": 1295908864,
+                "reserved_bytes": 0,
+                "peak_bytes": 2279669760
+              },
+              "backing_assigned": {
+                "bytes": 0,
+                "reserved_bytes": 0,
+                "peak_bytes": 983760896
+              },
+              "backing_materialized": {
+                "bytes": 2649096192,
+                "reserved_bytes": 0,
+                "peak_bytes": 2701524992
+              },
+              "private_state": {
+                "bytes": 10616832,
+                "reserved_bytes": 0,
+                "peak_bytes": 11796480
+              },
+              "private_tail": {
+                "bytes": 318373888,
+                "reserved_bytes": 0,
+                "peak_bytes": 374145024
+              },
+              "metadata": {
+                "bytes": 358472624,
+                "reserved_bytes": 0,
+                "peak_bytes": 358803940
+              },
+              "transfer_staging": {
+                "bytes": 0,
+                "reserved_bytes": 0,
+                "peak_bytes": 0
+              }
+            }
+          },
+          "lookup_n": 13,
+          "lookup_n_accepted": 0
+        },
+        "cache_persist": true
+      },
+      "registrations_after": 35,
+      "temperature_before_c": 93.375,
+      "temperature_after_c": 95.75
+    }
+  ],
+  "startup_ms": 6016.896387998713,
+  "limits": "Limit                     Soft Limit           Hard Limit           Units     \nMax cpu time              unlimited            unlimited            seconds   \nMax file size             unlimited            unlimited            bytes     \nMax data size             unlimited            unlimited            bytes     \nMax stack size            8388608              unlimited            bytes     \nMax core file size        unlimited            unlimited            bytes     \nMax resident set          unlimited            unlimited            bytes     \nMax processes             509341               509341               processes \nMax open files            1048576              1048576              files     \nMax locked memory         8388608              8388608              bytes     \nMax address space         unlimited            unlimited            bytes     \nMax file locks            unlimited            unlimited            locks     \nMax pending signals       509341               509341               signals   \nMax msgqueue size         819200               819200               bytes     \nMax nice priority         0                    0                    \nMax realtime priority     0                    0                    \nMax realtime timeout      unlimited            unlimited            us        \n",
+  "registrations_at_ready": [
+    [
+      "67108864",
+      "2093072",
+      "0",
+      "0.343968"
+    ],
+    [
+      "270592",
+      "603456",
+      "0",
+      "0.019961"
+    ],
+    [
+      "4096",
+      "805504",
+      "0",
+      "0.005321"
+    ],
+    [
+      "133562368",
+      "655360",
+      "0",
+      "2.598725"
+    ],
+    [
+      "133562368",
+      "1310720",
+      "0",
+      "4.917044"
+    ],
+    [
+      "133562368",
+      "1966080",
+      "0",
+      "3.851349"
+    ],
+    [
+      "133562368",
+      "524288",
+      "0",
+      "3.303961"
+    ],
+    [
+      "133562368",
+      "1179648",
+      "0",
+      "3.318662"
+    ],
+    [
+      "133562368",
+      "1835008",
+      "0",
+      "1.473487"
+    ],
+    [
+      "133562368",
+      "393216",
+      "0",
+      "1.501568"
+    ],
+    [
+      "133562368",
+      "1048576",
+      "0",
+      "1.553631"
+    ],
+    [
+      "133562368",
+      "1703936",
+      "0",
+      "1.594222"
+    ],
+    [
+      "133562368",
+      "262144",
+      "0",
+      "1.592142"
+    ],
+    [
+      "133562368",
+      "917504",
+      "0",
+      "1.748690"
+    ],
+    [
+      "133562368",
+      "1572864",
+      "0",
+      "2.642707"
+    ],
+    [
+      "133562368",
+      "131072",
+      "0",
+      "2.404234"
+    ],
+    [
+      "133562368",
+      "786432",
+      "0",
+      "2.443006"
+    ],
+    [
+      "133562368",
+      "1441792",
+      "0",
+      "2.419695"
+    ],
+    [
+      "133562368",
+      "0",
+      "0",
+      "2.450016"
+    ],
+    [
+      "133562368",
+      "655360",
+      "0",
+      "2.408175"
+    ]
+  ],
+  "registrations_final": [
+    [
+      "67108864",
+      "2093072",
+      "0",
+      "0.343968"
+    ],
+    [
+      "270592",
+      "603456",
+      "0",
+      "0.019961"
+    ],
+    [
+      "4096",
+      "805504",
+      "0",
+      "0.005321"
+    ],
+    [
+      "133562368",
+      "655360",
+      "0",
+      "2.598725"
+    ],
+    [
+      "133562368",
+      "1310720",
+      "0",
+      "4.917044"
+    ],
+    [
+      "133562368",
+      "1966080",
+      "0",
+      "3.851349"
+    ],
+    [
+      "133562368",
+      "524288",
+      "0",
+      "3.303961"
+    ],
+    [
+      "133562368",
+      "1179648",
+      "0",
+      "3.318662"
+    ],
+    [
+      "133562368",
+      "1835008",
+      "0",
+      "1.473487"
+    ],
+    [
+      "133562368",
+      "393216",
+      "0",
+      "1.501568"
+    ],
+    [
+      "133562368",
+      "1048576",
+      "0",
+      "1.553631"
+    ],
+    [
+      "133562368",
+      "1703936",
+      "0",
+      "1.594222"
+    ],
+    [
+      "133562368",
+      "262144",
+      "0",
+      "1.592142"
+    ],
+    [
+      "133562368",
+      "917504",
+      "0",
+      "1.748690"
+    ],
+    [
+      "133562368",
+      "1572864",
+      "0",
+      "2.642707"
+    ],
+    [
+      "133562368",
+      "131072",
+      "0",
+      "2.404234"
+    ],
+    [
+      "133562368",
+      "786432",
+      "0",
+      "2.443006"
+    ],
+    [
+      "133562368",
+      "1441792",
+      "0",
+      "2.419695"
+    ],
+    [
+      "133562368",
+      "0",
+      "0",
+      "2.450016"
+    ],
+    [
+      "133562368",
+      "655360",
+      "0",
+      "2.408175"
+    ],
+    [
+      "133562368",
+      "1703936",
+      "0",
+      "2.564152"
+    ],
+    [
+      "133562368",
+      "262144",
+      "0",
+      "0.898466"
+    ],
+    [
+      "133562368",
+      "917504",
+      "0",
+      "0.841023"
+    ],
+    [
+      "133562368",
+      "1572864",
+      "0",
+      "1.278426"
+    ],
+    [
+      "133562368",
+      "131072",
+      "0",
+      "0.827783"
+    ],
+    [
+      "133562368",
+      "786432",
+      "0",
+      "0.593461"
+    ],
+    [
+      "133562368",
+      "1441792",
+      "0",
+      "0.572040"
+    ],
+    [
+      "133562368",
+      "655360",
+      "0",
+      "0.759979"
+    ],
+    [
+      "133562368",
+      "1310720",
+      "0",
+      "0.685216"
+    ],
+    [
+      "133562368",
+      "1966080",
+      "0",
+      "0.638453"
+    ],
+    [
+      "133562368",
+      "524288",
+      "0",
+      "0.558679"
+    ],
+    [
+      "133562368",
+      "1179648",
+      "0",
+      "0.678315"
+    ],
+    [
+      "133562368",
+      "1835008",
+      "0",
+      "0.544678"
+    ],
+    [
+      "133562368",
+      "393216",
+      "0",
+      "0.560869"
+    ],
+    [
+      "133562368",
+      "1048576",
+      "0",
+      "0.570439"
+    ]
+  ],
+  "grew_after_readiness": true,
+  "draft_tokens": 179,
+  "accepted_tokens": 83
+}

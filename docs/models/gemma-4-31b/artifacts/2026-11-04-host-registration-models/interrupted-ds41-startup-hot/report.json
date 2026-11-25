@@ -1,0 +1,186 @@
+{
+  "model": "ds41",
+  "variant": "unaligned",
+  "label": "A1",
+  "pin": "unlimited",
+  "command": [
+    "/tmp/gufo-models-unaligned",
+    "serve",
+    "--host",
+    "127.0.0.1",
+    "--port",
+    "40831",
+    "llm",
+    "--model",
+    "/mnt/data/models/ds41/ista-gsq-rco-gguf/DeepSeek-V4.1-Flash-1017-GSQ-RCO-IQ2_XXS-00001-of-00006.gguf",
+    "--served-model-name",
+    "probe",
+    "--context",
+    "16384",
+    "--sessions",
+    "2",
+    "--cache-ram-bytes",
+    "8589934592",
+    "--speculative",
+    "dspark",
+    "--dspark-model",
+    "/mnt/data/models/ds41/dspark-lucebox-q2k/DeepSeek-V4.1-Flash-1017-DSpark-draft-Q2K-Q4K.gguf",
+    "--stream-experts",
+    "--expert-cache-bytes",
+    "51539607552"
+  ],
+  "launch": [
+    "bash",
+    "-c",
+    "sudo -n prlimit --pid $$ --memlock=unlimited:unlimited && exec \"$@\"",
+    "measurement",
+    "/tmp/gufo-models-unaligned",
+    "serve",
+    "--host",
+    "127.0.0.1",
+    "--port",
+    "40831",
+    "llm",
+    "--model",
+    "/mnt/data/models/ds41/ista-gsq-rco-gguf/DeepSeek-V4.1-Flash-1017-GSQ-RCO-IQ2_XXS-00001-of-00006.gguf",
+    "--served-model-name",
+    "probe",
+    "--context",
+    "16384",
+    "--sessions",
+    "2",
+    "--cache-ram-bytes",
+    "8589934592",
+    "--speculative",
+    "dspark",
+    "--dspark-model",
+    "/mnt/data/models/ds41/dspark-lucebox-q2k/DeepSeek-V4.1-Flash-1017-DSpark-draft-Q2K-Q4K.gguf",
+    "--stream-experts",
+    "--expert-cache-bytes",
+    "51539607552"
+  ],
+  "suites": {
+    "history": {}
+  },
+  "status": "interrupted",
+  "responses": [],
+  "startup_ms": 10015.683033998357,
+  "limits": "Limit                     Soft Limit           Hard Limit           Units     \nMax cpu time              unlimited            unlimited            seconds   \nMax file size             unlimited            unlimited            bytes     \nMax data size             unlimited            unlimited            bytes     \nMax stack size            8388608              unlimited            bytes     \nMax core file size        unlimited            unlimited            bytes     \nMax resident set          unlimited            unlimited            bytes     \nMax processes             509341               509341               processes \nMax open files            1048576              1048576              files     \nMax locked memory         unlimited            unlimited            bytes     \nMax address space         unlimited            unlimited            bytes     \nMax file locks            unlimited            unlimited            locks     \nMax pending signals       509341               509341               signals   \nMax msgqueue size         819200               819200               bytes     \nMax nice priority         0                    0                    \nMax realtime priority     0                    0                    \nMax realtime timeout      unlimited            unlimited            us        \n",
+  "registrations_at_ready": [
+    [
+      "8273920",
+      "110608",
+      "0",
+      "0.174149"
+    ],
+    [
+      "8273920",
+      "110608",
+      "0",
+      "0.125426"
+    ],
+    [
+      "133496832",
+      "823296",
+      "0",
+      "3.599916"
+    ],
+    [
+      "133496832",
+      "1544192",
+      "0",
+      "3.542823"
+    ],
+    [
+      "133496832",
+      "167936",
+      "0",
+      "2.692869"
+    ],
+    [
+      "133496832",
+      "888832",
+      "0",
+      "2.203963"
+    ],
+    [
+      "133496832",
+      "1609728",
+      "0",
+      "1.872456"
+    ],
+    [
+      "133496832",
+      "233472",
+      "0",
+      "1.873477"
+    ],
+    [
+      "133496832",
+      "954368",
+      "0",
+      "1.863326"
+    ],
+    [
+      "133496832",
+      "1675264",
+      "0",
+      "1.898038"
+    ],
+    [
+      "133496832",
+      "299008",
+      "0",
+      "1.785683"
+    ],
+    [
+      "133496832",
+      "1019904",
+      "0",
+      "1.533839"
+    ],
+    [
+      "133496832",
+      "1740800",
+      "0",
+      "1.270765"
+    ],
+    [
+      "133496832",
+      "364544",
+      "0",
+      "1.083546"
+    ],
+    [
+      "133496832",
+      "1085440",
+      "0",
+      "0.787810"
+    ],
+    [
+      "133496832",
+      "1806336",
+      "0",
+      "0.655733"
+    ],
+    [
+      "133496832",
+      "430080",
+      "0",
+      "0.576650"
+    ],
+    [
+      "133496832",
+      "1150976",
+      "0",
+      "0.539108"
+    ],
+    [
+      "133496832",
+      "1871872",
+      "0",
+      "0.548938"
+    ]
+  ],
+  "reason": "Stopped before measurement to cool the host after thermal drift in the preceding Gemma runs."
+}

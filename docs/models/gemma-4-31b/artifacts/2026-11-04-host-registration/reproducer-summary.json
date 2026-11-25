@@ -1,0 +1,154 @@
+[
+  {
+    "bytes": "1073745920",
+    "side": "above",
+    "layout": "isolated",
+    "samples": 12,
+    "correct": true,
+    "control_ms": {
+      "median": 0.045657500000000004,
+      "max": 0.045912
+    },
+    "unmap_ms": {
+      "median": 0.2187915,
+      "max": 0.261964
+    },
+    "post_unmap_ms": {
+      "median": 0.0880795,
+      "max": 0.262793
+    }
+  },
+  {
+    "bytes": "1073745920",
+    "side": "above",
+    "layout": "shared-block",
+    "samples": 12,
+    "correct": true,
+    "control_ms": {
+      "median": 0.045707,
+      "max": 0.046013
+    },
+    "unmap_ms": {
+      "median": 0.227662,
+      "max": 0.271894
+    },
+    "post_unmap_ms": {
+      "median": 0.08796000000000001,
+      "max": 0.123796
+    }
+  },
+  {
+    "bytes": "1073745920",
+    "side": "below",
+    "layout": "isolated",
+    "samples": 12,
+    "correct": true,
+    "control_ms": {
+      "median": 0.045767,
+      "max": 0.046062
+    },
+    "unmap_ms": {
+      "median": 0.2194415,
+      "max": 0.251733
+    },
+    "post_unmap_ms": {
+      "median": 0.0879845,
+      "max": 0.094365
+    }
+  },
+  {
+    "bytes": "1073745920",
+    "side": "below",
+    "layout": "shared-block",
+    "samples": 12,
+    "correct": true,
+    "control_ms": {
+      "median": 0.045702000000000007,
+      "max": 0.046133
+    },
+    "unmap_ms": {
+      "median": 0.22720200000000002,
+      "max": 0.255583
+    },
+    "post_unmap_ms": {
+      "median": 0.0881545,
+      "max": 0.127307
+    }
+  },
+  {
+    "bytes": "134221824",
+    "side": "above",
+    "layout": "isolated",
+    "samples": 12,
+    "correct": true,
+    "control_ms": {
+      "median": 0.038156999999999996,
+      "max": 0.038562
+    },
+    "unmap_ms": {
+      "median": 0.123451,
+      "max": 0.129557
+    },
+    "post_unmap_ms": {
+      "median": 0.074714,
+      "max": 0.099555
+    }
+  },
+  {
+    "bytes": "134221824",
+    "side": "above",
+    "layout": "shared-block",
+    "samples": 12,
+    "correct": true,
+    "control_ms": {
+      "median": 0.038192000000000004,
+      "max": 0.043162
+    },
+    "unmap_ms": {
+      "median": 0.1248215,
+      "max": 0.196631
+    },
+    "post_unmap_ms": {
+      "median": 0.074394,
+      "max": 0.096985
+    }
+  },
+  {
+    "bytes": "134221824",
+    "side": "below",
+    "layout": "isolated",
+    "samples": 12,
+    "correct": true,
+    "control_ms": {
+      "median": 0.038071999999999995,
+      "max": 0.115236
+    },
+    "unmap_ms": {
+      "median": 0.12293599999999999,
+      "max": 0.137287
+    },
+    "post_unmap_ms": {
+      "median": 0.075364,
+      "max": 0.086965
+    }
+  },
+  {
+    "bytes": "134221824",
+    "side": "below",
+    "layout": "shared-block",
+    "samples": 12,
+    "correct": true,
+    "control_ms": {
+      "median": 0.037961999999999996,
+      "max": 0.067973
+    },
+    "unmap_ms": {
+      "median": 0.123672,
+      "max": 0.127697
+    },
+    "post_unmap_ms": {
+      "median": 0.0742485,
+      "max": 0.094074
+    }
+  }
+]

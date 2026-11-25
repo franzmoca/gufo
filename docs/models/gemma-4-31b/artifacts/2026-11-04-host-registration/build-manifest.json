@@ -1,0 +1,17 @@
+{
+  "baseline_revision": "d2b01f24a9a70104170bfe69bd4752fb7ce8e4e1",
+  "candidate": "baseline plus candidate.patch (allocation changes from 8ee46f24, excluding FD_CLOEXEC)",
+  "build_command": "nix develop -c cmake --preset release -DGUFO_EXTENSIONS=qwen;qwen38_flash_next; nix develop -c cmake --build --preset release --target gufo --parallel 4",
+  "kernel": "7.2.11-200.fc44.x86_64",
+  "gpu": "gfx1151 AMD Radeon 8060S",
+  "memlock_bytes": 8388608,
+  "binary_sha256": {
+    "baseline": "656649983f4d3b0d0f077f4d6d85c3832e386c1b8692c452dc126f7092a7df89",
+    "candidate": "9f16984a005ac3b4f53a8d1431038319023bb2756ec9afeff9072f7125fe79f0"
+  },
+  "reproducer_note": "Initial direct runs resolved ROCr ym4x29...; final reproducer-pinned run uses the production environment and ROCr 88jjsz...",
+  "flake.lock_sha256": "be97114db5ce58877e3d529c0318864206a21b8284eeeaaffbfb2657264cee6f",
+  "CMakePresets.json_sha256": "5a9f4fdbf6dcba428f2699bfcdcd87a13c3f9f49bd96eeae37327e4f8ef93e84",
+  "production_rocr": "/nix/store/88jjsz00km321bcl9851aiwwdig79b4l-rocm-runtime-10.1/lib/libhsa-runtime64.so.1",
+  "reproducer_final_command": "nix develop -c /tmp/host_registration_blocks 6 (in /tmp/gufo-2m-upstream)"
+}

@@ -1,0 +1,1169 @@
+{
+  "sdk": "2.53.0",
+  "model": "functional-test",
+  "suite": "cache-growth",
+  "vision": false,
+  "speculative": "off",
+  "sampling_preset": "qwen38",
+  "request_timeout": 180.0,
+  "sampling_overrides": {},
+  "suites": {
+    "cache-growth": {
+      "status": "passed",
+      "through_case": "cache_growth_drop_reasoning_cold_control_3",
+      "seconds": 49.769
+    }
+  },
+  "through_case": "cache_growth_drop_reasoning_cold_control_3",
+  "status": "passed",
+  "expected_input_modalities": null,
+  "checks": {
+    "cache_growth_drop_reasoning_turn_0": {
+      "text": "BETA",
+      "reasoning": "The user is asking me to reply with only \"BETA\". This is a straightforward instruction.",
+      "tools": [],
+      "finish": "stop",
+      "usage": {
+        "completion_tokens": 24,
+        "prompt_tokens": 2932,
+        "total_tokens": 2956,
+        "completion_tokens_details": {
+          "reasoning_tokens": 20
+        },
+        "prompt_tokens_details": {
+          "cached_tokens": 0
+        },
+        "cached_tokens": 0,
+        "prompt_tokens_per_second": 552.7319219766846,
+        "completion_tokens_per_second": 12.03118126059782,
+        "draft_tokens": 0,
+        "draft_tokens_accepted": 0,
+        "gufo": {
+          "component_cache": {
+            "schema": "component-cache-v1",
+            "reuse": "none",
+            "selection_reason": 4,
+            "deepest_live_tokens": 0,
+            "deepest_ram_tokens": 0,
+            "deepest_disk_tokens": 0,
+            "selected_tokens": 0,
+            "restored_bytes": 0,
+            "prefilled_tokens": 2932,
+            "captures": 3,
+            "captured_capacity_bytes": 689111040,
+            "borrowed_capacity_bytes": 184549376,
+            "copied_payload_bytes": 497414624,
+            "captured_checkpoint_ids": [
+              2,
+              259,
+              356
+            ],
+            "global_spill": {
+              "idle_bytes": 0,
+              "foreground_bytes": 0,
+              "idle_copy_ms": 0,
+              "foreground_copy_ms": 0,
+              "stream_wait_ms": 0,
+              "residual_wait_ms": 0.045252,
+              "reassignments": 1,
+              "idle_failures": 0
+            },
+            "global_ledger_bytes": 1929357008,
+            "global_ram_bytes": 1929357008,
+            "global_peak_ledger_bytes": 1929381166,
+            "global_peak_ram_bytes": 1929381166,
+            "global_persistence_pinned_bytes": 0,
+            "global_peak_persistence_pinned_bytes": 0,
+            "global_categories": {
+              "backing_free": {
+                "bytes": 1210122240,
+                "reserved_bytes": 0,
+                "peak_bytes": 1899233280
+              },
+              "backing_assigned": {
+                "bytes": 184549376,
+                "reserved_bytes": 184549376,
+                "peak_bytes": 184549376
+              },
+              "backing_materialized": {
+                "bytes": 0,
+                "reserved_bytes": 0,
+                "peak_bytes": 0
+              },
+              "private_state": {
+                "bytes": 487784448,
+                "reserved_bytes": 0,
+                "peak_bytes": 487784448
+              },
+              "private_tail": {
+                "bytes": 16777216,
+                "reserved_bytes": 0,
+                "peak_bytes": 16777216
+              },
+              "metadata": {
+                "bytes": 30123728,
+                "reserved_bytes": 0,
+                "peak_bytes": 30147886
+              },
+              "transfer_staging": {
+                "bytes": 0,
+                "reserved_bytes": 0,
+                "peak_bytes": 0
+              }
+            }
+          },
+          "cache_hit": false,
+          "cache_miss_reason": "disabled",
+          "cache_common_prefix_tokens": 0,
+          "cache_checkpoint_tokens": 0,
+          "cache_restore_bytes": 0,
+          "cache_snapshot_bytes": 681964000,
+          "cache_disk_queued_bytes": 0,
+          "cache_shared_bytes": 0,
+          "cache_restore_ms": 0,
+          "cache_snapshot_ms": 9.97598,
+          "cache_disk_enqueue_ms": 0.00169,
+          "cache_disk_hit": false,
+          "cache_shared_prefix_snapshots": 0,
+          "cache_shared_prefix_bytes": 0,
+          "cache_shared_prefix_ms": 0,
+          "draft_rounds": 0,
+          "prefill_tokens": 2932,
+          "prefill_chunks": 3,
+          "active_decode_prefill_chunks": 0,
+          "max_prefill_chunk_tokens": 2048,
+          "queue_depth_at_submit": 1,
+          "client_queue_depth_at_submit": 1,
+          "resident_requests_at_admission": 1,
+          "requested_logical_concurrency": 2,
+          "physical_execution_width": 1,
+          "queue_ms": 0.638684,
+          "shared_prefix_wait_ms": 0,
+          "prefill_ms": 5304.560644,
+          "decode_ms": 1994.8165919999992,
+          "ttft_ms": 5312.630765,
+          "mean_inter_token_ms": 83.25418682608696,
+          "max_inter_token_ms": 89.517881,
+          "execution_plan": "serial-fallback"
+        }
+      }
+    },
+    "cache_growth_drop_reasoning_turn_1": {
+      "text": "BETA",
+      "reasoning": "The user is asking me to reply with only \"BETA\". This is a straightforward request.",
+      "tools": [],
+      "finish": "stop",
+      "usage": {
+        "completion_tokens": 24,
+        "prompt_tokens": 3135,
+        "total_tokens": 3159,
+        "completion_tokens_details": {
+          "reasoning_tokens": 20
+        },
+        "prompt_tokens_details": {
+          "cached_tokens": 2927
+        },
+        "cached_tokens": 2927,
+        "prompt_tokens_per_second": 318.5691491172717,
+        "completion_tokens_per_second": 12.049781817914313,
+        "draft_tokens": 0,
+        "draft_tokens_accepted": 0,
+        "gufo": {
+          "component_cache": {
+            "schema": "component-cache-v1",
+            "reuse": "ram",
+            "selection_reason": 1,
+            "deepest_live_tokens": 0,
+            "deepest_ram_tokens": 2927,
+            "deepest_disk_tokens": 0,
+            "selected_tokens": 2927,
+            "restored_bytes": 352669856,
+            "prefilled_tokens": 208,
+            "captures": 2,
+            "captured_capacity_bytes": 350355456,
+            "borrowed_capacity_bytes": 16777216,
+            "copied_payload_bytes": 329621824,
+            "captured_checkpoint_ids": [
+              357,
+              390
+            ],
+            "global_spill": {
+              "idle_bytes": 184549376,
+              "foreground_bytes": 0,
+              "idle_copy_ms": 5.47759,
+              "foreground_copy_ms": 0,
+              "stream_wait_ms": 0.029391,
+              "residual_wait_ms": 0.095534,
+              "reassignments": 2,
+              "idle_failures": 0
+            },
+            "global_ledger_bytes": 1929544256,
+            "global_ram_bytes": 1929544256,
+            "global_peak_ledger_bytes": 1929568882,
+            "global_peak_ram_bytes": 1929568882,
+            "global_persistence_pinned_bytes": 0,
+            "global_peak_persistence_pinned_bytes": 0,
+            "global_categories": {
+              "backing_free": {
+                "bytes": 859766784,
+                "reserved_bytes": 0,
+                "peak_bytes": 1899233280
+              },
+              "backing_assigned": {
+                "bytes": 16777216,
+                "reserved_bytes": 16777216,
+                "peak_bytes": 184549376
+              },
+              "backing_materialized": {
+                "bytes": 184549376,
+                "reserved_bytes": 0,
+                "peak_bytes": 184549376
+              },
+              "private_state": {
+                "bytes": 812974080,
+                "reserved_bytes": 0,
+                "peak_bytes": 812974080
+              },
+              "private_tail": {
+                "bytes": 25165824,
+                "reserved_bytes": 0,
+                "peak_bytes": 25165824
+              },
+              "metadata": {
+                "bytes": 30310976,
+                "reserved_bytes": 0,
+                "peak_bytes": 30335602
+              },
+              "transfer_staging": {
+                "bytes": 0,
+                "reserved_bytes": 0,
+                "peak_bytes": 0
+              }
+            }
+          },
+          "cache_hit": true,
+          "cache_restore_bytes": 352669856,
+          "cache_snapshot_bytes": 346399040,
+          "cache_disk_queued_bytes": 0,
+          "cache_shared_bytes": 0,
+          "cache_restore_ms": 5.557119,
+          "cache_snapshot_ms": 6.419536,
+          "cache_disk_enqueue_ms": 0.0014199999999999998,
+          "cache_disk_hit": false,
+          "cache_shared_prefix_snapshots": 0,
+          "cache_shared_prefix_bytes": 0,
+          "cache_shared_prefix_ms": 0,
+          "draft_rounds": 0,
+          "prefill_tokens": 208,
+          "prefill_chunks": 2,
+          "active_decode_prefill_chunks": 0,
+          "max_prefill_chunk_tokens": 203,
+          "queue_depth_at_submit": 1,
+          "client_queue_depth_at_submit": 1,
+          "resident_requests_at_admission": 1,
+          "requested_logical_concurrency": 2,
+          "physical_execution_width": 1,
+          "queue_ms": 6.289868,
+          "shared_prefix_wait_ms": 0,
+          "prefill_ms": 652.9194699999999,
+          "decode_ms": 1991.7373079999998,
+          "ttft_ms": 662.383553,
+          "mean_inter_token_ms": 83.13653373913041,
+          "max_inter_token_ms": 86.457452,
+          "execution_plan": "serial-fallback"
+        }
+      }
+    },
+    "cache_growth_drop_reasoning_turn_2": {
+      "text": "BETA",
+      "reasoning": "The user is asking me to reply with only \"BETA\". This is a straightforward request.",
+      "tools": [],
+      "finish": "stop",
+      "usage": {
+        "completion_tokens": 24,
+        "prompt_tokens": 3338,
+        "total_tokens": 3362,
+        "completion_tokens_details": {
+          "reasoning_tokens": 20
+        },
+        "prompt_tokens_details": {
+          "cached_tokens": 3130
+        },
+        "cached_tokens": 3130,
+        "prompt_tokens_per_second": 318.4705227764522,
+        "completion_tokens_per_second": 12.082102161249857,
+        "draft_tokens": 0,
+        "draft_tokens_accepted": 0,
+        "gufo": {
+          "component_cache": {
+            "schema": "component-cache-v1",
+            "reuse": "ram",
+            "selection_reason": 1,
+            "deepest_live_tokens": 0,
+            "deepest_ram_tokens": 3130,
+            "deepest_disk_tokens": 0,
+            "selected_tokens": 3130,
+            "restored_bytes": 365973664,
+            "prefilled_tokens": 208,
+            "captures": 2,
+            "captured_capacity_bytes": 346161152,
+            "borrowed_capacity_bytes": 16777216,
+            "copied_payload_bytes": 322675008,
+            "captured_checkpoint_ids": [
+              391,
+              424
+            ],
+            "global_spill": {
+              "idle_bytes": 201326592,
+              "foreground_bytes": 0,
+              "idle_copy_ms": 6.079263,
+              "foreground_copy_ms": 0,
+              "stream_wait_ms": 0.036751,
+              "residual_wait_ms": 0.170618,
+              "reassignments": 3,
+              "idle_failures": 0
+            },
+            "global_ledger_bytes": 1929675424,
+            "global_ram_bytes": 1929675424,
+            "global_peak_ledger_bytes": 1929700518,
+            "global_peak_ram_bytes": 1929700518,
+            "global_persistence_pinned_bytes": 0,
+            "global_peak_persistence_pinned_bytes": 0,
+            "global_categories": {
+              "backing_free": {
+                "bytes": 513605632,
+                "reserved_bytes": 0,
+                "peak_bytes": 1899233280
+              },
+              "backing_assigned": {
+                "bytes": 16777216,
+                "reserved_bytes": 16777216,
+                "peak_bytes": 184549376
+              },
+              "backing_materialized": {
+                "bytes": 201326592,
+                "reserved_bytes": 0,
+                "peak_bytes": 201326592
+              },
+              "private_state": {
+                "bytes": 1138163712,
+                "reserved_bytes": 0,
+                "peak_bytes": 1138163712
+              },
+              "private_tail": {
+                "bytes": 29360128,
+                "reserved_bytes": 0,
+                "peak_bytes": 29360128
+              },
+              "metadata": {
+                "bytes": 30442144,
+                "reserved_bytes": 0,
+                "peak_bytes": 30467238
+              },
+              "transfer_staging": {
+                "bytes": 0,
+                "reserved_bytes": 0,
+                "peak_bytes": 0
+              }
+            }
+          },
+          "cache_hit": true,
+          "cache_restore_bytes": 365973664,
+          "cache_snapshot_bytes": 339452224,
+          "cache_disk_queued_bytes": 0,
+          "cache_shared_bytes": 0,
+          "cache_restore_ms": 6.071446,
+          "cache_snapshot_ms": 6.426745,
+          "cache_disk_enqueue_ms": 0.0020800000000000003,
+          "cache_disk_hit": false,
+          "cache_shared_prefix_snapshots": 0,
+          "cache_shared_prefix_bytes": 0,
+          "cache_shared_prefix_ms": 0,
+          "draft_rounds": 0,
+          "prefill_tokens": 208,
+          "prefill_chunks": 2,
+          "active_decode_prefill_chunks": 0,
+          "max_prefill_chunk_tokens": 203,
+          "queue_depth_at_submit": 1,
+          "client_queue_depth_at_submit": 1,
+          "resident_requests_at_admission": 1,
+          "requested_logical_concurrency": 2,
+          "physical_execution_width": 1,
+          "queue_ms": 6.90504,
+          "shared_prefix_wait_ms": 0,
+          "prefill_ms": 653.121671,
+          "decode_ms": 1986.409292,
+          "ttft_ms": 663.206626,
+          "mean_inter_token_ms": 82.91027413043479,
+          "max_inter_token_ms": 86.220639,
+          "execution_plan": "serial-fallback"
+        }
+      }
+    },
+    "cache_growth_drop_reasoning_turn_3": {
+      "text": "BETA",
+      "reasoning": "The user is asking me to reply with only \"BETA\". This is a straightforward request.",
+      "tools": [],
+      "finish": "stop",
+      "usage": {
+        "completion_tokens": 24,
+        "prompt_tokens": 3541,
+        "total_tokens": 3565,
+        "completion_tokens_details": {
+          "reasoning_tokens": 20
+        },
+        "prompt_tokens_details": {
+          "cached_tokens": 3333
+        },
+        "cached_tokens": 3333,
+        "prompt_tokens_per_second": 318.3464093279183,
+        "completion_tokens_per_second": 12.062403699611588,
+        "draft_tokens": 0,
+        "draft_tokens_accepted": 0,
+        "gufo": {
+          "component_cache": {
+            "schema": "component-cache-v1",
+            "reuse": "ram",
+            "selection_reason": 1,
+            "deepest_live_tokens": 0,
+            "deepest_ram_tokens": 3333,
+            "deepest_disk_tokens": 0,
+            "selected_tokens": 3333,
+            "restored_bytes": 379277472,
+            "prefilled_tokens": 208,
+            "captures": 2,
+            "captured_capacity_bytes": 354549760,
+            "borrowed_capacity_bytes": 0,
+            "copied_payload_bytes": 349282624,
+            "captured_checkpoint_ids": [
+              425,
+              426
+            ],
+            "global_spill": {
+              "idle_bytes": 218103808,
+              "foreground_bytes": 0,
+              "idle_copy_ms": 6.700014,
+              "foreground_copy_ms": 0,
+              "stream_wait_ms": 0.042232,
+              "residual_wait_ms": 0.238442,
+              "reassignments": 4,
+              "idle_failures": 0
+            },
+            "global_ledger_bytes": 1929789016,
+            "global_ram_bytes": 1929789016,
+            "global_peak_ledger_bytes": 1929813298,
+            "global_peak_ram_bytes": 1929813298,
+            "global_persistence_pinned_bytes": 0,
+            "global_peak_persistence_pinned_bytes": 0,
+            "global_categories": {
+              "backing_free": {
+                "bytes": 159055872,
+                "reserved_bytes": 0,
+                "peak_bytes": 1899233280
+              },
+              "backing_assigned": {
+                "bytes": 0,
+                "reserved_bytes": 0,
+                "peak_bytes": 184549376
+              },
+              "backing_materialized": {
+                "bytes": 218103808,
+                "reserved_bytes": 0,
+                "peak_bytes": 218103808
+              },
+              "private_state": {
+                "bytes": 1463353344,
+                "reserved_bytes": 0,
+                "peak_bytes": 1463353344
+              },
+              "private_tail": {
+                "bytes": 58720256,
+                "reserved_bytes": 0,
+                "peak_bytes": 58720256
+              },
+              "metadata": {
+                "bytes": 30555736,
+                "reserved_bytes": 0,
+                "peak_bytes": 30580018
+              },
+              "transfer_staging": {
+                "bytes": 0,
+                "reserved_bytes": 0,
+                "peak_bytes": 0
+              }
+            }
+          },
+          "cache_hit": true,
+          "cache_restore_bytes": 379277472,
+          "cache_snapshot_bytes": 349282624,
+          "cache_disk_queued_bytes": 0,
+          "cache_shared_bytes": 0,
+          "cache_restore_ms": 6.407615,
+          "cache_snapshot_ms": 6.363843,
+          "cache_disk_enqueue_ms": 0.00034,
+          "cache_disk_hit": false,
+          "cache_shared_prefix_snapshots": 0,
+          "cache_shared_prefix_bytes": 0,
+          "cache_shared_prefix_ms": 0,
+          "draft_rounds": 0,
+          "prefill_tokens": 208,
+          "prefill_chunks": 2,
+          "active_decode_prefill_chunks": 0,
+          "max_prefill_chunk_tokens": 203,
+          "queue_depth_at_submit": 1,
+          "client_queue_depth_at_submit": 1,
+          "resident_requests_at_admission": 1,
+          "requested_logical_concurrency": 2,
+          "physical_execution_width": 1,
+          "queue_ms": 7.651029,
+          "shared_prefix_wait_ms": 0,
+          "prefill_ms": 653.376303,
+          "decode_ms": 1989.6531900000002,
+          "ttft_ms": 664.192018,
+          "mean_inter_token_ms": 83.04490460869565,
+          "max_inter_token_ms": 86.338855,
+          "execution_plan": "serial-fallback"
+        }
+      }
+    },
+    "cache_growth_drop_reasoning_unchanged": {
+      "text": "BETA",
+      "reasoning": "The user is asking me to reply with only \"BETA\". This is a straightforward request.",
+      "tools": [],
+      "finish": "stop",
+      "usage": {
+        "completion_tokens": 24,
+        "prompt_tokens": 3541,
+        "total_tokens": 3565,
+        "completion_tokens_details": {
+          "reasoning_tokens": 20
+        },
+        "prompt_tokens_details": {
+          "cached_tokens": 3541
+        },
+        "cached_tokens": 3541,
+        "prompt_tokens_per_second": 0,
+        "completion_tokens_per_second": 12.065862839554622,
+        "draft_tokens": 0,
+        "draft_tokens_accepted": 0,
+        "gufo": {
+          "component_cache": {
+            "schema": "component-cache-v1",
+            "reuse": "ram",
+            "selection_reason": 1,
+            "deepest_live_tokens": 0,
+            "deepest_ram_tokens": 3541,
+            "deepest_disk_tokens": 0,
+            "selected_tokens": 3541,
+            "restored_bytes": 392908960,
+            "prefilled_tokens": 0,
+            "captures": 0,
+            "captured_capacity_bytes": 0,
+            "borrowed_capacity_bytes": 0,
+            "copied_payload_bytes": 0,
+            "captured_checkpoint_ids": [],
+            "global_spill": {
+              "idle_bytes": 218103808,
+              "foreground_bytes": 0,
+              "idle_copy_ms": 6.700014,
+              "foreground_copy_ms": 0,
+              "stream_wait_ms": 0.042232,
+              "residual_wait_ms": 0.333497,
+              "reassignments": 5,
+              "idle_failures": 0
+            },
+            "global_ledger_bytes": 1929791188,
+            "global_ram_bytes": 1929791188,
+            "global_peak_ledger_bytes": 1929850252,
+            "global_peak_ram_bytes": 1929850252,
+            "global_persistence_pinned_bytes": 0,
+            "global_peak_persistence_pinned_bytes": 0,
+            "global_categories": {
+              "backing_free": {
+                "bytes": 159055872,
+                "reserved_bytes": 0,
+                "peak_bytes": 1899233280
+              },
+              "backing_assigned": {
+                "bytes": 0,
+                "reserved_bytes": 0,
+                "peak_bytes": 184549376
+              },
+              "backing_materialized": {
+                "bytes": 218103808,
+                "reserved_bytes": 0,
+                "peak_bytes": 218103808
+              },
+              "private_state": {
+                "bytes": 1463353344,
+                "reserved_bytes": 0,
+                "peak_bytes": 1463353344
+              },
+              "private_tail": {
+                "bytes": 58720256,
+                "reserved_bytes": 0,
+                "peak_bytes": 58720256
+              },
+              "metadata": {
+                "bytes": 30557908,
+                "reserved_bytes": 0,
+                "peak_bytes": 30616972
+              },
+              "transfer_staging": {
+                "bytes": 0,
+                "reserved_bytes": 0,
+                "peak_bytes": 0
+              }
+            }
+          },
+          "cache_hit": true,
+          "cache_restore_bytes": 392908960,
+          "cache_snapshot_bytes": 0,
+          "cache_disk_queued_bytes": 0,
+          "cache_shared_bytes": 0,
+          "cache_restore_ms": 6.181323,
+          "cache_snapshot_ms": 0,
+          "cache_disk_enqueue_ms": 0,
+          "cache_disk_hit": false,
+          "cache_shared_prefix_snapshots": 0,
+          "cache_shared_prefix_bytes": 0,
+          "cache_shared_prefix_ms": 0,
+          "draft_rounds": 0,
+          "prefill_tokens": 0,
+          "prefill_chunks": 0,
+          "active_decode_prefill_chunks": 0,
+          "max_prefill_chunk_tokens": 0,
+          "queue_depth_at_submit": 1,
+          "client_queue_depth_at_submit": 1,
+          "resident_requests_at_admission": 1,
+          "requested_logical_concurrency": 2,
+          "physical_execution_width": 1,
+          "queue_ms": 7.070029,
+          "shared_prefix_wait_ms": 0,
+          "prefill_ms": 0,
+          "decode_ms": 1989.0827799999997,
+          "ttft_ms": 7.071039,
+          "mean_inter_token_ms": 82.88282917391304,
+          "max_inter_token_ms": 83.138398,
+          "execution_plan": "serial-fallback"
+        }
+      }
+    },
+    "cache_growth_drop_reasoning_cold_control_0": {
+      "text": "BETA",
+      "reasoning": "The user is asking me to reply with only \"BETA\". This is a straightforward instruction.",
+      "tools": [],
+      "finish": "stop",
+      "usage": {
+        "completion_tokens": 24,
+        "prompt_tokens": 2932,
+        "total_tokens": 2956,
+        "completion_tokens_details": {
+          "reasoning_tokens": 20
+        },
+        "prompt_tokens_details": {
+          "cached_tokens": 0
+        },
+        "cached_tokens": 0,
+        "prompt_tokens_per_second": 568.8824510401296,
+        "completion_tokens_per_second": 12.10090356589779,
+        "draft_tokens": 0,
+        "draft_tokens_accepted": 0,
+        "gufo": {
+          "component_cache": {
+            "schema": "component-cache-v1",
+            "reuse": "none",
+            "selection_reason": 4,
+            "deepest_live_tokens": 0,
+            "deepest_ram_tokens": 0,
+            "deepest_disk_tokens": 0,
+            "selected_tokens": 0,
+            "restored_bytes": 0,
+            "prefilled_tokens": 2932,
+            "captures": 2,
+            "captured_capacity_bytes": 526516224,
+            "borrowed_capacity_bytes": 184549376,
+            "copied_payload_bytes": 336568640,
+            "captured_checkpoint_ids": [
+              428,
+              781
+            ],
+            "global_spill": {
+              "idle_bytes": 218103808,
+              "foreground_bytes": 0,
+              "idle_copy_ms": 6.700014,
+              "foreground_copy_ms": 0,
+              "stream_wait_ms": 0.042232,
+              "residual_wait_ms": 0.376239,
+              "reassignments": 6,
+              "idle_failures": 0
+            },
+            "global_ledger_bytes": 1929924254,
+            "global_ram_bytes": 1929924254,
+            "global_peak_ledger_bytes": 1929973840,
+            "global_peak_ram_bytes": 1929973840,
+            "global_persistence_pinned_bytes": 0,
+            "global_peak_persistence_pinned_bytes": 0,
+            "global_categories": {
+              "backing_free": {
+                "bytes": 141295616,
+                "reserved_bytes": 0,
+                "peak_bytes": 1899233280
+              },
+              "backing_assigned": {
+                "bytes": 184549376,
+                "reserved_bytes": 184549376,
+                "peak_bytes": 184549376
+              },
+              "backing_materialized": {
+                "bytes": 218103808,
+                "reserved_bytes": 0,
+                "peak_bytes": 218103808
+              },
+              "private_state": {
+                "bytes": 1300758528,
+                "reserved_bytes": 0,
+                "peak_bytes": 1463353344
+              },
+              "private_tail": {
+                "bytes": 54525952,
+                "reserved_bytes": 0,
+                "peak_bytes": 58720256
+              },
+              "metadata": {
+                "bytes": 30690974,
+                "reserved_bytes": 0,
+                "peak_bytes": 30740560
+              },
+              "transfer_staging": {
+                "bytes": 0,
+                "reserved_bytes": 0,
+                "peak_bytes": 0
+              }
+            }
+          },
+          "cache_hit": false,
+          "cache_miss_reason": "disabled",
+          "cache_common_prefix_tokens": 0,
+          "cache_checkpoint_tokens": 0,
+          "cache_restore_bytes": 0,
+          "cache_snapshot_bytes": 521118016,
+          "cache_disk_queued_bytes": 0,
+          "cache_shared_bytes": 0,
+          "cache_restore_ms": 0,
+          "cache_snapshot_ms": 7.427537,
+          "cache_disk_enqueue_ms": 0.00076,
+          "cache_disk_hit": false,
+          "cache_shared_prefix_snapshots": 0,
+          "cache_shared_prefix_bytes": 0,
+          "cache_shared_prefix_ms": 0,
+          "draft_rounds": 0,
+          "prefill_tokens": 2932,
+          "prefill_chunks": 2,
+          "active_decode_prefill_chunks": 0,
+          "max_prefill_chunk_tokens": 2927,
+          "queue_depth_at_submit": 1,
+          "client_queue_depth_at_submit": 1,
+          "resident_requests_at_admission": 1,
+          "requested_logical_concurrency": 2,
+          "physical_execution_width": 1,
+          "queue_ms": 0.483925,
+          "shared_prefix_wait_ms": 0,
+          "prefill_ms": 5153.964575,
+          "decode_ms": 1983.3229700000004,
+          "ttft_ms": 5158.655919,
+          "mean_inter_token_ms": 82.78422582608695,
+          "max_inter_token_ms": 86.089703,
+          "execution_plan": "serial-fallback"
+        }
+      }
+    },
+    "cache_growth_drop_reasoning_cold_control_1": {
+      "text": "BETA",
+      "reasoning": "The user is asking me to reply with only \"BETA\". This is a straightforward request.",
+      "tools": [],
+      "finish": "stop",
+      "usage": {
+        "completion_tokens": 24,
+        "prompt_tokens": 3135,
+        "total_tokens": 3159,
+        "completion_tokens_details": {
+          "reasoning_tokens": 20
+        },
+        "prompt_tokens_details": {
+          "cached_tokens": 0
+        },
+        "cached_tokens": 0,
+        "prompt_tokens_per_second": 536.8132408462898,
+        "completion_tokens_per_second": 12.087292808969137,
+        "draft_tokens": 0,
+        "draft_tokens_accepted": 0,
+        "gufo": {
+          "component_cache": {
+            "schema": "component-cache-v1",
+            "reuse": "none",
+            "selection_reason": 4,
+            "deepest_live_tokens": 0,
+            "deepest_ram_tokens": 0,
+            "deepest_disk_tokens": 0,
+            "selected_tokens": 0,
+            "restored_bytes": 0,
+            "prefilled_tokens": 3135,
+            "captures": 2,
+            "captured_capacity_bytes": 534904832,
+            "borrowed_capacity_bytes": 201326592,
+            "copied_payload_bytes": 329621824,
+            "captured_checkpoint_ids": [
+              783,
+              1168
+            ],
+            "global_spill": {
+              "idle_bytes": 359137280,
+              "foreground_bytes": 0,
+              "idle_copy_ms": 10.975667,
+              "foreground_copy_ms": 0,
+              "stream_wait_ms": 0.064465,
+              "residual_wait_ms": 0.459174,
+              "reassignments": 7,
+              "idle_failures": 0
+            },
+            "global_ledger_bytes": 1930075384,
+            "global_ram_bytes": 1930075384,
+            "global_peak_ledger_bytes": 1930128210,
+            "global_peak_ram_bytes": 1930128210,
+            "global_persistence_pinned_bytes": 0,
+            "global_peak_persistence_pinned_bytes": 0,
+            "global_categories": {
+              "backing_free": {
+                "bytes": 115146752,
+                "reserved_bytes": 0,
+                "peak_bytes": 1899233280
+              },
+              "backing_assigned": {
+                "bytes": 244842496,
+                "reserved_bytes": 244842496,
+                "peak_bytes": 244842496
+              },
+              "backing_materialized": {
+                "bytes": 359137280,
+                "reserved_bytes": 0,
+                "peak_bytes": 359137280
+              },
+              "private_state": {
+                "bytes": 1138163712,
+                "reserved_bytes": 0,
+                "peak_bytes": 1463353344
+              },
+              "private_tail": {
+                "bytes": 41943040,
+                "reserved_bytes": 0,
+                "peak_bytes": 58720256
+              },
+              "metadata": {
+                "bytes": 30842104,
+                "reserved_bytes": 0,
+                "peak_bytes": 30894930
+              },
+              "transfer_staging": {
+                "bytes": 0,
+                "reserved_bytes": 0,
+                "peak_bytes": 0
+              }
+            }
+          },
+          "cache_hit": false,
+          "cache_miss_reason": "disabled",
+          "cache_common_prefix_tokens": 0,
+          "cache_checkpoint_tokens": 0,
+          "cache_restore_bytes": 0,
+          "cache_snapshot_bytes": 530948416,
+          "cache_disk_queued_bytes": 0,
+          "cache_shared_bytes": 0,
+          "cache_restore_ms": 0,
+          "cache_snapshot_ms": 7.423157,
+          "cache_disk_enqueue_ms": 0.00072,
+          "cache_disk_hit": false,
+          "cache_shared_prefix_snapshots": 0,
+          "cache_shared_prefix_bytes": 0,
+          "cache_shared_prefix_ms": 0,
+          "draft_rounds": 0,
+          "prefill_tokens": 3135,
+          "prefill_chunks": 2,
+          "active_decode_prefill_chunks": 0,
+          "max_prefill_chunk_tokens": 3130,
+          "queue_depth_at_submit": 1,
+          "client_queue_depth_at_submit": 1,
+          "resident_requests_at_admission": 1,
+          "requested_logical_concurrency": 2,
+          "physical_execution_width": 1,
+          "queue_ms": 0.95238,
+          "shared_prefix_wait_ms": 0,
+          "prefill_ms": 5840.019883,
+          "decode_ms": 1985.5562680000003,
+          "ttft_ms": 5845.194484,
+          "mean_inter_token_ms": 82.86598134782608,
+          "max_inter_token_ms": 86.154715,
+          "execution_plan": "serial-fallback"
+        }
+      }
+    },
+    "cache_growth_drop_reasoning_cold_control_2": {
+      "text": "BETA",
+      "reasoning": "The user is asking me to reply with only \"BETA\". This is a straightforward request.",
+      "tools": [],
+      "finish": "stop",
+      "usage": {
+        "completion_tokens": 24,
+        "prompt_tokens": 3338,
+        "total_tokens": 3362,
+        "completion_tokens_details": {
+          "reasoning_tokens": 20
+        },
+        "prompt_tokens_details": {
+          "cached_tokens": 0
+        },
+        "cached_tokens": 0,
+        "prompt_tokens_per_second": 499.71196388325046,
+        "completion_tokens_per_second": 12.012706885177947,
+        "draft_tokens": 0,
+        "draft_tokens_accepted": 0,
+        "gufo": {
+          "component_cache": {
+            "schema": "component-cache-v1",
+            "reuse": "none",
+            "selection_reason": 4,
+            "deepest_live_tokens": 0,
+            "deepest_ram_tokens": 0,
+            "deepest_disk_tokens": 0,
+            "selected_tokens": 0,
+            "restored_bytes": 0,
+            "prefilled_tokens": 3338,
+            "captures": 2,
+            "captured_capacity_bytes": 547487744,
+            "borrowed_capacity_bytes": 218103808,
+            "copied_payload_bytes": 322675008,
+            "captured_checkpoint_ids": [
+              1170,
+              1587
+            ],
+            "global_spill": {
+              "idle_bytes": 544210944,
+              "foreground_bytes": 43515904,
+              "idle_copy_ms": 17.687789,
+              "foreground_copy_ms": 1.14311,
+              "stream_wait_ms": 0.130628,
+              "residual_wait_ms": 1.684908,
+              "reassignments": 8,
+              "idle_failures": 0
+            },
+            "global_ledger_bytes": 1930264658,
+            "global_ram_bytes": 1930264658,
+            "global_peak_ledger_bytes": 1930320724,
+            "global_peak_ram_bytes": 1930320724,
+            "global_persistence_pinned_bytes": 0,
+            "global_peak_persistence_pinned_bytes": 0,
+            "global_categories": {
+              "backing_free": {
+                "bytes": 70123520,
+                "reserved_bytes": 0,
+                "peak_bytes": 1899233280
+              },
+              "backing_assigned": {
+                "bytes": 234356736,
+                "reserved_bytes": 234356736,
+                "peak_bytes": 244842496
+              },
+              "backing_materialized": {
+                "bytes": 587726848,
+                "reserved_bytes": 0,
+                "peak_bytes": 587726848
+              },
+              "private_state": {
+                "bytes": 975568896,
+                "reserved_bytes": 0,
+                "peak_bytes": 1463353344
+              },
+              "private_tail": {
+                "bytes": 31457280,
+                "reserved_bytes": 0,
+                "peak_bytes": 58720256
+              },
+              "metadata": {
+                "bytes": 31031378,
+                "reserved_bytes": 0,
+                "peak_bytes": 31087444
+              },
+              "transfer_staging": {
+                "bytes": 0,
+                "reserved_bytes": 0,
+                "peak_bytes": 0
+              }
+            }
+          },
+          "cache_hit": false,
+          "cache_miss_reason": "disabled",
+          "cache_common_prefix_tokens": 0,
+          "cache_checkpoint_tokens": 0,
+          "cache_restore_bytes": 0,
+          "cache_snapshot_bytes": 540778816,
+          "cache_disk_queued_bytes": 0,
+          "cache_shared_bytes": 0,
+          "cache_restore_ms": 0,
+          "cache_snapshot_ms": 8.548976,
+          "cache_disk_enqueue_ms": 0.00072,
+          "cache_disk_hit": false,
+          "cache_shared_prefix_snapshots": 0,
+          "cache_shared_prefix_bytes": 0,
+          "cache_shared_prefix_ms": 0,
+          "draft_rounds": 0,
+          "prefill_tokens": 3338,
+          "prefill_chunks": 2,
+          "active_decode_prefill_chunks": 0,
+          "max_prefill_chunk_tokens": 3333,
+          "queue_depth_at_submit": 1,
+          "client_queue_depth_at_submit": 1,
+          "resident_requests_at_admission": 1,
+          "requested_logical_concurrency": 2,
+          "physical_execution_width": 1,
+          "queue_ms": 2.47981,
+          "shared_prefix_wait_ms": 0,
+          "prefill_ms": 6679.848075,
+          "decode_ms": 1997.8844260000008,
+          "ttft_ms": 6687.634592,
+          "mean_inter_token_ms": 83.39810304347824,
+          "max_inter_token_ms": 86.792859,
+          "execution_plan": "serial-fallback"
+        }
+      }
+    },
+    "cache_growth_drop_reasoning_cold_control_3": {
+      "text": "BETA",
+      "reasoning": "The user is asking me to reply with only \"BETA\". This is a straightforward request.",
+      "tools": [],
+      "finish": "stop",
+      "usage": {
+        "completion_tokens": 24,
+        "prompt_tokens": 3541,
+        "total_tokens": 3565,
+        "completion_tokens_details": {
+          "reasoning_tokens": 20
+        },
+        "prompt_tokens_details": {
+          "cached_tokens": 0
+        },
+        "cached_tokens": 0,
+        "prompt_tokens_per_second": 535.2010362442455,
+        "completion_tokens_per_second": 12.001506933213552,
+        "draft_tokens": 0,
+        "draft_tokens_accepted": 0,
+        "gufo": {
+          "component_cache": {
+            "schema": "component-cache-v1",
+            "reuse": "none",
+            "selection_reason": 4,
+            "deepest_live_tokens": 0,
+            "deepest_ram_tokens": 0,
+            "deepest_disk_tokens": 0,
+            "selected_tokens": 0,
+            "restored_bytes": 0,
+            "prefilled_tokens": 3541,
+            "captures": 2,
+            "captured_capacity_bytes": 572653568,
+            "borrowed_capacity_bytes": 218103808,
+            "copied_payload_bytes": 349282624,
+            "captured_checkpoint_ids": [
+              1589,
+              2006
+            ],
+            "global_spill": {
+              "idle_bytes": 778567680,
+              "foreground_bytes": 43515904,
+              "idle_copy_ms": 26.490796,
+              "foreground_copy_ms": 1.14311,
+              "stream_wait_ms": 0.194943,
+              "residual_wait_ms": 1.844586,
+              "reassignments": 9,
+              "idle_failures": 0
+            },
+            "global_ledger_bytes": 1930393548,
+            "global_ram_bytes": 1930393548,
+            "global_peak_ledger_bytes": 1930511398,
+            "global_peak_ram_bytes": 1930511398,
+            "global_persistence_pinned_bytes": 0,
+            "global_peak_persistence_pinned_bytes": 0,
+            "global_categories": {
+              "backing_free": {
+                "bytes": 220135424,
+                "reserved_bytes": 0,
+                "peak_bytes": 1899233280
+              },
+              "backing_assigned": {
+                "bytes": 218103808,
+                "reserved_bytes": 218103808,
+                "peak_bytes": 244842496
+              },
+              "backing_materialized": {
+                "bytes": 603979776,
+                "reserved_bytes": 0,
+                "peak_bytes": 822083584
+              },
+              "private_state": {
+                "bytes": 812974080,
+                "reserved_bytes": 0,
+                "peak_bytes": 1463353344
+              },
+              "private_tail": {
+                "bytes": 44040192,
+                "reserved_bytes": 0,
+                "peak_bytes": 58720256
+              },
+              "metadata": {
+                "bytes": 31160268,
+                "reserved_bytes": 0,
+                "peak_bytes": 31278118
+              },
+              "transfer_staging": {
+                "bytes": 0,
+                "reserved_bytes": 0,
+                "peak_bytes": 0
+              }
+            }
+          },
+          "cache_hit": false,
+          "cache_miss_reason": "disabled",
+          "cache_common_prefix_tokens": 0,
+          "cache_checkpoint_tokens": 0,
+          "cache_restore_bytes": 0,
+          "cache_snapshot_bytes": 567386432,
+          "cache_disk_queued_bytes": 0,
+          "cache_shared_bytes": 0,
+          "cache_restore_ms": 0,
+          "cache_snapshot_ms": 9.628093,
+          "cache_disk_enqueue_ms": 0.0008699999999999999,
+          "cache_disk_hit": false,
+          "cache_shared_prefix_snapshots": 0,
+          "cache_shared_prefix_bytes": 0,
+          "cache_shared_prefix_ms": 0,
+          "draft_rounds": 0,
+          "prefill_tokens": 3541,
+          "prefill_chunks": 2,
+          "active_decode_prefill_chunks": 0,
+          "max_prefill_chunk_tokens": 3536,
+          "queue_depth_at_submit": 1,
+          "client_queue_depth_at_submit": 1,
+          "resident_requests_at_admission": 1,
+          "requested_logical_concurrency": 2,
+          "physical_execution_width": 1,
+          "queue_ms": 1.413314,
+          "shared_prefix_wait_ms": 0,
+          "prefill_ms": 6616.2054259999995,
+          "decode_ms": 1999.7488759999994,
+          "ttft_ms": 6624.002282,
+          "mean_inter_token_ms": 83.46735360869566,
+          "max_inter_token_ms": 86.895415,
+          "execution_plan": "serial-fallback"
+        }
+      }
+    }
+  }
+}
