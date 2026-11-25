@@ -219,8 +219,9 @@ struct Engine::Impl {
   // allocated once (convolution histories at Init, drafter features at
   // AttachDrafter). A prefill run inside another's yield finds it busy and
   // allocates its own.
-  static constexpr std::size_t kCpConvFloats =
-      static_cast<std::size_t>(48) * kConvChannels * 3;
+  std::size_t CpConvFloats() const {
+    return static_cast<std::size_t>(eng->n_slots_) * kConvChannels * 3;
+  }
   float* cp_conv = nullptr;
   float* cp_draft_f = nullptr;
   bool cp_busy = false;
@@ -256,6 +257,8 @@ struct Engine::Impl {
   int* off_d;
   int* sorted_d;
   float* logits_d;
+  float* logits_ref_d = nullptr;
+  float *ref_cur = nullptr, *ref_blk = nullptr, *ref_hn = nullptr;
   int nblocks = 0;
 
   // ---- decode (T = 1) state: separate small buffers, a device slot table and
@@ -323,7 +326,9 @@ struct Engine::Impl {
   // all rows of the verification are one session's (else several sessions'
   // rows, each run through the per-row attention kernel)
   bool verify_one_session = true;
-  float* d_vcap = nullptr;  // [48][kVerifyRows][6656] conv inputs of a step
+  float* d_vcap = nullptr;  // [n_slots][kVerifyRows][6656] conv inputs
+  void* d_loopcd_ws = nullptr;
+  float* d_ref_cur = nullptr;
   // device argmax and GPU linear sampler workspaces
   float* d_amax_ws = nullptr;
   int* d_amax = nullptr;
@@ -450,15 +455,20 @@ struct Engine::Impl {
     }
   }
   // Live between two visits of a ubatch: cur, prelude, bankout, blocks[6],
-  // bank[4]. Only a yield to another session spills them, so the area exists
-  // from the first one (Engine::ReserveYieldSpill makes it at load).
+  // bank[4], plus ref_cur, ref_blk, hn when LoopCD is enabled. Only a yield
+  // to another session spills them, so the area exists from the first one
+  // (Engine::ReserveYieldSpill makes it at load).
   float* spill_buf[13] = {};
+  float* spill_ref[3] = {};
   void EnsureSpill() {
     if (spill_buf[0] != nullptr)
       return;
     const std::shared_lock<std::shared_mutex> gate(CaptureGate());
     for (auto& b : spill_buf)
       b = NewBuf(static_cast<std::size_t>(U) * kEmbd);
+    if (eng->has_loopcd())
+      for (auto& b : spill_ref)
+        b = NewBuf(static_cast<std::size_t>(U) * kEmbd);
   }
   float** LiveBufs(float** out) {
     int n = 0;
@@ -480,6 +490,13 @@ struct Engine::Impl {
       Check(hipMemcpyAsync(spill_buf[i], live[i], rows, hipMemcpyDeviceToDevice,
                            s),
             "spill");
+    if (eng->has_loopcd()) {
+      float* ref_live[3] = {ref_cur, ref_blk, hn};
+      for (int i = 0; i < 3; ++i)
+        Check(hipMemcpyAsync(spill_ref[i], ref_live[i], rows,
+                             hipMemcpyDeviceToDevice, s),
+              "spill");
+    }
   }
   void Unspill() {
     float* live[13];
@@ -489,6 +506,13 @@ struct Engine::Impl {
       Check(hipMemcpyAsync(live[i], spill_buf[i], rows, hipMemcpyDeviceToDevice,
                            s),
             "unspill");
+    if (eng->has_loopcd()) {
+      float* ref_live[3] = {ref_cur, ref_blk, hn};
+      for (int i = 0; i < 3; ++i)
+        Check(hipMemcpyAsync(ref_live[i], spill_ref[i], rows,
+                             hipMemcpyDeviceToDevice, s),
+              "unspill");
+    }
   }
   /// Called after every visit unit; yields at the group boundaries. `mid`:
   /// transient activations are live (inside a ubatch), so they are spilled
@@ -615,9 +639,14 @@ struct Engine::Impl {
     U = static_cast<int>(e->ubatch_);
     const std::size_t u = static_cast<std::size_t>(U);
     cur = NewBuf(u * kEmbd);
-    cp_conv = NewBuf(Engine::kMaxPassCheckpoints * kCpConvFloats);
+    cp_conv = NewBuf(Engine::kMaxPassCheckpoints * CpConvFloats());
     prelude = NewBuf(u * kEmbd);
     bankout = NewBuf(u * kEmbd);
+    if (e->has_loopcd()) {
+      ref_cur = NewBuf(u * kEmbd);
+      ref_blk = NewBuf(u * kEmbd);
+      ref_hn = NewBuf(u * kEmbd);
+    }
     for (auto& b : blocks)
       b = NewBuf(u * kEmbd);
     for (auto& b : bank)
@@ -656,6 +685,9 @@ struct Engine::Impl {
     sorted_d = NewInts(u * 8);
     logits_d =
         NewBuf(static_cast<std::size_t>(kLogitChunk) * cfg->n_vocab_text);
+    if (e->has_loopcd())
+      logits_ref_d =
+          NewBuf(static_cast<std::size_t>(kLogitChunk) * cfg->n_vocab_text);
     // message queries of the core layers, [4][2304] each, one core layer after
     // the other (a decode pass mixes all of them in one launch)
     msgq_all = NewBuf(static_cast<std::size_t>(cfg->CoreLen()) * 4 * kEmbd);
@@ -804,8 +836,12 @@ struct Engine::Impl {
     d_groups.nd = NewInts(1);
     d_groups.qx = NewRaw(B * 8 * fs::kMoeQuantBytes);
     d_step = NewInts(3 * B);  // tokens [B], positions [B], row in session [B]
-    d_vcap =
-        NewBuf(static_cast<std::size_t>(48) * kConvChannels * fs::kVerifyRows);
+    d_vcap = NewBuf(static_cast<std::size_t>(eng->n_slots_) * kConvChannels *
+                    fs::kVerifyRows);
+    if (eng->has_loopcd()) {
+      d_loopcd_ws = NewRaw(fs::LoopCdWorkspaceBytes(kMaxB));
+      d_ref_cur = NewBuf(B * kEmbd);
+    }
     d_feat = NewBuf(B * Drafter::kFeatureFloats);
     d_amax_ws = NewBuf(B * 64 * 2);
     d_amax = NewInts(B);
@@ -839,7 +875,7 @@ struct Engine::Impl {
     d_moe_cnt = reinterpret_cast<unsigned*>(NewInts(2 * B * 8));
     Check(hipMemset(d_moe_cnt, 0, 2 * B * 8 * 4), "expert counters");
     d_tbl = static_cast<fs::SlotEntry*>(
-        AllocDevice(B * 48 * sizeof(fs::SlotEntry), "slot table"));
+        AllocDevice(B * eng->n_slots_ * sizeof(fs::SlotEntry), "slot table"));
     scratch_allocs.push_back(d_tbl);
     const int ff = static_cast<int>(cfg->n_ff_expert);
     for (std::uint32_t il = 0; il < 24; ++il) {
@@ -1648,6 +1684,7 @@ struct Engine::Impl {
       ka.ldd = 64;
       ka.cap = VCap(slot_idx);
       ka.ri = VRows();
+      ka.slot_stride = static_cast<int>(eng->n_slots_);
       if (verify_mode)
         fs::KvPrep(ds, ka, nb);
     }
@@ -1684,6 +1721,7 @@ struct Engine::Impl {
       aa.tau_alpha = cfg->log_scale_alpha;
       aa.ldp = kSProj;
       aa.ws_tok = static_cast<int>(kMaxSplit * 8 * 12);
+      aa.slot_stride = static_cast<int>(eng->n_slots_);
       if (!verify_mode) {
         fs::KvAttnDecode(ds, ka, aa, nb);
       } else {
@@ -1691,7 +1729,7 @@ struct Engine::Impl {
           const int cn = std::min(kChunk, nb - c0);
           const std::size_t o = static_cast<std::size_t>(c0);
           fs::AttnArgs ac = aa;
-          ac.slot = aa.slot + o * 48;
+          ac.slot = aa.slot + o * eng->n_slots_;
           ac.pos = aa.pos + o;
           ac.q = aa.q + o * kSProj;
           ac.r = aa.r + o * kSProj;
@@ -1728,6 +1766,7 @@ struct Engine::Impl {
       ca.blk = nullptr;
       ca.cap = VCap(slot_idx);
       ca.ri = VRows();
+      ca.slot_stride = static_cast<int>(eng->n_slots_);
       if (ip % static_cast<int>(cfg->attn_res_block) == 0) {
         ca.blk = NewBlock();
         d_states[d_ns++] = ca.blk;
@@ -1851,8 +1890,31 @@ struct Engine::Impl {
       ca.blk = nullptr;
       ca.cap = VCap(slot_idx);
       ca.ri = VRows();
+      ca.slot_stride = static_cast<int>(eng->n_slots_);
       pend.on = true;
       pend.a = ca;
+    }
+  }
+
+  void RunDecodeHead(const float* src_hn, float* out_logits) {
+    const int V = static_cast<int>(cfg->n_vocab_text);
+    if (head_fast) {
+      if (nb >= kMmaHeadRows) {
+        fs::QuantRows(ds, kEmbd, src_hn, 1, kEmbd, nb, d_qa, d_qs);
+        fs::GemvMma(ds, kEmbd, D(w->output), d_qa, d_qs, out_logits, V,
+                    cfg->logit_softcap, nb);
+      } else {
+        for (int c0 = 0; c0 < nb; c0 += kChunk)
+          fs::GemvQ8(ds, kEmbd, D(w->output),
+                     src_hn + static_cast<std::size_t>(c0) * kEmbd,
+                     out_logits + static_cast<std::size_t>(c0) * V, V,
+                     cfg->logit_softcap, std::min(kChunk, nb - c0));
+      }
+    } else {
+      kk::Gemm(ds, static_cast<int>(w->output.type), D(w->output), V, kEmbd,
+               src_hn, kEmbd, out_logits, V, nb);
+      kk::Softcap(ds, out_logits, static_cast<std::int64_t>(nb) * V,
+                  cfg->logit_softcap);
     }
   }
 
@@ -1888,9 +1950,20 @@ struct Engine::Impl {
     const int core_len = static_cast<int>(cfg->CoreLen());
     const float* bank[16];
     int bank_n = 0;
+    const float* d_ref_states[16] = {};
+    int d_ref_ns = 0;
     for (int pass = 0; pass < static_cast<int>(cfg->n_passes); ++pass) {
       if (pass > 0) {
         FlushPending();
+        if (pass == 1 && eng->has_loopcd()) {
+          d_ref_ns = d_ns;
+          for (int i = 0; i < d_ns; ++i)
+            d_ref_states[i] = d_states[i];
+          Check(hipMemcpyAsync(d_ref_cur, cur,
+                               static_cast<std::size_t>(nb) * kEmbd * 4,
+                               hipMemcpyDeviceToDevice, ds),
+                "ref_cur");
+        }
         bank_n = 0;
         for (int i = prelude_n + 1; i < d_ns; ++i)
           bank[bank_n++] = d_states[i];
@@ -1940,22 +2013,35 @@ struct Engine::Impl {
     if (dsp)
       CaptureFeature(ds, d_hn, nb, 3, d_feat);
     PrefetchJoin();
-    const int V = static_cast<int>(cfg->n_vocab_text);
-    if (head_fast) {
-      if (nb >= kMmaHeadRows) {
-        fs::QuantRows(ds, kEmbd, d_hn, 1, kEmbd, nb, d_qa, d_qs);
-        fs::GemvMma(ds, kEmbd, D(w->output), d_qa, d_qs, logits_d, V,
-                    cfg->logit_softcap, nb);
-      } else
-        for (int c0 = 0; c0 < nb; c0 += kChunk)
-          fs::GemvQ8(ds, kEmbd, D(w->output),
-                     d_hn + static_cast<std::size_t>(c0) * kEmbd,
-                     logits_d + static_cast<std::size_t>(c0) * V, V,
-                     cfg->logit_softcap, std::min(kChunk, nb - c0));
-    } else {
-      kk::Gemm(ds, static_cast<int>(w->output.type), D(w->output), V, kEmbd,
-               d_hn, kEmbd, logits_d, V, 1);
-      kk::Softcap(ds, logits_d, V, cfg->logit_softcap);
+    RunDecodeHead(d_hn, logits_d);
+    if (eng->has_loopcd()) {
+      Check(hipMemcpyAsync(cur, d_ref_cur,
+                           static_cast<std::size_t>(nb) * kEmbd * 4,
+                           hipMemcpyDeviceToDevice, ds),
+            "ref_cur restore");
+      d_ns = d_ref_ns;
+      for (int i = 0; i < d_ref_ns; ++i)
+        d_states[i] = d_ref_states[i];
+      for (int ip = static_cast<int>(cfg->core_end);
+           ip < static_cast<int>(cfg->n_phys); ++ip) {
+        const int slot = static_cast<int>(cfg->n_visits) +
+                         (ip - static_cast<int>(cfg->core_end));
+        DLayer(ip, slot, nullptr, bucket_ctx);
+      }
+      DMix(cur, DS(w->output_res_query), 1, d_mixf);
+      kk::RmsNorm(ds, d_mixf, kEmbd, DS(w->output_norm), d_hn, kEmbd, kEmbd, nb,
+                  cfg->rms_eps);
+      PrefetchJoin();
+      RunDecodeHead(d_hn, logits_ref_d);
+      fs::LoopCdArgs la{};
+      la.logits = logits_d;
+      la.ref_logits = logits_ref_d;
+      la.rows = nb;
+      la.vocab = static_cast<int>(cfg->n_vocab_text);
+      la.w_max = eng->options_.loopcd.w_max;
+      la.adaptive = true;
+      la.ws = d_loopcd_ws;
+      fs::LoopCdGuide(ds, la);
     }
   }
 
@@ -2090,21 +2176,34 @@ struct Engine::Impl {
     Check(hipMemcpyAsync(d_step, step, sizeof step, hipMemcpyHostToDevice, ds),
           "step");
     for (int b = 0; b < n; ++b)
-      Check(hipMemcpyAsync(d_tbl + b * 48, sess[b]->tbl_,
-                           48 * sizeof(fs::SlotEntry), hipMemcpyDeviceToDevice,
-                           ds),
+      Check(hipMemcpyAsync(d_tbl + static_cast<std::size_t>(b) * eng->n_slots_,
+                           sess[b]->tbl_, eng->n_slots_ * sizeof(fs::SlotEntry),
+                           hipMemcpyDeviceToDevice, ds),
             "slot table");
-    const int key = ctx * 128 + n + (decode_prefetch ? (1 << 29) : 0);
-    auto it = graphs.find(key);
-    if (it == graphs.end() && failed_graphs.count(key) == 0)
-      it = CaptureGraph(ctx, key);
-    if (it != graphs.end()) {
-      Check(hipGraphLaunch(it->second, ds), "graph launch");
+    if (eng->options_.disable_graphs) {
+      BuildDecode(ctx);
     } else {
-      BuildDecode(ctx);  // capture was invalidated (see CaptureGraph): run this
-                         // step eagerly; a failed key is not retried
+      const int key = ctx * 128 + n + (decode_prefetch ? (1 << 29) : 0);
+      auto it = graphs.find(key);
+      if (it == graphs.end() && failed_graphs.count(key) == 0)
+        it = CaptureGraph(ctx, key);
+      if (it != graphs.end()) {
+        Check(hipGraphLaunch(it->second, ds), "graph launch");
+      } else {
+        BuildDecode(ctx);  // capture was invalidated (see CaptureGraph): run
+                           // this step eagerly; a failed key is not retried
+      }
     }
     const std::size_t V = cfg->n_vocab_text;
+    if (eng->has_loopcd() && eng->ref_logits_tap_) {
+      std::vector<float> ref_host(static_cast<std::size_t>(n) * V);
+      Check(hipMemcpyAsync(ref_host.data(), logits_ref_d,
+                           ref_host.size() * sizeof(float),
+                           hipMemcpyDeviceToHost, ds),
+            "ref logits copy");
+      Check(hipStreamSynchronize(ds), "ref logits sync");
+      eng->ref_logits_tap_(static_cast<std::size_t>(n), ref_host.data());
+    }
     for (int b = 0; b < n; ++b) {
       if (outs[b] == nullptr) {  // device logits (Engine::Step)
         Check(hipMemcpyAsync(sess[b]->dlogits_, logits_d + b * V, V * 4,
@@ -2183,10 +2282,11 @@ struct Engine::Impl {
           "step");
     for (int g = 0, b = 0; g < ng; ++g)
       for (int j = 0; j < counts[g]; ++j, ++b)
-        Check(hipMemcpyAsync(d_tbl + b * 48, sess[g]->tbl_,
-                             48 * sizeof(fs::SlotEntry),
-                             hipMemcpyDeviceToDevice, ds),
-              "slot table");
+        Check(
+            hipMemcpyAsync(d_tbl + static_cast<std::size_t>(b) * eng->n_slots_,
+                           sess[g]->tbl_, eng->n_slots_ * sizeof(fs::SlotEntry),
+                           hipMemcpyDeviceToDevice, ds),
+            "slot table");
     verify_mode = true;
     verify_one_session = ng == 1;
     struct Off {
@@ -2197,21 +2297,34 @@ struct Engine::Impl {
         *one = true;
       }
     } off{&verify_mode, &verify_one_session};
-    // Several sessions take the per-row attention kernel: their own graphs.
-    const int key = ctx * 128 + n + (ng > 1 ? (1 << 28) : 0) +
-                    (decode_prefetch ? (1 << 29) : 0);
-    const int fkey = -key;  // failed verification captures
-    auto it = vgraphs.find(key);
-    if (it == vgraphs.end() && failed_graphs.count(fkey) == 0) {
-      it = CaptureGraph(ctx, key);
-      if (it == vgraphs.end())
-        failed_graphs.insert(fkey);
-    }
-    if (it != vgraphs.end())
-      Check(hipGraphLaunch(it->second, ds), "graph launch");
-    else
+    if (eng->options_.disable_graphs) {
       BuildDecode(ctx);
+    } else {
+      // Several sessions take the per-row attention kernel: their own graphs.
+      const int key = ctx * 128 + n + (ng > 1 ? (1 << 28) : 0) +
+                      (decode_prefetch ? (1 << 29) : 0);
+      const int fkey = -key;  // failed verification captures
+      auto it = vgraphs.find(key);
+      if (it == vgraphs.end() && failed_graphs.count(fkey) == 0) {
+        it = CaptureGraph(ctx, key);
+        if (it == vgraphs.end())
+          failed_graphs.insert(fkey);
+      }
+      if (it != vgraphs.end())
+        Check(hipGraphLaunch(it->second, ds), "graph launch");
+      else
+        BuildDecode(ctx);
+    }
     const std::size_t V = cfg->n_vocab_text;
+    if (eng->has_loopcd() && eng->ref_logits_tap_) {
+      std::vector<float> ref_host(static_cast<std::size_t>(n) * V);
+      Check(hipMemcpyAsync(ref_host.data(), logits_ref_d,
+                           ref_host.size() * sizeof(float),
+                           hipMemcpyDeviceToHost, ds),
+            "ref logits copy");
+      Check(hipStreamSynchronize(ds), "ref logits sync");
+      eng->ref_logits_tap_(static_cast<std::size_t>(n), ref_host.data());
+    }
     if (out != nullptr) {
       Check(
           hipMemcpyAsync(h_rows, logits_d, static_cast<std::size_t>(n) * V * 4,
@@ -2244,7 +2357,8 @@ struct Engine::Impl {
     Drafter::Rows rows[kMaxB];
     for (int g = 0; g < ng; ++g) {
       fs::CommitVerifyConv(ds, static_cast<const fs::SlotEntry*>(ss[g]->tbl_),
-                           d_vcap, keep[g], row0[g]);
+                           d_vcap, keep[g], row0[g],
+                           static_cast<int>(eng->n_slots_));
       rows[g] = {.st = &ss[g]->draft_,
                  .feats = d_feat + static_cast<std::size_t>(row0[g]) *
                                        Drafter::kFeatureFloats,
@@ -2309,6 +2423,13 @@ struct Engine::Impl {
     for (int pass = 0; pass < static_cast<int>(cfg->n_passes); ++pass) {
       int bank_n = 0;
       if (pass > 0) {
+        if (pass == 1 && eng->has_loopcd()) {
+          if (nblocks != prelude_n + 2)
+            throw std::runtime_error(
+                "inkling2: unexpected block count after pass 1");
+          kk::Copy(s, cur, ref_cur, T * kEmbd);
+          kk::Copy(s, blocks[prelude_n + 1], ref_blk, T * kEmbd);
+        }
         // The previous pass's core blocks and end state become the message bank
         // (buffer swaps).
         for (int i = prelude_n + 1; i < nblocks; ++i)
@@ -2366,11 +2487,10 @@ struct Engine::Impl {
          ip < static_cast<int>(cfg->n_phys); ++ip) {
       Layer(ss, ip, ip, nullptr);
       Tap(visit++, "l_out");
-      if (visit < 48)
+      if (visit < static_cast<int>(eng->n_slots_))
         MaybeYield(yr,
                    true);  // (the last visit is followed by the head)
     }
-    ss.pos_ += T;
     const bool has_cps = ubatch_cps != nullptr && !ubatch_cps->empty();
     bool has_interior = false, has_at_end = false;
     if (has_cps) {
@@ -2381,41 +2501,97 @@ struct Engine::Impl {
           has_at_end = true;
       }
     }
-    if (!last_ubatch && !sink && !dsp && !has_cps)
-      return;
-
-    // output: attention-residual mix, norm, lm head, soft cap, crop
+    const bool need_main_out = last_ubatch || sink || dsp || has_cps;
     const bool need_all = dsp || sink || has_interior;
-    const int out_n = need_all ? T : 1;
-    const std::size_t out_off =
-        need_all ? 0 : static_cast<std::size_t>(T - 1) * kEmbd;
-    {
+    if (need_main_out) {
+      // output: attention-residual mix, norm (before reference coda overwrites
+      // cur / blocks; hn is preserved across reference-coda yields)
+      const int out_n = need_all ? T : 1;
+      const std::size_t out_off =
+          need_all ? 0 : static_cast<std::size_t>(T - 1) * kEmbd;
       kk::MixStates st = States(cur);
       for (int i = 0; i < st.n; ++i)
         st.ptr[i] += out_off;
       kk::Mix(s, st, DF(w->output_res_query), 1, kEmbd, out_n, mixf,
               cfg->rms_eps, nullptr);
-    }
-    kk::RmsNorm(s, mixf, kEmbd, DF(w->output_norm), hn, kEmbd, kEmbd, out_n,
-                cfg->rms_eps);
-    if (dsp) {
-      CaptureFeature(s, hn, T, 3, p_feat);
-      std::vector<Drafter::InjectCapture> dcaps;
-      if (has_interior) {
-        for (const auto& cp : *ubatch_cps)
-          if (cp.draft_f != nullptr)
-            dcaps.push_back({cp.local_t - 1, cp.draft_f});
+      kk::RmsNorm(s, mixf, kEmbd, DF(w->output_norm), hn, kEmbd, kEmbd, out_n,
+                  cfg->rms_eps);
+      if (dsp) {
+        CaptureFeature(s, hn, T, 3, p_feat);
+        std::vector<Drafter::InjectCapture> dcaps;
+        if (has_interior) {
+          for (const auto& cp : *ubatch_cps)
+            if (cp.draft_f != nullptr)
+              dcaps.push_back({cp.local_t - 1, cp.draft_f});
+        }
+        dsp->Inject(s, ss.draft_, p_feat, static_cast<std::size_t>(pos0), T,
+                    dcaps);
       }
-      dsp->Inject(s, ss.draft_, p_feat, static_cast<std::size_t>(pos0), T,
-                  dcaps);
-      if (!last_ubatch && !sink && !has_cps)
-        return;
     }
+    if (eng->has_loopcd()) {
+      // Run the reference coda on pass 1's stashed state for every ubatch so
+      // its KV cache, conv histories, and in-pass checkpoints stay complete.
+      kk::Copy(s, ref_cur, cur, T * kEmbd);
+      kk::Copy(s, prelude, blocks[prelude_n], T * kEmbd);
+      kk::Copy(s, ref_blk, blocks[prelude_n + 1], T * kEmbd);
+      nblocks = prelude_n + 2;
+      for (int ip = static_cast<int>(cfg->core_end);
+           ip < static_cast<int>(cfg->n_phys); ++ip) {
+        const int slot = static_cast<int>(cfg->n_visits) +
+                         (ip - static_cast<int>(cfg->core_end));
+        Layer(ss, ip, slot, nullptr);
+        Tap(visit++, "l_out");
+        if (visit < static_cast<int>(eng->n_slots_))
+          MaybeYield(yr, true);
+      }
+    }
+    ss.pos_ += T;
+    if (!last_ubatch && !sink && !has_cps)
+      return;
+
+    const bool ref_need_all = sink || has_interior;
+    if (eng->has_loopcd()) {
+      const int ref_out_n = ref_need_all ? T : 1;
+      const std::size_t ref_out_off =
+          ref_need_all ? 0 : static_cast<std::size_t>(T - 1) * kEmbd;
+      kk::MixStates st = States(cur);
+      for (int i = 0; i < st.n; ++i)
+        st.ptr[i] += ref_out_off;
+      kk::Mix(s, st, DF(w->output_res_query), 1, kEmbd, ref_out_n, mixf,
+              cfg->rms_eps, nullptr);
+      kk::RmsNorm(s, mixf, kEmbd, DF(w->output_norm), ref_hn, kEmbd, kEmbd,
+                  ref_out_n, cfg->rms_eps);
+    }
+
     const int V = static_cast<int>(cfg->n_vocab_text);
-    auto chunk = [&](const float* src_hn, int n, std::vector<float>* host) {
+    auto chunk = [&](const float* src_hn, const float* src_ref_hn, int n,
+                     std::vector<float>* host) {
       G(w->output, src_hn, kEmbd, logits_d, V, n, V);
       kk::Softcap(s, logits_d, static_cast<std::int64_t>(n) * V,
                   cfg->logit_softcap);
+      if (eng->has_loopcd()) {
+        G(w->output, src_ref_hn, kEmbd, logits_ref_d, V, n, V);
+        kk::Softcap(s, logits_ref_d, static_cast<std::int64_t>(n) * V,
+                    cfg->logit_softcap);
+        if (eng->ref_logits_tap_) {
+          std::vector<float> ref_host(static_cast<std::size_t>(n) * V);
+          Check(hipMemcpyAsync(ref_host.data(), logits_ref_d,
+                               ref_host.size() * sizeof(float),
+                               hipMemcpyDeviceToHost, s),
+                "ref logits copy");
+          Check(hipStreamSynchronize(s), "ref logits sync");
+          eng->ref_logits_tap_(static_cast<std::size_t>(n), ref_host.data());
+        }
+        fs::LoopCdArgs la{};
+        la.logits = logits_d;
+        la.ref_logits = logits_ref_d;
+        la.rows = n;
+        la.vocab = V;
+        la.w_max = eng->options_.loopcd.w_max;
+        la.adaptive = true;
+        la.ws = d_loopcd_ws;
+        fs::LoopCdGuide(s, la);
+      }
       host->resize(static_cast<std::size_t>(n) * V);
       Check(hipMemcpyAsync(host->data(), logits_d, host->size() * 4,
                            hipMemcpyDeviceToHost, s),
@@ -2426,7 +2602,10 @@ struct Engine::Impl {
     if (sink) {
       for (int a = 0; a < T; a += kLogitChunk) {
         const int n = std::min(kLogitChunk, T - a);
-        chunk(hn + static_cast<std::size_t>(a) * kEmbd, n, &host);
+        chunk(hn + static_cast<std::size_t>(a) * kEmbd,
+              eng->has_loopcd() ? ref_hn + static_cast<std::size_t>(a) * kEmbd
+                                : nullptr,
+              n, &host);
         sink(static_cast<std::size_t>(first_idx + a), n, host.data());
         if (has_interior) {
           for (auto& cp : *ubatch_cps) {
@@ -2453,6 +2632,12 @@ struct Engine::Impl {
                     hn + static_cast<std::size_t>(cp.local_t - 1) * kEmbd,
                     kEmbd * sizeof(float), hipMemcpyDeviceToDevice, s),
                 "cp hn copy");
+          if (eng->has_loopcd())
+            Check(hipMemcpyAsync(
+                      cur + static_cast<std::size_t>(n_out) * kEmbd,
+                      ref_hn + static_cast<std::size_t>(cp.local_t - 1) * kEmbd,
+                      kEmbd * sizeof(float), hipMemcpyDeviceToDevice, s),
+                  "cp ref hn copy");
           interior_ptrs.push_back(&cp);
           ++n_out;
         }
@@ -2463,9 +2648,15 @@ struct Engine::Impl {
                              hn + static_cast<std::size_t>(T - 1) * kEmbd,
                              kEmbd * sizeof(float), hipMemcpyDeviceToDevice, s),
               "cp end hn copy");
+        if (eng->has_loopcd())
+          Check(
+              hipMemcpyAsync(cur + static_cast<std::size_t>(n_out) * kEmbd,
+                             ref_hn + static_cast<std::size_t>(T - 1) * kEmbd,
+                             kEmbd * sizeof(float), hipMemcpyDeviceToDevice, s),
+              "cp end ref hn copy");
         ++n_out;
       }
-      chunk(mixf, n_out, &host);
+      chunk(mixf, eng->has_loopcd() ? cur : nullptr, n_out, &host);
       for (std::size_t i = 0; i < interior_ptrs.size(); ++i)
         interior_ptrs[i]->logits.assign(
             host.begin() + static_cast<std::ptrdiff_t>(i) * V,
@@ -2475,8 +2666,8 @@ struct Engine::Impl {
         ss.logits_stale_ = false;
       }
     } else {
-      chunk(hn + static_cast<std::size_t>(need_all ? T - 1 : 0) * kEmbd, 1,
-            &host);
+      chunk(hn + static_cast<std::size_t>(need_all ? T - 1 : 0) * kEmbd,
+            eng->has_loopcd() ? ref_hn : nullptr, 1, &host);
       ss.logits_ = std::move(host);
       ss.logits_stale_ = false;
     }
@@ -2538,8 +2729,22 @@ Engine::~Engine() = default;
 
 std::unique_ptr<Engine> Engine::Create(
     std::shared_ptr<const core::GgufReader> reader, std::uint32_t max_context,
-    std::string* error) {
+    std::string* error, const Options& options) {
   try {
+    if (options.override_passes != 0 && options.override_passes != 1)
+      throw std::invalid_argument("inkling2: override_passes must be 0 or 1");
+    if (options.override_passes == 1 && options.loopcd.enabled())
+      throw std::invalid_argument(
+          "inkling2: cannot combine override_passes = 1 with LoopCD");
+    if (options.loopcd.enabled()) {
+      const float w = options.loopcd.w_max;
+      const bool ok =
+          std::isfinite(w) &&
+          (options.loopcd.allow_zero_strength ? (w >= 0.0F) : (w > 0.0F)) &&
+          w <= 4.0F;
+      if (!ok)
+        throw std::invalid_argument("inkling2: LoopCD strength out of range");
+    }
     auto e = std::unique_ptr<Engine>(new Engine());
     std::string why;
     auto bound = Inkling2Weights::Bind(*reader, &why);
@@ -2549,6 +2754,13 @@ std::unique_ptr<Engine> Engine::Create(
       return nullptr;
     }
     e->weights_ = std::move(*bound);
+    e->options_ = options;
+    if (options.override_passes == 1) {
+      e->weights_.config.n_passes = 1;
+      e->weights_.config.n_visits = e->weights_.config.n_phys;
+    }
+    e->n_slots_ = e->weights_.config.n_visits +
+                  (options.loopcd.enabled() ? kRefSlots : 0);
     e->reader_ = std::move(reader);
     e->max_context_ = max_context;
     int dev = 0;
@@ -2613,13 +2825,25 @@ void Engine::CalibrateDecodePrefetch() {
                I.decode_prefetch ? "on" : "off", best[1] * 1e3, best[0] * 1e3);
 }
 
+std::uint32_t Engine::PhysOfSlot(std::uint32_t slot) const {
+  const auto& cfg = weights_.config;
+  if (slot < cfg.n_phys)
+    return slot;
+  if (slot < cfg.n_visits)
+    return cfg.core_start + (slot - cfg.n_phys) % cfg.CoreLen();
+  return cfg.core_end + (slot - cfg.n_visits);
+}
+
 Engine::StateLayout Engine::DeclareState() const {
   StateLayout layout;
+  layout.k.resize(n_slots_);
+  layout.v.resize(n_slots_);
+  layout.conv.resize(n_slots_);
   auto& state = layout.state;
   const std::size_t kv_row = static_cast<std::size_t>(kKV) * 2;  // f16
   const std::size_t ring = 1024 + ubatch_;
-  for (int i = 0; i < 48; ++i) {
-    const int phys = i < 24 ? i : 6 + (i - 24) % 12;
+  for (std::uint32_t i = 0; i < n_slots_; ++i) {
+    const std::uint32_t phys = PhysOfSlot(i);
     if (weights_.config.global_layer[phys]) {
       // Global visits keep every position: rows backed as they are written.
       layout.k[i] = state.Context({.row_bytes = kv_row, .rows = max_context_});
@@ -2632,7 +2856,7 @@ Engine::StateLayout Engine::DeclareState() const {
     layout.conv[i] =
         state.Fixed(static_cast<std::size_t>(kConvChannels) * 3 * 4);
   }
-  layout.table = state.Fixed(48 * sizeof(fs::SlotEntry));
+  layout.table = state.Fixed(n_slots_ * sizeof(fs::SlotEntry));
   layout.logits =
       state.Fixed(static_cast<std::size_t>(weights_.config.n_vocab_text) * 4);
   if (impl_ != nullptr && impl_->dsp) {
@@ -2675,9 +2899,10 @@ std::unique_ptr<Session> Engine::NewSession() {
   const auto& state = *s->state_;
   s->bytes_ = state.allocated_bytes();
   const std::size_t ring = 1024 + ubatch_;
-  fs::SlotEntry host[48];
-  for (int i = 0; i < 48; ++i) {
-    const int phys = i < 24 ? i : 6 + (i - 24) % 12;
+  s->slots_.resize(n_slots_);
+  std::vector<fs::SlotEntry> host(n_slots_);
+  for (std::uint32_t i = 0; i < n_slots_; ++i) {
+    const std::uint32_t phys = PhysOfSlot(i);
     auto& sl = s->slots_[i];
     sl.global = weights_.config.global_layer[phys];
     sl.rows = sl.global ? max_context_ : ring;
@@ -2707,7 +2932,8 @@ std::unique_ptr<Session> Engine::NewSession() {
   }
   {
     const std::shared_lock<std::shared_mutex> gate(CaptureGate());
-    Check(hipMemcpy(s->tbl_, host, sizeof host, hipMemcpyHostToDevice),
+    Check(hipMemcpy(s->tbl_, host.data(), host.size() * sizeof(fs::SlotEntry),
+                    hipMemcpyHostToDevice),
           "slot table");
   }
   Reset(*s);
@@ -3087,7 +3313,8 @@ bool Engine::CanCaptureInPass(std::size_t offset, std::size_t consumed,
 }
 
 std::size_t Engine::PrefillCheckpointScratchBytes() const {
-  return static_cast<std::size_t>(48) * kConvChannels * 3 * sizeof(float) +
+  return static_cast<std::size_t>(n_slots_) * kConvChannels * 3 *
+             sizeof(float) +
          (has_drafter() ? static_cast<std::size_t>(kEmbd) * sizeof(float) : 0);
 }
 
@@ -3119,7 +3346,7 @@ void Engine::Forward(Session& s, std::span<const std::int32_t> tokens,
     const std::size_t ubatches = (tokens.size() + ubatch_ - 1) / ubatch_;
     run.spec = yield;
     run.lock = &lock;
-    run.total = ubatches * 48;
+    run.total = ubatches * n_slots_;
     yr = &run;
   }
   for (const auto& r : rows)
@@ -3172,7 +3399,7 @@ void Engine::Forward(Session& s, std::span<const std::int32_t> tokens,
         }
       }
     } cp_dev{.impl = impl_.get()};
-    constexpr std::size_t kConvFloats = Impl::kCpConvFloats;
+    const std::size_t kConvFloats = impl_->CpConvFloats();
     if (n_interior > 0) {
       float* conv = impl_->cp_conv;
       float* draft_f = impl_->dsp ? impl_->cp_draft_f : nullptr;

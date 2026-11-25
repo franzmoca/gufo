@@ -140,17 +140,19 @@ struct ConvResidArgs {
   // With `cap`: each row's index within its session's rows (a step may verify
   // several sessions, each one's rows consecutive); null: all rows one session.
   const int* ri = nullptr;
+  int slot_stride = 48;
 };
 /// Rows of one verification step (Engine::kMaxVerifyRows).
 inline constexpr int kVerifyRows = 64;
-/// Batched (nb tokens): x, cur, blk are [nb][2304]; token b uses slot[b * 48].
+/// Batched (nb tokens): x, cur, blk are [nb][2304]; token b uses
+/// slot[b * slot_stride].
 void ConvResid(hipStream_t s, const ConvResidArgs& a, int nb = 1);
-/// After a verification step: every history of the session's 48 slots
+/// After a verification step: every history of the session's `n_slots` slots
 /// becomes the last 3 inputs of (history, the first `keep` of its captured
 /// rows, which start at step row `row0`).
-/// `cap` is [48][kVerifyRows][6656].
+/// `cap` is [n_slots][kVerifyRows][6656].
 void CommitVerifyConv(hipStream_t s, const SlotEntry* tbl, const float* cap,
-                      int keep, int row0 = 0);
+                      int keep, int row0 = 0, int n_slots = 48);
 /// out[r] = the first maximum of the finite values of row r of x [rows][n]
 /// (ws: rows * 64 * 2 floats).
 void RowsArgmax(hipStream_t s, const float* x, int rows, int n, float* ws,
@@ -264,9 +266,10 @@ struct KvPrepArgs {
   const int* pos;
   float scale, qk_thr, eps;
   int ld = 0, ldd = 0;      // token strides of k / v and of dk / dv (decode
-                            // batches); slot advances 48 entries per token
+                            // batches); slot advances slot_stride entries/token
   float* cap = nullptr;     // verification capture (see ConvResidArgs::cap)
   const int* ri = nullptr;  // see ConvResidArgs::ri
+  int slot_stride = 48;
 };
 void KvPrep(hipStream_t s, const KvPrepArgs& a, int nb = 1);
 
@@ -291,6 +294,7 @@ struct AttnArgs {
                    // [nb][3072], sink [nb][24]
   int ws_tok = 0;  // token stride of ws_m / ws_l (floats); ws_o is ws_tok * 128
   int nrows = 0;   // attn_decode_rows: rows of the step (groups of NB per z)
+  int slot_stride = 48;
 };
 void AttnDecode(hipStream_t s, const AttnArgs& a, int nb = 1);
 /// KvPrep and the attention in one launch, then the split reduction, for rows
@@ -434,5 +438,27 @@ void TopkPrefill(hipStream_t s, const float* logits, const float* bias,
 /// F32).
 void SkinnyPrefill(hipStream_t s, const float* x, int ldx, const float* w,
                    int rows, float* out, int ldo, int t);
+
+/// LoopCD-Logits contrastive decoding applied in place to `logits`
+/// ([rows][vocab]) using reference logits `ref_logits` ([rows][vocab]):
+///   w = adaptive ? w_max * (1 - (p1 - p2)) : w_max
+///   z' = z + w * (z - z_1)
+/// When `guide_mask` is non-null, rows with `guide_mask[r] == 0` are left
+/// untouched. When `control_bits` is non-null, tokens whose bit is set keep
+/// their exact softmax(z) probabilities and ordinary tokens are shifted by a
+/// constant in log space so their total probability mass matches softmax(z).
+struct LoopCdArgs {
+  float* logits = nullptr;
+  const float* ref_logits = nullptr;
+  int rows = 0;
+  int vocab = 0;
+  float w_max = 0.5F;
+  bool adaptive = true;
+  const std::uint8_t* guide_mask = nullptr;
+  const std::uint32_t* control_bits = nullptr;
+  void* ws = nullptr;
+};
+std::size_t LoopCdWorkspaceBytes(int max_rows);
+void LoopCdGuide(hipStream_t s, const LoopCdArgs& a);
 
 }  // namespace gufo::models::inkling2::fast

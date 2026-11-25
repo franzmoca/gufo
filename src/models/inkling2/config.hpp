@@ -3,9 +3,27 @@
 #include <array>
 #include <cstdint>
 #include <gufo/ext/gguf_reader.hpp>
+#include <gufo/ext/options.hpp>
 #include <string>
+#include <string_view>
 
 namespace gufo::models::inkling2 {
+
+enum class LoopCdMode : std::uint8_t { kOff = 0, kOn = 1, kSkipThinking = 2 };
+
+struct LoopCdConfig {
+  LoopCdMode mode = LoopCdMode::kOff;
+  float w_max = 0.5F;
+  /// Test-only (never set from CLI): allows w_max == 0 with LoopCD enabled
+  /// to assert bit-identity with `off`.
+  bool allow_zero_strength = false;
+
+  [[nodiscard]] bool enabled() const { return mode != LoopCdMode::kOff; }
+};
+
+[[nodiscard]] std::string_view LoopCdModeName(LoopCdMode mode);
+[[nodiscard]] bool ParseLoopCdOptions(const ext::ParsedOptions& options,
+                                      LoopCdConfig* out, std::string* error);
 
 /// The one hyper-parameter set the extension serves. Defaults are the exact
 /// values of Inkling 2 Mini; `ParseConfig` refuses a file that differs.

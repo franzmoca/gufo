@@ -14,11 +14,12 @@
 namespace gufo::models::inkling2 {
 
 StateLayout::StateLayout(const Inkling2Config& c, std::uint32_t ring_rows,
-                         bool drafter)
+                         bool drafter, bool loopcd)
     : ring_rows_(ring_rows),
       logits_bytes_(std::size_t{c.n_vocab_text} * 4),
       vocab_(c.n_vocab_text),
-      drafter_(drafter) {
+      drafter_(drafter),
+      loopcd_(loopcd) {
   if (ring_rows < kWindowRows + kRowsPerChunk - 1)
     throw std::invalid_argument(
         "inkling2: sliding-window ring smaller than a checkpoint keeps");
@@ -57,6 +58,17 @@ StateLayout::StateLayout(const Inkling2Config& c, std::uint32_t ring_rows,
                                : cache::ComponentKind::kWindowRows;
       add(Part::kKey, kind, kKvRowBytes, 0, kVisits + l, global);
       add(Part::kValue, kind, kKvRowBytes, 0, kVisits + l, global);
+    }
+  }
+  if (loopcd) {
+    add(Part::kRefConv, cache::ComponentKind::kPrivateState, 0, kRefConvBytes,
+        0, false);
+    for (std::uint32_t l = 0; l < kRefVisits; ++l) {
+      const bool global = c.global_layer[c.core_end + l];
+      const auto kind = global ? cache::ComponentKind::kAppendRows
+                               : cache::ComponentKind::kWindowRows;
+      add(Part::kKey, kind, kKvRowBytes, 0, kRefVisitBase + l, global);
+      add(Part::kValue, kind, kKvRowBytes, 0, kRefVisitBase + l, global);
     }
   }
 }
@@ -106,7 +118,8 @@ std::size_t StateLayout::PrivateBytes() const {
 }
 
 std::size_t StateLayout::SessionBytes(std::uint32_t context) const {
-  std::size_t b = kConvBytes + (drafter_ ? kDraftFBytes : 0);
+  std::size_t b = kConvBytes + (drafter_ ? kDraftFBytes : 0) +
+                  (loopcd_ ? kRefConvBytes : 0);
   for (const auto& c : components_)
     if (HasRows(c.descriptor.kind))
       b += c.descriptor.row_bytes * (c.global ? context : ring_rows_);
@@ -137,6 +150,15 @@ void Settle(hipError_t submitted, const char* what) {
 SessionStateAccess::Stream SessionStateAccess::RowStream(const Session& s,
                                                          std::uint32_t visit,
                                                          bool value) {
+  if (visit >= kRefVisitBase) {
+    const std::uint32_t l = visit - kRefVisitBase;
+    const std::size_t slot_idx = kVisits + l;
+    if (l >= kRefVisits || slot_idx >= s.slots_.size())
+      throw std::invalid_argument(
+          "inkling2: no LoopCD reference layer for the visit");
+    const auto& sl = s.slots_[slot_idx];
+    return {value ? sl.v : sl.k, sl.rows, sl.global};
+  }
   if (visit >= kVisits) {
     const std::uint32_t l = visit - kVisits;
     if (l >= kDraftLayers || s.draft_.k[l] == nullptr)

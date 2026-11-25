@@ -127,6 +127,14 @@ gufo_extension_target(
   LINK_LIBRARIES
     gufo_inkling2_hip
 )
+gufo_extension_target(
+  NAME inkling2_loopcd_test
+  SOURCES
+    tests/loopcd/loopcd_test.cpp
+  LINK_LIBRARIES
+    gufo_inkling2_hip
+    hip::host
+)
 
 if(TARGET inkling2_probe_test)
   add_test(NAME inkling2.probe COMMAND inkling2_probe_test)

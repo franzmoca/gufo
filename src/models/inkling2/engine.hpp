@@ -152,8 +152,8 @@ private:
     bool global = false;
     std::size_t rows = 0;  // global: max_context; SWA: ring size
   };
-  std::array<Slot, 48> slots_{};
-  void* tbl_ = nullptr;  // device table of the 48 slots (fast::SlotEntry[48])
+  std::vector<Slot> slots_;
+  void* tbl_ = nullptr;  // device table of n_slots_ slots (fast::SlotEntry[])
   /// The declared state (Engine::DeclareState), allocated by the core.
   std::unique_ptr<mem::SessionState> state_;
   /// Regions of the global-attention K and V rows, backed as rows are written.
@@ -162,14 +162,35 @@ private:
 
 class Engine {
 public:
+  static constexpr std::uint32_t kBaseSlots = 48;
+  static constexpr std::uint32_t kRefSlots = 6;
+
+  struct Options {
+    LoopCdConfig loopcd{};
+    /// Test-only: 0 = config default (3), 1 = 1 core pass (24 visits) for z_1
+    /// oracle.
+    std::uint32_t override_passes = 0;
+    /// Test-only: force eager decode/verify (skip HIP graph capture/replay).
+    bool disable_graphs = false;
+  };
+
   /// Binds and uploads the weights of `reader` (must stay alive as long as the
   /// Engine).
   [[nodiscard]] static std::unique_ptr<Engine> Create(
       std::shared_ptr<const core::GgufReader> reader, std::uint32_t max_context,
-      std::string* error);
+      std::string* error) {
+    return Create(std::move(reader), max_context, error, Options{});
+  }
+  [[nodiscard]] static std::unique_ptr<Engine> Create(
+      std::shared_ptr<const core::GgufReader> reader, std::uint32_t max_context,
+      std::string* error, const Options& options);
   ~Engine();
 
   [[nodiscard]] const Inkling2Config& config() const { return weights_.config; }
+  [[nodiscard]] const LoopCdConfig& loopcd() const { return options_.loopcd; }
+  [[nodiscard]] bool has_loopcd() const { return options_.loopcd.enabled(); }
+  [[nodiscard]] std::uint32_t num_slots() const { return n_slots_; }
+  [[nodiscard]] std::uint32_t PhysOfSlot(std::uint32_t slot) const;
   [[nodiscard]] std::size_t weight_bytes() const { return weight_bytes_; }
   [[nodiscard]] std::size_t session_bytes() const;
   /// The part of session_bytes() in demand-mapped regions (0 without them).
@@ -356,11 +377,15 @@ public:
   void Step(Session& s, std::int32_t token, std::int32_t* argmax);
 
   /// Optional per-visit hidden-state tap for bisecting against llama.cpp:
-  /// called with the visit index (0..47), a label ("l_out" or "ffn_inp") and
-  /// the first token's [2304] row.
+  /// called with the visit index (0..num_slots-1), a label ("l_out" or
+  /// "ffn_inp") and the first token's [2304] row.
   using Tap = std::function<void(int visit, const char* what,
                                  const std::vector<float>& row)>;
   void SetTap(Tap tap) { tap_ = std::move(tap); }
+  /// Test-only tap receiving reference-coda logits (z_1, [rows][vocab_text])
+  /// before LoopCD combines them with z.
+  using RefLogitsTap = std::function<void(std::size_t rows, const float* data)>;
+  void SetRefLogitsTap(RefLogitsTap tap) { ref_logits_tap_ = std::move(tap); }
 
 private:
   Engine() = default;
@@ -368,7 +393,7 @@ private:
   /// the context, window visits are rings) and the convolution history.
   struct StateLayout {
     mem::StateDeclaration state{Session::kKvMarginRows};
-    std::array<mem::StateBufferId, 48> k{}, v{}, conv{};
+    std::vector<mem::StateBufferId> k, v, conv;
     mem::StateBufferId table{};
     std::array<mem::StateBufferId, 3> dk{}, dv{};  // with a drafter
     mem::StateBufferId df{};
@@ -381,11 +406,14 @@ private:
   struct Impl;
   std::unique_ptr<Impl> impl_;
   Inkling2Weights weights_;
+  Options options_;
+  std::uint32_t n_slots_ = kBaseSlots;
   std::shared_ptr<const core::GgufReader> reader_;
   std::size_t weight_bytes_ = 0;
   std::uint32_t max_context_ = 0;
   std::uint32_t ubatch_ = kUbatch;
   Tap tap_;
+  RefLogitsTap ref_logits_tap_;
   std::mutex mutex_;
 };
 
