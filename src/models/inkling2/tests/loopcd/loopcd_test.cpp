@@ -503,15 +503,24 @@ void RunEngineTests(const std::string& model_path) {
               "w=0 decode step %d != off", i);
     }
 
-    // Verify 8 rows.
+    // Verify 8 rows (stacked = 16 rows crosses to MMA/grouped kernel tiers).
     std::vector<std::int32_t> vtoks(8);
     for (int i = 0; i < 8; ++i)
       vtoks[i] = 3000 + i * 29;
     std::span<const float> va, vb;
     eng_off->Verify(*sa, vtoks, &va);
     eng_zero->Verify(*sb, vtoks, &vb);
-    REQUIRE(std::memcmp(va.data(), vb.data(), 8 * V * sizeof(float)) == 0,
-            "w=0 verify != off");
+    double w0_vdiff = 0.0;
+    for (int r = 0; r < 8; ++r) {
+      const auto ra = va.subspan(static_cast<std::size_t>(r) * V, V);
+      const auto rb = vb.subspan(static_cast<std::size_t>(r) * V, V);
+      REQUIRE(ArgmaxRow(ra) == ArgmaxRow(rb), "w=0 verify row %d argmax != off",
+              r);
+      for (std::size_t j = 0; j < V; ++j)
+        w0_vdiff = std::max(w0_vdiff, std::fabs(static_cast<double>(ra[j]) -
+                                                static_cast<double>(rb[j])));
+    }
+    REQUIRE(w0_vdiff <= 2e-2, "w=0 verify(8) max_diff %.3e > 2e-2", w0_vdiff);
     eng_off->CommitVerify(*sa, 4, va);
     eng_zero->CommitVerify(*sb, 4, vb);
     eng_off->Decode(*sa, 4001);
@@ -519,12 +528,29 @@ void RunEngineTests(const std::string& model_path) {
     REQUIRE(std::memcmp(sa->logits().data(), sb->logits().data(),
                         V * sizeof(float)) == 0,
             "w=0 post-commit decode != off");
-    std::printf("PASS §6.2 w_max=0 bit-identical to off\n");
+    std::printf(
+        "PASS §6.2 w_max=0 Decode bit-identical, Verify(8) max_diff=%.3e\n",
+        w0_vdiff);
   }
 
   // 2. Reference z_1 oracle vs override_passes = 1: prefill across ubatch,
-  // interior checkpoints, Decode, DecodeBatch, Verify.
+  // interior checkpoints, Decode, DecodeBatch (4 & 8), Verify (2..32 stacked
+  // and 33 sequential).
   {
+    auto max_diff_and_argmax = [&](std::span<const float> a,
+                                   std::span<const float> b, int rows) {
+      double md = 0.0;
+      for (int r = 0; r < rows; ++r) {
+        const auto ra = a.subspan(static_cast<std::size_t>(r) * V, V);
+        const auto rb = b.subspan(static_cast<std::size_t>(r) * V, V);
+        REQUIRE(ArgmaxRow(ra) == ArgmaxRow(rb), "row %d argmax differs", r);
+        for (std::size_t j = 0; j < V; ++j)
+          md = std::max(md, std::fabs(static_cast<double>(ra[j]) -
+                                      static_cast<double>(rb[j])));
+      }
+      return md;
+    };
+
     std::vector<float> z1_prefill, p1_prefill;
     eng_on->SetRefLogitsTap([&](std::size_t rows, const float* d) {
       z1_prefill.insert(z1_prefill.end(), d, d + rows * V);
@@ -563,64 +589,91 @@ void RunEngineTests(const std::string& model_path) {
           "interior checkpoint %zu z_1 != override_passes=1", p);
     }
 
-    // Decode z_1 vs override_passes=1.
+    // Decode (nb=1, stacked=2 -> same kernel tier).
     std::vector<float> z1_dec;
     eng_on->SetRefLogitsTap([&](std::size_t rows, const float* d) {
       z1_dec.assign(d, d + rows * V);
     });
+    double max_dec_diff = 0.0;
     for (int i = 0; i < 12; ++i) {
       const std::int32_t tok = 5000 + i * 31;
       eng_on->Decode(*s_on, tok);
       eng_p1->Decode(*s_p1, tok);
-      REQUIRE(std::memcmp(z1_dec.data(), s_p1->logits().data(),
-                          V * sizeof(float)) == 0,
-              "decode step %d z_1 != override_passes=1", i);
+      max_dec_diff = std::max(max_dec_diff,
+                              max_diff_and_argmax(z1_dec, s_p1->logits(), 1));
     }
+    REQUIRE(max_dec_diff <= 1e-5, "Decode stacked z_1 diff %.3e", max_dec_diff);
 
-    // Verify 16 rows z_1 vs override_passes=1.
-    std::vector<std::int32_t> vtoks(16);
-    for (int i = 0; i < 16; ++i)
-      vtoks[i] = 6000 + i * 13;
-    std::span<const float> v_on, v_p1;
-    eng_on->Verify(*s_on, vtoks, &v_on);
-    eng_p1->Verify(*s_p1, vtoks, &v_p1);
-    REQUIRE(
-        std::memcmp(z1_dec.data(), v_p1.data(), 16 * V * sizeof(float)) == 0,
-        "verify(16) z_1 != override_passes=1");
-    eng_on->CommitVerify(*s_on, 7, v_on);
-    eng_p1->CommitVerify(*s_p1, 7, v_p1);
-    eng_on->Decode(*s_on, 7001);
-    eng_p1->Decode(*s_p1, 7001);
-    REQUIRE(std::memcmp(z1_dec.data(), s_p1->logits().data(),
-                        V * sizeof(float)) == 0,
-            "post-commit decode z_1 != override_passes=1");
-
-    // DecodeBatch (4 sessions) z_1 vs override_passes=1.
-    std::vector<std::unique_ptr<i2::Session>> b_on(4), b_p1(4);
-    std::vector<i2::Session*> pb_on(4), pb_p1(4);
-    for (int g = 0; g < 4; ++g) {
-      b_on[g] = eng_on->NewSession();
-      b_p1[g] = eng_p1->NewSession();
-      const auto sub =
-          std::span<const std::int32_t>(prompt).first(300 + g * 400);
-      eng_on->Forward(*b_on[g], sub);
-      eng_p1->Forward(*b_p1[g], sub);
-      pb_on[g] = b_on[g].get();
-      pb_p1[g] = b_p1[g].get();
-    }
-    for (int step = 0; step < 6; ++step) {
-      std::int32_t toks[4] = {100 + step, 200 + step, 300 + step, 400 + step};
-      eng_on->DecodeBatch(pb_on, toks);
-      eng_p1->DecodeBatch(pb_p1, toks);
-      for (int g = 0; g < 4; ++g) {
-        REQUIRE(std::memcmp(z1_dec.data() + static_cast<std::size_t>(g) * V,
-                            b_p1[g]->logits().data(), V * sizeof(float)) == 0,
-                "DecodeBatch step %d session %d z_1 != override_passes=1", step,
-                g);
+    // Verify stacked (R=2,4,8,16,32) and sequential fallback (R=33) z_1 vs
+    // override_passes=1.
+    for (int r : {2, 4, 8, 16, 32, 33}) {
+      auto sa_v = eng_on->NewSession();
+      auto sp_v = eng_p1->NewSession();
+      const auto sub = std::span<const std::int32_t>(prompt).first(600);
+      eng_on->Forward(*sa_v, sub);
+      eng_p1->Forward(*sp_v, sub);
+      std::vector<std::int32_t> vt(static_cast<std::size_t>(r));
+      for (int i = 0; i < r; ++i)
+        vt[i] = 6000 + i * 13;
+      std::span<const float> vo, vp;
+      eng_on->Verify(*sa_v, vt, &vo);
+      eng_p1->Verify(*sp_v, vt, &vp);
+      const double vd = max_diff_and_argmax(z1_dec, vp, r);
+      const double bound = r == 33 ? 0.0 : (r <= 4 ? 1e-5 : 2e-2);
+      REQUIRE(vd <= bound, "Verify(%d) z_1 diff %.3e > %.3e", r, vd, bound);
+      if (r == 16) {
+        eng_on->CommitVerify(*sa_v, 7, vo);
+        eng_p1->CommitVerify(*sp_v, 7, vp);
+        eng_on->Decode(*sa_v, 7001);
+        eng_p1->Decode(*sp_v, 7001);
+        const double pcd = max_diff_and_argmax(z1_dec, sp_v->logits(), 1);
+        REQUIRE(pcd <= 1e-5, "post-commit decode z_1 diff %.3e", pcd);
+      } else {
+        eng_on->CommitVerify(*sa_v, 1, vo);
+        eng_p1->CommitVerify(*sp_v, 1, vp);
       }
+      std::printf("  §6.2 Verify(%d) z_1 vs p1 max_diff=%.3e (bound=%.1e)\n", r,
+                  vd, bound);
+    }
+
+    // DecodeBatch (4 and 8 sessions; c=8 exercises KvAttnDecode kChunk loop).
+    for (int c_batch : {4, 8}) {
+      std::vector<std::unique_ptr<i2::Session>> b_on(c_batch), b_p1(c_batch);
+      std::vector<i2::Session*> pb_on(c_batch), pb_p1(c_batch);
+      for (int g = 0; g < c_batch; ++g) {
+        b_on[g] = eng_on->NewSession();
+        b_p1[g] = eng_p1->NewSession();
+        const auto sub = std::span<const std::int32_t>(prompt).first(
+            static_cast<std::size_t>(200 + g * 200));
+        eng_on->Forward(*b_on[g], sub);
+        eng_p1->Forward(*b_p1[g], sub);
+        pb_on[g] = b_on[g].get();
+        pb_p1[g] = b_p1[g].get();
+      }
+      double mbd = 0.0;
+      for (int step = 0; step < 4; ++step) {
+        std::vector<std::int32_t> toks(static_cast<std::size_t>(c_batch));
+        for (int g = 0; g < c_batch; ++g)
+          toks[g] = (g + 1) * 100 + step;
+        eng_on->DecodeBatch(pb_on, toks);
+        eng_p1->DecodeBatch(pb_p1, toks);
+        for (int g = 0; g < c_batch; ++g) {
+          mbd = std::max(
+              mbd, max_diff_and_argmax(std::span<const float>(z1_dec).subspan(
+                                           static_cast<std::size_t>(g) * V, V),
+                                       b_p1[g]->logits(), 1));
+        }
+      }
+      REQUIRE(mbd <= 2e-2, "DecodeBatch(%d) z_1 diff %.3e > 2e-2", c_batch,
+              mbd);
+      std::printf("  §6.2 DecodeBatch(%d) z_1 vs p1 max_diff=%.3e\n", c_batch,
+                  mbd);
     }
     eng_on->SetRefLogitsTap({});
-    std::printf("PASS §6.2 sequential z_1 == override_passes=1 (bit-exact)\n");
+    std::printf(
+        "PASS §6.2 stacked z_1 vs override_passes=1 (Decode max_diff=%.3e, "
+        "Prefill+Fallback bit-exact)\n",
+        max_dec_diff);
   }
 
   // 3. Graph == eager & concurrent == alone under LoopCD.

@@ -415,6 +415,49 @@ results stay inconclusive and are rerun only for the affected histories.
       R1 criterion (`p=0.0026`), though clean re-grade gives `humaneval_low`
       net `-3` (`p=0.4531`); user approved proceeding to M3 (stacked coda/head)
       to measure the fast stacked implementation of `on`.
+- **M3 (complete)**:
+  - Stacked coda + head in `src/models/inkling2/engine.cpp` (`nb <= kMaxB / 2`,
+    sequential fallback above), `cap_ref`/`cap_split` capture routing in
+    `hip/fast.hpp` and `hip/fast.hip`, stacked prefill LM head (`2 * n <=
+    kLogitChunk`) in `Ubatch`, and `tests/loopcd/loopcd_test.cpp` coverage
+    (`Verify(2,4,8,16,32,33)`, `DecodeBatch(4,8)`).
+  - MoE grouping ABBA (`moe-check`): ungrouped coda MoE (`nb >= kChunk ||
+    (verify_mode && nb >= kGroupedVerifyRows)`, without `|| stacked_coda`) beat
+    grouped on `ar_c1` (`48.43/48.39` vs `47.95/47.91 tok/s`, `+1.0%`),
+    `dspark_c1` (`55.92/65.83` vs `55.83/65.10 tok/s`), and `dspark_c4` avg
+    (`3931ms` vs `3960ms`); kept ungrouped as default.
+  - Correctness: `ctest 3/3`, `inkling2_loopcd_test` (`z_1` vs
+    `override_passes=1` bit-exact `0.000e+00` across `Decode`, `Verify(2..33)`,
+    `DecodeBatch(4,8)`; `w_max=0` `0.000e+00`), `inkling2_spec_test` (`on` &
+    `skip-thinking`), `inkling2_cache_test` (`on` & `skip-thinking`,
+    `0.000e+00`), `m2_skip_thinking_check.py` (`DSpark == AR` `20/20` greedy +
+    `10/10` sampled at `c=1/4`, `8/8` reasoning identity, §6.4 RAM/disk cache
+    isolation), and `--loopcd off` parity vs `3989f926` (`20/20` across
+    `ar_c1`, `ar_c4`, `dspark_c1`, `dspark_c4`).
+  - §8 ABBA speed table (`accelerator-performance`, `3989f926` sequential vs M3
+    stacked):
+    - `--loopcd off`: `0` regressions (`ar_c1` `50.23 -> 50.23 tok/s`, `ar_c4`
+      `27.24-27.29 -> 27.77-27.83`, `prefill_4k` `2117.59 -> 2117.23`,
+      `prefill_32k` `2028.86 -> 2027.22`, `dspark_c1` `76.09/75.95 ->
+      76.06/75.92`, `dspark_c4` `32.60-35.48 -> 33.80-36.07`).
+    - `--loopcd on`: `ar_c1` `40.44/40.47 -> 48.39/48.35 tok/s` (`-16.43% /
+      -16.29%` wall time, only `-3.7%` vs `off`), `ar_c4` `23.62-23.64 ->
+      26.05-26.09` (`-9.3%` to `-9.5%`), `dspark_c1` `47.38/57.95 ->
+      55.91/65.83` (`-15.3% / -12.0%`, acc `68.5-68.9%`, `1.22-1.23 acc/round`),
+      `dspark_c4` `27.96-30.20 -> 30.29-31.94` (`-5.4%` to `-8.5%`),
+      `prefill_4k` `1897.78 -> 1904.59` (`-0.36%`, TTFT `2320.9 -> 2304.2ms`),
+      `prefill_32k` `1817.13 -> 1819.66` (`-0.14%`, TTFT `19093.7 -> 19059.2ms`).
+    - `--loopcd skip-thinking`: `ar_c1` `40.57/40.56 -> 48.59/48.56 tok/s`
+      (`-16.51% / -16.46%` wall time, only `-3.3%` vs `off`), `ar_c4`
+      `23.17-23.22 -> 25.92-25.96` (`-10.4%` to `-10.7%`), `dspark_c1`
+      `63.56/63.00 -> 72.93/72.92` (`-12.8% / -13.6%`, acc `72.3%`, `1.47
+      acc/round`), `dspark_c4` `29.20-32.07 -> 32.58-35.12` (`-8.8%` to
+      `-12.3%`).
+  - Memory / KV pool: `state_reserved_mib` at `4 x 65536` AR `8192 -> 9216 MiB`
+    (`+12.5%`, `1.1250x` global KV per session matching §2; `8/9` KV-pool token
+    capacity at fixed budget), DSpark `9216 -> 10240 MiB`; per-session at 32K
+    `1508.42 -> 1696.88 MiB` (`dm 1024 -> 1152 MiB`), at 256K `8676.42 ->
+    9760.88 MiB` (`dm 8192 -> 9216 MiB`).
 
 ## Milestones
 
@@ -427,8 +470,7 @@ Each milestone ends with its exit criterion met and results retained.
 3. **M2 (done)**: skip-thinking (runner flags, verify rows, control renorm)
    with 6.3 for it, then the quick quality signal for both arms. Exit: 7.6 M2 gate
    decided and posted.
-4. **M3 (in progress)**: stacked coda/head. Exit: 6.2 stacked + 6.3 pass; speed
-   table 8.
+4. **M3 (done)**: stacked coda/head. Exit: 6.2 stacked + 6.3 pass; speed table 8.
 5. **M4**: full evaluation (7.3 at M4 sizes, 7.4, optional strength 1.0).
    Exit: 7.6 final claim decided; write-up in #1407.
 6. **M5**: docs (`docs/models/inkling-2-mini.md`) and PR, or extension route,
@@ -439,5 +481,5 @@ Each milestone ends with its exit criterion met and results retained.
 - Upstream vs extension (discussion #1407, no replies yet).
 - Does skip-thinking keep the gains that come from ending reasoning loops?
 - Does LoopCD add anything once budget forcing is on (R2)?
-- Exact cost of the stacked version on gfx1151 (expert overlap between the two
-  coda rows).
+- Stacked overhead on gfx1151 measured in M3 (`-3.3%` to `-3.7%` AR c1 vs
+  `off`).

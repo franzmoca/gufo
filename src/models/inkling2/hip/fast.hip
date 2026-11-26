@@ -1397,7 +1397,10 @@ __device__ __forceinline__ void conv_resid_elem(const ConvResidArgs& a, int c,
     if (j < 3)
       for (int l = j + 1; l <= 3; ++l)
         xin[3 - l] = st[3 - l + j];
-    a.cap[((size_t)a.conv_off + c) * kVerifyRows + tok] = xc;
+    float* dst_cap = (a.cap_ref && tok >= a.cap_split) ? a.cap_ref : a.cap;
+    const int cap_tok =
+        (a.cap_ref && tok >= a.cap_split) ? (tok - a.cap_split) : tok;
+    dst_cap[((size_t)a.conv_off + c) * kVerifyRows + cap_tok] = xc;
   }
   float y = 0.f;
 #pragma unroll
@@ -1459,7 +1462,10 @@ __device__ __forceinline__ void conv_resid_block(const ConvResidArgs& a,
         if (j < 3)
           for (int l = j + 1; l <= 3; ++l)
             xin[r][3 - l] = st[3 - l + j];
-        a.cap[((size_t)a.conv_off + c) * kVerifyRows + tok] = xc;
+        float* dst_cap = (a.cap_ref && tok >= a.cap_split) ? a.cap_ref : a.cap;
+        const int cap_tok =
+            (a.cap_ref && tok >= a.cap_split) ? (tok - a.cap_split) : tok;
+        dst_cap[((size_t)a.conv_off + c) * kVerifyRows + cap_tok] = xc;
       }
 #pragma unroll
       for (int i = 0; i < 4; ++i)
@@ -1783,8 +1789,11 @@ __device__ __forceinline__ void kvprep_block(const KvPrepArgs& a, int kvh,
         kx[3 - l] = sk[3 - l + j];
         vx[3 - l] = sv[3 - l + j];
       }
-    a.cap[((size_t)a.conv_off_k + c) * kVerifyRows + tk] = kx[3];
-    a.cap[((size_t)a.conv_off_v + c) * kVerifyRows + tk] = vx[3];
+    float* dst_cap = (a.cap_ref && tk >= a.cap_split) ? a.cap_ref : a.cap;
+    const int cap_tok =
+        (a.cap_ref && tk >= a.cap_split) ? (tk - a.cap_split) : tk;
+    dst_cap[((size_t)a.conv_off_k + c) * kVerifyRows + cap_tok] = kx[3];
+    dst_cap[((size_t)a.conv_off_v + c) * kVerifyRows + cap_tok] = vx[3];
   }
   float ky = 0.f, vy = 0.f;
 #pragma unroll

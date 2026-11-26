@@ -311,6 +311,8 @@ struct Engine::Impl {
   // all rows of the verification are one session's (else several sessions'
   // rows, each run through the per-row attention kernel)
   bool verify_one_session = true;
+  bool stacked_coda = false;
+  int stacked_base_nb = 0;
   float* d_vcap = nullptr;  // [n_slots][6656][kVerifyRows] conv inputs
   void* d_loopcd_ws = nullptr;
   float* d_ref_cur = nullptr;
@@ -343,6 +345,10 @@ struct Engine::Impl {
   /// plane; null outside verification).
   const int* VRows() const {
     return verify_mode ? d_step + 2 * kMaxB : nullptr;
+  }
+  int RefSlotOf(int ip) const {
+    return static_cast<int>(cfg->n_visits) +
+           (ip - static_cast<int>(cfg->core_end));
   }
   std::set<int> failed_graphs;  // keys whose capture failed: those steps run
                                 // eagerly, no retry
@@ -1618,6 +1624,10 @@ struct Engine::Impl {
       ka.cap = VCap(slot_idx);
       ka.ri = VRows();
       ka.slot_stride = static_cast<int>(eng->n_slots_);
+      if (verify_mode && stacked_coda) {
+        ka.cap_ref = VCap(RefSlotOf(ip));
+        ka.cap_split = stacked_base_nb;
+      }
       if (verify_mode)
         fs::KvPrep(ds, ka, nb);
     }
@@ -1656,11 +1666,18 @@ struct Engine::Impl {
       aa.ws_tok = static_cast<int>(kMaxSplit * 8 * 12);
       aa.slot_stride = static_cast<int>(eng->n_slots_);
       if (!verify_mode) {
-        fs::KvAttnDecode(ds, ka, aa, nb);
-      } else {
         for (int c0 = 0; c0 < nb; c0 += kChunk) {
           const int cn = std::min(kChunk, nb - c0);
           const std::size_t o = static_cast<std::size_t>(c0);
+          fs::KvPrepArgs kc = ka;
+          kc.k = ka.k + o * kSProj;
+          kc.v = ka.v + o * kSProj;
+          if (ka.dk) {
+            kc.dk = ka.dk + o * 64;
+            kc.dv = ka.dv + o * 64;
+          }
+          kc.slot = ka.slot + o * eng->n_slots_;
+          kc.pos = ka.pos + o;
           fs::AttnArgs ac = aa;
           ac.slot = aa.slot + o * eng->n_slots_;
           ac.pos = aa.pos + o;
@@ -1669,10 +1686,32 @@ struct Engine::Impl {
           ac.gate = aa.gate + o * kSProj;
           ac.sink = aa.sink + o * 24;
           ac.out = aa.out + o * kQ;
-          if (verify_one_session && !swa && cn > 1)
-            fs::AttnDecodeRows(ds, ac, cn);
-          else
-            fs::AttnDecode(ds, ac, cn);
+          fs::KvAttnDecode(ds, kc, ac, cn);
+        }
+      } else {
+        auto run_verify_range = [&](int start, int end) {
+          for (int c0 = start; c0 < end; c0 += kChunk) {
+            const int cn = std::min(kChunk, end - c0);
+            const std::size_t o = static_cast<std::size_t>(c0);
+            fs::AttnArgs ac = aa;
+            ac.slot = aa.slot + o * eng->n_slots_;
+            ac.pos = aa.pos + o;
+            ac.q = aa.q + o * kSProj;
+            ac.r = aa.r + o * kSProj;
+            ac.gate = aa.gate + o * kSProj;
+            ac.sink = aa.sink + o * 24;
+            ac.out = aa.out + o * kQ;
+            if (verify_one_session && !swa && cn > 1)
+              fs::AttnDecodeRows(ds, ac, cn);
+            else
+              fs::AttnDecode(ds, ac, cn);
+          }
+        };
+        if (stacked_coda) {
+          run_verify_range(0, stacked_base_nb);
+          run_verify_range(stacked_base_nb, nb);
+        } else {
+          run_verify_range(0, nb);
         }
       }
     }
@@ -1700,6 +1739,10 @@ struct Engine::Impl {
       ca.cap = VCap(slot_idx);
       ca.ri = VRows();
       ca.slot_stride = static_cast<int>(eng->n_slots_);
+      if (verify_mode && stacked_coda) {
+        ca.cap_ref = VCap(RefSlotOf(ip));
+        ca.cap_split = stacked_base_nb;
+      }
       if (ip % static_cast<int>(cfg->attn_res_block) == 0) {
         ca.blk = NewBlock();
         d_states[d_ns++] = ca.blk;
@@ -1796,6 +1839,10 @@ struct Engine::Impl {
       ca.cap = VCap(slot_idx);
       ca.ri = VRows();
       ca.slot_stride = static_cast<int>(eng->n_slots_);
+      if (verify_mode && stacked_coda) {
+        ca.cap_ref = VCap(RefSlotOf(ip));
+        ca.cap_split = stacked_base_nb;
+      }
       pend.on = true;
       pend.a = ca;
     }
@@ -1897,39 +1944,51 @@ struct Engine::Impl {
         }
       }
     }
-    for (int ip = static_cast<int>(cfg->core_end);
-         ip < static_cast<int>(cfg->n_phys); ++ip)
-      DLayer(ip, ip, nullptr, bucket_ctx);
-    DMix(cur, DS(w->output_res_query), 1, d_mixf);
-    kk::RmsNorm(ds, d_mixf, kEmbd, DS(w->output_norm), d_hn, kEmbd, kEmbd, nb,
-                cfg->rms_eps);
-    if (dsp)
-      CaptureFeature(ds, d_hn, nb, 3, d_feat);
-    PrefetchJoin();
-    RunDecodeHead(d_hn, logits_d);
-    if (eng->has_loopcd()) {
-      Check(hipMemcpyAsync(cur, d_ref_cur,
-                           static_cast<std::size_t>(nb) * kEmbd * 4,
-                           hipMemcpyDeviceToDevice, ds),
-            "ref_cur restore");
-      d_ns = d_ref_ns;
-      for (int i = 0; i < d_ref_ns; ++i)
-        d_states[i] = d_ref_states[i];
+    if (eng->has_loopcd() && nb <= kMaxB / 2) {
+      FlushPending();
+      const int base_nb = nb;
+      const std::size_t row_bytes =
+          static_cast<std::size_t>(base_nb) * kEmbd * sizeof(float);
+      for (int i = 0; i < d_ns; ++i)
+        Check(hipMemcpyAsync(const_cast<float*>(d_states[i]) +
+                                 static_cast<std::size_t>(base_nb) * kEmbd,
+                             d_ref_states[i], row_bytes,
+                             hipMemcpyDeviceToDevice, ds),
+              "stack state");
+      Check(hipMemcpyAsync(cur + static_cast<std::size_t>(base_nb) * kEmbd,
+                           d_ref_cur, row_bytes, hipMemcpyDeviceToDevice, ds),
+            "stack cur");
+      struct StackScope {
+        Impl* self;
+        int base_nb;
+        ~StackScope() {
+          self->nb = base_nb;
+          self->stacked_coda = false;
+          self->stacked_base_nb = 0;
+        }
+      } stack_scope{this, base_nb};
+      nb = 2 * base_nb;
+      stacked_coda = true;
+      stacked_base_nb = base_nb;
       for (int ip = static_cast<int>(cfg->core_end);
-           ip < static_cast<int>(cfg->n_phys); ++ip) {
-        const int slot = static_cast<int>(cfg->n_visits) +
-                         (ip - static_cast<int>(cfg->core_end));
-        DLayer(ip, slot, nullptr, bucket_ctx);
-      }
+           ip < static_cast<int>(cfg->n_phys); ++ip)
+        DLayer(ip, ip, nullptr, bucket_ctx);
       DMix(cur, DS(w->output_res_query), 1, d_mixf);
       kk::RmsNorm(ds, d_mixf, kEmbd, DS(w->output_norm), d_hn, kEmbd, kEmbd, nb,
                   cfg->rms_eps);
       PrefetchJoin();
-      RunDecodeHead(d_hn, logits_ref_d);
+      RunDecodeHead(d_hn, logits_d);
+      // Restore main `nb` before feature capture and LoopCD merge.
+      nb = base_nb;
+      stacked_coda = false;
+      stacked_base_nb = 0;
+      if (dsp)
+        CaptureFeature(ds, d_hn, base_nb, 3, d_feat);
       fs::LoopCdArgs la{};
       la.logits = logits_d;
-      la.ref_logits = logits_ref_d;
-      la.rows = nb;
+      la.ref_logits =
+          logits_d + static_cast<std::size_t>(base_nb) * cfg->n_vocab_text;
+      la.rows = base_nb;
       la.vocab = static_cast<int>(cfg->n_vocab_text);
       la.w_max = eng->options_.loopcd.w_max;
       la.adaptive = true;
@@ -1937,6 +1996,45 @@ struct Engine::Impl {
       la.control_bits = d_loopcd_ctrl;
       la.ws = d_loopcd_ws;
       fs::LoopCdGuide(ds, la);
+    } else {
+      for (int ip = static_cast<int>(cfg->core_end);
+           ip < static_cast<int>(cfg->n_phys); ++ip)
+        DLayer(ip, ip, nullptr, bucket_ctx);
+      DMix(cur, DS(w->output_res_query), 1, d_mixf);
+      kk::RmsNorm(ds, d_mixf, kEmbd, DS(w->output_norm), d_hn, kEmbd, kEmbd, nb,
+                  cfg->rms_eps);
+      if (dsp)
+        CaptureFeature(ds, d_hn, nb, 3, d_feat);
+      PrefetchJoin();
+      RunDecodeHead(d_hn, logits_d);
+      if (eng->has_loopcd()) {
+        Check(hipMemcpyAsync(cur, d_ref_cur,
+                             static_cast<std::size_t>(nb) * kEmbd * 4,
+                             hipMemcpyDeviceToDevice, ds),
+              "ref_cur restore");
+        d_ns = d_ref_ns;
+        for (int i = 0; i < d_ref_ns; ++i)
+          d_states[i] = d_ref_states[i];
+        for (int ip = static_cast<int>(cfg->core_end);
+             ip < static_cast<int>(cfg->n_phys); ++ip)
+          DLayer(ip, RefSlotOf(ip), nullptr, bucket_ctx);
+        DMix(cur, DS(w->output_res_query), 1, d_mixf);
+        kk::RmsNorm(ds, d_mixf, kEmbd, DS(w->output_norm), d_hn, kEmbd, kEmbd,
+                    nb, cfg->rms_eps);
+        PrefetchJoin();
+        RunDecodeHead(d_hn, logits_ref_d);
+        fs::LoopCdArgs la{};
+        la.logits = logits_d;
+        la.ref_logits = logits_ref_d;
+        la.rows = nb;
+        la.vocab = static_cast<int>(cfg->n_vocab_text);
+        la.w_max = eng->options_.loopcd.w_max;
+        la.adaptive = true;
+        la.guide_mask = d_loopcd_mask;
+        la.control_bits = d_loopcd_ctrl;
+        la.ws = d_loopcd_ws;
+        fs::LoopCdGuide(ds, la);
+      }
     }
   }
 
@@ -2081,6 +2179,11 @@ struct Engine::Impl {
       step[b] = tokens[b];
       step[kMaxB + b] = pos;
     }
+    const bool stacked = eng->has_loopcd() && n <= kMaxB / 2;
+    if (stacked) {
+      for (int b = 0; b < n; ++b)
+        step[kMaxB + n + b] = step[kMaxB + b];
+    }
     const int ctx = BucketCtx(maxpos);
     // M2: the cache adapter writes state on the default stream; `ds` is
     // non-blocking, so order it.
@@ -2093,6 +2196,17 @@ struct Engine::Impl {
                            sess[b]->tbl_, eng->n_slots_ * sizeof(fs::SlotEntry),
                            hipMemcpyDeviceToDevice, ds),
             "slot table");
+    if (stacked) {
+      for (int b = 0; b < n; ++b)
+        Check(hipMemcpyAsync(
+                  d_tbl + static_cast<std::size_t>(n + b) * eng->n_slots_ +
+                      cfg->core_end,
+                  static_cast<const fs::SlotEntry*>(sess[b]->tbl_) +
+                      cfg->n_visits,
+                  Engine::kRefSlots * sizeof(fs::SlotEntry),
+                  hipMemcpyDeviceToDevice, ds),
+              "stacked ref slot table");
+    }
     if (eng->options_.disable_graphs) {
       BuildDecode(ctx);
     } else {
@@ -2110,7 +2224,9 @@ struct Engine::Impl {
     const std::size_t V = cfg->n_vocab_text;
     if (eng->has_loopcd() && eng->ref_logits_tap_) {
       std::vector<float> ref_host(static_cast<std::size_t>(n) * V);
-      Check(hipMemcpyAsync(ref_host.data(), logits_ref_d,
+      const float* src_ref =
+          stacked ? (logits_d + static_cast<std::size_t>(n) * V) : logits_ref_d;
+      Check(hipMemcpyAsync(ref_host.data(), src_ref,
                            ref_host.size() * sizeof(float),
                            hipMemcpyDeviceToHost, ds),
             "ref logits copy");
@@ -2189,6 +2305,13 @@ struct Engine::Impl {
       }
       maxpos = std::max(maxpos, pos + counts[g] - 1);
     }
+    const bool stacked = eng->has_loopcd() && n <= kMaxB / 2;
+    if (stacked) {
+      for (int b = 0; b < n; ++b) {
+        step[kMaxB + n + b] = step[kMaxB + b];
+        step[2 * kMaxB + n + b] = step[2 * kMaxB + b];
+      }
+    }
     nb = n;
     const int ctx = BucketCtx(maxpos);
     Check(hipStreamSynchronize(s), "pre-verify sync");
@@ -2202,6 +2325,18 @@ struct Engine::Impl {
                            sess[g]->tbl_, eng->n_slots_ * sizeof(fs::SlotEntry),
                            hipMemcpyDeviceToDevice, ds),
             "slot table");
+    if (stacked) {
+      for (int g = 0, b = 0; g < ng; ++g)
+        for (int j = 0; j < counts[g]; ++j, ++b)
+          Check(hipMemcpyAsync(
+                    d_tbl + static_cast<std::size_t>(n + b) * eng->n_slots_ +
+                        cfg->core_end,
+                    static_cast<const fs::SlotEntry*>(sess[g]->tbl_) +
+                        cfg->n_visits,
+                    Engine::kRefSlots * sizeof(fs::SlotEntry),
+                    hipMemcpyDeviceToDevice, ds),
+                "stacked ref slot table");
+    }
     verify_mode = true;
     verify_one_session = ng == 1;
     struct Off {
@@ -2233,7 +2368,9 @@ struct Engine::Impl {
     const std::size_t V = cfg->n_vocab_text;
     if (eng->has_loopcd() && eng->ref_logits_tap_) {
       std::vector<float> ref_host(static_cast<std::size_t>(n) * V);
-      Check(hipMemcpyAsync(ref_host.data(), logits_ref_d,
+      const float* src_ref =
+          stacked ? (logits_d + static_cast<std::size_t>(n) * V) : logits_ref_d;
+      Check(hipMemcpyAsync(ref_host.data(), src_ref,
                            ref_host.size() * sizeof(float),
                            hipMemcpyDeviceToHost, ds),
             "ref logits copy");
@@ -2481,16 +2618,25 @@ struct Engine::Impl {
     auto chunk = [&](const float* src_hn, const float* src_ref_hn,
                      const std::uint8_t* guide_ptr, int n,
                      std::vector<float>* host) {
-      G(w->output, src_hn, kEmbd, logits_d, V, n, V);
-      kk::Softcap(s, logits_d, static_cast<std::int64_t>(n) * V,
-                  cfg->logit_softcap);
-      if (eng->has_loopcd()) {
-        G(w->output, src_ref_hn, kEmbd, logits_ref_d, V, n, V);
-        kk::Softcap(s, logits_ref_d, static_cast<std::int64_t>(n) * V,
+      if (eng->has_loopcd() && 2 * n <= kLogitChunk) {
+        if (src_hn != mixf)
+          Check(hipMemcpyAsync(
+                    mixf, src_hn,
+                    static_cast<std::size_t>(n) * kEmbd * sizeof(float),
+                    hipMemcpyDeviceToDevice, s),
+                "stack hn copy");
+        Check(hipMemcpyAsync(
+                  mixf + static_cast<std::size_t>(n) * kEmbd, src_ref_hn,
+                  static_cast<std::size_t>(n) * kEmbd * sizeof(float),
+                  hipMemcpyDeviceToDevice, s),
+              "stack ref hn copy");
+        G(w->output, mixf, kEmbd, logits_d, V, 2 * n, V);
+        kk::Softcap(s, logits_d, static_cast<std::int64_t>(2 * n) * V,
                     cfg->logit_softcap);
+        float* ref_logits_ptr = logits_d + static_cast<std::size_t>(n) * V;
         if (eng->ref_logits_tap_) {
           std::vector<float> ref_host(static_cast<std::size_t>(n) * V);
-          Check(hipMemcpyAsync(ref_host.data(), logits_ref_d,
+          Check(hipMemcpyAsync(ref_host.data(), ref_logits_ptr,
                                ref_host.size() * sizeof(float),
                                hipMemcpyDeviceToHost, s),
                 "ref logits copy");
@@ -2500,7 +2646,7 @@ struct Engine::Impl {
         UploadGuideMask(s, p_loopcd_mask, p_loopcd_mask_d, guide_ptr, n);
         fs::LoopCdArgs la{};
         la.logits = logits_d;
-        la.ref_logits = logits_ref_d;
+        la.ref_logits = ref_logits_ptr;
         la.rows = n;
         la.vocab = V;
         la.w_max = eng->options_.loopcd.w_max;
@@ -2509,6 +2655,36 @@ struct Engine::Impl {
         la.control_bits = d_loopcd_ctrl;
         la.ws = d_loopcd_ws;
         fs::LoopCdGuide(s, la);
+      } else {
+        G(w->output, src_hn, kEmbd, logits_d, V, n, V);
+        kk::Softcap(s, logits_d, static_cast<std::int64_t>(n) * V,
+                    cfg->logit_softcap);
+        if (eng->has_loopcd()) {
+          G(w->output, src_ref_hn, kEmbd, logits_ref_d, V, n, V);
+          kk::Softcap(s, logits_ref_d, static_cast<std::int64_t>(n) * V,
+                      cfg->logit_softcap);
+          if (eng->ref_logits_tap_) {
+            std::vector<float> ref_host(static_cast<std::size_t>(n) * V);
+            Check(hipMemcpyAsync(ref_host.data(), logits_ref_d,
+                                 ref_host.size() * sizeof(float),
+                                 hipMemcpyDeviceToHost, s),
+                  "ref logits copy");
+            Check(hipStreamSynchronize(s), "ref logits sync");
+            eng->ref_logits_tap_(static_cast<std::size_t>(n), ref_host.data());
+          }
+          UploadGuideMask(s, p_loopcd_mask, p_loopcd_mask_d, guide_ptr, n);
+          fs::LoopCdArgs la{};
+          la.logits = logits_d;
+          la.ref_logits = logits_ref_d;
+          la.rows = n;
+          la.vocab = V;
+          la.w_max = eng->options_.loopcd.w_max;
+          la.adaptive = true;
+          la.guide_mask = p_loopcd_mask_d;
+          la.control_bits = d_loopcd_ctrl;
+          la.ws = d_loopcd_ws;
+          fs::LoopCdGuide(s, la);
+        }
       }
       host->resize(static_cast<std::size_t>(n) * V);
       Check(hipMemcpyAsync(host->data(), logits_d, host->size() * 4,
@@ -2518,8 +2694,9 @@ struct Engine::Impl {
     };
     std::vector<float> host;
     if (sink) {
-      for (int a = 0; a < T; a += kLogitChunk) {
-        const int n = std::min(kLogitChunk, T - a);
+      const int step_n = eng->has_loopcd() ? (kLogitChunk / 2) : kLogitChunk;
+      for (int a = 0; a < T; a += step_n) {
+        const int n = std::min(step_n, T - a);
         const std::uint8_t* gp = prefill_guide.empty()
                                      ? nullptr
                                      : prefill_guide.data() + first_idx + a;
