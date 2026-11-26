@@ -141,6 +141,9 @@ struct ConvResidArgs {
   // several sessions, each one's rows consecutive); null: all rows one session.
   const int* ri = nullptr;
   int slot_stride = 48;
+  float* cap_ref =
+      nullptr;  // stacked LoopCD verify capture for rows >= cap_split
+  int cap_split = 0;
 };
 /// Rows of one verification step (Engine::kMaxVerifyRows).
 inline constexpr int kVerifyRows = 64;
@@ -270,6 +273,9 @@ struct KvPrepArgs {
   float* cap = nullptr;     // verification capture (see ConvResidArgs::cap)
   const int* ri = nullptr;  // see ConvResidArgs::ri
   int slot_stride = 48;
+  float* cap_ref =
+      nullptr;  // stacked LoopCD verify capture for rows >= cap_split
+  int cap_split = 0;
 };
 void KvPrep(hipStream_t s, const KvPrepArgs& a, int nb = 1);
 
