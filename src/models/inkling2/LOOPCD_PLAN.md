@@ -458,6 +458,27 @@ results stay inconclusive and are rerun only for the affected histories.
     capacity at fixed budget), DSpark `9216 -> 10240 MiB`; per-session at 32K
     `1508.42 -> 1696.88 MiB` (`dm 1024 -> 1152 MiB`), at 256K `8676.42 ->
     9760.88 MiB` (`dm 8192 -> 9216 MiB`).
+- **M4 (in progress — negative controls + §7.4 agent done; MMLU-Pro 500 pending)**:
+  - Negative controls (`effort=low`, `max_tokens=4096`, greedy, DSpark `c=4`,
+    stacked M3 `42bddde9`, `w_max=0.5`):
+    - `gsm8k_low` (`n=150`, seed `20261126`): `off` `145/150` (`96.7%`, `0` cuts,
+      mean `221.3` r-tok, `1350.3s`) vs `on` `144/150` (`96.0%`, `0` cuts, mean
+      `193.0` r-tok / `-12.8%`, `1424.9s`, non-cut Wilcoxon `p=1.15e-7`), paired
+      `+0/-1` (`p=1.0000`).
+    - `mmlu_pro_low` (`n=150`, same subset): `off` `125/150` (`83.3%`, `5` cuts,
+      mean `619.8` r-tok, `3316.3s`) vs `on` `125/150` (`83.3%`, `1` cut, mean
+      `434.3` r-tok / `-29.9%`, `2766.6s` / `-16.6%`, non-cut Wilcoxon
+      `p=7.18e-5`), paired `+3/-3` (`p=1.0000`).
+  - §7.4 Agent workflow (`tests/functional/pi_agent.py`, `thinking=high`,
+    `--mmproj`, DSpark, `3` repeats/task, seeds `101..103`):
+    - Non-image tasks (`simple`, `tools`, `edit`, `creation`, `bugfix`,
+      `literal-protocol`, `wide-tool`): `21/21` pass on both `off` and `on` (all
+      KV-cache reuse and tool-result checks pass; intermediate `node` assertion
+      failures in `creation_r1` `on` and `bugfix_r2` `off`/`on` recovered
+      cleanly).
+    - `image-read`: `off` `2/3` vs `on` `1/3` — all `3` failed repeats called
+      `read` on `swatch.png` and answered `"red"` accurately, tripping only the
+      `"Do not use bash"` assertion by running `ls -la` first.
 
 ## Milestones
 
@@ -471,8 +492,8 @@ Each milestone ends with its exit criterion met and results retained.
    with 6.3 for it, then the quick quality signal for both arms. Exit: 7.6 M2 gate
    decided and posted.
 4. **M3 (done)**: stacked coda/head. Exit: 6.2 stacked + 6.3 pass; speed table 8.
-5. **M4**: full evaluation (7.3 at M4 sizes, 7.4, optional strength 1.0).
-   Exit: 7.6 final claim decided; write-up in #1407.
+5. **M4 (in progress)**: negative controls and 7.4 agent done; MMLU-Pro 500
+   expansion (7.3), optional strength 1.0, and 7.6 final claim pending.
 6. **M5**: docs (`docs/models/inkling-2-mini.md`) and PR, or extension route,
    depending on the maintainers' answer.
 
