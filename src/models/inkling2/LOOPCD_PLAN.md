@@ -247,6 +247,19 @@ incoherent while flips are frequent (then expect losses, say so in #1407).
   - **R2 budget**: `reasoning_budget_tokens` 16384, `max_tokens` 20480. This is
     the fair test SparkInkling left open: does LoopCD add anything once
     budget forcing closes long thoughts?
+- Note (M2): Switched quality runs from AR `c=8` to `--speculative dspark` `c=4`
+  after §6.3 verified `DSpark == AR` exactness across `off`, `on`, and
+  `skip-thinking` (`c=1` and `c=4`); the first ~280 items of `off_1` ran under
+  AR `c=8` and resumed with DSpark `c=4`. For greedy R2, items whose R1 finished
+  with `finish_reason == "stop"`, `reasoning_tokens < 16384`, and
+  `completion_tokens < 20480` are reused from R1 (bit-identical under greedy
+  decoding); remaining items are queried with `reasoning_budget_tokens: 16384,
+  max_tokens: 20480`. For `skip-thinking` `mmlu_pro_r1`, the 33 `off_1`
+  pure-thinking 32K cuts (`content == ""`, `guide == 0` throughout; verified by
+  `328/328` exact reasoning matches on HumanEval) are exact-reused while
+  querying all 117 non-cut R1 items and all 33 budget-forced R2 items; `off_2`
+  noise floor runs on `humaneval_low` (164) + 30 non-cut `mmlu_pro_r1` items
+  alongside the `off_1` vs `skip-thinking` reasoning-identity audit.
 - Harness: small external script (never `gufo eval`) talking to the OpenAI
   endpoint, reusing SparkInkling's/omlx's set definitions where possible so
   results are comparable; answer extraction and HumanEval execution
@@ -350,7 +363,7 @@ results stay inconclusive and are rerun only for the affected histories.
     thinking (3,863 rows) `top1_agree=65.00%`, `flip_rate=9.14%`; non-thinking
     (571 rows) `top1_agree=77.93%`, `flip_rate=2.10%`. 1-pass samples stay
     coherent initially then show repetition/arithmetic slips.
-- **M2 (code & §6.2–§6.6 verified; quality gate pending)**:
+- **M2 (complete; §6.2–§6.6 verified + §7 quality gate run)**:
   - Implemented per-row `guide_mask` & `control_bits` across `Engine`
     (`Forward`, `Decode`, `Step`, `DecodeBatch`, `DecodeBatchRows`, `Verify`,
     `VerifyBatch`), `Inkling2CacheAdapter::PrefillThrough`, and
@@ -372,6 +385,36 @@ results stay inconclusive and are rerun only for the affected histories.
   - §6.6 functional suites with `--mmproj`: `stops`, `conversation`,
     `structured`, `tool-history`, `long-context`, and all `14` `cache` sub-runs
     (`baseline passed`) for both `--loopcd skip-thinking` and `--loopcd on`.
+  - §7 Quality Gate (`w_max=0.5`, DSpark `c=4`, clean idle-CPU EvalPlus
+    re-grade):
+    - Determinism: `off_1` vs `off_2` `81/81` text-identical (`humaneval_low`
+      `0` discordant); `off_1` vs `skip-thinking` `445/445` (`100%`) exact
+      `reasoning_content` match (`164/164` low, `164/164` high, `117/117`
+      MMLU-Pro non-cut R1).
+    - `mmlu_pro_r2` (primary, 16K budget): `off_1` `129/150` (`86.0%`, `33`
+      forced, mean `4,487` r-tok), `on` `127/150` (`84.7%`, `6` forced, mean
+      `2,903` r-tok, `-35.3%` tokens / `-9.9%` wall time, `+4/-6` `p=0.7539`),
+      `skip-thinking` `128/150` (`85.3%`, `+0/-1` `p=1.0000`).
+    - `mmlu_pro_r1` (no budget, 32K cap): `off_1` `113/150` (`75.3%`, `33`
+      cuts, mean `8,091` r-tok), `on` **`127/150` (`84.7%`**, `3` cuts, mean
+      `3,299` r-tok, `-59.2%` tokens / `-41.6%` wall time, **`+17/-3` net
+      `+14` `p=0.0026`**), `skip-thinking` `113/150` (`+0/-0`).
+    - Reasoning-token split on R2: normal non-looping items (`n=117`) are flat
+      (`1,131 -> 1,269` r-tok, Wilcoxon `p=0.39`, acc `113/117 -> 110/117`),
+      whereas on the `33` `off_1`-forced tail items `on` breaks `27/33` loops
+      (`median 16,384 -> 7,856`, `-46.9%` tokens, Wilcoxon `p=1.49e-8`, acc
+      `17/33` vs `16/33`).
+    - `humaneval_high` (EvalPlus / base): `off_1` `151/164` / `156` (`6` cuts),
+      `on` `151/164` / `160` (`1` cut, `+3/-3` EvalPlus, `+6/-2` base),
+      `skip-thinking` `151/164` / `156` (`+0/-0`).
+    - `humaneval_low` (EvalPlus / base): `off_1` `154/164` / `160` (`2` cuts,
+      mean `380` r-tok), `on` `151/164` / `159` (`1` cut, mean `341` r-tok,
+      `-11.0%` non-cut Wilcoxon `p=4.47e-6`, `+2/-5` EvalPlus `p=0.4531`),
+      `skip-thinking` `154/164` / `160` (`+0/-0`).
+    - Gate & next step: `skip-thinking` fails M2 gate; `on` passes the primary
+      R1 criterion (`p=0.0026`), though clean re-grade gives `humaneval_low`
+      net `-3` (`p=0.4531`); user approved proceeding to M3 (stacked coda/head)
+      to measure the fast stacked implementation of `on`.
 
 ## Milestones
 
@@ -381,10 +424,11 @@ Each milestone ends with its exit criterion met and results retained.
    `on` mode. Exit: 6.1, 6.2 (sequential), 6.3 greedy, 6.4, 6.5 pass; 8 "main vs
    `off`" has no regression.
 2. **M1.5 (done)**: weak-model diagnostic 7.1.
-3. **M2 (in progress)**: skip-thinking (runner flags, verify rows, control renorm)
+3. **M2 (done)**: skip-thinking (runner flags, verify rows, control renorm)
    with 6.3 for it, then the quick quality signal for both arms. Exit: 7.6 M2 gate
    decided and posted.
-4. **M3**: stacked coda/head. Exit: 6.2 stacked + 6.3 pass; speed table 8.
+4. **M3 (in progress)**: stacked coda/head. Exit: 6.2 stacked + 6.3 pass; speed
+   table 8.
 5. **M4**: full evaluation (7.3 at M4 sizes, 7.4, optional strength 1.0).
    Exit: 7.6 final claim decided; write-up in #1407.
 6. **M5**: docs (`docs/models/inkling-2-mini.md`) and PR, or extension route,
